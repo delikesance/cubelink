@@ -1,0 +1,9 @@
+# FIX-TAURI : corrections src-tauri
+1. `instances_launch` : `pub async fn` + `tauri::async_runtime::spawn` (plus de panique « no reactor running ») ; test de garde hors runtime tokio. Audit : aucune autre commande synchrone ne lance de tâche (`join_start`, `friend_*` déjà async ; `host_stop_sharing`/`join_pause|resume|cancel` sans spawn).
+2. Tunnel invité : commandes `join_open_tunnel {friend_public_key}` -> u16 et `join_close_tunnel` (trait `P2pBackend`, `IrohBackend` garde le `GuestTunnel`, fermé aussi à l'arrêt). `test_state.guest_tunnel_port` ajouté ; `tunnel_port` inchangé (monde hôte). Enregistrées dans les deux gestionnaires (lib.rs). Contrat documenté.
+3. Hôte redémarré : `Fetcher` re-résout l'adresse après tout échec/silence (`refreshed_addr` : retire les IP directes périmées si un relais est connu) ; fichier muet > 15 s relancé ; watchdog `run_with_watchdog` : > 60 s sans octet (hors pause) -> annulation puis `failed` + message français. `IrohOptions.inactivity/stall_retry`, `CUBELINK_TRANSFER_IDLE_SECS` en test.
+4. `iroh_options` (lib.rs) : mode test + relais `disabled` -> `advertise_addrs = Some(true)` ; inchangé hors mode test.
+5. `validate` (commands_settings.rs) : `relay_only && !allow_relay` refusé ; `load_settings` retombe donc aux défauts sur un fichier contradictoire.
+6. « Plus lentement » : `via_relay` déjà dans `TransferProgress` ; `Advice::SlowViaRelay` de p2p n'a pas de champ dans le schéma -> documenté (contrats.md), aucun changement de schéma.
+Limite : sans relais ni découverte, un hôte redémarré sur un autre port reste injoignable tant que l'invité ne ressaisit pas le code ami ; l'invité reçoit alors l'échec clair au bout de 60 s (pas de blocage muet).
+Tests : `cargo test -p cubelink --lib --tests` OK (40 + 2) ; `cargo clippy -p cubelink --all-targets -- -D warnings` propre. Aucune dépendance ajoutée.

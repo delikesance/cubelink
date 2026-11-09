@@ -1,0 +1,74 @@
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { Shell, useScreenTitle } from "./shell";
+import { buildHash, navigate, parseHash } from "./router";
+import { ShellContext, type ShellContextValue } from "./context";
+import { createFakeServices } from "../services/fake";
+
+function go(hash: string) {
+  act(() => {
+    window.location.hash = hash;
+    window.dispatchEvent(new HashChangeEvent("hashchange"));
+  });
+}
+
+beforeEach(() => { window.location.hash = ""; });
+afterEach(cleanup);
+
+describe("routeur", () => {
+  it("route par défaut : login", () => {
+    render(<Shell services={createFakeServices({ tickMs: 0 })} />);
+    expect(screen.getByRole("main").getAttribute("data-route")).toBe("login");
+    expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Cubelink · Connexion");
+  });
+
+  it("navigation par hash et focus sur le contenu", () => {
+    render(<Shell services={createFakeServices({ tickMs: 0 })} />);
+    go("#/friends");
+    const main = screen.getByRole("main");
+    expect(main.getAttribute("data-route")).toBe("friends");
+    expect(document.activeElement).toBe(main);
+    expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Cubelink · Amis");
+  });
+
+  it("route inconnue : repli sur login", () => {
+    render(<Shell services={createFakeServices({ tickMs: 0 })} />);
+    go("#/nimporte-quoi");
+    expect(screen.getByRole("main").getAttribute("data-route")).toBe("login");
+  });
+
+  it("parse et construit les paramètres", () => {
+    expect(parseHash("#/install?friend=abc")).toEqual({ route: "install", params: { friend: "abc" } });
+    expect(buildHash("join", { friend: "x" })).toBe("#/join?friend=x");
+  });
+
+  it("lien d'évitement : donne le focus au contenu", () => {
+    render(<Shell services={createFakeServices({ tickMs: 0 })} />);
+    fireEvent.click(screen.getByText("Aller au contenu"));
+    expect(document.activeElement).toBe(screen.getByRole("main"));
+  });
+});
+
+describe("titre contextuel", () => {
+  it("modifiable par un écran, remis à zéro au démontage", () => {
+    const calls: (string | null)[] = [];
+    function Probe() { useScreenTitle("Monde de Alex"); return null; }
+    const value: ShellContextValue = {
+      services: createFakeServices({ tickMs: 0 }), route: "main", params: {},
+      navigate, setTitle: (t) => { calls.push(t); },
+    };
+    const { unmount } = render(<ShellContext.Provider value={value}><Probe /></ShellContext.Provider>);
+    expect(calls).toEqual(["Monde de Alex"]);
+    unmount();
+    expect(calls).toEqual(["Monde de Alex", null]);
+  });
+});
+
+describe("barre de titre", () => {
+  it("boutons Réduire / Fermer présents et sans effet hors Tauri", () => {
+    render(<Shell services={createFakeServices({ tickMs: 0 })} />);
+    const min = screen.getByRole("button", { name: "Réduire" });
+    const close = screen.getByRole("button", { name: "Fermer" });
+    expect(() => { fireEvent.click(min); fireEvent.click(close); }).not.toThrow();
+  });
+});

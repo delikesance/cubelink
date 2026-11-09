@@ -1,0 +1,11 @@
+# FIXF : corrections front (src/ uniquement)
+- (1) shell.tsx : le focus n'est plus repris si l'écran l'a déjà placé dans `<main>` (Install/Error : titre ; Create : champ Nom). (5) Install : `<main>` interne remplacé par `<section>`.
+- (2) Create : Échap via écouteur document (fonctionne focus sur body). (3) Settings : Échap ferme le dialogue ; alertdialog : focus initial sur Annuler, Échap ferme seulement la confirmation, focus restitué ; `.set{height:100%}` supprime la double barre de défilement.
+- (4) Friends : onglets WAI-ARIA (flèches/Home/End, tabIndex itinérant), styles `friends.css` aux tokens ; h2 « Demandes » devient « Demandes reçues » (plus de doublon avec l'onglet).
+- (6) Error : action `retry` : joinStart(friend) puis `#/install?friend=` (sans ami : retour Accueil) ; `buildStates(ctx)` : nom (param `name` ou friendList), `file`, `others`, `need` réels ou libellé neutre. Install passe `friend` et le jar extrait du message d'échec.
+- (7) Login : `classifyLoginFailure` route vers Error no-license/cancelled/offline (sinon message en ligne + Réessayer) ; « Problème lors de la connexion ? » relance une demande de code.
+- (8) Main : abonnement `onFriendPresence`. (9) Join : bloc « fichiers non vérifiés » pour `unknown_unchecked` (pas de case de confiance, pas présenté comme sûr) ; `onUnknownMods` ajouté (types, fake, tauri : `transfer://unknown_mods`) et affiché dans Install (l'événement part pendant join_start, après avoir quitté Join).
+- (10) NON FAIT : aucun signal « lent » côté front/IPC (SLOW_MESSAGE_FR n'existe que dans p2p/relay.rs, non émis) ; la note statique via_relay subsiste.
+- Tests : +17 Vitest (Login x4, Create, Settings x2, Main, Join, Install x3, Error x2, Friends). lint, test:front (114), build OK.
+- e2e : `test.fixme` retiré dans 08-a11y (7) et 06 (retry l.146, Microsoft l.204) ; NON exécutés (binaire requis). Laissés : 06 « vrai nom/fichier » (l.253, `need`/`others` non fournis par le backend), disk-full réel, 04, 07.
+- Bogue 6 (T7T8T9, settings_set relay) et BOGUE 1/2 (T3T4) hors périmètre (src-tauri).

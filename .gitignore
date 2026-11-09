@@ -1,0 +1,9 @@
+target/
+node_modules/
+dist/
+*.log
+e2e/artifacts/
+.claude/
+.vite/
+*.tsbuildinfo
+.DS_Store

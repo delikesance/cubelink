@@ -1,0 +1,11 @@
+# E2E-FIX : mise a jour de la suite E2E apres FIXF/FIXT
+- Perimetre : e2e/*.spec.ts, e2e/helpers/, .gitignore (e2e/artifacts/ ajoute). Aucun changement src/src-tauri/harness.
+- Helpers e2e1/e2e2/e2e3-common : contournement `allow_relay=false` + redemarrage supprime (hook advertise) ; seul le redemarrage pour `extraEnv` subsiste (e2e2).
+- 04-launch : `launchTest`/E2E_LAUNCH_FIXED retires ; tests de lancement actifs ; tunnel invite via `join_open_tunnel` + `test_state.guest_tunnel_port` (+ `join_close_tunnel`).
+- 06:122 bad-hash hote : passait deja une fois le build a jour (aucune modif).
+- 06:188 declined / no_license : PERIME -> echec route vers l'ecran Erreur (annulee / sans licence), Reessayer ramene a Login puis nouveau clic.
+- 06:228 ecrans Erreur : PERIME -> libelles neutres (« Ton ami… »), Reessayer sans ami -> Accueil ; ancien fixme « vrai nom » converti en test actif (params name/file).
+- 06:146 Reessayer relance le transfert : VRAI BOGUE -> test.fixme. join_start relance mais echoue a nouveau en « fichier corrompu » (fichiers hote repares = manifeste, 4 runs). Piste : p2p/src/transfer/send.rs:470-487 (cache `known`).
+- 03:108 coupure puis reprise : VRAI BOGUE -> test.fixme. Compteur ~54 Mo -> 16 Ko, files_done=0 : retransfert complet. Pistes : iroh_backend.rs:276-280, p2p/src/transfer/resume.rs:541.
+- 03 adresse figee : aucun test.fixme dans 03 (rien a retirer). Restent fixme : disque plein reel (06:168), 07 relay_only (E2E_RUN_FIXME).
+- Validation : voir resume final (2 executions des specs 01-06).

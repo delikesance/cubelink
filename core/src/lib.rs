@@ -1,0 +1,16 @@
+//! Cubelink core. Chaque module est la propriété d'une seule tâche (voir docs/taches-agents.md).
+pub mod types;
+pub mod java;
+pub mod java_install;
+pub mod instance;
+pub mod launch_args;
+pub mod launch_run;
+pub mod mrpack;
+pub mod manifest;
+pub mod guest;
+pub mod unknown_mods;
+pub mod auth;
+pub mod store;
+pub mod mojang;
+pub mod loader;
+pub mod providers;

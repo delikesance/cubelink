@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Créer une instance</title>
+</head>
+<body>
+
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Montserrat:wght@500;600;700;800&display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#0A0A0A}
+a{color:inherit}
+a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible{outline:2px solid #FF8A4A;outline-offset:2px}
+.field{width:100%;box-sizing:border-box;min-height:48px;padding:0 14px;border-radius:10px;border:1px solid #6A6A6A;background:#0D0D0D;color:#F2F2F2;font:inherit;font-size:15px;color-scheme:dark}
+.field::placeholder{color:#9A9A9A}
+.loader{display:flex;align-items:center;justify-content:center;min-height:48px;padding:0 8px;border-radius:10px;border:1px solid #6A6A6A;background:#0D0D0D;color:#D8D8D8;font-weight:600;font-size:14px;cursor:pointer;text-align:center}
+.loader-wrap{position:relative;display:block}
+.loader-wrap input{position:absolute;opacity:0;inset:0;margin:0;cursor:pointer}
+.loader-wrap input:checked + .loader{border-color:#FF5C00;background:#1A0D05;color:#FFFFFF}
+.loader-wrap input:focus-visible + .loader{outline:2px solid #FF8A4A;outline-offset:2px}
+</style>
+
+<div style="display:flex;flex-direction:column;height:100vh;min-height:600px;background:#0A0A0A;color:#F2F2F2;font-family:Inter,system-ui,sans-serif;font-size:14px">
+
+<div style="height:32px;flex:0 0 auto;box-sizing:border-box;display:flex;align-items:center;justify-content:center;position:relative;border-bottom:1px solid #161616">
+<span style="font-size:13px;color:#B5B5B5">Cubelink</span>
+<div style="position:absolute;right:0;top:0;display:flex">
+<button type="button" aria-label="Réduire" style="width:46px;height:32px;border:0;background:transparent;color:#BDBDBD;cursor:pointer"><svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M2 6h8" stroke="currentColor" stroke-width="1.2"/></svg></button>
+<button type="button" aria-label="Fermer" style="width:46px;height:32px;border:0;background:transparent;color:#BDBDBD;cursor:pointer"><svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 2.5l7 7M9.5 2.5l-7 7" stroke="currentColor" stroke-width="1.2"/></svg></button>
+</div>
+</div>
+
+<main style="flex:1;min-height:0;display:flex;align-items:center;justify-content:center;padding:24px;box-sizing:border-box">
+<form onsubmit="return false" style="width:100%;max-width:640px;max-height:100%;display:flex;flex-direction:column;background:#111111;border:1px solid #262626;border-radius:16px;overflow:hidden">
+
+<header style="flex:0 0 auto;display:flex;align-items:center;justify-content:space-between;gap:16px;padding:20px 24px;border-bottom:1px solid #262626">
+<h1 style="margin:0;font-family:Montserrat,sans-serif;font-weight:700;font-size:22px">Créer une instance</h1>
+<a href="Main.html" aria-label="Fermer" style="width:44px;height:44px;display:flex;align-items:center;justify-content:center;border-radius:10px;border:1px solid #6A6A6A;color:#F2F2F2"><svg width="14" height="14" viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 2.5l7 7M9.5 2.5l-7 7" stroke="currentColor" stroke-width="1.4"/></svg></a>
+</header>
+
+<div style="flex:1;min-height:0;overflow:auto;padding:24px;display:flex;flex-direction:column;gap:24px">
+
+<div style="display:flex;flex-direction:column;gap:8px">
+<label for="name" style="font-weight:600;font-size:15px">Nom</label>
+<input id="name" class="field" type="text" placeholder="Ex. : Create: Aeronautics" autocomplete="off">
+</div>
+
+<div style="display:flex;flex-direction:column;gap:8px">
+<label for="mc" style="font-weight:600;font-size:15px">Version de Minecraft</label>
+<select id="mc" class="field">
+<option>1.21.1 (recommandée)</option>
+<option>1.21</option>
+<option>1.20.4</option>
+<option>1.20.1</option>
+</select>
+</div>
+
+<fieldset style="margin:0;padding:0;border:0;min-width:0;display:flex;flex-direction:column;gap:8px">
+<legend style="padding:0;margin-bottom:8px;font-weight:600;font-size:15px">Mods</legend>
+<div style="display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px">
+<label class="loader-wrap"><input type="radio" name="loader" value="vanilla"><span class="loader">Aucun</span></label>
+<label class="loader-wrap"><input type="radio" name="loader" value="neoforge" checked><span class="loader">NeoForge</span></label>
+<label class="loader-wrap"><input type="radio" name="loader" value="fabric"><span class="loader">Fabric</span></label>
+<label class="loader-wrap"><input type="radio" name="loader" value="quilt"><span class="loader">Quilt</span></label>
+<label class="loader-wrap"><input type="radio" name="loader" value="forge"><span class="loader">Forge</span></label>
+</div>
+<span style="font-size:14px;color:#B5B5B5;line-height:1.5">Le système qui permet de charger des mods. Cubelink installe la version recommandée et Java&nbsp;21 si besoin.</span>
+</fieldset>
+
+<details style="border-top:1px solid #262626;padding-top:16px">
+<summary style="min-height:44px;display:flex;align-items:center;cursor:pointer;font-weight:600;color:#D8D8D8">Options avancées</summary>
+<div style="display:flex;flex-direction:column;gap:8px;margin-top:8px">
+<label for="ram" style="font-weight:600;font-size:15px">Mémoire allouée</label>
+<select id="ram" class="field">
+<option>4&nbsp;Go (recommandée)</option>
+<option>6&nbsp;Go</option>
+<option>8&nbsp;Go</option>
+</select>
+</div>
+</details>
+
+</div>
+
+<footer style="flex:0 0 auto;display:flex;flex-wrap:wrap;align-items:center;gap:12px;padding:16px 24px;border-top:1px solid #262626;background:#111111">
+<a href="Main.html" style="margin-right:auto;min-height:44px;display:flex;align-items:center;font-weight:600;color:#FF8A4A;text-decoration:underline;text-underline-offset:3px">Importer un modpack (.mrpack)</a>
+<a href="Main.html" style="min-height:44px;padding:0 20px;box-sizing:border-box;display:flex;align-items:center;border-radius:10px;border:1px solid #6A6A6A;color:#F2F2F2;font-weight:600;text-decoration:none">Annuler</a>
+<button type="submit" style="min-height:44px;padding:0 24px;border-radius:10px;border:0;background:#FF5C00;color:#140700;font:inherit;font-weight:700;cursor:pointer">Créer l'instance</button>
+</footer>
+
+</form>
+</main>
+</div>
+
+</body>
+</html>

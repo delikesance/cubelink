@@ -1,0 +1,35 @@
+[workspace]
+resolver = "2"
+members = ["core", "p2p", "src-tauri"]
+exclude = ["spike/p2p-tunnel"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+sha2 = "0.10"
+blake3 = "1"
+md-5 = "0.10"
+uuid = { version = "1", features = ["v3", "v4", "serde"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+url = "2"
+aes-gcm = "0.10"
+rand = "0.8"
+ed25519-dalek = { version = "2", features = ["rand_core", "serde"] }
+data-encoding = "2"
+hex = "0.4"
+futures-util = "0.3"
+tracing = "0.1"
+# dev
+tempfile = "3"
+wiremock = "0.6"
+proptest = "1"

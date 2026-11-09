@@ -1,0 +1,33 @@
+[package]
+name = "cubelink-core"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "core_lib"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+reqwest.workspace = true
+sha2.workspace = true
+blake3.workspace = true
+md-5.workspace = true
+uuid.workspace = true
+rusqlite.workspace = true
+zip.workspace = true
+url.workspace = true
+aes-gcm.workspace = true
+rand.workspace = true
+hex.workspace = true
+futures-util.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+wiremock.workspace = true
+proptest.workspace = true

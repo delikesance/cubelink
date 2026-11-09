@@ -1,0 +1,32 @@
+[package]
+name = "cubelink-p2p"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "p2p_lib"
+path = "src/lib.rs"
+
+[dependencies]
+cubelink-core = { path = "../core" }
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+sha2.workspace = true
+blake3.workspace = true
+rusqlite.workspace = true
+ed25519-dalek.workspace = true
+data-encoding.workspace = true
+rand.workspace = true
+hex.workspace = true
+futures-util.workspace = true
+tracing.workspace = true
+iroh = "=1.4.1"
+iroh-blobs = "=0.104.1"
+n0-future = "0.3"
+
+[dev-dependencies]
+tempfile.workspace = true
+proptest.workspace = true

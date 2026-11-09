@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Connexion</title>
+</head>
+<body>
+
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Montserrat:wght@500;600;700;800&display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#0A0A0A}
+a{color:inherit;text-decoration:none}
+a.link:hover{text-decoration:underline}
+</style>
+
+<div style="display:flex;flex-direction:column;min-height:720px;background:#0A0A0A;color:#F2F2F2;font-family:Inter,system-ui,sans-serif;font-size:14px;position:relative;overflow:hidden">
+<img src="../../../../assets/images/hero-2.png" alt="" aria-hidden="true" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;image-rendering:pixelated">
+<div aria-hidden="true" style="position:absolute;inset:0;background:linear-gradient(to bottom,#0A0A0AD9 0%,#0A0A0AF2 100%)"></div>
+
+<div style="position:relative;height:32px;display:flex;justify-content:flex-end">
+<button type="button" aria-label="Réduire" style="width:46px;height:32px;border:0;background:transparent;color:#BDBDBD;cursor:pointer"><svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M2 6h8" stroke="currentColor" stroke-width="1.2"/></svg></button>
+<button type="button" aria-label="Fermer" style="width:46px;height:32px;border:0;background:transparent;color:#BDBDBD;cursor:pointer"><svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 2.5l7 7M9.5 2.5l-7 7" stroke="currentColor" stroke-width="1.2"/></svg></button>
+</div>
+
+<main style="position:relative;flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:28px;padding:24px;text-align:center">
+<div style="display:flex;align-items:center;gap:14px">
+<svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="#FF5C00" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9L12 3z"/><path d="M12 12l8-4.5M12 12v9M12 12L4 7.5"/></svg>
+<span style="font-family:Montserrat,sans-serif;font-weight:800;font-size:44px;letter-spacing:-0.02em;color:#FF5C00">CUBELINK</span>
+</div>
+<p style="margin:0;max-width:340px;color:#B5B5B5;line-height:1.6;font-size:16px">Connecte-toi avec ton compte Microsoft pour jouer.</p>
+<div style="display:flex;flex-direction:column;align-items:center;gap:16px">
+<button type="button" style="height:56px;padding:0 40px;border-radius:10px;border:0;background:#FF5C00;color:#140700;font:inherit;font-size:18px;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:12px;box-shadow:0 8px 32px #FF5C0040">
+<svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><rect x="1" y="1" width="8" height="8"/><rect x="11" y="1" width="8" height="8"/><rect x="1" y="11" width="8" height="8"/><rect x="11" y="11" width="8" height="8"/></svg>Se connecter avec Microsoft</button>
+<span style="color:#B5B5B5;font-size:14px">Pas de compte Minecraft ? <a class="link" href="#" style="color:#FF5C00;font-weight:600;display:inline-flex;align-items:center;min-height:44px">En acheter un</a></span>
+</div>
+<p style="margin:0;max-width:460px;color:#B5B5B5;font-size:14px;line-height:1.6">Cubelink crée une clé privée sur cet ordinateur pour te faire reconnaître de tes amis. Aucun serveur ne stocke ton compte ni ta liste d'amis.</p>
+</main>
+
+<footer style="position:relative;display:flex;justify-content:space-between;align-items:center;padding:0 48px 28px;font-size:14px;font-weight:600;color:#B5B5B5">
+<a class="link" href="Error.html" style="min-height:44px;display:flex;align-items:center">Problème lors de la connexion ?</a>
+<span>Version 1.0.0</span>
+</footer>
+</div>
+
+<script>(function(){
+function parse(c){var m=c.match(/rgba?\(([^)]+)\)/);if(!m)return null;var p=m[1].split(/[ ,\/]+/).map(Number);return {r:p[0],g:p[1],b:p[2],a:p.length>3?p[3]:1};}
+function bgOf(el){var layers=[],flag=[];var e=el;while(e&&e.nodeType==1){var cs=getComputedStyle(e);var c=parse(cs.backgroundColor);if(c&&c.a>0)layers.push(c);if(cs.backgroundImage!='none')flag.push(cs.backgroundImage.slice(0,40));if(c&&c.a==1)break;e=e.parentElement;}
+var base={r:10,g:10,b:10};layers.reverse().forEach(function(l){base={r:l.r*l.a+base.r*(1-l.a),g:l.g*l.a+base.g*(1-l.a),b:l.b*l.a+base.b*(1-l.a)};});return {bg:[Math.round(base.r),Math.round(base.g),Math.round(base.b)],flag:flag};}
+var out={text:[],ui:[],imgs:0};
+var all=document.body.querySelectorAll('*');
+all.forEach(function(el){
+var own=Array.from(el.childNodes).filter(function(n){return n.nodeType==3&&n.textContent.trim()}).map(function(n){return n.textContent.trim()}).join(' ');
+var cs=getComputedStyle(el),r=el.getBoundingClientRect();
+if(own&&r.width>0){var c=parse(cs.color);var b=bgOf(el);var op=1,e=el;while(e&&e.nodeType==1){op*=parseFloat(getComputedStyle(e).opacity);e=e.parentElement;}
+out.text.push({t:own.slice(0,60),tag:el.tagName,fs:parseFloat(cs.fontSize),fw:cs.fontWeight,lh:cs.lineHeight,fam:cs.fontFamily.split(',')[0],col:[c.r,c.g,c.b,c.a],op:op,bg:b.bg,flag:b.flag,x:Math.round(r.x),y:Math.round(r.y+scrollY),w:Math.round(r.width),h:Math.round(r.height),tt:cs.textTransform,ls:cs.letterSpacing,ov:cs.overflow,to:cs.textOverflow,ws:cs.whiteSpace});}
+if(el.matches('a,button,input,select,textarea,[role=button],[role=tab],[role=radio],[role=switch],[role=checkbox],[tabindex],label,summary')&&r.width>0){
+out.ui.push({tag:el.tagName,role:el.getAttribute('role'),al:el.getAttribute('aria-label'),t:(el.innerText||'').trim().slice(0,40),w:Math.round(r.width),h:Math.round(r.height),x:Math.round(r.x),y:Math.round(r.y+scrollY),ol:cs.outlineStyle+' '+cs.outlineWidth,type:el.type||null,id:el.id||null,lab:el.labels?el.labels.length:null,border:cs.borderTopWidth+' '+cs.borderTopColor,bgc:cs.backgroundColor,sh:el.scrollWidth>el.clientWidth+1});}
+});
+out.hs=Array.from(document.querySelectorAll('h1,h2,h3,h4,[role=heading]')).map(function(h){return h.tagName+':'+h.innerText.trim().slice(0,40)});
+out.landmarks=Array.from(document.querySelectorAll('main,nav,header,footer,aside,section,[role=dialog],[role=tablist],[role=radiogroup],[role=progressbar]')).map(function(h){return h.tagName+(h.getAttribute('role')?'['+h.getAttribute('role')+']':'')+(h.getAttribute('aria-label')?'('+h.getAttribute('aria-label')+')':'')});
+out.sw=innerWidth;out.sh=document.documentElement.scrollHeight;
+out.outlineNone=(document.documentElement.outerHTML.match(/outline:\s*(none|0)/g)||[]).length;
+out.focusCss=(document.documentElement.outerHTML.match(/:focus[^{]*\{[^}]*\}/g)||[]);
+var pre=document.createElement('pre');pre.style.display='none';pre.id='AUDITOUT';pre.textContent=JSON.stringify(out);document.body.appendChild(pre);
+})();
+</script></body>
+</html>

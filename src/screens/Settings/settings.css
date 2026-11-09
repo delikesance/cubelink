@@ -1,0 +1,43 @@
+.set{display:flex;align-items:center;justify-content:center;box-sizing:border-box;height:100%;padding:24px;background:#0A0A0A;color:#F2F2F2;font-family:var(--font-ui);font-size:14px}
+.set-dialog{position:relative;width:100%;max-width:1040px;height:100%;max-height:640px;box-sizing:border-box;border-radius:14px;border:1px solid #2A2A2A;background:#0F0F0F;display:flex;flex-direction:column;overflow:hidden}
+.set-head{flex:0 0 auto;display:flex;align-items:center;justify-content:space-between;padding:12px 20px;border-bottom:1px solid #1F1F1F}
+.set-head h1{margin:0;font-size:15px;font-weight:700;letter-spacing:.04em;text-transform:uppercase}
+.set-close{width:44px;height:44px;box-sizing:border-box;border-radius:10px;border:1px solid #6A6A6A;display:flex;align-items:center;justify-content:center;color:#E0E0E0;background:transparent;cursor:pointer}
+.set-lay{display:flex;flex:1;min-height:0}
+.set-nav{flex:0 0 240px;box-sizing:border-box;padding:24px 16px;border-right:1px solid #1F1F1F;display:flex;flex-direction:column;gap:8px;overflow:auto}
+.set-tabs{display:flex;flex-direction:column;gap:8px}
+.set-tab,.set-navlink{min-height:44px;padding:0 14px;border-radius:10px;border:1.5px solid transparent;display:flex;align-items:center;font:inherit;font-weight:600;color:#D0D0D0;background:transparent;box-sizing:border-box;cursor:pointer;text-align:left;text-decoration:none}
+.set-tab:hover,.set-navlink:hover{background:#181818}
+.set-tab[aria-selected="true"]{background:#1A0E06;border-color:#FF5C00;color:#F2F2F2;font-weight:700}
+.set-navlink{margin-top:16px}
+.set-pane{flex:1;min-width:0;overflow:auto;box-sizing:border-box;padding:32px 40px 40px}
+.set-panel{display:flex;flex-direction:column;gap:24px}
+.set-panel[hidden]{display:none}
+.set h2{margin:0;font-size:22px;font-weight:700;line-height:1.3}
+.set p{margin:0;line-height:1.6;color:#D0D0D0;max-width:68ch}
+.set .set-sub{color:#B5B5B5}
+.set-hint{font-size:14px;color:#B5B5B5;line-height:1.5;max-width:68ch}
+.set-row{display:flex;flex-wrap:wrap;gap:12px 16px;align-items:center;padding:20px 24px;border-radius:12px;border:1px solid #2A2A2A;background:#141414}
+.set-txt{flex:1 1 280px;min-width:0;display:flex;flex-direction:column;gap:4px;line-height:1.5}
+.set-txt b{font-weight:600}
+.set-txt span{font-size:14px;color:#B5B5B5;max-width:68ch}
+.set-check{width:24px;height:24px;margin:10px;flex:0 0 auto;accent-color:#FF5C00;color-scheme:dark}
+.set-btn{min-height:44px;padding:0 16px;border-radius:10px;border:1px solid #6A6A6A;background:#1A1A1A;color:#F2F2F2;font:inherit;font-weight:600;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;white-space:nowrap}
+.set-pri{border:0;background:#FF5C00;color:#140700;font-weight:700}
+.set-sec{background:transparent}
+.set-btn:disabled{opacity:.7;cursor:default}
+.set-field{display:flex;flex-direction:column;gap:12px}
+.set-field>b{font-weight:600}
+.set-cr{display:flex;flex-wrap:wrap;gap:12px;align-items:center}
+.set-code{flex:1 1 240px;min-width:0;height:44px;box-sizing:border-box;display:flex;align-items:center;padding:0 14px;border-radius:10px;background:#0A0A0A;border:1px solid #6A6A6A;font-family:ui-monospace,Consolas,monospace;font-size:14px;color:#FF8A4A;overflow:hidden;white-space:nowrap}
+.set-more{color:#B5B5B5;font-size:14px}
+.set-more summary{min-height:44px;display:inline-flex;align-items:center;cursor:pointer;text-decoration:underline;text-underline-offset:2px}
+.set-more p{margin:0 0 8px}
+.set-lnk{color:#FF8A4A;text-decoration:underline;text-underline-offset:2px}
+.set-alert{display:flex;flex-direction:column;gap:12px;padding:20px 24px;border-radius:12px;border:1px solid #C46A4E;background:#1A0F0A}
+.set-alert strong{color:#FFB59E}
+.set-danger{border-color:#C46A4E;background:transparent;color:#FF9A7A}
+.set-status{min-height:20px;font-size:14px;color:#4ADE80}
+.set-error{margin:0;color:var(--danger)}
+.set a:focus-visible,.set button:focus-visible,.set input:focus-visible,.set summary:focus-visible{outline:2px solid #FF8A4A;outline-offset:2px}
+@media (max-width:760px){.set-lay{flex-direction:column}.set-nav{flex:0 0 auto;border-right:0;border-bottom:1px solid #1F1F1F;padding:12px}.set-pane{padding:20px}}

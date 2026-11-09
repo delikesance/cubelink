@@ -1,0 +1,31 @@
+[package]
+name = "cubelink"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "cubelink_app"
+path = "src/lib.rs"
+
+[[bin]]
+name = "cubelink"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+cubelink-core = { path = "../core" }
+cubelink-p2p = { path = "../p2p" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+reqwest.workspace = true
+iroh = "=1.4.1"
+iroh-blobs = "=0.104.1"
+hex.workspace = true
+anyhow.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

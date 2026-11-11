@@ -146,12 +146,12 @@ export function Shell({ services }: { services?: Services } = {}) {
           Aller au contenu
         </a>
         <TitleBar context={title ?? ROUTE_LABELS[route]} />
-        <UpdateBanner services={svc} />
         <main id="contenu" className="content" ref={mainRef} tabIndex={-1} data-route={route}>
           {route === "login" && booting
             ? <div className="boot" role="status">Chargement…</div>
             : Screen ? <Screen /> : <Fallback route={route} />}
         </main>
+        <UpdateBanner services={svc} />
       </div>
     </ShellContext.Provider>
   );

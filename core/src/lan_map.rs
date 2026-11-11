@@ -21,6 +21,8 @@ pub enum Runtime {
     Official,
     /// Noms intermediary (Fabric, Quilt).
     Intermediary,
+    /// Noms SRG (Forge 1.7.10 → 1.12.2) : table embarquée par version, aucun téléchargement.
+    Srg,
 }
 
 impl Runtime {
@@ -28,6 +30,7 @@ impl Runtime {
         match self {
             Runtime::Official => "official",
             Runtime::Intermediary => "intermediary",
+            Runtime::Srg => "srg",
         }
     }
 }
@@ -207,6 +210,9 @@ fn runtime_type(t: &str, p: &Proguard, tiny: Option<&Tiny>) -> String {
 
 /// Construit le contenu du fichier de correspondance. `tiny` : requis pour `Runtime::Intermediary`.
 pub fn build_lanmap(proguard: &str, tiny: Option<&str>, runtime: Runtime) -> Result<String> {
+    if runtime == Runtime::Srg {
+        return Err(Error::Invalid("les noms SRG viennent d'une table embarquée, pas de ProGuard".into()));
+    }
     let p = parse_proguard(proguard);
     let t = match (runtime, tiny) {
         (Runtime::Intermediary, Some(text)) => Some(parse_tiny(text)?),
@@ -310,6 +316,114 @@ pub async fn ensure_lanmap(
     Ok(dest)
 }
 
+// ---- Forge legacy (SRG) : tables embarquées ----
+
+include!(concat!(env!("OUT_DIR"), "/srg_tables.rs"));
+
+/// Minecraft < 1.13 (« legacy » : sans ProGuard Mojang, noms SRG sous Forge). Version non reconnue = moderne.
+pub fn is_legacy(mc_version: &str) -> bool {
+    matches!(crate::java::parse_mc_version(mc_version), Some((minor, _)) if minor <= 12)
+}
+
+/// Table SRG embarquée pour cette version de Minecraft (`core/resources/lan-map-srg/<mc>.map`).
+pub fn srg_table(mc_version: &str) -> Option<&'static str> {
+    SRG_TABLES.iter().find(|(v, _)| *v == mc_version.trim()).map(|(_, t)| *t)
+}
+
+/// Espace de noms à utiliser pour traduire les membres de l'agent. `has_mappings` : le JSON de version fournit
+/// `client_mappings` (ProGuard Mojang). `None` : aucune table (noms Mojang directs, ou version non gérée).
+pub fn pick_runtime(loader: crate::types::Loader, mc_version: &str, has_mappings: bool) -> Option<Runtime> {
+    use crate::types::Loader;
+    match loader {
+        Loader::Forge if is_legacy(mc_version) => srg_table(mc_version).map(|_| Runtime::Srg),
+        Loader::Forge | Loader::NeoForge => None,
+        Loader::Vanilla => has_mappings.then_some(Runtime::Official),
+        Loader::Fabric | Loader::Quilt => has_mappings.then_some(Runtime::Intermediary),
+    }
+}
+
+/// Clés que l'agent exige d'une table SRG (membres : `true` = champ `F`, sinon méthode `M`).
+const SRG_CLASS_KEYS: &[&str] = &["minecraft", "integrated"];
+const SRG_MEMBER_KEYS: &[(&str, bool)] = &[
+    ("mc.getInstance", false),
+    ("mc.getSingleplayerServer", false),
+    ("mc.player", true),
+    ("is.shareToLan", false),
+    ("is.isPublished", false),
+    ("server.getDefaultGameType", false),
+    ("mc.schedule", false),
+];
+
+/// Valide une table au format lu par l'agent : entête `# ...`, lignes `C clé classe`, `M clé nom nbParams retour`,
+/// `F clé nom` ; toutes les clés requises présentes, `nbParams` numérique.
+pub fn validate_srg_table(text: &str) -> std::result::Result<(), String> {
+    let mut lines = text.lines().filter(|l| !l.trim().is_empty());
+    if !lines.next().is_some_and(|l| l.starts_with('#')) {
+        return Err("entête `# ...` manquant".into());
+    }
+    let mut classes = std::collections::HashSet::new();
+    let mut methods = std::collections::HashSet::new();
+    let mut fields = std::collections::HashSet::new();
+    for l in lines {
+        if l.starts_with('#') {
+            continue;
+        }
+        let f: Vec<&str> = l.split_whitespace().collect();
+        match f.as_slice() {
+            ["C", key, _class] => {
+                classes.insert(*key);
+            }
+            ["M", key, _name, n, _ret] if n.parse::<u32>().is_ok() => {
+                methods.insert(*key);
+            }
+            ["F", key, _name] => {
+                fields.insert(*key);
+            }
+            _ => return Err(format!("ligne invalide : {l}")),
+        }
+    }
+    for k in SRG_CLASS_KEYS {
+        if !classes.contains(k) {
+            return Err(format!("classe `{k}` absente"));
+        }
+    }
+    for (k, is_field) in SRG_MEMBER_KEYS {
+        let ok = if *is_field { fields.contains(k) } else { methods.contains(k) };
+        if !ok {
+            return Err(format!("membre `{k}` absent ({})", if *is_field { "F" } else { "M" }));
+        }
+    }
+    Ok(())
+}
+
+/// Java minimal pour charger le jar de l'agent, d'après la version du classfile de `LanAgent.class`
+/// (52 = Java 8, 61 = Java 17). Jar illisible : 17 (hypothèse prudente, ancien comportement).
+pub fn jar_min_java(jar: &Path) -> u32 {
+    use std::io::Read;
+    let read = || -> Option<u32> {
+        let mut z = zip::ZipArchive::new(std::fs::File::open(jar).ok()?).ok()?;
+        let mut head = [0u8; 8];
+        z.by_name("app/cubelink/agent/LanAgent.class").ok()?.read_exact(&mut head).ok()?;
+        (head[..4] == [0xCA, 0xFE, 0xBA, 0xBE]).then(|| u32::from(u16::from_be_bytes([head[6], head[7]])).saturating_sub(44))
+    };
+    read().unwrap_or(17)
+}
+
+/// Copie la table SRG de cette version dans le cache (nom lié au contenu) et renvoie son chemin ; `None` sans table.
+pub fn ensure_srg_map(cache_dir: &Path, mc_version: &str) -> Result<Option<PathBuf>> {
+    let Some(text) = srg_table(mc_version) else { return Ok(None) };
+    let safe: String = mc_version.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_')).collect();
+    let dest = cache_dir.join(format!("{safe}-srg-{}.map", sha1_hex(text.as_bytes()).chars().take(8).collect::<String>()));
+    if dest.is_file() {
+        return Ok(Some(dest));
+    }
+    std::fs::create_dir_all(cache_dir)?;
+    let tmp = dest.with_extension("map.tmp");
+    std::fs::write(&tmp, text)?;
+    std::fs::rename(&tmp, &dest)?;
+    Ok(Some(dest))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -362,6 +476,95 @@ METHOD\tjkl\t()Lstu;\ts\tmethod_3790\n\
 CLASS\tmno\tnet/minecraft/class_1255\n\
 CLASS\tpqr\tnet/minecraft/class_746\n\
 CLASS\tstu\tnet/minecraft/class_1934\n";
+
+    const SRG_OK: &str = "# cubelink-lanmap srg
+C minecraft net.minecraft.client.Minecraft
+C integrated net.minecraft.server.integrated.IntegratedServer
+M mc.getInstance func_71410_x 0 net.minecraft.client.Minecraft
+M mc.getSingleplayerServer func_71401_C 0 net.minecraft.server.integrated.IntegratedServer
+F mc.player field_71439_g
+M is.shareToLan func_71206_a 2 java.lang.String
+M is.isPublished func_71344_c 0 boolean
+M server.getDefaultGameType func_71265_f 0 net.minecraft.world.GameType
+M mc.schedule func_152344_a 1 com.google.common.util.concurrent.ListenableFuture
+";
+
+    #[test]
+    fn validation_de_table_srg() {
+        assert_eq!(validate_srg_table(SRG_OK), Ok(()));
+        assert!(validate_srg_table(&SRG_OK.replace("# cubelink-lanmap srg\n", "")).is_err());
+        assert!(validate_srg_table(&SRG_OK.replace("func_71206_a 2", "func_71206_a deux")).is_err());
+        assert!(validate_srg_table(&SRG_OK.replace("F mc.player field_71439_g\n", "")).is_err());
+        assert!(validate_srg_table(&SRG_OK.replace("M mc.schedule", "M mc.autre")).is_err());
+        assert!(validate_srg_table(&SRG_OK.replace("C integrated", "C autre")).is_err());
+        assert!(validate_srg_table(&format!("{SRG_OK}X inconnu\n")).is_err());
+        // un champ n'est pas une méthode
+        assert!(validate_srg_table(&SRG_OK.replace("F mc.player field_71439_g", "M mc.player field_71439_g 0 x")).is_err());
+    }
+
+    /// Toutes les tables embarquées (fournies par T3) doivent respecter le format.
+    #[test]
+    fn tables_embarquees_valides() {
+        for (v, t) in SRG_TABLES {
+            validate_srg_table(t).unwrap_or_else(|e| panic!("table {v} : {e}"));
+            assert!(is_legacy(v), "{v} n'est pas legacy");
+        }
+    }
+
+    #[test]
+    fn legacy_et_choix_du_runtime() {
+        use crate::types::Loader;
+        for v in ["1.7.10", "1.8.9", "1.12.2", "1.12"] {
+            assert!(is_legacy(v), "{v}");
+        }
+        for v in ["1.13", "1.14.4", "1.21.1", "26.1", "24w14a", ""] {
+            assert!(!is_legacy(v), "{v}");
+        }
+        assert_eq!(pick_runtime(Loader::Forge, "1.20.1", true), None);
+        assert_eq!(pick_runtime(Loader::NeoForge, "1.21.1", true), None);
+        assert_eq!(pick_runtime(Loader::Vanilla, "1.21.1", true), Some(Runtime::Official));
+        assert_eq!(pick_runtime(Loader::Vanilla, "26.1", false), None);
+        assert_eq!(pick_runtime(Loader::Fabric, "1.21.1", true), Some(Runtime::Intermediary));
+        assert_eq!(pick_runtime(Loader::Quilt, "1.21.1", true), Some(Runtime::Intermediary));
+        // legacy : Srg seulement si une table existe ; jamais Official/Intermediary
+        assert_eq!(pick_runtime(Loader::Forge, "1.12.2", false), srg_table("1.12.2").map(|_| Runtime::Srg));
+        assert_eq!(pick_runtime(Loader::Forge, "1.5.2", false), None);
+        assert_eq!(pick_runtime(Loader::Fabric, "1.12.2", false), None);
+        assert_eq!(pick_runtime(Loader::Vanilla, "1.12.2", false), None);
+    }
+
+    #[test]
+    fn copie_de_la_table_srg_dans_le_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(ensure_srg_map(dir.path(), "0.0.0").unwrap(), None);
+        if let Some((v, t)) = SRG_TABLES.first() {
+            let p = ensure_srg_map(dir.path(), v).unwrap().unwrap();
+            assert_eq!(std::fs::read_to_string(&p).unwrap(), *t);
+            assert_eq!(ensure_srg_map(dir.path(), v).unwrap(), Some(p));
+        }
+    }
+
+    #[test]
+    fn version_java_du_jar() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let mk = |name: &str, major: u16| {
+            let p = dir.path().join(name);
+            let mut z = zip::ZipWriter::new(std::fs::File::create(&p).unwrap());
+            z.start_file("app/cubelink/agent/LanAgent.class", zip::write::SimpleFileOptions::default()).unwrap();
+            z.write_all(&[0xCA, 0xFE, 0xBA, 0xBE, 0, 0, (major >> 8) as u8, major as u8]).unwrap();
+            z.finish().unwrap();
+            p
+        };
+        assert_eq!(jar_min_java(&mk("j8.jar", 52)), 8);
+        assert_eq!(jar_min_java(&mk("j17.jar", 61)), 17);
+        assert_eq!(jar_min_java(&dir.path().join("absent.jar")), 17);
+    }
+
+    #[test]
+    fn srg_refuse_proguard() {
+        assert!(build_lanmap(PG, None, Runtime::Srg).is_err());
+    }
 
     #[test]
     fn noms_obfusques() {

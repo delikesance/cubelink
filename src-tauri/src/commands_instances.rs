@@ -79,7 +79,7 @@ pub fn state_for(id: &str, ev: &LaunchEvent) -> Option<LaunchStateEvent> {
 ///
 /// Invité (`join` = hôte:port du tunnel) : le même jar est chargé en mode `join=` (aucune ouverture de monde) ; il ne
 /// fait que relancer la connexion si le `--quickPlayMultiplayer` du jeu n'est pas parti (voir `LanAgent.joinLoop`).
-fn lan_agent_args(st: &AppState, own: bool, join: Option<&(String, u16)>) -> Option<String> {
+fn lan_agent_jar(st: &AppState, own: bool, join: Option<&(String, u16)>) -> Option<std::path::PathBuf> {
     let env = std::env::var_os("CUBELINK_LAN_AGENT").map(std::path::PathBuf::from);
     if crate::test_hooks::hooks().test_mode && env.is_none() {
         return None;
@@ -91,14 +91,50 @@ fn lan_agent_args(st: &AppState, own: bool, join: Option<&(String, u16)>) -> Opt
     // La JVM refuse un `-javaagent` au format Windows étendu (préfixe verbatim, renvoyé par le résolveur de
     // ressources Tauri) : « FATAL ERROR … appending to system class path failed ». On passe un chemin classique.
     let p = plain_windows_path(&p);
-    p.is_file().then(|| {
-        let a = javaagent_arg(&p, None);
-        if let Some((host, port)) = join {
-            return with_join(a, host, *port);
+    p.is_file().then_some(p)
+}
+
+/// Argument `-javaagent` complet pour ce jar (options d'invité ou de test comprises).
+fn lan_agent_arg(jar: &std::path::Path, join: Option<&(String, u16)>) -> String {
+    let a = javaagent_arg(jar, None);
+    if let Some((host, port)) = join {
+        return with_join(a, host, *port);
+    }
+    let flag = std::env::var("CUBELINK_LAN_NOAUTH").ok();
+    with_test_noauth(a, noauth_enabled(crate::test_hooks::hooks().test_mode, flag.as_deref()))
+}
+
+/// Faut-il injecter l'agent LAN ? `Err(raison)` sinon (journalisée). Pure, testable.
+/// - `java_major` : Java qui lance le jeu (`None` si inconnu) ; `jar_min_java` : Java minimal du jar (`lan_map::jar_min_java`) ;
+/// - legacy (MC < 1.13) : hôte Forge avec table SRG uniquement (l'invité n'a pas besoin de l'agent : `--server/--port`) ;
+/// - moderne (≥ 1.13, version non reconnue comprise) : inchangé.
+pub(crate) fn agent_supported(
+    java_major: Option<u32>,
+    jar_min_java: u32,
+    mc_version: &str,
+    loader: Loader,
+    join: bool,
+    has_srg_table: bool,
+) -> Result<(), &'static str> {
+    let legacy = core_lib::lan_map::is_legacy(mc_version);
+    match java_major {
+        Some(j) if j < 8 => return Err("Java < 8"),
+        Some(j) if j < jar_min_java => return Err("le jar de l'agent exige une Java plus récente"),
+        None if legacy => return Err("version de Java inconnue (Minecraft legacy)"),
+        _ => {}
+    }
+    if legacy {
+        if join {
+            return Err("invité legacy : --server/--port suffit");
         }
-        let flag = std::env::var("CUBELINK_LAN_NOAUTH").ok();
-        with_test_noauth(a, noauth_enabled(crate::test_hooks::hooks().test_mode, flag.as_deref()))
-    })
+        if loader != Loader::Forge {
+            return Err("Minecraft < 1.13 : seul Forge est géré");
+        }
+        if !has_srg_table {
+            return Err("pas de table SRG pour cette version");
+        }
+    }
+    Ok(())
 }
 
 /// TEST UNIQUEMENT : l'option `noauth` de l'agent (serveur LAN sans verification de session) n'est possible
@@ -183,11 +219,22 @@ pub(crate) fn plain_windows_path(p: &std::path::Path) -> std::path::PathBuf {
 /// suffisent (NeoForge, Minecraft 26.x) ou ne sont pas gérés (Forge : non vérifié). Toute erreur est journalisée
 /// et rend `None` : l'agent signale alors lui-même dans `latest.log` qu'il ne trouve pas les noms.
 async fn lan_map_path(st: &AppState, inst: &Instance, version: &LaunchVersion, libs_dir: &std::path::Path) -> Option<std::path::PathBuf> {
-    use core_lib::lan_map::{ensure_lanmap, Runtime};
+    use core_lib::lan_map::{ensure_lanmap, ensure_srg_map, pick_runtime, Runtime};
     let (downloads, libs) = match version {
         LaunchVersion::Vanilla(v) => (&v.downloads, &v.libraries),
         LaunchVersion::Merged(m) => (&m.downloads, &m.libraries),
     };
+    let dir = st.paths.root.join("lanmap");
+    // Forge 1.7.10 → 1.12.2 : table SRG embarquée (aucun téléchargement).
+    if pick_runtime(inst.loader.loader, &inst.minecraft, downloads.client_mappings.is_some()) == Some(Runtime::Srg) {
+        return match ensure_srg_map(&dir, &inst.minecraft) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("[Cubelink] LAN: table SRG illisible ({e})");
+                None
+            }
+        };
+    }
     // Jeu non obfusqué (26.x) : pas de mappings Mojang, les noms Mojang directs suffisent, aucune traduction.
     downloads.client_mappings.as_ref()?;
     let (runtime, inter) = match inst.loader.loader {
@@ -207,7 +254,6 @@ async fn lan_map_path(st: &AppState, inst: &Instance, version: &LaunchVersion, l
         Loader::NeoForge | Loader::Forge => return None,
     };
     let mappings = downloads.client_mappings.as_ref()?; // absent : jeu non obfusqué (26.x)
-    let dir = st.paths.root.join("lanmap");
     match ensure_lanmap(&dir, &reqwest::Client::new(), &inst.minecraft, runtime, mappings, inter.as_deref()).await {
         Ok(p) => Some(p),
         Err(e) => {
@@ -425,7 +471,18 @@ impl AppState {
         };
         // Partage / agent LAN : seulement pour nos propres instances, jamais en rejoignant un ami.
         let own = join_server.is_none() && self.instances.kind(&id).map(|k| k == core_lib::instance::InstanceKind::Own).unwrap_or(false);
-        let agent_on = lan_agent_args(self, own, join_server.as_ref()).is_some();
+        let agent_arg = lan_agent_jar(self, own, join_server.as_ref()).and_then(|jar| {
+            let java = core_lib::java::probe_with(&prepared.java, core_lib::java::run_java_version).map(|i| i.major);
+            let has_srg = core_lib::lan_map::srg_table(&inst.minecraft).is_some();
+            match agent_supported(java, core_lib::lan_map::jar_min_java(&jar), &inst.minecraft, inst.loader.loader, join_server.is_some(), has_srg) {
+                Ok(()) => Some(lan_agent_arg(&jar, join_server.as_ref())),
+                Err(why) => {
+                    eprintln!("[Cubelink] LAN: agent non injecté ({why}) : {} {:?}, Java {java:?}", inst.minecraft, inst.loader.loader);
+                    None
+                }
+            }
+        });
+        let agent_on = agent_arg.is_some();
         let lan_map = if agent_on && join_server.is_none() { lan_map_path(self, &inst, &prepared.version, &prepared.libs_dir).await } else { None };
         let spec = LaunchSpec {
             java_path: prepared.java,
@@ -445,7 +502,7 @@ impl AppState {
             launcher_version: env!("CARGO_PKG_VERSION").into(),
             extra_jvm_args: {
                 let mut a = core_lib::instance::split_jvm_args(&inst.jvm_args);
-                a.extend(lan_agent_args(self, own, join_server.as_ref()).map(|arg| match &lan_map {
+                a.extend(agent_arg.map(|arg| match &lan_map {
                     Some(m) => with_map(arg, m),
                     None => arg,
                 }));
@@ -563,6 +620,37 @@ pub async fn minecraft_versions(state: State<'_, Arc<AppState>>) -> Result<Vec<S
 mod tests {
     use super::*;
     use crate::state::test_support::test_state;
+
+    #[test]
+    fn agent_supporte_selon_version_java_et_loader() {
+        use Loader::*;
+        let ok = |j, jm, v, l, join, t| agent_supported(j, jm, v, l, join, t);
+        // moderne : inchangé (Java >= jar), table SRG sans effet
+        assert_eq!(ok(Some(21), 8, "1.21.1", Fabric, false, false), Ok(()));
+        assert_eq!(ok(Some(21), 17, "26.1", NeoForge, true, false), Ok(()));
+        assert_eq!(ok(Some(17), 17, "1.20.1", Forge, false, false), Ok(()));
+        assert_eq!(ok(None, 17, "1.21.1", Vanilla, false, false), Ok(()));
+        assert_eq!(ok(Some(21), 17, "snapshot-inconnu", Vanilla, false, false), Ok(()));
+        // 1.13 → 1.16 sous Java 8 : seulement si le jar est en classfile 52
+        assert_eq!(ok(Some(8), 8, "1.16.5", Fabric, false, false), Ok(()));
+        assert!(ok(Some(8), 17, "1.16.5", Fabric, false, false).is_err());
+        assert!(ok(Some(8), 17, "1.14.4", Forge, true, false).is_err());
+        // Java < 8 : jamais
+        assert!(ok(Some(7), 8, "1.7.10", Forge, false, true).is_err());
+        assert!(ok(Some(6), 8, "1.21.1", Fabric, false, false).is_err());
+        // legacy : Forge + hôte + table + Java 8 avec jar 52
+        for v in ["1.7.10", "1.8.9", "1.12.2"] {
+            assert_eq!(ok(Some(8), 8, v, Forge, false, true), Ok(()), "{v}");
+            assert!(ok(Some(8), 8, v, Forge, false, false).is_err(), "{v} sans table");
+            assert!(ok(Some(8), 8, v, Forge, true, true).is_err(), "{v} invité");
+            assert!(ok(Some(8), 8, v, Vanilla, false, true).is_err(), "{v} vanilla");
+            assert!(ok(Some(8), 8, v, Fabric, false, true).is_err(), "{v} fabric");
+            assert!(ok(Some(8), 17, v, Forge, false, true).is_err(), "{v} jar Java 17 sous Java 8");
+            assert!(ok(None, 8, v, Forge, false, true).is_err(), "{v} Java inconnue");
+        }
+        // Java 17 sur legacy avec jar 52 : accepté (Java plus récente)
+        assert_eq!(ok(Some(17), 8, "1.12.2", Forge, false, true), Ok(()));
+    }
 
     #[test]
     fn marqueurs_d_echec_d_agent() {

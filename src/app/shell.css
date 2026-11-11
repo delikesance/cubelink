@@ -16,9 +16,17 @@
 /* Conteneurs de page : .page plafonne la largeur, .page-fill remplit tout (grilles). Blocs de texte : ~68ch. */
 .page{width:100%;max-width:var(--page-max);margin-inline:auto;padding-inline:var(--page-pad);box-sizing:border-box}
 .page-fill{width:100%;padding-inline:var(--page-pad);box-sizing:border-box}
-/* Bannière de mise à jour prête (sous la barre de titre, hors du contenu défilant). */
-.update-banner{flex:none;display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;padding:8px var(--page-pad);background:var(--surface-2);border-bottom:1px solid var(--line)}
-.update-banner-txt{flex:1 1 240px;min-width:0;color:var(--text)}
+/* Mise à jour prête : carte flottante en bas à droite, au-dessus du crédit modpack, superposée au contenu (ne le pousse pas). */
+.update-banner{position:fixed;right:20px;bottom:64px;z-index:30;display:flex;align-items:center;gap:14px;width:max-content;max-width:calc(100vw - 2 * var(--page-pad));padding:12px 14px 12px 16px;background:var(--surface);border:1px solid var(--line-strong);border-radius:var(--r-lg);box-shadow:var(--shadow-soft);animation:update-in var(--dur-enter) var(--ease)}
+.update-banner-ico{flex:none;width:36px;height:36px;display:grid;place-items:center;border-radius:var(--r-pill);background:var(--accent);color:var(--accent-ink)}
+.update-banner-body{display:flex;flex-direction:column;gap:2px;min-width:0}
+.update-banner-title{font:600 14px var(--font-ui);color:var(--text)}
+.update-banner-txt{font-size:12px;color:var(--muted)}
+.update-banner-txt.is-error{color:var(--danger)}
+.update-banner-actions{display:flex;flex:none;gap:8px;margin-left:6px}
+@keyframes update-in{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
+@media (prefers-reduced-motion:reduce){.update-banner{animation:none}}
+@media (max-width:640px){.update-banner{flex-wrap:wrap;width:auto;left:var(--page-pad);right:var(--page-pad);bottom:20px}.update-banner-actions{width:100%;margin:0;justify-content:flex-end}}
 
 /* Démarrage : contrôle de la session avant d'afficher l'écran Connexion */
 .boot{height:100%;display:grid;place-items:center;color:var(--muted);font-size:14px}

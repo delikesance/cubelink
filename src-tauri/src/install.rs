@@ -404,4 +404,26 @@ mod tests {
         assert!(safe_version("1.21.1") && safe_version("21.1.77-beta"));
         assert!(!safe_version("../1") && !safe_version("") && !safe_version("a b"));
     }
+
+    /// Mesure (manuelle) : durée de `ensure_game` sur une instance déjà installée du vrai dossier de données.
+    ///   CUBELINK_TIMING_DIR=<dossier de données> CUBELINK_TIMING_ID=<instance> cargo test -p cubelink --lib mesure_ensure_game -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn mesure_ensure_game() {
+        let (Ok(dir), Ok(id)) = (std::env::var("CUBELINK_TIMING_DIR"), std::env::var("CUBELINK_TIMING_ID")) else { return };
+        let paths = Paths::new(std::path::Path::new(&dir));
+        let inst = core_lib::instance::InstanceStore::new(paths.instances.clone()).get(&id).unwrap();
+        for run in 1..=2 {
+            let t = std::time::Instant::now();
+            let last = std::sync::Arc::new(std::sync::Mutex::new(t));
+            let l2 = last.clone();
+            let progress: Progress = std::sync::Arc::new(move |m: String| {
+                let mut g = l2.lock().unwrap();
+                eprintln!("  [{:>6} ms] {m}", g.elapsed().as_millis());
+                *g = std::time::Instant::now();
+            });
+            ensure_game(&paths, &inst, None, progress).await.unwrap();
+            eprintln!("run {run} : total {} ms (dernier palier : {} ms)", t.elapsed().as_millis(), last.lock().unwrap().elapsed().as_millis());
+        }
+    }
 }

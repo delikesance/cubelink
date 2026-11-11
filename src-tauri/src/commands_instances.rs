@@ -523,7 +523,8 @@ impl AppState {
 
 #[tauri::command(rename_all = "snake_case")]
 pub fn instances_list(state: State<'_, Arc<AppState>>) -> Result<Vec<Instance>, String> {
-    Ok(state.instances_list())
+    // Les modpacks reçus d'un ami (instances d'invité) restent hors de la liste : ils ne sont lancés que via « Rejoindre ».
+    Ok(state.instances_list().into_iter().filter(|i| !core_lib::guest::is_guest_instance(&state.instances, &i.id)).collect())
 }
 
 #[tauri::command(rename_all = "snake_case")]

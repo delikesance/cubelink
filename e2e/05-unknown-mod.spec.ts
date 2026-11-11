@@ -56,10 +56,10 @@ test('T5 : mod inconnu signale avant telechargement, confiance requise, sha256 i
 
   // Instance invitee : sha256 identiques, jar dans le game_dir invite.
   const st = await testState(appB.page);
-  const list = await invoke<{ id: string; name: string }[]>(appB.page, 'instances_list');
-  const guest = list.find((i) => i.id === ev[0].instance_id);
-  expect(guest?.name).toMatch(/\(invité\)$/);
+  // L'instance invitee n'apparait pas dans la liste de l'utilisateur (modpack d'un ami) mais existe sur disque.
+  expect((await invoke<{ id: string }[]>(appB.page, 'instances_list')).some((i) => i.id === ev[0].instance_id)).toBe(false);
   const meta = JSON.parse(fs.readFileSync(path.join(st.paths.instances, ev[0].instance_id, 'instance.json'), 'utf8'));
+  expect(meta.name).toMatch(/\(invité\)$/);
   expect(meta.kind).toBe('guest');
   const guestDir = path.join(st.paths.instances, ev[0].instance_id, 'minecraft');
   for (const f of plan.manifest.files) {

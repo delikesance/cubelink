@@ -63,6 +63,15 @@ pub async fn fetch_asset_index(index_ref: &AssetIndexRef, assets_dir: &Path) -> 
     if index_ref.id.contains(['/', '\\']) || index_ref.id.contains("..") {
         return Err(Error::Invalid(format!("identifiant d'index {}", index_ref.id)));
     }
+    // Index déjà sur disque et conforme au sha1 attendu : aucun accès réseau (lancement plus rapide, et hors ligne).
+    let cached = assets_dir.join("indexes").join(format!("{}.json", index_ref.id));
+    if let Ok(bytes) = tokio::fs::read(&cached).await {
+        if sha1_hex(&bytes).eq_ignore_ascii_case(&index_ref.sha1) {
+            if let Ok(index) = serde_json::from_slice::<AssetIndex>(&bytes) {
+                return Ok(index);
+            }
+        }
+    }
     let resp = reqwest::get(&index_ref.url).await.map_err(net)?;
     if !resp.status().is_success() {
         return Err(Error::Network(format!("index d'assets {} : HTTP {}", index_ref.id, resp.status())));
@@ -176,9 +185,10 @@ async fn fetch_object(
     let prefix = &hash[..2];
     let dest = assets_dir.join("objects").join(prefix).join(hash);
 
-    // Déjà présent et valide : sauté. Sinon (corrompu) : supprimé puis retéléchargé.
-    if let Ok(existing) = tokio::fs::read(&dest).await {
-        if existing.len() as u64 == size && sha1_hex(&existing) == hash {
+    // Déjà présent : sauté d'après la taille seule (écriture atomique à l'installation ; relire et hacher les milliers
+    // d'objets à chaque lancement coûtait plusieurs secondes). Taille différente (tronqué, corrompu) : supprimé puis retéléchargé.
+    if let Ok(meta) = tokio::fs::metadata(&dest).await {
+        if meta.is_file() && meta.len() == size {
             return Ok(());
         }
         let _ = tokio::fs::remove_file(&dest).await;

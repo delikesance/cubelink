@@ -222,9 +222,9 @@ export async function waitProgress(page: Page, pred: (p: Progress) => boolean, t
 /** Dossier de jeu de l'instance invitee de B (la seule instance de kind guest) : { id, gameDir }. */
 export async function guestInstance(app: App): Promise<{ id: string; gameDir: string } | null> {
   const st = await testState(app.page);
-  const list = await invoke<{ id: string }[]>(app.page, 'instances_list');
-  const g = list.find((i) => fs.existsSync(path.join(st.paths.instances, i.id, 'guest.json')));
-  return g ? { id: g.id, gameDir: path.join(st.paths.instances, g.id, 'minecraft') } : null;
+  // Les instances d'invite sont volontairement absentes de instances_list : on les cherche sur disque.
+  const id = fs.existsSync(st.paths.instances) ? fs.readdirSync(st.paths.instances).find((d) => fs.existsSync(path.join(st.paths.instances, d, 'guest.json'))) : undefined;
+  return id ? { id, gameDir: path.join(st.paths.instances, id, 'minecraft') } : null;
 }
 
 /** Liste recursive de fichiers dont le chemin satisfait `pred`. */

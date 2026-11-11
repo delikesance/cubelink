@@ -201,6 +201,11 @@ fn sanitize_name(name: &str) -> String {
     }
 }
 
+/// Vrai si l'instance a été créée pour rejoindre un ami (modpack temporaire, absent de la liste de l'utilisateur).
+pub fn is_guest_instance(store: &InstanceStore, id: &str) -> bool {
+    meta_path(store, id).map(|p| p.exists()).unwrap_or(false)
+}
+
 fn meta_path(store: &InstanceStore, id: &str) -> Result<PathBuf> {
     let gd = store.game_dir(id)?;
     Ok(gd.parent().map(|p| p.join(GUEST_META)).unwrap_or_else(|| PathBuf::from(GUEST_META)))

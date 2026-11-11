@@ -23,6 +23,8 @@ permissions:
   contents: write
 
 env:
+  CARGO_INCREMENTAL: 0
+  CARGO_TERM_COLOR: always
   # Clé de signature des mises à jour (générée par `tauri signer generate`, sans mot de passe).
   TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
   TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
@@ -30,6 +32,7 @@ env:
 jobs:
   version:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
       version: ${{ steps.v.outputs.version }}
       tag: ${{ steps.v.outputs.tag }}
@@ -57,6 +60,7 @@ jobs:
   build-windows:
     needs: version
     runs-on: windows-latest
+    timeout-minutes: 40
     outputs:
       unsigned-artifact-id: ${{ steps.upload-msi.outputs.artifact-id }}
     steps:
@@ -65,15 +69,16 @@ jobs:
         with: { node-version: 22, cache: npm }
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-java@v5
-        with: { distribution: temurin, java-version: '17' }
+        with:
+          shared-key: release-${{ runner.os }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: npm ci
       - name: Version
         shell: bash
         run: node scripts/release-version.mjs "$GITHUB_RUN_NUMBER" --write
       - name: Agent LAN (jar Java)
         shell: bash
-        run: bash core/resources/lan-agent/build.sh
+        run: JAVA_HOME="$JAVA_HOME_17_X64" bash core/resources/lan-agent/build.sh
       # Pas de CUBELINK_CF_API_KEY ici : une clé embarquée serait extractible de l'installeur public.
       - name: Installeur MSI
         run: npx tauri build --bundles msi
@@ -91,23 +96,26 @@ jobs:
   build-linux:
     needs: version
     runs-on: ubuntu-22.04
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: 22, cache: npm }
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-java@v5
-        with: { distribution: temurin, java-version: '17' }
-      - name: Dépendances système (WebKitGTK, AppImage)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev patchelf xdg-utils build-essential
+        with:
+          shared-key: release-${{ runner.os }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Dépendances système (WebKitGTK, AppImage ; mises en cache)
+        uses: awalsh128/cache-apt-pkgs-action@v1
+        with:
+          packages: libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev patchelf xdg-utils
+          version: 1.0
       - run: npm ci
       - name: Version
         run: node scripts/release-version.mjs "$GITHUB_RUN_NUMBER" --write
       - name: Agent LAN (jar Java)
-        run: bash core/resources/lan-agent/build.sh
+        run: JAVA_HOME="$JAVA_HOME_17_X64" bash core/resources/lan-agent/build.sh
       - name: AppImage
         run: npx tauri build --bundles appimage
       - uses: actions/upload-artifact@v4
@@ -120,6 +128,7 @@ jobs:
   sign-windows:
     needs: [version, build-windows]
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     # Seulement si SignPath est configuré (variable de dépôt SIGNPATH_ORGANIZATION_ID, secret SIGNPATH_API_TOKEN).
     if: ${{ vars.SIGNPATH_ORGANIZATION_ID != '' }}
     steps:
@@ -141,6 +150,7 @@ jobs:
   release:
     needs: [version, build-windows, build-linux, sign-windows]
     # Les builds doivent réussir ; la signature peut être ignorée (SignPath non configuré) mais pas échouer.
+    timeout-minutes: 15
     if: ${{ always() && needs.version.outputs.publish == 'true' && needs.build-windows.result == 'success' && needs.build-linux.result == 'success' && (needs.sign-windows.result == 'success' || needs.sign-windows.result == 'skipped') }}
     runs-on: ubuntu-latest
     steps:

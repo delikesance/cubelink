@@ -1,4 +1,5 @@
 # Vérifications à chaque push sur `development` et à chaque pull request vers `main` (aucune release ici).
+# Quatre jobs indépendants qui tournent EN PARALLÈLE (le front est rapide, le Rust est la partie longue).
 name: ci
 
 on:
@@ -14,39 +15,70 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  CARGO_INCREMENTAL: 0          # inutile en CI et alourdit le cache
+  CARGO_PROFILE_DEV_DEBUG: 0    # pas d'infos de debogage : compilation et cache nettement plus legers
+  CARGO_TERM_COLOR: always
+
 jobs:
-  tests-windows:
-    runs-on: windows-latest
+  front:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run test:front
+
+  clippy-windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with: { components: clippy }
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-java@v5
-        with: { distribution: temurin, java-version: '17' }
-      - run: npm ci
-      - run: bash core/resources/lan-agent/build.sh
+        with:
+          shared-key: ci-clippy-win
+          save-if: ${{ github.ref == 'refs/heads/development' }}
+      - name: Agent LAN (JDK 17 préinstallé sur le runner)
         shell: bash
-      # clippy -D warnings + cargo test --workspace + tsc + vitest
-      - run: npm test
+        run: JAVA_HOME="$JAVA_HOME_17_X64" bash core/resources/lan-agent/build.sh
+      - run: cargo clippy --workspace --all-targets -- -D warnings
 
-  build-linux:
-    runs-on: ubuntu-22.04
+  tests-windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: 22, cache: npm }
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-java@v5
-        with: { distribution: temurin, java-version: '17' }
-      - name: Dépendances système
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev patchelf xdg-utils build-essential
-      - run: npm ci
-      - run: bash core/resources/lan-agent/build.sh
-      # Le build Linux ne doit pas casser sans que personne ne le voie : compilation complète (l'AppImage est produite par `release`).
+        with:
+          shared-key: ci-test-win
+          save-if: ${{ github.ref == 'refs/heads/development' }}
+      - name: Agent LAN (JDK 17 préinstallé sur le runner)
+        shell: bash
+        run: JAVA_HOME="$JAVA_HOME_17_X64" bash core/resources/lan-agent/build.sh
+      - run: cargo test --workspace
+
+  check-linux:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-check-linux
+          save-if: ${{ github.ref == 'refs/heads/development' }}
+      - name: Dépendances système (mises en cache)
+        uses: awalsh128/cache-apt-pkgs-action@v1
+        with:
+          packages: libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev patchelf xdg-utils
+          version: 1.0
+      - name: Agent LAN (JDK 17 préinstallé sur le runner)
+        run: JAVA_HOME="$JAVA_HOME_17_X64" bash core/resources/lan-agent/build.sh
+      # Le build Linux ne doit pas casser sans que personne ne le voie ; l'AppImage elle-même est produite par `release`.
       - run: cargo check --workspace --all-targets

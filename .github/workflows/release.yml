@@ -8,6 +8,7 @@ name: release
 on:
   push:
     branches: [main]
+    paths-ignore: ['docs/**', '**/*.md', 'LICENSE']   # une simple doc ne produit pas de release
   workflow_dispatch:
     inputs:
       publish:

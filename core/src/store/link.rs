@@ -23,34 +23,10 @@ static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Indique si `a` et `b` désignent le même fichier physique (`false` si l'un n'existe pas).
 ///
-/// Unix : comparaison (périphérique, inode). Windows : la std stable n'expose pas l'identifiant
-/// de fichier ; on compare les chemins canoniques, puis, au mieux, taille, date de modification
-/// et date de création (identiques pour deux hardlinks, qui partagent les métadonnées). Limite :
-/// une copie conservant tous ces attributs pourrait être prise à tort pour le même fichier.
+/// Comparaison exacte via la crate `same-file` (identifiant de fichier du système). Une copie n'est jamais prise pour un hardlink.
 pub fn same_file(a: &Path, b: &Path) -> bool {
-    let (Ok(ma), Ok(mb)) = (fs::metadata(a), fs::metadata(b)) else {
-        return false;
-    };
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        ma.dev() == mb.dev() && ma.ino() == mb.ino()
-    }
-    #[cfg(not(unix))]
-    {
-        if let (Ok(ca), Ok(cb)) = (fs::canonicalize(a), fs::canonicalize(b)) {
-            if ca == cb {
-                return true;
-            }
-        }
-        if ma.len() != mb.len() {
-            return false;
-        }
-        match (ma.modified(), mb.modified(), ma.created(), mb.created()) {
-            (Ok(m1), Ok(m2), Ok(c1), Ok(c2)) => m1 == m2 && c1 == c2,
-            _ => false,
-        }
-    }
+    // Identité réelle du fichier (volume + index sur Windows, dev + inode sur Unix), pas une heuristique sur les dates.
+    ::same_file::is_same_file(a, b).unwrap_or(false)
 }
 
 /// Valide `rel_path` (séparateurs `/` ou `\`) et le joint à `root`.

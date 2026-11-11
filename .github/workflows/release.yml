@@ -106,6 +106,10 @@ jobs:
         with:
           shared-key: release-${{ runner.os }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: apt robuste (le miroir Azure des runners résout parfois mal son DNS)
+        run: |
+          echo 'Acquire::Retries "5"; Acquire::http::Timeout "15"; Acquire::https::Timeout "15"; Acquire::ForceIPv4 "true";' | sudo tee /etc/apt/apt.conf.d/99ci
+          sudo sed -i 's|http://azure.archive.ubuntu.com/ubuntu|http://archive.ubuntu.com/ubuntu|' /etc/apt/apt-mirrors.txt || true
       - name: Dépendances système (WebKitGTK, AppImage ; mises en cache)
         uses: awalsh128/cache-apt-pkgs-action@v1
         with:

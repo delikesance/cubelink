@@ -20,6 +20,7 @@ md-5.workspace = true
 uuid.workspace = true
 rusqlite.workspace = true
 zip.workspace = true
+same-file = "1"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 url.workspace = true
 aes-gcm.workspace = true

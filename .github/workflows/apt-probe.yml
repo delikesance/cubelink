@@ -1,0 +1,30 @@
+# Test jetable : quel contournement permet d'installer WebKitGTK sans rester bloqué ? (à supprimer ensuite)
+name: apt-probe
+on:
+  push:
+    branches: [development]
+jobs:
+  runner-24:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - run: |
+          date; getent hosts archive.ubuntu.com azure.archive.ubuntu.com || true
+          sudo timeout 120 apt-get update; echo "update rc=$?"
+          time sudo timeout 240 apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev patchelf xdg-utils; echo "install rc=$?"
+  container-jammy:
+    runs-on: ubuntu-latest
+    container: ubuntu:22.04
+    timeout-minutes: 8
+    steps:
+      - run: |
+          date; apt-get update; echo "update rc=$?"
+          time apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev patchelf xdg-utils ca-certificates curl build-essential; echo "install rc=$?"
+  container-bookworm:
+    runs-on: ubuntu-latest
+    container: rust:1-bookworm
+    timeout-minutes: 8
+    steps:
+      - run: |
+          date; apt-get update; echo "update rc=$?"
+          time apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev patchelf xdg-utils; echo "install rc=$?"

@@ -1,30 +1,34 @@
-# Test jetable : quel contournement permet d'installer WebKitGTK sans rester bloqué ? (à supprimer ensuite)
+# Test jetable : quel miroir Ubuntu repond depuis les runners ? (à supprimer ensuite)
 name: apt-probe
 on:
   push:
     branches: [development]
 jobs:
-  runner-24:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 8
-    steps:
-      - run: |
-          date; getent hosts archive.ubuntu.com azure.archive.ubuntu.com || true
-          sudo timeout 120 apt-get update; echo "update rc=$?"
-          time sudo timeout 240 apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev patchelf xdg-utils; echo "install rc=$?"
-  container-jammy:
+  mirrors:
     runs-on: ubuntu-latest
     container: ubuntu:22.04
     timeout-minutes: 8
     steps:
       - run: |
-          date; apt-get update; echo "update rc=$?"
-          time apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev patchelf xdg-utils ca-certificates curl build-essential; echo "install rc=$?"
-  container-bookworm:
+          apt-get install -y --no-install-recommends ca-certificates curl >/dev/null 2>&1 || true
+          for h in archive.ubuntu.com azure.archive.ubuntu.com security.ubuntu.com mirrors.edge.kernel.org ftp.fau.de mirror.hetzner.com mirrors.xtom.com mirror.us.leaseweb.net debian.org deb.debian.org; do
+            printf '%s: ' $h; getent hosts $h | head -1 || echo "DNS KO"
+          done
+          cat /etc/resolv.conf
+  jammy-kernel-mirror:
     runs-on: ubuntu-latest
-    container: rust:1-bookworm
-    timeout-minutes: 8
+    container: ubuntu:22.04
+    timeout-minutes: 10
     steps:
       - run: |
-          date; apt-get update; echo "update rc=$?"
-          time apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev patchelf xdg-utils; echo "install rc=$?"
+          sed -i 's|http://archive.ubuntu.com|http://mirrors.edge.kernel.org|; s|http://security.ubuntu.com|http://mirrors.edge.kernel.org|' /etc/apt/sources.list
+          apt-get update; echo "update rc=$?"
+          apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev patchelf xdg-utils ca-certificates curl build-essential; echo "install rc=$?"
+  bookworm:
+    runs-on: ubuntu-latest
+    container: rust:1-bookworm
+    timeout-minutes: 10
+    steps:
+      - run: |
+          apt-get update; echo "update rc=$?"
+          apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev patchelf xdg-utils; echo "install rc=$?"

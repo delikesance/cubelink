@@ -2,7 +2,7 @@
 # avec l'installeur Windows (.msi), l'AppImage Linux et latest.json (lu par l'updater du launcher).
 # Flux de travail : on pousse sur `development`, puis on merge dans `main`.
 # `workflow_dispatch` (depuis n'importe quelle branche) construit tout SANS publier, pour vérifier les builds.
-# Signature Windows : SignPath Foundation, seulement si la variable de dépôt SIGNPATH_ORGANIZATION_ID existe.
+# Windows : .msi (updater) + paquet .msix à téléverser dans le Microsoft Store (qui le signe).
 name: release
 
 on:
@@ -61,8 +61,6 @@ jobs:
     needs: version
     runs-on: windows-latest
     timeout-minutes: 40
-    outputs:
-      unsigned-artifact-id: ${{ steps.upload-msi.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -82,8 +80,7 @@ jobs:
       # Pas de CUBELINK_CF_API_KEY ici : une clé embarquée serait extractible de l'installeur public.
       - name: Installeur MSI
         run: npx tauri build --bundles msi
-      - id: upload-msi
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: windows-msi
           path: target/release/bundle/msi/*.msi
@@ -147,33 +144,11 @@ jobs:
             target/release/bundle/appimage/*.AppImage
             target/release/bundle/appimage/*.AppImage.sig
 
-  sign-windows:
-    needs: [version, build-windows]
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    # Seulement si SignPath est configuré (variable de dépôt SIGNPATH_ORGANIZATION_ID, secret SIGNPATH_API_TOKEN).
-    if: ${{ vars.SIGNPATH_ORGANIZATION_ID != '' }}
-    steps:
-      - uses: signpath/github-action-submit-signing-request@v1
-        with:
-          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
-          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
-          project-slug: cubelink
-          signing-policy-slug: release-signing
-          artifact-configuration-slug: default
-          github-artifact-id: ${{ needs.build-windows.outputs.unsigned-artifact-id }}
-          wait-for-completion: true
-          output-artifact-directory: signed
-      - uses: actions/upload-artifact@v4
-        with:
-          name: windows-msi-signed
-          path: signed/*.msi
-
   release:
-    needs: [version, build-windows, build-linux, sign-windows]
-    # Les builds doivent réussir ; la signature peut être ignorée (SignPath non configuré) mais pas échouer.
+    needs: [version, build-windows, build-linux]
+    # Les deux builds doivent réussir.
     timeout-minutes: 15
-    if: ${{ always() && needs.version.outputs.publish == 'true' && needs.build-windows.result == 'success' && needs.build-linux.result == 'success' && (needs.sign-windows.result == 'success' || needs.sign-windows.result == 'skipped') }}
+    if: ${{ always() && needs.version.outputs.publish == 'true' && needs.build-windows.result == 'success' && needs.build-linux.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -181,21 +156,10 @@ jobs:
         with: { node-version: 22 }
       - uses: actions/download-artifact@v4
         with: { path: artifacts }
-      - name: Remplacer le MSI par la version signée (si SignPath a tourné) et re-signer la mise à jour
+      - name: Rassembler les signatures de mise à jour
         shell: bash
-        run: |
-          set -euo pipefail
-          if [ -d artifacts/windows-msi-signed ]; then
-            echo "MSI signé par SignPath : on le substitue et on recalcule la signature de l'updater"
-            rm -f artifacts/windows-msi/*.msi artifacts/windows-sig/*.sig
-            cp artifacts/windows-msi-signed/*.msi artifacts/windows-msi/
-            rm -rf artifacts/windows-msi-signed
-            if [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
-              for f in artifacts/windows-msi/*.msi; do npx --yes @tauri-apps/cli@2 signer sign "$f"; mv "$f.sig" artifacts/windows-sig/; done
-            fi
-          fi
-          # Les .sig doivent se trouver à côté des fichiers pour make-latest-json.
-          cp artifacts/windows-sig/*.sig artifacts/windows-msi/ 2>/dev/null || true
+        # Les .sig doivent se trouver à côté des fichiers pour make-latest-json.
+        run: cp artifacts/windows-sig/*.sig artifacts/windows-msi/ 2>/dev/null || true
       - name: Notes + latest.json
         shell: bash
         run: |

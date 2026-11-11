@@ -19,8 +19,9 @@ Majeur/mineur : champ `version` de `src-tauri/tauri.conf.json` (changer à la ma
 |---|---|---|
 | `TAURI_SIGNING_PRIVATE_KEY` | secret | clé privée de signature des mises à jour (`~/.tauri/cubelink-updater.key` en local ; **à sauvegarder**, la perdre casse les mises à jour des versions déjà installées) |
 | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | secret (optionnel) | mot de passe de la clé (vide aujourd'hui) |
-| `SIGNPATH_ORGANIZATION_ID` | variable | active la signature Authenticode du .msi (voir `signature-du-code.md`) |
-| `SIGNPATH_API_TOKEN` | secret | jeton SignPath |
+| `MSIX_IDENTITY_NAME` | variable | Package/Identity/Name donné par le Partner Center (Microsoft Store) |
+| `MSIX_PUBLISHER` | variable | Package/Identity/Publisher du Partner Center (`CN=...`) |
+| `MSIX_PUBLISHER_DISPLAY_NAME` | variable | nom d'éditeur affiché dans le Store |
 
 Régénérer la clé : `npx tauri signer generate -w ~/.tauri/cubelink-updater.key`, puis mettre la clé publique dans `plugins.updater.pubkey`.
 Les installations existantes ne pourront plus se mettre à jour automatiquement après un changement de clé.
@@ -28,4 +29,4 @@ Les installations existantes ne pourront plus se mettre à jour automatiquement 
 ## Limites connues
 - MSI : installation « par machine » (demande les droits administrateur) ; l'ancien NSIS s'installait par utilisateur.
 - Linux : l'AppImage est construite en CI ; non testée sur une vraie machine Linux (l'agent LAN, le lancement du jeu et la mise à jour y sont non éprouvés).
-- Sans SignPath : Windows affiche l'alerte SmartScreen ; les mises à jour restent protégées par la signature minisign.
+- Le .msi des releases GitHub n'est pas signé Authenticode : SmartScreen avertit. La voie sans alerte est le paquet MSIX du Store, que Microsoft signe ; il se téléverse à la main dans le Partner Center (artefact `windows-msix`). Installé via le Store, le launcher coupe son updater interne.

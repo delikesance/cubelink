@@ -1,9 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<!-- Configuration d'artefact SignPath : l'artefact envoye par la CI est un zip contenant l'installeur MSI. -->
-<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
-  <zip-file>
-    <msi-file path="Cubelink_*.msi">
-      <authenticode-sign/>
-    </msi-file>
-  </zip-file>
-</artifact-configuration>

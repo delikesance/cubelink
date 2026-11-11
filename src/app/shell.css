@@ -16,3 +16,6 @@
 /* Conteneurs de page : .page plafonne la largeur, .page-fill remplit tout (grilles). Blocs de texte : ~68ch. */
 .page{width:100%;max-width:var(--page-max);margin-inline:auto;padding-inline:var(--page-pad);box-sizing:border-box}
 .page-fill{width:100%;padding-inline:var(--page-pad);box-sizing:border-box}
+/* Bannière de mise à jour prête (sous la barre de titre, hors du contenu défilant). */
+.update-banner{flex:none;display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;padding:8px var(--page-pad);background:var(--surface-2);border-bottom:1px solid var(--line)}
+.update-banner-txt{flex:1 1 240px;min-width:0;color:var(--text)}

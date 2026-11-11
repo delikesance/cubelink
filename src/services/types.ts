@@ -131,6 +131,21 @@ export interface PickFilesOptions { extensions: string[]; multiple?: boolean }
 export type Unsubscribe = () => void;
 
 /** Une méthode par commande (rejet = message d'erreur en français), un abonnement par événement. */
+export type UpdatePhase = "idle" | "checking" | "up_to_date" | "available" | "downloading" | "ready" | "error";
+
+/** État de la mise à jour automatique du launcher (octets pour downloaded/total, message d'erreur en français). */
+export interface UpdateState {
+  phase: UpdatePhase;
+  /** Version installée. */
+  current: string;
+  /** Version proposée. */
+  version: string | null;
+  notes: string | null;
+  downloaded: number;
+  total: number | null;
+  message: string | null;
+}
+
 export interface Services {
   authStatus(): Promise<Profile | null>;
   authBeginLogin(): Promise<DeviceCode>;
@@ -203,4 +218,10 @@ export interface Services {
   onBrowseProgress(cb: (e: BrowseProgressEvent) => void): Unsubscribe;
   /** Fichiers déposés sur la fenêtre (glisser-déposer natif). */
   onFilesDropped(cb: (paths: string[]) => void): Unsubscribe;
+  updateState(): Promise<UpdateState>;
+  /** Vérification manuelle ; si une version existe, le téléchargement démarre en arrière-plan. */
+  updateCheck(): Promise<UpdateState>;
+  /** Redémarre et installe la mise à jour téléchargée (rejette si une partie est en cours). */
+  updateInstall(): Promise<void>;
+  onUpdateState(cb: (s: UpdateState) => void): Unsubscribe;
 }

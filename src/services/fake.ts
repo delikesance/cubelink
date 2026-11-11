@@ -2,7 +2,7 @@ import type {
   BrowseHit, BrowseInstallResult, BrowseKind, BrowseProgressEvent, BrowseSource, BrowseVersion, ModEntry,
   CreateInstanceInput, DeviceCode, HostState, ImportWarningEvent, LaunchLogEvent, FriendRequest, FriendWithPresence, Instance, InstanceArt,
   JoinPlan, LaunchState, Manifest, PresenceEvent, UnknownModsEvent, Profile, Services, Settings,
-  TransferProgress, Unsubscribe,
+  TransferProgress, Unsubscribe, UpdateState,
 } from "./types";
 
 export interface FakeOptions {
@@ -23,6 +23,10 @@ export interface FakeControls {
   dropFiles(paths: string[]): void;
   /** Test : émet un événement host://state. */
   emitHostState(e: HostState): void;
+  /** Test : fusionne `patch` dans l'état de mise à jour et émet update://state (ex. available, downloading, ready). */
+  emitUpdateState(patch: Partial<UpdateState>): void;
+  /** Test : état (fusionné) auquel aboutit la prochaine updateCheck ; par défaut up_to_date. */
+  setUpdateCheckResult(patch: Partial<UpdateState>): void;
 }
 
 const KIND_WORDS: Record<BrowseKind, string[]> = {
@@ -198,7 +202,11 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     drop: new Set<(p: string[]) => void>(),
     warning: new Set<(e: ImportWarningEvent) => void>(),
     host: new Set<(e: HostState) => void>(),
+    update: new Set<(s: UpdateState) => void>(),
   };
+  let updateSt: UpdateState = { phase: "idle", current: "0.1.0", version: null, notes: null, downloaded: 0, total: null, message: null };
+  let updateCheckPatch: Partial<UpdateState> = { phase: "up_to_date" };
+  const setUpdate = (patch: Partial<UpdateState>) => { updateSt = { ...updateSt, ...patch }; emit(listeners.update, { ...updateSt }); };
   function sub<T>(set: Set<(v: T) => void>, cb: (v: T) => void): Unsubscribe {
     set.add(cb);
     return () => { set.delete(cb); };
@@ -494,6 +502,19 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     setPickedFiles: (paths) => { picked = paths; },
     dropFiles: (paths) => emit(listeners.drop, paths),
     emitHostState: (e) => emit(listeners.host, e),
+    emitUpdateState: (patch) => setUpdate(patch),
+    setUpdateCheckResult: (patch) => { updateCheckPatch = patch; },
+    updateState: async () => ({ ...updateSt }),
+    updateCheck: async () => {
+      setUpdate({ phase: "checking", message: null });
+      await Promise.resolve();
+      setUpdate(updateCheckPatch);
+      return { ...updateSt };
+    },
+    updateInstall: async () => {
+      if (updateSt.phase !== "ready") throw new Error("Aucune mise à jour prête à installer.");
+    },
+    onUpdateState: (cb) => sub(listeners.update, cb),
 
     onAuthState: (cb) => sub(listeners.auth, cb),
     onLaunchState: (cb) => sub(listeners.launch, cb),

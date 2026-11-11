@@ -10,6 +10,7 @@ pub mod commands_host;
 pub mod commands_instances;
 pub mod commands_join;
 pub mod commands_settings;
+pub mod commands_update;
 pub mod error;
 pub mod foreground;
 pub mod iroh_backend;
@@ -61,6 +62,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(move |app| {
             let root = match &hooks.data_dir {
                 Some(d) => d.clone(),
@@ -81,6 +83,7 @@ pub fn run() {
                 }
             }
             app.manage(st.clone());
+            commands_update::setup(app, test_mode);
             let opts = iroh_options(hooks);
             tauri::async_runtime::spawn(async move {
                 match iroh_backend::IrohBackend::start(&st, opts).await {
@@ -131,6 +134,9 @@ pub fn run() {
             commands_join::join_open_tunnel,
             commands_join::join_close_tunnel,
             commands_join::join_play,
+            commands_update::update_state,
+            commands_update::update_check,
+            commands_update::update_install,
             commands_settings::settings_get,
             commands_settings::settings_set,
             commands_browse::browse_search,

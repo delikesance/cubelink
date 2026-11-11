@@ -3,6 +3,7 @@ import "./settings.css";
 import { useScreenTitle, useServices, useShell } from "../../app/context";
 import { useBack } from "../../app/context";
 import { Button, Card, Field, Input } from "../../ui";
+import { UpdateSection } from "./UpdateSection";
 import type { Profile, Settings as BaseSettings } from "../../services/types";
 
 export type SettingsData = BaseSettings;
@@ -342,6 +343,7 @@ export default function Settings({ testConnection, clearCache }: SettingsProps =
           <div><b>Cubelink</b><span>Launcher Minecraft pour jouer avec tes amis</span></div>
           <a className="cl-btn cl-btn-secondary set-linkbtn" href="#/legal">Mentions légales</a>
         </Card>
+        <UpdateSection />
         <p style={{ margin: 0, color: "var(--muted)", lineHeight: 1.6 }}>Cubelink est un projet indépendant. Il n'est pas un produit Minecraft officiel, n'est pas approuvé par Mojang ou Microsoft et n'est pas associé à eux.</p>
         <div>
           <details className="set-more">

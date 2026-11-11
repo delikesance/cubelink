@@ -4,6 +4,7 @@ import { createServices, type Services } from "../services";
 import { ShellContext, type ShellContextValue } from "./context";
 import { navigate, goBack, takePendingFocus, useCanGoBack, useLocation, type RouteName } from "./router";
 import { TitleBar } from "./TitleBar";
+import { UpdateBanner } from "./UpdateBanner";
 
 export { useShell, useServices, useScreenTitle, useBack } from "./context";
 export { navigate, goBack, canGoBack, useCanGoBack, ROUTES, parseHash, type RouteName } from "./router";
@@ -103,6 +104,7 @@ export function Shell({ services }: { services?: Services } = {}) {
           Aller au contenu
         </a>
         <TitleBar context={title ?? ROUTE_LABELS[route]} />
+        <UpdateBanner services={svc} />
         <main id="contenu" className="content" ref={mainRef} tabIndex={-1} data-route={route}>
           {Screen ? <Screen /> : <Fallback route={route} />}
         </main>

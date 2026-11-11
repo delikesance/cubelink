@@ -1,50 +1,126 @@
-# Build de l'installeur Windows (NSIS) sur GitHub Actions, puis signature gratuite via SignPath Foundation.
-# Declenche par un tag `vX.Y.Z` (ou a la main). Sans les secrets/variables SignPath, seul l'installeur NON signe est produit.
+# Build + release automatiques : chaque merge dans `main` produit un nouveau tag `vMAJEUR.MINEUR.<run>` et une release GitHub
+# avec l'installeur Windows (.msi), l'AppImage Linux et latest.json (lu par l'updater du launcher).
+# Flux de travail : on pousse sur `development`, puis on merge dans `main`.
+# `workflow_dispatch` (depuis n'importe quelle branche) construit tout SANS publier, pour vérifier les builds.
+# Signature Windows : SignPath Foundation, seulement si la variable de dépôt SIGNPATH_ORGANIZATION_ID existe.
 name: release
 
 on:
   push:
-    tags: ['v*']
+    branches: [main]
   workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Publier la release (tag + fichiers) ; sinon build seul'
+        type: boolean
+        default: false
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 permissions:
   contents: write
 
+env:
+  # Clé de signature des mises à jour (générée par `tauri signer generate`, sans mot de passe).
+  TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+  TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
 jobs:
-  build:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      tag: ${{ steps.v.outputs.tag }}
+      publish: ${{ steps.v.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-tags: true }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - id: v
+        shell: bash
+        run: |
+          version=$(node scripts/release-version.mjs "$GITHUB_RUN_NUMBER")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_EVENT_NAME" = "push" ] || [ "${{ inputs.publish }}" = "true" ]; then publish=true; else publish=false; fi
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+          if [ "$publish" = "true" ] && git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
+            echo "Le tag v$version existe déjà" >&2; exit 1
+          fi
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then echo "::warning::secret TAURI_SIGNING_PRIVATE_KEY absent : les mises à jour ne seront pas signées"; fi
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+
+  build-windows:
+    needs: version
     runs-on: windows-latest
     outputs:
-      unsigned-artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      unsigned-artifact-id: ${{ steps.upload-msi.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: 22, cache: npm }
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with: { distribution: temurin, java-version: '17' }
       - run: npm ci
+      - name: Version
+        shell: bash
+        run: node scripts/release-version.mjs "$GITHUB_RUN_NUMBER" --write
       - name: Agent LAN (jar Java)
         shell: bash
         run: bash core/resources/lan-agent/build.sh
-      # Pas de CUBELINK_CF_API_KEY ici : une cle embarquee serait extractible de l'installeur public.
-      - name: Installeur NSIS
-        run: npx tauri build
-      - name: Preparer l'artefact a signer
-        shell: bash
-        run: |
-          mkdir -p unsigned
-          cp target/release/bundle/nsis/Cubelink_*_x64-setup.exe unsigned/
-      - id: upload
+      # Pas de CUBELINK_CF_API_KEY ici : une clé embarquée serait extractible de l'installeur public.
+      - name: Installeur MSI
+        run: npx tauri build --bundles msi
+      - id: upload-msi
         uses: actions/upload-artifact@v4
         with:
-          name: installeur-non-signe
-          path: unsigned/*.exe
+          name: windows-msi
+          path: target/release/bundle/msi/*.msi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-sig
+          path: target/release/bundle/msi/*.msi.sig
+          if-no-files-found: warn
 
-  sign:
-    needs: build
+  build-linux:
+    needs: version
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-java@v5
+        with: { distribution: temurin, java-version: '17' }
+      - name: Dépendances système (WebKitGTK, AppImage)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev patchelf xdg-utils build-essential
+      - run: npm ci
+      - name: Version
+        run: node scripts/release-version.mjs "$GITHUB_RUN_NUMBER" --write
+      - name: Agent LAN (jar Java)
+        run: bash core/resources/lan-agent/build.sh
+      - name: AppImage
+        run: npx tauri build --bundles appimage
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-appimage
+          path: |
+            target/release/bundle/appimage/*.AppImage
+            target/release/bundle/appimage/*.AppImage.sig
+
+  sign-windows:
+    needs: [version, build-windows]
     runs-on: ubuntu-latest
-    # Ne tourne que si SignPath est configure (variable de depot SIGNPATH_ORGANIZATION_ID).
+    # Seulement si SignPath est configuré (variable de dépôt SIGNPATH_ORGANIZATION_ID, secret SIGNPATH_API_TOKEN).
     if: ${{ vars.SIGNPATH_ORGANIZATION_ID != '' }}
     steps:
       - uses: signpath/github-action-submit-signing-request@v1
@@ -54,15 +130,54 @@ jobs:
           project-slug: cubelink
           signing-policy-slug: release-signing
           artifact-configuration-slug: default
-          github-artifact-id: ${{ needs.build.outputs.unsigned-artifact-id }}
+          github-artifact-id: ${{ needs.build-windows.outputs.unsigned-artifact-id }}
           wait-for-completion: true
           output-artifact-directory: signed
       - uses: actions/upload-artifact@v4
         with:
-          name: installeur-signe
-          path: signed/*.exe
-      - name: Joindre a la release (tag uniquement)
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: signed/*.exe
+          name: windows-msi-signed
+          path: signed/*.msi
+
+  release:
+    needs: [version, build-windows, build-linux, sign-windows]
+    # Les builds doivent réussir ; la signature peut être ignorée (SignPath non configuré) mais pas échouer.
+    if: ${{ always() && needs.version.outputs.publish == 'true' && needs.build-windows.result == 'success' && needs.build-linux.result == 'success' && (needs.sign-windows.result == 'success' || needs.sign-windows.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - uses: actions/download-artifact@v4
+        with: { path: artifacts }
+      - name: Remplacer le MSI par la version signée (si SignPath a tourné) et re-signer la mise à jour
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -d artifacts/windows-msi-signed ]; then
+            echo "MSI signé par SignPath : on le substitue et on recalcule la signature de l'updater"
+            rm -f artifacts/windows-msi/*.msi artifacts/windows-sig/*.sig
+            cp artifacts/windows-msi-signed/*.msi artifacts/windows-msi/
+            rm -rf artifacts/windows-msi-signed
+            if [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
+              for f in artifacts/windows-msi/*.msi; do npx --yes @tauri-apps/cli@2 signer sign "$f"; mv "$f.sig" artifacts/windows-sig/; done
+            fi
+          fi
+          # Les .sig doivent se trouver à côté des fichiers pour make-latest-json.
+          cp artifacts/windows-sig/*.sig artifacts/windows-msi/ 2>/dev/null || true
+      - name: Notes + latest.json
+        shell: bash
+        run: |
+          set -euo pipefail
+          git log -20 --pretty='- %s' > notes.md
+          node scripts/make-latest-json.mjs artifacts "${{ needs.version.outputs.version }}" "${{ needs.version.outputs.tag }}" notes.md "$GITHUB_REPOSITORY"
+      - name: Tag + release GitHub
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ needs.version.outputs.tag }}"
+          gh release create "$tag" --target "$GITHUB_SHA" --title "Cubelink ${{ needs.version.outputs.version }}" --notes-file notes.md \
+            artifacts/windows-msi/*.msi artifacts/windows-msi/*.msi.sig \
+            artifacts/linux-appimage/*.AppImage artifacts/linux-appimage/*.AppImage.sig \
+            artifacts/latest.json

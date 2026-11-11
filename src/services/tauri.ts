@@ -85,6 +85,10 @@ export function createTauriServices(): Services {
     onFriendRequest: (cb) => on("friend://request", cb),
     onUnknownMods: (cb) => on("transfer://unknown_mods", cb),
     onTransferErrorDetails: (cb) => on("transfer://error_details", cb),
+    updateState: () => invoke("update_state"),
+    updateCheck: () => invoke("update_check"),
+    updateInstall: () => invoke("update_install"),
+    onUpdateState: (cb) => on("update://state", cb),
     onBrowseProgress: (cb) => on("browse://progress", cb),
     onFilesDropped: (cb) => {
       let off: (() => void) | null = null;

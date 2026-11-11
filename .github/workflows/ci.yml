@@ -73,15 +73,15 @@ jobs:
         with:
           shared-key: ci-check-linux
           save-if: ${{ github.ref == 'refs/heads/development' }}
-      - name: apt robuste (le miroir Azure des runners résout parfois mal son DNS)
+      - name: Dépendances système (miroir kernel.org car les noms ubuntu.com ne résolvent plus depuis les runners)
         run: |
-          echo 'Acquire::Retries "5"; Acquire::http::Timeout "15"; Acquire::https::Timeout "15"; Acquire::ForceIPv4 "true";' | sudo tee /etc/apt/apt.conf.d/99ci
-          sudo sed -i 's|http://azure.archive.ubuntu.com/ubuntu|http://archive.ubuntu.com/ubuntu|' /etc/apt/apt-mirrors.txt || true
-      - name: Dépendances système (apt direct, délais courts)
-        run: |
-          getent hosts archive.ubuntu.com security.ubuntu.com azure.archive.ubuntu.com || true
-          sudo timeout 240 apt-get update || sudo timeout 240 apt-get update || true
-          sudo timeout 900 apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev patchelf xdg-utils
+          sudo tee /etc/apt/sources.list >/dev/null <<'LIST'
+          deb http://mirrors.edge.kernel.org/ubuntu jammy main restricted universe multiverse
+          deb http://mirrors.edge.kernel.org/ubuntu jammy-updates main restricted universe multiverse
+          deb http://mirrors.edge.kernel.org/ubuntu jammy-security main restricted universe multiverse
+          LIST
+          sudo timeout 240 apt-get update
+          sudo timeout 600 apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev patchelf xdg-utils
       - name: Agent LAN (JDK 17 préinstallé sur le runner)
         run: JAVA_HOME="$JAVA_HOME_17_X64" bash core/resources/lan-agent/build.sh
       # Le build Linux ne doit pas casser sans que personne ne le voie ; l'AppImage elle-même est produite par `release`.

@@ -46,3 +46,21 @@
 .set-about span{color:var(--muted)}
 a.cl-btn.set-linkbtn{color:var(--text);text-decoration:none}
 .set h1:focus,.set h1:focus-visible{outline:none}
+
+/* Comptes */
+.acc-card{display:flex;flex-direction:column;gap:var(--sp-3);padding:20px 24px}
+.acc-h{margin:0;font:600 16px var(--font-display)}
+.acc-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column}
+.acc-row{display:flex;align-items:center;gap:16px;padding:12px 0;border-bottom:1px solid var(--line)}
+.acc-row:last-child{border-bottom:0}
+.acc-badge{width:40px;height:40px;font-size:16px}
+.acc-who{flex:1;min-width:0}
+.acc-who .name{font:600 16px var(--font-display);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.acc-meta{display:flex;align-items:center;gap:10px;margin-top:2px}
+.acc-active{font-size:13px}
+.acc-acts,.acc-confirm{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.acc-confirm>span{color:var(--muted);font-size:14px}
+.acc-add{display:flex;flex-wrap:wrap;gap:12px}
+.acc-notice{min-height:1.5em}
+.acc-panel{display:flex;flex-direction:column;gap:12px;padding:16px;border:1px solid var(--line);border-radius:var(--r-md)}
+.acc-code{margin:0;font:700 28px/1 var(--font-display);letter-spacing:.08em}

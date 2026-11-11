@@ -211,7 +211,7 @@ mod tests {
     async fn code_invalide_refuse() {
         let dir = tempfile::tempdir().unwrap();
         let (st, _) = test_state(dir.path());
-        st.auth_offline_login("Alice", true).unwrap();
+        st.auth_offline_login("Alice").unwrap();
         for bad in ["", "abc", "mcl1-zzzz", "mcl1-aaaa-bbbb"] {
             let e = st.friend_send_request(bad).await.unwrap_err();
             assert!(e.contains("code ami invalide"), "{bad} -> {e}");
@@ -222,7 +222,7 @@ mod tests {
     async fn propre_code_refuse_et_backend_indisponible() {
         let dir = tempfile::tempdir().unwrap();
         let (st, _) = test_state(dir.path());
-        st.auth_offline_login("Alice", true).unwrap();
+        st.auth_offline_login("Alice").unwrap();
         let mine = st.friend_my_code();
         assert!(st.friend_send_request(&mine.0).await.unwrap_err().contains("propre code"));
         // Code d'un autre : valide, mais le protocole n'est pas branché.

@@ -245,3 +245,25 @@ describe("fake : illustrations d'instance", () => {
     expect(r.instance.art?.screenshots.length).toBe(4);
   });
 });
+
+describe("comptes multiples", () => {
+  it("ajout, bascule, retrait et événements", async () => {
+    const s = svc();
+    const seen: Array<string | null> = [];
+    s.onAccountsState((st) => seen.push(st.active));
+    await s.authPollLogin();
+    await s.authOfflineLogin("Alex_");
+    let st = await s.authAccounts();
+    expect(st.accounts.map((a) => a.kind)).toEqual(["online", "offline"]);
+    expect(st.active).toBe(st.accounts[1].id);
+    await s.authSwitch(st.accounts[0].id);
+    expect((await s.authStatus())?.kind).toBe("online");
+    await s.authRemove(st.accounts[0].id);
+    st = await s.authAccounts();
+    expect(st.accounts).toHaveLength(1);
+    expect(st.active).toBe(st.accounts[0].id);
+    expect(seen.length).toBe(4);
+    await expect(s.authOfflineLogin("ab")).rejects.toThrow(/3 à 16/);
+    await expect(s.authSwitch("nope")).rejects.toThrow();
+  });
+});

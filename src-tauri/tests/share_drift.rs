@@ -37,7 +37,7 @@ impl Node {
             ..IrohOptions::default()
         };
         let (st, be) = start_app(root, sink, opts).await.unwrap();
-        st.auth_offline_login(name, true).unwrap();
+        st.auth_offline_login(name).unwrap();
         st.skip_game_install.store(true, std::sync::atomic::Ordering::SeqCst);
         Node { st, be, events }
     }

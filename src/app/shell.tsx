@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ComponentType } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentType } from "react";
 import "./shell.css";
 import { createServices, type Services } from "../services";
 import { ShellContext, type ShellContextValue } from "./context";
-import { navigate, goBack, takePendingFocus, useCanGoBack, useLocation, type RouteName } from "./router";
+import { navigate, goBack, parseHash, takePendingFocus, useCanGoBack, useLocation, type RouteName } from "./router";
 import { TitleBar } from "./TitleBar";
 import { UpdateBanner } from "./UpdateBanner";
 
@@ -11,13 +11,13 @@ export { navigate, goBack, canGoBack, useCanGoBack, ROUTES, parseHash, type Rout
 
 export const ROUTE_LABELS: Record<RouteName, string> = {
   login: "Connexion", main: "Accueil", create: "Créer une instance", install: "Installation",
-  join: "Rejoindre", friends: "Amis", settings: "Paramètres", error: "Erreur", legal: "Mentions légales", browse: "Parcourir",
+  join: "Rejoindre", friends: "Amis", settings: "Paramètres", error: "Erreur", legal: "Mentions légales", browse: "Parcourir", overlay: "Panneau en jeu",
 };
 
 // Dossier d'écran par route. Les écrans sont chargés sans être modifiés.
 const SCREEN_DIRS: Record<RouteName, string> = {
   login: "Login", main: "Main", create: "Create", install: "Install", join: "Join",
-  friends: "Friends", settings: "Settings", error: "Error", legal: "Legal", browse: "Browse",
+  friends: "Friends", settings: "Settings", error: "Error", legal: "Legal", browse: "Browse", overlay: "Overlay",
 };
 type ScreenModule = { default?: ComponentType };
 const screenModules = import.meta.glob<ScreenModule>("../screens/*/index.tsx", { eager: true });
@@ -41,6 +41,28 @@ export function Shell({ services }: { services?: Services } = {}) {
   const [title, setTitle] = useState<string | null>(null);
   const mainRef = useRef<HTMLElement>(null);
   const first = useRef(true);
+
+  // Démarrage : arrivé sur « login » sans l'avoir demandé (hash vide ou par défaut), on regarde
+  // d'abord si une session est conservée. Une arrivée volontaire (#/login, déconnexion) n'est pas contrôlée.
+  const [booting, setBooting] = useState(
+    () => parseHash(window.location.hash).route === "login" && !/^#\/?login/i.test(window.location.hash),
+  );
+  useEffect(() => {
+    if (!booting) return;
+    let on = true;
+    void (async () => {
+      let profile = null;
+      try { profile = await svc.authStatus(); } catch { /* traité comme l'absence de session */ }
+      if (!on) return;
+      if (profile) { navigate("main"); setBooting(false); return; }
+      let existed = false;
+      try { existed = (await svc.authAccounts()).accounts.length > 0; } catch { /* sans liste : pas de message */ }
+      if (!on) return;
+      if (existed) navigate("login", { notice: "expired" });
+      setBooting(false);
+    })();
+    return () => { on = false; };
+  }, [booting, svc]);
 
   // Focus sur le contenu à chaque changement de route (pas au premier rendu).
   useEffect(() => {
@@ -92,6 +114,26 @@ export function Shell({ services }: { services?: Services } = {}) {
     [svc, route, params, canBack, set],
   );
   const Screen = screenFor(route);
+  const overlay = route === "overlay";
+
+  // Fenêtre du panneau en jeu : fond transparent (le panneau est une carte arrondie).
+  useLayoutEffect(() => {
+    if (!overlay) return;
+    document.documentElement.setAttribute("data-overlay", "");
+    return () => document.documentElement.removeAttribute("data-overlay");
+  }, [overlay]);
+
+  if (overlay) {
+    return (
+      <ShellContext.Provider value={value}>
+        <div className="app app-overlay">
+          <main id="contenu" className="content content-overlay" ref={mainRef} tabIndex={-1} data-route={route}>
+            {Screen ? <Screen /> : <Fallback route={route} />}
+          </main>
+        </div>
+      </ShellContext.Provider>
+    );
+  }
 
   return (
     <ShellContext.Provider value={value}>
@@ -106,7 +148,9 @@ export function Shell({ services }: { services?: Services } = {}) {
         <TitleBar context={title ?? ROUTE_LABELS[route]} />
         <UpdateBanner services={svc} />
         <main id="contenu" className="content" ref={mainRef} tabIndex={-1} data-route={route}>
-          {Screen ? <Screen /> : <Fallback route={route} />}
+          {route === "login" && booting
+            ? <div className="boot" role="status">Chargement…</div>
+            : Screen ? <Screen /> : <Fallback route={route} />}
         </main>
       </div>
     </ShellContext.Provider>

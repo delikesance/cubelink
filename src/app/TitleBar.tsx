@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { isTauri } from "../services";
+import { AccountSwitcher } from "./AccountSwitcher";
 import { goBack, useCanGoBack, useLocation } from "./router";
 
 type WindowAction = "minimize" | "close" | "toggleMaximize";
@@ -51,6 +52,7 @@ export function TitleBar({ context }: { context: string }) {
         </button>
       </span>
       <h1 className="titlebar-title" data-tauri-drag-region>Cubelink · {context}</h1>
+      <AccountSwitcher />
       <div className="titlebar-buttons">
         <button type="button" className="tb-btn" aria-label="Réduire" onClick={() => void windowAction("minimize")}>
           <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M0 5h10" stroke="currentColor" /></svg>

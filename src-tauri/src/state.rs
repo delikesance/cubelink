@@ -13,6 +13,7 @@ use core_lib::unknown_mods::UnknownReport;
 use p2p_lib::friend_code::FriendCodePayload;
 use p2p_lib::friends_db::FriendsDb;
 use p2p_lib::identity::Identity;
+use p2p_lib::invite::InviteMessage;
 use p2p_lib::transfer::plan::Plan;
 use serde::Serialize;
 
@@ -35,7 +36,9 @@ pub struct Paths {
     pub logs: PathBuf,
     pub p2p: PathBuf,
     pub settings_file: PathBuf,
+    /// Ancien fichier à compte unique (migré vers `accounts_file` puis supprimé).
     pub tokens_file: PathBuf,
+    pub accounts_file: PathBuf,
     pub key_file: PathBuf,
     pub epoch_file: PathBuf,
 }
@@ -56,6 +59,7 @@ impl Paths {
             p2p: r.join("p2p"),
             settings_file: r.join("settings.json"),
             tokens_file: r.join("auth").join("tokens.bin"),
+            accounts_file: r.join("auth").join("accounts.bin"),
             key_file: r.join("auth").join("tokens.key"),
             epoch_file: r.join("p2p").join("friend_code_epoch"),
             root: r,
@@ -108,6 +112,12 @@ pub struct AppState {
     pub lan_agent_off: std::sync::atomic::AtomicBool,
     /// État du partage hôte (voir `commands_host`).
     pub host: Mutex<Option<crate::commands_host::HostState>>,
+    /// Invitations reçues d'amis (mémoire seulement, voir `invites`).
+    pub invites: Mutex<Vec<core_lib::types::Invite>>,
+    /// Dernier envoi d'invitation par ami (anti-spam côté émetteur).
+    pub invites_sent: Mutex<std::collections::HashMap<String, std::time::Instant>>,
+    /// Instance invitée créée par le dernier `join_start` réussi (lue par `game_join_friend`).
+    pub last_join_instance: Mutex<Option<String>>,
     backend: RwLock<Arc<dyn P2pBackend>>,
     /// Test : saute l'installation du jeu (Mojang, loader, Java) après un transfert d'invité.
     pub skip_game_install: AtomicBool,
@@ -217,6 +227,9 @@ impl P2pBackend for PendingBackend {
             }
         })
     }
+    fn send_invite(&self, public_key: String, msg: InviteMessage) -> BoxFuture<'_, Result<(), String>> {
+        Box::pin(async move { self.wait().await?.send_invite(public_key, msg).await })
+    }
     fn host_start_sharing(&self, instance_id: String, world_port: u16) -> BoxFuture<'_, Result<(), String>> {
         Box::pin(async move { self.wait().await?.host_start_sharing(instance_id, world_port).await })
     }
@@ -278,6 +291,8 @@ pub fn default_settings() -> Settings {
         share_mods: true,
         discovery: true,
         lan_auto: true,
+        overlay_enabled: true,
+        overlay_hotkey: core_lib::types::DEFAULT_OVERLAY_HOTKEY.into(),
     }
 }
 
@@ -303,6 +318,9 @@ impl AppState {
             lan_agent: Mutex::new(None),
             lan_agent_off: std::sync::atomic::AtomicBool::new(false),
             host: Mutex::new(None),
+            invites: Mutex::new(Vec::new()),
+            invites_sent: Mutex::new(std::collections::HashMap::new()),
+            last_join_instance: Mutex::new(None),
             backend: RwLock::new(backend),
             skip_game_install: AtomicBool::new(false),
             emit,

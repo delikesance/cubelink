@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import "./error.css";
 import { useShell } from "../../app/context";
 import { Button, Card } from "../../ui";
-import { BlockPattern, Cube } from "../Login/Cube";
+import { BlockPattern, Logo } from "../Login/Logo";
 import { buildStates, resolveState, type Action, type ErrorContext } from "./states";
 
 const stagger = (i: number) => ({ "--i": i }) as React.CSSProperties;
@@ -109,7 +109,7 @@ export default function ErrorScreen() {
           {def.wait ? (
             <svg className="err-spin" width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2.5" strokeLinecap="round" aria-hidden="true"><path d="M12 3a9 9 0 109 9" /></svg>
           ) : (
-            <Cube width={160} crack shadow />
+            <Logo width={160} far shadow />
           )}
         </div>
         <div className="err-head enter" style={stagger(1)} role={def.wait ? "status" : "alert"}>

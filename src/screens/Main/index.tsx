@@ -13,6 +13,8 @@ import { Modal } from "./Modal";
 import { ICONS, Icon, Panel } from "./Panel";
 import { SettingsDialog } from "./SettingsDialog";
 import { Viewer } from "./Viewer";
+import { canInviteFrom } from "../../app/useInvites";
+import Invites from "../Friends/Invites";
 
 const LOADERS: Record<string, string> = {
   vanilla: "Vanilla", neoforge: "NeoForge", fabric: "Fabric", quilt: "Quilt", forge: "Forge",
@@ -450,6 +452,7 @@ export default function Main() {
       <Drawer open={dialog?.kind === "friends"} onClose={closeDialog} title={`Amis · ${friends.length}`} width={360}>
         <Panel onClose={closeDialog}>
           <div className="dr-body">
+            <Invites compact />
             {friends.length === 0 ? <p className="dr-empty">Aucun ami pour l'instant.</p> : (
               <ul className="dr-list dr-friends" aria-label="Amis">
                 {friends.map((f) => (
@@ -458,6 +461,11 @@ export default function Main() {
                       <span className="n">{f.friend.name}</span>
                       <StatusDot tone={f.presence === "online" ? "ok" : "neutral"} label={f.presence === "online" ? "En ligne" : "Hors ligne"} />
                     </span>
+                    {f.presence === "online" && canInviteFrom(host) && (
+                      <Button variant="secondary" aria-label={`Inviter ${f.friend.name}`} onClick={() => { void run(() => services.friendInvite(f.friend.public_key)); }}>
+                        Inviter
+                      </Button>
+                    )}
                     {f.presence === "online" && (
                       <Button variant="secondary" aria-label={`Rejoindre ${f.friend.name}`} onClick={() => navigate("join", { friend: f.friend.public_key })}>
                         Rejoindre

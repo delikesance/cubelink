@@ -1,0 +1,25 @@
+/* Panneau en jeu : carte sombre arrondie sur fond transparent, compacte (environ 380 px). */
+.ov{flex:1;min-height:0;display:flex;flex-direction:column;margin:6px;background:var(--surface);border:1px solid var(--line);border-radius:var(--r-lg);box-shadow:var(--shadow-soft);color:var(--text);overflow:hidden}
+.ov-head{flex:none;display:flex;align-items:center;gap:8px;padding:0 6px 0 16px;height:44px;border-bottom:1px solid var(--line);user-select:none}
+.ov-title{flex:1;margin:0;font:700 14px var(--font-display);letter-spacing:.02em;outline:none}
+.ov-hint{color:var(--muted);font-size:11px}
+.ov-close{width:32px;height:32px;display:grid;place-items:center;border:0;border-radius:var(--r-md);background:transparent;color:var(--muted);cursor:pointer}
+.ov-close:hover{background:var(--surface-2);color:var(--text)}
+.ov-body{flex:1;min-height:0;overflow:auto;padding:12px 14px 14px;display:flex;flex-direction:column;gap:16px}
+.ov-sec{display:flex;flex-direction:column;gap:8px}
+.ov-sec h2{margin:0;font:700 12px var(--font-display);letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.ov-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}
+.ov-row{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:var(--r-md);background:var(--surface-2)}
+.ov-who{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.ov-name{display:flex;align-items:center;gap:8px;font-weight:600;overflow:hidden;white-space:nowrap}
+.ov-name>span:first-child{overflow:hidden;text-overflow:ellipsis}
+.ov-sub{color:var(--muted);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ov-actions{display:flex;gap:6px;flex:none}
+.ov .cl-btn{min-height:36px;min-width:36px;padding:0 12px;font-size:13px}
+.ov-empty{margin:0;color:var(--muted);font-size:13px}
+.ov-confirm{flex:none;display:flex;flex-direction:column;gap:8px;margin:0 14px 12px;padding:10px 12px;border:1px solid var(--accent);border-radius:var(--r-md);background:var(--surface-2)}
+.ov-confirm p{margin:0;line-height:1.45;font-size:13px}
+.ov-error{margin:0;color:var(--danger);font-size:13px}
+.ov-warn{margin:0;padding:8px 10px;border-radius:var(--r-md);border:1px solid var(--warn);color:var(--warn);font-size:12px;line-height:1.4}
+.ov-live{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+.ov-row-inv .ov-sub{white-space:normal}

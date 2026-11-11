@@ -12,6 +12,7 @@
 .login-card .cl-btn.login-wide{width:100%;margin-top:var(--sp-3)}
 .login-ghost{background:transparent;color:var(--muted);font-weight:500;box-shadow:none;border:0;min-height:44px;padding:0 20px;border-radius:var(--r-md);font:500 14px var(--font-ui);cursor:pointer;transition:color var(--dur-feedback) var(--ease)}
 .login-ghost:hover{color:var(--text)}
+.login-expired{margin:0;color:var(--muted);font-size:13px}
 .login-offline{width:100%;display:flex;flex-direction:column;gap:var(--sp-2);text-align:left}
 .login-offline .row{display:flex;gap:var(--sp-2);align-items:flex-end}
 .login-offline .cl-field{flex:1}

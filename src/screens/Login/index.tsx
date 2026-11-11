@@ -1,18 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import "./login.css";
-import { useScreenTitle, useServices } from "../../app/context";
+import { useScreenTitle, useServices, useShell } from "../../app/context";
 import { navigate } from "../../app/router";
-import { Button, Card, Field, Input } from "../../ui";
-import type { DeviceCode, Profile } from "../../services/types";
-import { BlockPattern, Cube } from "./Cube";
-
-type State =
-  | { step: "idle" }
-  | { step: "starting" }
-  | { step: "code"; code: DeviceCode }
-  | { step: "expired"; code: DeviceCode }
-  | { step: "connected"; profile: Profile }
-  | { step: "error"; message: string };
+import { Button, Card } from "../../ui";
+import { BlockPattern, Logo } from "./Logo";
+import { OfflineForm } from "./OfflineForm";
+import { useDeviceLogin } from "./useDeviceLogin";
 
 /** Délai d'affichage de l'état « Connecté » avant d'ouvrir l'accueil (le bouton Continuer passe tout de suite). */
 export const WELCOME_MS = 700;
@@ -31,12 +24,6 @@ export function classifyLoginFailure(message: string): "no-license" | "cancelled
   if (/refusée par l'utilisateur|annul|cancel|declin/.test(m)) return "cancelled";
   if (/réseau|reseau|network|offline|hors ligne|internet|http|dns|timeout|injoignable/.test(m)) return "offline";
   return null;
-}
-
-function messageOf(e: unknown): string {
-  if (e instanceof Error && e.message) return e.message;
-  if (typeof e === "string" && e) return e;
-  return "La connexion a échoué. Réessaie dans un instant.";
 }
 
 const Tick = () => (
@@ -71,64 +58,16 @@ function spokenTime(s: number): string {
 export default function Login() {
   useScreenTitle(null);
   const services = useServices();
-  const [state, setState] = useState<State>({ step: "idle" });
-  const [left, setLeft] = useState(0);
+  const { params } = useShell();
   const [offlineOpen, setOfflineOpen] = useState(false);
-  const [offlineOk, setOfflineOk] = useState(false);
-  const [pseudo, setPseudo] = useState("");
-  const [pseudoError, setPseudoError] = useState<string | undefined>(undefined);
-  const [offlineBusy, setOfflineBusy] = useState(false);
-  const [copied, setCopied] = useState(false);
-  const run = useRef(0);
   const h1 = useRef<HTMLHeadingElement>(null);
   useEffect(() => { h1.current?.focus(); }, []);
-  // « Jouer hors ligne » n'existe qu'en mode test : on ne montre pas un bouton qui échoue toujours.
-  useEffect(() => {
-    let on = true;
-    services.offlineAvailable().then((ok) => { if (on) setOfflineOk(ok); }, () => {});
-    return () => { on = false; };
-  }, [services]);
-  const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  useEffect(() => () => {
-    run.current += 1;
-    if (copyTimer.current) clearTimeout(copyTimer.current);
-  }, []);
-
-  const start = useCallback(async () => {
-    const id = ++run.current;
-    setState({ step: "starting" });
-    try {
-      const code = await services.authBeginLogin();
-      if (id !== run.current) return;
-      setLeft(code.expires_in);
-      setCopied(false);
-      setState({ step: "code", code });
-      const profile = await services.authPollLogin();
-      if (id !== run.current) return;
-      setState({ step: "connected", profile });
-    } catch (e) {
-      if (id !== run.current) return;
-      const message = messageOf(e);
-      const kind = classifyLoginFailure(message);
-      if (kind) { navigate("error", { state: kind }); return; }
-      setState({ step: "error", message });
-    }
-  }, [services]);
-
-  const waiting = state.step === "code";
-  useEffect(() => {
-    if (!waiting) return;
-    const t = setInterval(() => setLeft((v) => Math.max(0, v - 1)), 1000);
-    return () => clearInterval(t);
-  }, [waiting]);
-
-  useEffect(() => {
-    if (state.step === "code" && left === 0) {
-      run.current += 1;
-      setState({ step: "expired", code: state.code });
-    }
-  }, [state, left]);
+  const { state, left, copied, start, copy } = useDeviceLogin(services, (message) => {
+    const kind = classifyLoginFailure(message);
+    if (!kind) return false;
+    navigate("error", { state: kind });
+    return true;
+  });
 
   // Connecté : on laisse voir la confirmation, puis accueil.
   const connected = state.step === "connected";
@@ -137,29 +76,6 @@ export default function Login() {
     const t = setTimeout(() => navigate("main"), WELCOME_MS);
     return () => clearTimeout(t);
   }, [connected]);
-
-  const offlineLogin = async () => {
-    const name = pseudo.trim();
-    if (!name) { setPseudoError("Saisis un pseudo pour jouer hors ligne."); return; }
-    setOfflineBusy(true);
-    setPseudoError(undefined);
-    try {
-      await services.authOfflineLogin(name);
-      navigate("main");
-    } catch (e) {
-      setPseudoError(messageOf(e));
-      setOfflineBusy(false);
-    }
-  };
-
-  const copy = async (text: string) => {
-    try {
-      await navigator.clipboard.writeText(text);
-      setCopied(true);
-      if (copyTimer.current) clearTimeout(copyTimer.current);
-      copyTimer.current = setTimeout(() => setCopied(false), 2400);
-    } catch { /* presse-papiers indisponible : le code reste lisible à l'écran */ }
-  };
 
   const onCode = state.step === "code" || state.step === "expired" || state.step === "connected" || state.step === "error";
 
@@ -171,7 +87,7 @@ export default function Login() {
           <div className="login-col">
             <Card as="section" className="login-card" aria-labelledby="login-title">
               <div className="login-brand enter">
-                <Cube width={44} />
+                <Logo width={44} />
                 <b>Cubelink</b>
               </div>
               <h1 id="login-title" ref={h1} tabIndex={-1} className="enter" style={{ "--i": 1 } as React.CSSProperties}>Joue avec tes amis, sans serveur.</h1>
@@ -179,22 +95,16 @@ export default function Login() {
               <Button className="login-wide enter" style={{ "--i": 2 } as React.CSSProperties} loading={state.step === "starting"} onClick={() => { void start(); }}>
                 Se connecter avec Microsoft
               </Button>
-              {offlineOk && (
-                <button
-                  type="button" className="login-ghost enter" style={{ "--i": 2 } as React.CSSProperties}
-                  aria-expanded={offlineOpen} aria-controls="login-offline"
-                  onClick={() => setOfflineOpen((o) => !o)}
-                >Jouer hors ligne</button>
+              <button
+                type="button" className="login-ghost enter" style={{ "--i": 2 } as React.CSSProperties}
+                aria-expanded={offlineOpen} aria-controls="login-offline"
+                onClick={() => setOfflineOpen((o) => !o)}
+              >Jouer hors ligne</button>
+              {offlineOpen && (
+                <OfflineForm id="login-offline" submitLabel="Jouer" onSubmit={async (name) => { await services.authOfflineLogin(name); navigate("main"); }} />
               )}
-              {offlineOk && offlineOpen && (
-                <form id="login-offline" className="login-offline enter" noValidate onSubmit={(e) => { e.preventDefault(); void offlineLogin(); }}>
-                  <div className="row">
-                    <Field label="Pseudo hors ligne" error={pseudoError}>
-                      {(p) => <Input {...p} value={pseudo} autoComplete="off" autoFocus onChange={(e) => setPseudo(e.target.value)} />}
-                    </Field>
-                    <Button type="submit" variant="secondary" loading={offlineBusy}>Jouer</Button>
-                  </div>
-                </form>
+              {params.notice === "expired" && (
+                <p className="login-expired" role="status">Session expirée, reconnecte-toi.</p>
               )}
             </Card>
             <p className="login-note">

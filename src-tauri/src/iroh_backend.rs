@@ -30,6 +30,7 @@ use p2p_lib::friend_code::{self, FriendCodePayload};
 use p2p_lib::friend_proto::{self, FriendConfig, FriendEvent, FriendService};
 use p2p_lib::friends_db::{FriendsDb, PeerAddr};
 use p2p_lib::manifest_channel::{fetch_manifest as p2p_fetch_manifest, ManifestServer};
+use p2p_lib::invite::{send_invite as p2p_send_invite, InviteHandler, InviteMessage, INVITE_ALPN};
 use p2p_lib::presence::{ping_reach, PresenceConfig, PresenceService, PRESENCE_ALPN};
 use p2p_lib::reach::Reach;
 use p2p_lib::relay::{self, PathKind, PathObserver, RelayChoice, RelaySettings};
@@ -449,7 +450,7 @@ impl IrohBackend {
         // Découverte publique (pkarr + DNS n0) : réglage `discovery`, jamais en mode « sans réseau » des tests.
         let address_lookup = discovery && opts.relay != RelayChoice::Disabled;
         let rs = RelaySettings { mode: opts.relay.clone(), relay_only, allow_relay, address_lookup };
-        let alpns: Vec<Vec<u8>> = [friend_proto::ALPN, PRESENCE_ALPN, CONTROL_ALPN, iroh_blobs::ALPN, MANIFEST_ALPN, TUNNEL_ALPN]
+        let alpns: Vec<Vec<u8>> = [friend_proto::ALPN, PRESENCE_ALPN, INVITE_ALPN, CONTROL_ALPN, iroh_blobs::ALPN, MANIFEST_ALPN, TUNNEL_ALPN]
             .iter()
             .map(|a| a.to_vec())
             .collect();
@@ -526,9 +527,18 @@ impl IrohBackend {
         presence.set_addr_sink(Arc::new(move |a| sink_book.remember(a)));
         // Demandeur accepté : son adresse est retenue avant la réponse d'acceptation.
         friends_svc.set_addr_sink(Arc::new(move |a| friend_book.remember(a)));
+        // Invitations reçues : file en mémoire de l'état (référence faible : le backend vit dans l'état).
+        let weak_st = Arc::downgrade(st);
+        let invite_sink: p2p_lib::invite::InviteSink = Arc::new(move |key, msg| {
+            if let Some(st) = weak_st.upgrade() {
+                st.invite_received(&hex::encode(key), msg);
+            }
+        });
+        let invite_handler = InviteHandler::new(authz.clone(), invite_sink);
         let router = Router::builder(endpoint.clone())
             .accept(friend_proto::ALPN, friends_svc.handler())
             .accept(PRESENCE_ALPN, presence.handler())
+            .accept(INVITE_ALPN, invite_handler)
             .accept(CONTROL_ALPN, control)
             .accept(iroh_blobs::ALPN, blobs)
             .accept(MANIFEST_ALPN, manifest_srv.handler())
@@ -764,6 +774,14 @@ impl P2pBackend for IrohBackend {
             }
             self.add_peer_addr(addr);
             self.friends_svc.send_request(&friend_code::encode(&target)).await.map_err(|e| user_msg(&e))
+        })
+    }
+
+    fn send_invite(&self, public_key: String, msg: InviteMessage) -> BoxFuture<'_, std::result::Result<(), String>> {
+        Box::pin(async move {
+            self.ensure_reachable(&public_key).await?;
+            let addr = self.addr_for(&public_key)?;
+            p2p_send_invite(&self.endpoint, addr, &msg).await
         })
     }
 

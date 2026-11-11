@@ -167,6 +167,97 @@ impl AppState {
     }
 }
 
+/// Délai maximal pour que le jeu en cours se ferme (kill propre 5 s, puis forcé).
+pub const GAME_STOP_TIMEOUT: Duration = Duration::from_secs(30);
+/// Délai maximal du téléchargement du monde d'un ami avant d'abandonner l'attente.
+const JOIN_WAIT_TIMEOUT: Duration = Duration::from_secs(2 * 3600);
+
+impl AppState {
+    /// Ferme le jeu en cours (s'il y en a un) et attend la libération du verrou `game` (fin de la tâche de jeu,
+    /// après l'événement `launch://state` `exited`). Un jeu encore en préparation est attendu puis fermé.
+    pub async fn stop_game_and_wait(&self, timeout: Duration) -> Result<(), String> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        let mut killed = false;
+        let mut retry_at = tokio::time::Instant::now();
+        loop {
+            let Some(id) = lock(&self.game).clone() else { return Ok(()) };
+            let now = tokio::time::Instant::now();
+            if !killed && now >= retry_at {
+                let has_handle = lock(&self.game_handle).as_ref().is_some_and(|(g, _)| *g == id);
+                if has_handle {
+                    match self.instances_kill(&id).await {
+                        Ok(()) => killed = true,
+                        // Le jeu a pu se terminer entre-temps : la boucle le constate. Sinon on réessaie.
+                        Err(_) => retry_at = now + Duration::from_millis(500),
+                    }
+                }
+            }
+            if now >= deadline {
+                return Err("le jeu ne se ferme pas : fermez-le à la main puis réessayez".into());
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    /// Change de modpack : ferme le jeu en cours (la confirmation est à la charge de l'interface), attend sa fin,
+    /// puis lance `instance_id`. Les vérifications (instance, compte) passent AVANT la fermeture du jeu.
+    pub async fn game_switch(self: &Arc<Self>, instance_id: &str) -> Result<(), String> {
+        check_id(instance_id)?;
+        self.instances.get(instance_id).map_err(|e| user_msg(&e))?;
+        if self.auth_status_refresh().await.is_none() {
+            return Err("connectez-vous avant de lancer le jeu".into());
+        }
+        self.stop_game_and_wait(GAME_STOP_TIMEOUT).await?;
+        self.instances_launch(instance_id).await
+    }
+
+    /// Rejoint le monde d'un ami depuis n'importe où (p. ex. le panneau en jeu). Enchaîne `join_plan` (échec
+    /// rapide : ami hors ligne ou rien d'ouvert, le jeu en cours n'est alors pas touché), `join_start` (sauf si
+    /// `instance_id`, une instance invitée déjà créée, est fournie), fermeture du jeu en cours, puis `join_play`.
+    /// Le jeu actuel reste ouvert pendant le téléchargement ; la progression passe par `transfer://progress`.
+    pub async fn game_join_friend(self: &Arc<Self>, public_key: &str, instance_id: Option<&str>) -> Result<(), String> {
+        self.check_friend(public_key)?;
+        if let Some(id) = instance_id {
+            check_id(id)?;
+            self.instances.get(id).map_err(|e| user_msg(&e))?;
+        }
+        if self.auth_status_refresh().await.is_none() {
+            return Err("connectez-vous avant de lancer le jeu".into());
+        }
+        self.join_plan(public_key).await?;
+        let instance = match instance_id {
+            Some(id) => id.to_string(),
+            None => {
+                self.join_start(public_key).await?;
+                let deadline = tokio::time::Instant::now() + JOIN_WAIT_TIMEOUT;
+                while lock(&self.join).is_some() {
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err("le téléchargement du monde de l'ami est trop long".into());
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                lock(&self.last_join_instance).clone().ok_or("la préparation du monde de l'ami a échoué")?
+            }
+        };
+        self.stop_game_and_wait(GAME_STOP_TIMEOUT).await?;
+        self.join_play(public_key, &instance).await
+    }
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn game_switch(state: State<'_, Arc<AppState>>, instance_id: String) -> Result<(), String> {
+    state.inner().game_switch(&instance_id).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn game_join_friend(
+    state: State<'_, Arc<AppState>>,
+    public_key: String,
+    instance_id: Option<String>,
+) -> Result<(), String> {
+    state.inner().game_join_friend(&public_key, instance_id.as_deref()).await
+}
+
 #[tauri::command(rename_all = "snake_case")]
 pub async fn instances_kill(state: State<'_, Arc<AppState>>, id: String) -> Result<(), String> {
     state.instances_kill(&id).await
@@ -266,6 +357,81 @@ mod tests {
         assert!(t.starts_with("ligne ") && t.ends_with("ligne 79999\n"));
         let first: u64 = t.lines().next().unwrap()[6..].parse().unwrap();
         assert!(big.contains(&format!("ligne {}\n", first - 1)), "début coupé proprement");
+    }
+
+    fn login(st: &AppState) {
+        st.auth_offline_login("Joueur").unwrap();
+    }
+
+    #[tokio::test]
+    async fn stop_game_and_wait_attend_la_liberation_du_verrou() {
+        let dir = tempfile::tempdir().unwrap();
+        let (st, _) = test_state(dir.path());
+        st.stop_game_and_wait(Duration::from_millis(100)).await.unwrap();
+        *lock(&st.game) = Some("x".into());
+        let s2 = st.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            *lock(&s2.game) = None;
+        });
+        st.stop_game_and_wait(Duration::from_secs(5)).await.unwrap();
+        assert!(lock(&st.game).is_none());
+        // Verrou jamais libéré : délai dépassé, message clair.
+        *lock(&st.game) = Some("y".into());
+        let e = st.stop_game_and_wait(Duration::from_millis(300)).await.unwrap_err();
+        assert!(e.contains("ne se ferme pas"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn game_switch_verifie_avant_de_fermer_le_jeu() {
+        let dir = tempfile::tempdir().unwrap();
+        let (st, _) = test_state(dir.path());
+        *lock(&st.game) = Some("ancien".into());
+        assert!(st.game_switch("../x").await.is_err());
+        assert!(st.game_switch("inconnue").await.is_err());
+        let inst = st.instances.create("Neuf", "1.21.1", vanilla(), 2048).unwrap();
+        // Pas connecté : refus, le jeu en cours n'est pas touché.
+        let e = st.game_switch(&inst.id).await.unwrap_err();
+        assert!(e.contains("connectez-vous"), "{e}");
+        assert_eq!(lock(&st.game).as_deref(), Some("ancien"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn game_switch_attend_la_fin_du_jeu_puis_lance_la_nouvelle_instance() {
+        let dir = tempfile::tempdir().unwrap();
+        let (st, events) = test_state(dir.path());
+        login(&st);
+        let inst = st.instances.create("Neuf", "1.21.1", vanilla(), 2048).unwrap();
+        *lock(&st.game) = Some("ancien".into());
+        let s2 = st.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            *lock(&s2.game) = None;
+        });
+        st.game_switch(&inst.id).await.unwrap();
+        // Le nouveau jeu a pris le verrou et annonce sa préparation.
+        let seen = lock(&events).iter().any(|(n, v)| n == "launch://state" && v["id"] == inst.id.as_str());
+        let holds = lock(&st.game).as_deref() == Some(inst.id.as_str());
+        assert!(seen || holds, "lancement de la nouvelle instance");
+    }
+
+    #[tokio::test]
+    async fn game_join_friend_refus_avant_de_fermer_le_jeu() {
+        let dir = tempfile::tempdir().unwrap();
+        let (st, _) = test_state(dir.path());
+        *lock(&st.game) = Some("ancien".into());
+        let key = "d".repeat(64);
+        assert!(st.game_join_friend("zz", None).await.unwrap_err().contains("inconnu"));
+        st.friends
+            .add_friend(&core_lib::types::Friend { public_key: key.clone(), name: "Bob".into(), trust: core_lib::types::TrustLevel::Ask, added_at: 1 })
+            .unwrap();
+        assert!(st.game_join_friend(&key, Some("../x")).await.is_err());
+        assert!(st.game_join_friend(&key, Some("inconnue")).await.is_err());
+        assert!(st.game_join_friend(&key, None).await.unwrap_err().contains("connectez-vous"));
+        login(&st);
+        // Réseau indisponible : le plan échoue, le jeu en cours reste en place.
+        assert!(st.game_join_friend(&key, None).await.is_err());
+        assert_eq!(lock(&st.game).as_deref(), Some("ancien"));
     }
 
     #[test]

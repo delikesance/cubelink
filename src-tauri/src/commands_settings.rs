@@ -36,6 +36,7 @@ pub fn validate_with(s: &Settings, test_mode: bool) -> Result<(), String> {
     if s.relay_only && !s.allow_relay {
         return Err("« Toujours le relais » est incompatible avec un relais désactivé : autorisez le relais ou désactivez « Toujours le relais »".into());
     }
+    crate::overlay::validate_hotkey(&s.overlay_hotkey)?;
     if let Some(j) = &s.java_path {
         let p = Path::new(j);
         let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("").to_ascii_lowercase();
@@ -90,9 +91,12 @@ pub fn settings_set(
     share_mods: Option<bool>,
     discovery: Option<bool>,
     lan_auto: Option<bool>,
+    overlay_enabled: Option<bool>,
+    overlay_hotkey: Option<String>,
+    app: tauri::AppHandle,
 ) -> Result<Settings, String> {
     let cur = state.settings_get();
-    state.settings_set(Settings {
+    let saved = state.settings_set(Settings {
         language,
         default_ram_mb,
         java_path: java_path.filter(|j| !j.trim().is_empty()),
@@ -103,7 +107,11 @@ pub fn settings_set(
         share_mods: share_mods.unwrap_or(cur.share_mods),
         discovery: discovery.unwrap_or(cur.discovery),
         lan_auto: lan_auto.unwrap_or(cur.lan_auto),
-    })
+        overlay_enabled: overlay_enabled.unwrap_or(cur.overlay_enabled),
+        overlay_hotkey: overlay_hotkey.map(|h| h.trim().to_string()).unwrap_or(cur.overlay_hotkey),
+    })?;
+    crate::overlay::apply_settings(&app);
+    Ok(saved)
 }
 
 #[cfg(test)]
@@ -165,6 +173,29 @@ mod tests {
         s.java_path = Some(fake.to_str().unwrap().into());
         assert!(validate_with(&s, true).is_ok());
         assert!(validate_with(&s, false).is_err());
+    }
+
+    #[test]
+    fn refuse_raccourci_invalide() {
+        let dir = tempfile::tempdir().unwrap();
+        let (st, _) = test_state(dir.path());
+        let mut s = default_settings();
+        s.overlay_hotkey = "Ctrl+Shift+".into();
+        let e = st.settings_set(s.clone()).unwrap_err();
+        assert!(e.contains("raccourci"), "{e}");
+        s.overlay_hotkey = "Alt+F9".into();
+        assert!(st.settings_set(s).is_ok());
+    }
+
+    #[test]
+    fn ancien_settings_json_se_charge_avec_les_defauts_overlay() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("settings.json");
+        std::fs::write(&f, br#"{"language":"fr","default_ram_mb":6144,"java_path":null,"trust_default":"ask","allow_relay":true,"close_on_launch":true,"relay_only":false,"share_mods":true}"#).unwrap();
+        let s = load_settings(&f);
+        assert_eq!(s.default_ram_mb, 6144, "l'ancien fichier est bien lu, pas remplacé par les défauts");
+        assert!(s.overlay_enabled);
+        assert_eq!(s.overlay_hotkey, "Ctrl+Shift+C");
     }
 
     #[test]

@@ -7,6 +7,7 @@ import MyCode from "./MyCode";
 import Requests, { RequestsBadge, useRequestsTotal } from "./Requests";
 import Add from "./Add";
 import FriendsList from "./FriendsList";
+import Invites from "./Invites";
 
 type Tab = "friends" | "requests";
 
@@ -81,6 +82,7 @@ export default function Friends() {
           <Card as="div" className="fr-card enter" style={stagger(1)}><Add /></Card>
           <Card as="div" className="fr-card enter" style={stagger(2)}><MyCode /></Card>
         </div>
+        <Invites />
         <div role="tablist" aria-label="Amis" className="fr-tabs enter" style={stagger(3)}>
           {tabs.map((t, i) => (
             <button

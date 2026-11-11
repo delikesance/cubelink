@@ -1,6 +1,7 @@
+import { validateOfflineName } from "./accounts";
 import type {
-  BrowseHit, BrowseInstallResult, BrowseKind, BrowseProgressEvent, BrowseSource, BrowseVersion, ModEntry,
-  CreateInstanceInput, DeviceCode, HostState, ImportWarningEvent, LaunchLogEvent, FriendRequest, FriendWithPresence, Instance, InstanceArt,
+  AccountInfo, AccountsState, BrowseHit, BrowseInstallResult, BrowseKind, BrowseProgressEvent, BrowseSource, BrowseVersion, ModEntry,
+  CreateInstanceInput, DeviceCode, HostState, Invite, OverlayState, ImportWarningEvent, LaunchLogEvent, FriendRequest, FriendWithPresence, Instance, InstanceArt,
   JoinPlan, LaunchState, Manifest, PresenceEvent, UnknownModsEvent, Profile, Services, Settings,
   TransferProgress, Unsubscribe, UpdateState,
 } from "./types";
@@ -14,6 +15,8 @@ export interface FakeOptions {
   requestCount?: number;
   /** Valeur renvoyée par pickFiles (configurable aussi via setPickedFiles). */
   pickedFiles?: string[];
+  /** Comptes présents au départ (le premier est actif). Vide par défaut : écran Connexion. */
+  accounts?: AccountInfo[];
 }
 
 /** Commandes de test exposées par le faux service. */
@@ -23,6 +26,12 @@ export interface FakeControls {
   dropFiles(paths: string[]): void;
   /** Test : émet un événement host://state. */
   emitHostState(e: HostState): void;
+  /** Test : reçoit une invitation (friend://invite + friend://invites). */
+  emitInvite(i: Partial<Invite> & { public_key: string }): Invite;
+  /** Test : fixe l'état du panneau en jeu et émet overlay://state. */
+  emitOverlayState(patch: Partial<OverlayState>): void;
+  /** Test : appels de commandes de jeu enregistrés (switch, join, invite). */
+  readonly gameCalls: Array<{ kind: "switch" | "join" | "invite"; arg: string; instanceId?: string }>;
   /** Test : fusionne `patch` dans l'état de mise à jour et émet update://state (ex. available, downloading, ready). */
   emitUpdateState(patch: Partial<UpdateState>): void;
   /** Test : état (fusionné) auquel aboutit la prochaine updateCheck ; par défaut up_to_date. */
@@ -165,11 +174,18 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
   const loginDelayMs = opts.loginDelayMs ?? 1200;
   const requestCount = opts.requestCount ?? 1000;
 
-  let profile: Profile | null = null;
+  let accounts: AccountInfo[] = (opts.accounts ?? []).map((a) => ({ ...a }));
+  let active: string | null = accounts[0]?.id ?? null;
+  const MS_ACCOUNTS: Array<{ name: string; uuid: string }> = [
+    { name: "Steve", uuid: "8667ba71-b85a-4004-af54-457a9734eed7" },
+    { name: "Alex", uuid: "ec561538-f3fd-461d-aff5-086b22154bce" },
+    { name: "Efe", uuid: "61699b2e-d327-4a01-9f1e-0ea8c3f06bc6" },
+  ];
   let codeN = 1;
   let settings: Settings = {
     language: "fr", default_ram_mb: 4096, java_path: null,
     trust_default: "ask", allow_relay: true, close_on_launch: false, relay_only: false, share_mods: true, discovery: true, lan_auto: true,
+    overlay_enabled: true, overlay_hotkey: "Ctrl+Shift+C",
   };
   const instances: Instance[] = [{
     id: "inst-aeronautics", name: "Create: Aeronautics", minecraft: "1.21.1",
@@ -190,8 +206,14 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     { friend: { public_key: hex(2, 64), name: "Noor", trust: "always", added_at: NOW - 172800 }, presence: "offline" },
   ];
 
+  let invites: Invite[] = [];
+  let inviteN = 0;
+  let overlaySt: OverlayState = { available: true, game_running: false, hotkey: "Ctrl+Shift+C", fullscreen_exclusive: false };
+  const gameCalls: Array<{ kind: "switch" | "join" | "invite"; arg: string; instanceId?: string }> = [];
+
   const listeners = {
     auth: new Set<(p: Profile | null) => void>(),
+    accounts: new Set<(s: AccountsState) => void>(),
     launch: new Set<(s: LaunchState) => void>(),
     transfer: new Set<(p: TransferProgress) => void>(),
     presence: new Set<(e: PresenceEvent) => void>(),
@@ -202,6 +224,9 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     drop: new Set<(p: string[]) => void>(),
     warning: new Set<(e: ImportWarningEvent) => void>(),
     host: new Set<(e: HostState) => void>(),
+    invite: new Set<(i: Invite) => void>(),
+    invites: new Set<(l: Invite[]) => void>(),
+    overlay: new Set<(s: OverlayState) => void>(),
     update: new Set<(s: UpdateState) => void>(),
   };
   let updateSt: UpdateState = { phase: "idle", current: "0.1.0", version: null, notes: null, downloaded: 0, total: null, message: null };
@@ -212,7 +237,13 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     return () => { set.delete(cb); };
   }
   function emit<T>(set: Set<(v: T) => void>, v: T) { set.forEach((cb) => cb(v)); }
-  const setProfile = (p: Profile | null) => { profile = p; emit(listeners.auth, p); };
+  const profileOf = (a: AccountInfo | undefined): Profile | null => (a ? { kind: a.kind, name: a.name, uuid: a.uuid } : null);
+  const accountsState = (): AccountsState => ({ accounts: accounts.map((a) => ({ ...a })), active });
+  /** Applique un changement de comptes et émet les deux événements (profil actif, liste). */
+  const commitAccounts = () => {
+    emit(listeners.auth, profileOf(accounts.find((a) => a.id === active)));
+    emit(listeners.accounts, accountsState());
+  };
 
   // --- jeu simulé : logs et lancement ---
   const logs = new Map<string, string[]>();
@@ -282,26 +313,52 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
   }
 
   return {
-    authStatus: async () => profile,
+    authStatus: async () => profileOf(accounts.find((a) => a.id === active)),
     authBeginLogin: async (): Promise<DeviceCode> => ({
       user_code: "AB12CD34", verification_uri: "https://www.microsoft.com/link", expires_in: 900,
     }),
     authPollLogin: () => new Promise<Profile>((resolve) => {
       const done = () => {
-        const p: Profile = { kind: "online", name: "Steve", uuid: "8667ba71-b85a-4004-af54-457a9734eed7" };
-        setProfile(p);
-        resolve(p);
+        const known = accounts.filter((a) => a.kind === "online").length;
+        const m = MS_ACCOUNTS[known % MS_ACCOUNTS.length];
+        let acc = accounts.find((a) => a.kind === "online" && a.uuid === m.uuid);
+        if (!acc) { acc = { id: `ms-${m.uuid}`, kind: "online", name: m.name, uuid: m.uuid }; accounts = [...accounts, acc]; }
+        active = acc.id;
+        commitAccounts();
+        resolve(profileOf(acc)!);
       };
       if (loginDelayMs <= 0) done(); else setTimeout(done, loginDelayMs);
     }),
-    authLogout: async () => { setProfile(null); },
+    authLogout: async () => {
+      accounts = accounts.filter((a) => a.id !== active);
+      active = accounts[0]?.id ?? null;
+      commitAccounts();
+    },
     offlineAvailable: async () => true,
     authOfflineLogin: async (name) => {
       const n = name.trim();
-      if (!n) throw new Error("Le pseudo est obligatoire.");
-      const p: Profile = { kind: "offline", name: n, uuid: `00000000-0000-3000-8000-${hex(n.length, 12)}` };
-      setProfile(p);
-      return p;
+      const err = validateOfflineName(n);
+      if (err) throw new Error(err);
+      const id = `off-${n.toLowerCase()}`;
+      let acc = accounts.find((a) => a.id === id);
+      if (!acc) { acc = { id, kind: "offline", name: n, uuid: `00000000-0000-3000-8000-${hex(n.length, 12)}` }; accounts = [...accounts, acc]; }
+      active = acc.id;
+      commitAccounts();
+      return profileOf(acc)!;
+    },
+    authAccounts: async () => accountsState(),
+    authSwitch: async (id) => {
+      const acc = accounts.find((a) => a.id === id);
+      if (!acc) throw new Error("Ce compte n'existe plus.");
+      active = id;
+      commitAccounts();
+      return profileOf(acc)!;
+    },
+    authRemove: async (id) => {
+      if (!accounts.some((a) => a.id === id)) throw new Error("Ce compte n'existe plus.");
+      accounts = accounts.filter((a) => a.id !== id);
+      if (active === id) active = accounts[0]?.id ?? null;
+      commitAccounts();
     },
 
     instancesList: async () => instances.map((i) => ({ ...i })),
@@ -391,6 +448,19 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     friendMyCode: async () => `mcl1-${hex(codeN * 7, 24)}`,
     friendRegenerateCode: async () => { codeN += 1; return `mcl1-${hex(codeN * 7, 24)}`; },
     friendList: async () => friends.map((f) => ({ friend: { ...f.friend }, presence: f.presence })),
+    friendInvite: async (pk) => {
+      if (!friends.some((f) => f.friend.public_key === pk)) throw new Error("Ami introuvable.");
+      gameCalls.push({ kind: "invite", arg: pk });
+    },
+    friendInvites: async () => invites.map((i) => ({ ...i })),
+    friendInviteDismiss: async (id) => {
+      invites = invites.filter((i) => i.id !== id);
+      emit(listeners.invites, invites.map((i) => ({ ...i })));
+    },
+    overlayToggle: async () => {},
+    overlayState: async () => ({ ...overlaySt }),
+    gameSwitch: async (id) => { need(id); gameCalls.push({ kind: "switch", arg: id }); },
+    gameJoinFriend: async (pk, instanceId) => { gameCalls.push({ kind: "join", arg: pk, instanceId }); },
     friendSendRequest: async (code) => {
       if (!/^mcl1-[0-9a-f]{8,}$/i.test(code.trim())) throw new Error("Code ami invalide.");
       return verifyCode(code.length);
@@ -502,6 +572,20 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     setPickedFiles: (paths) => { picked = paths; },
     dropFiles: (paths) => emit(listeners.drop, paths),
     emitHostState: (e) => emit(listeners.host, e),
+    emitInvite: (p) => {
+      inviteN += 1;
+      const f = friends.find((x) => x.friend.public_key === p.public_key);
+      const inv: Invite = {
+        id: `inv-${inviteN}`, name: f?.friend.name ?? "Ami", world_name: "Monde de survie", minecraft: "1.21.1",
+        received_at: Math.floor(Date.now() / 1000), expires_at: Math.floor(Date.now() / 1000) + 600, ...p,
+      };
+      invites = [...invites, inv];
+      emit(listeners.invite, { ...inv });
+      emit(listeners.invites, invites.map((i) => ({ ...i })));
+      return { ...inv };
+    },
+    emitOverlayState: (patch) => { overlaySt = { ...overlaySt, ...patch }; emit(listeners.overlay, { ...overlaySt }); },
+    gameCalls,
     emitUpdateState: (patch) => setUpdate(patch),
     setUpdateCheckResult: (patch) => { updateCheckPatch = patch; },
     updateState: async () => ({ ...updateSt }),
@@ -517,6 +601,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     onUpdateState: (cb) => sub(listeners.update, cb),
 
     onAuthState: (cb) => sub(listeners.auth, cb),
+    onAccountsState: (cb) => sub(listeners.accounts, cb),
     onLaunchState: (cb) => sub(listeners.launch, cb),
     onLaunchLog: (cb) => sub(listeners.log, cb),
     onImportWarning: (cb) => sub(listeners.warning, cb),
@@ -525,6 +610,9 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     onTransferProgress: (cb) => sub(listeners.transfer, cb),
     onFriendPresence: (cb) => sub(listeners.presence, cb),
     onFriendRequest: (cb) => sub(listeners.request, cb),
+    onFriendInvite: (cb) => sub(listeners.invite, cb),
+    onFriendInvites: (cb) => sub(listeners.invites, cb),
+    onOverlayState: (cb) => sub(listeners.overlay, cb),
     onUnknownMods: (cb) => sub(listeners.unknown, cb),
     onTransferErrorDetails: () => () => {},
     onBrowseProgress: (cb) => sub(listeners.browse, cb),

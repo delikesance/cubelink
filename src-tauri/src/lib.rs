@@ -15,6 +15,8 @@ pub mod error;
 pub mod foreground;
 pub mod iroh_backend;
 pub mod install;
+pub mod invites;
+pub mod overlay;
 pub mod p2p_backend;
 pub mod state;
 pub mod test_hooks;
@@ -63,6 +65,8 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_notification::init())
         .setup(move |app| {
             let root = match &hooks.data_dir {
                 Some(d) => d.clone(),
@@ -84,6 +88,7 @@ pub fn run() {
             }
             app.manage(st.clone());
             commands_update::setup(app, test_mode);
+            overlay::setup(app.handle(), test_mode);
             let opts = iroh_options(hooks);
             tauri::async_runtime::spawn(async move {
                 match iroh_backend::IrohBackend::start(&st, opts).await {
@@ -101,6 +106,9 @@ pub fn run() {
         })
         .invoke_handler(select_handler(test_mode, tauri::generate_handler![
             commands_auth::auth_status,
+            commands_auth::auth_accounts,
+            commands_auth::auth_switch,
+            commands_auth::auth_remove,
             commands_auth::auth_begin_login,
             commands_auth::auth_poll_login,
             commands_auth::auth_logout,
@@ -149,8 +157,18 @@ pub fn run() {
             commands_host::host_start_sharing,
             commands_host::host_stop_sharing,
             commands_host::host_state,
+            invites::friend_invite,
+            invites::friend_invites,
+            invites::friend_invite_dismiss,
+            commands_game::game_switch,
+            commands_game::game_join_friend,
+            overlay::overlay_toggle,
+            overlay::overlay_state,
         ], tauri::generate_handler![
             commands_auth::auth_status,
+            commands_auth::auth_accounts,
+            commands_auth::auth_switch,
+            commands_auth::auth_remove,
             commands_auth::auth_begin_login,
             commands_auth::auth_poll_login,
             commands_auth::auth_logout,
@@ -196,6 +214,13 @@ pub fn run() {
             commands_host::host_start_sharing,
             commands_host::host_stop_sharing,
             commands_host::host_state,
+            invites::friend_invite,
+            invites::friend_invites,
+            invites::friend_invite_dismiss,
+            commands_game::game_switch,
+            commands_game::game_join_friend,
+            overlay::overlay_toggle,
+            overlay::overlay_state,
             test_hooks::test_state,
             test_hooks::test_cut_guest_connection,
         ]))

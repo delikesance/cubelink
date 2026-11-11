@@ -236,7 +236,9 @@ pub async fn update_install(app: AppHandle, ctl: State<'_, Arc<UpdateCtl>>, st: 
 /// Pour `lib.rs` : enregistre l'état et démarre les vérifications.
 pub fn setup(app: &tauri::App, test_mode: bool) {
     // Version de l'application (tauri.conf.json, fixée par la CI à chaque release), celle que compare l'updater.
-    let ctl = Arc::new(UpdateCtl::new(app.package_info().version.to_string(), test_mode));
+    // Installée par le Microsoft Store (paquet MSIX sous ...\WindowsApps\) : le Store gère les mises à jour, pas nous.
+    let store = std::env::current_exe().map(|p| p.to_string_lossy().to_lowercase().contains("\\windowsapps\\")).unwrap_or(false);
+    let ctl = Arc::new(UpdateCtl::new(app.package_info().version.to_string(), test_mode || store));
     app.manage(ctl.clone());
     start_background_checks(app.handle(), ctl);
 }

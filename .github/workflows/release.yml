@@ -87,6 +87,20 @@ jobs:
         with:
           name: windows-msi
           path: target/release/bundle/msi/*.msi
+      # Paquet MSIX pour le Microsoft Store (non signé : le Store le signe). Les valeurs d'identité viennent du Partner Center
+      # (variables de dépôt MSIX_IDENTITY_NAME, MSIX_PUBLISHER, MSIX_PUBLISHER_DISPLAY_NAME) ; sans elles, paquet de test.
+      - name: Paquet MSIX (Microsoft Store)
+        shell: pwsh
+        run: >
+          scripts/make-msix.ps1
+          -Version "${{ needs.version.outputs.version }}"
+          -IdentityName "${{ vars.MSIX_IDENTITY_NAME || 'Cubelink.Placeholder' }}"
+          -Publisher "${{ vars.MSIX_PUBLISHER || 'CN=Placeholder' }}"
+          -PublisherDisplayName "${{ vars.MSIX_PUBLISHER_DISPLAY_NAME || 'Cubelink' }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-msix
+          path: target/release/bundle/msix/*.msix
       - uses: actions/upload-artifact@v4
         with:
           name: windows-sig
@@ -197,5 +211,6 @@ jobs:
           tag="${{ needs.version.outputs.tag }}"
           gh release create "$tag" --target "$GITHUB_SHA" --title "Cubelink ${{ needs.version.outputs.version }}" --notes-file notes.md \
             artifacts/windows-msi/*.msi artifacts/windows-msi/*.msi.sig \
+            artifacts/windows-msix/*.msix \
             artifacts/linux-appimage/*.AppImage artifacts/linux-appimage/*.AppImage.sig \
             artifacts/latest.json

@@ -110,11 +110,11 @@ jobs:
         run: |
           echo 'Acquire::Retries "5"; Acquire::http::Timeout "15"; Acquire::https::Timeout "15"; Acquire::ForceIPv4 "true";' | sudo tee /etc/apt/apt.conf.d/99ci
           sudo sed -i 's|http://azure.archive.ubuntu.com/ubuntu|http://archive.ubuntu.com/ubuntu|' /etc/apt/apt-mirrors.txt || true
-      - name: Dépendances système (WebKitGTK, AppImage ; mises en cache)
-        uses: awalsh128/cache-apt-pkgs-action@v1
-        with:
-          packages: libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev patchelf xdg-utils
-          version: 1.0
+      - name: Dépendances système (apt direct, délais courts)
+        run: |
+          getent hosts archive.ubuntu.com security.ubuntu.com azure.archive.ubuntu.com || true
+          sudo timeout 240 apt-get update || sudo timeout 240 apt-get update || true
+          sudo timeout 900 apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev patchelf xdg-utils
       - run: npm ci
       - name: Version
         run: node scripts/release-version.mjs "$GITHUB_RUN_NUMBER" --write

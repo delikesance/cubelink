@@ -121,6 +121,8 @@ pub trait P2pBackend: Send + Sync {
         Box::pin(async { Err(UNAVAILABLE.to_string()) })
     }
     fn host_stop_sharing(&self) {}
+    /// Hôte : le monde LAN vient de s'ouvrir sur `port` (127.0.0.1) ; 0 le referme. N'altère pas le partage de fichiers.
+    fn host_set_world_port(&self, _port: u16) {}
     /// Invité : ouvre un tunnel local vers le monde de l'ami ; renvoie le port local (127.0.0.1) pour Minecraft.
     fn join_open_tunnel(&self, _friend_public_key: String) -> BoxFuture<'_, Result<u16, String>> {
         Box::pin(async { Err(UNAVAILABLE.to_string()) })
@@ -128,6 +130,11 @@ pub trait P2pBackend: Send + Sync {
     /// Invité : ferme le tunnel ouvert (sans effet s'il n'y en a pas).
     fn join_close_tunnel(&self) -> BoxFuture<'_, ()> {
         Box::pin(async {})
+    }
+    /// TEST uniquement (commande `test_cut_guest_connection`, mode test) : coupe de force la connexion iroh du
+    /// tunnel invité pour vérifier la reconnexion. Renvoie faux s'il n'y a pas de tunnel.
+    fn test_cut_guest_connection(&self) -> BoxFuture<'_, bool> {
+        Box::pin(async { false })
     }
     /// Reçoit les fichiers du plan dans le magasin local (reprenable, identifiant stable).
     fn receive_files(

@@ -1,4 +1,4 @@
-// T2 : B (ami accepte) ouvre « Rejoindre » depuis l'Accueil ; plan, mod inconnu, case de confiance, annulation.
+// T2 : B (ami accepte) ouvre « Rejoindre » depuis l'ecran Amis ; plan, mod inconnu, case de confiance, annulation.
 import { test, expect, invoke, makeHostInstance, startFakeWorld, testState } from './harness/fixtures';
 import { NAME_A, closeOpened, countFiles, gotoRoute, keyOfCode, loginBoth, makeFriends, readMyCode } from './helpers/e2e1-common';
 
@@ -20,7 +20,7 @@ test('T2 : plan affiche, mod maison inconnu, confiance requise, non-ami refuse, 
   await expect(invoke(appB.page, 'join_plan', { friend_public_key: keyA })).rejects.toThrow(/inconnu/);
   await gotoRoute(appB, `join?friend=${keyA}`);
   await expect(appB.page.getByRole('heading', { name: "Impossible de rejoindre pour l'instant" })).toBeVisible({ timeout: 20_000 });
-  await expect(appB.page.getByRole('button', { name: 'Rejoindre', exact: true })).toHaveCount(0);
+  await expect(appB.page.getByRole('button', { name: 'Rejoindre et jouer' })).toHaveCount(0);
   await appB.page.getByRole('button', { name: 'Annuler' }).click();
   await appB.page.waitForSelector('main[data-route="main"]');
 
@@ -34,11 +34,11 @@ test('T2 : plan affiche, mod maison inconnu, confiance requise, non-ami refuse, 
   expect(await invoke<unknown[]>(appB.page, 'instances_list')).toHaveLength(0);
 
   // B : Accueil (rechargee pour lire la presence) puis « Rejoindre Alice ».
-  await gotoRoute(appB, 'friends');
   await gotoRoute(appB, 'main');
+  await gotoRoute(appB, 'friends');
   await appB.page.getByRole('button', { name: `Rejoindre ${NAME_A}` }).click();
   await appB.page.waitForSelector('main[data-route="join"]');
-  await expect(appB.page.getByRole('heading', { name: /Rejoindre « Monde de test »/ })).toBeVisible({ timeout: 30_000 });
+  await expect(appB.page.getByRole('heading', { level: 1, name: `Rejoindre ${NAME_A}` })).toBeVisible({ timeout: 30_000 });
 
   // Le plan : version, loader, fichiers a recevoir.
   const dialog = appB.page.getByRole('region', { name: 'Rejoindre un ami' });
@@ -53,7 +53,7 @@ test('T2 : plan affiche, mod maison inconnu, confiance requise, non-ami refuse, 
   const warn = dialog.getByRole('note');
   await expect(warn.getByRole('heading', { name: "Un mod inconnu va s'exécuter sur ton ordinateur" })).toBeVisible();
   await expect(warn.getByText(HOME_MOD, { exact: true })).toBeVisible();
-  const join = dialog.getByRole('button', { name: 'Rejoindre', exact: true });
+  const join = dialog.getByRole('button', { name: 'Rejoindre et jouer' });
   await expect(join).toBeDisabled();
   const trust = dialog.getByRole('checkbox', { name: /Je fais confiance/ });
   await expect(trust).not.toBeChecked();
@@ -62,9 +62,9 @@ test('T2 : plan affiche, mod maison inconnu, confiance requise, non-ami refuse, 
   await trust.uncheck();
   await expect(join).toBeDisabled();
 
-  // Annuler : retour a l'Accueil, rien telecharge ni installe.
+  // Annuler : retour a l'ecran precedent (Amis), rien telecharge ni installe.
   await dialog.getByRole('button', { name: 'Annuler' }).click();
-  await appB.page.waitForSelector('main[data-route="main"]');
+  await appB.page.waitForSelector('main[data-route="friends"]');
   await new Promise((r) => setTimeout(r, 2000));
   expect(await invoke<unknown[]>(appB.page, 'instances_list')).toHaveLength(0);
   expect(countFiles(st.paths.instances)).toBe(before.instances);

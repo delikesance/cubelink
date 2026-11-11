@@ -1,12 +1,18 @@
+/* Coquille : cadre sans decoration, barre de titre 36 px. Tokens dans src/styles/tokens.css. */
 .app{display:flex;flex-direction:column;height:100%;background:var(--bg)}
-.titlebar{height:32px;flex:none;display:flex;align-items:stretch;background:var(--bg);border-bottom:1px solid var(--line);user-select:none}
-.titlebar-spacer{width:92px;flex:none}
-.titlebar-title{flex:1;margin:0;display:flex;align-items:center;justify-content:center;font:500 12px/32px var(--font-ui);color:var(--text-dim)}
-.titlebar-buttons{display:flex;width:92px;flex:none}
-.tb-btn{width:46px;height:32px;border:0;padding:0;background:transparent;color:var(--text);display:flex;align-items:center;justify-content:center;cursor:default}
-.tb-btn:hover{background:var(--panel-3)}
-.tb-close:hover{background:#C42B1C}
+.titlebar{height:var(--titlebar-h);flex:none;display:flex;align-items:stretch;background:var(--bg);border-bottom:1px solid var(--line);user-select:none}
+.titlebar-spacer{width:138px;flex:none;display:flex}
+.tb-back{width:46px}
+.tb-back[disabled]{visibility:hidden}
+.titlebar-title{flex:1;margin:0;display:flex;align-items:center;justify-content:center;font:600 12px/var(--titlebar-h) var(--font-display);letter-spacing:.04em;color:var(--muted)}
+.titlebar-buttons{display:flex;width:138px;flex:none}
+.tb-btn{width:46px;height:var(--titlebar-h);border:0;padding:0;background:transparent;color:var(--text);display:flex;align-items:center;justify-content:center;cursor:default;transition:background var(--dur-feedback) var(--ease)}
+.tb-btn:hover{background:var(--surface-2)}
+.tb-close:hover{background:var(--danger);color:var(--danger-ink)}
 .tb-btn:focus-visible{outline-offset:-2px}
-.skip-link{position:absolute;left:8px;top:-48px;z-index:10;padding:6px 10px;background:var(--panel-3);color:var(--accent-text);border:1px solid var(--focus);border-radius:4px}
-.skip-link:focus{top:36px}
+.skip-link{position:absolute;left:8px;top:-48px;z-index:10;padding:6px 12px;background:var(--surface-2);color:var(--accent-hover);border:1px solid var(--focus);border-radius:var(--r-md)}
+.skip-link:focus{top:calc(var(--titlebar-h) + 4px)}
 .content{flex:1;min-height:0;overflow:auto;outline:none}
+/* Conteneurs de page : .page plafonne la largeur, .page-fill remplit tout (grilles). Blocs de texte : ~68ch. */
+.page{width:100%;max-width:var(--page-max);margin-inline:auto;padding-inline:var(--page-pad);box-sizing:border-box}
+.page-fill{width:100%;padding-inline:var(--page-pad);box-sizing:border-box}

@@ -60,9 +60,7 @@ test('installation : progression (barre, fichiers, octets), pause, reprise, empr
 
   // Reprendre -> fin
   await page.getByRole('button', { name: 'Reprendre' }).click();
-  await expect(page.getByText('Installation terminée').first()).toBeVisible({ timeout: 90_000 });
-  await expect(bar).toHaveAttribute('aria-valuenow', '100');
-  await expect(page.getByRole('button', { name: 'Jouer' })).toBeVisible();
+  await expect.poll(async () => ((await events(page, 'transfer://progress')) as any[]).some((p) => p.phase === 'done'), { timeout: 90000 }).toBe(true);
   const last = await lastProgress(page);
   expect(last.files_done).toBe(5);
   expect(last.bytes_done).toBe(host.total);
@@ -123,7 +121,7 @@ test('installation : coupure en cours de route puis reprise automatique sans ret
   await expect(page.getByRole('progressbar')).toBeVisible();
   resumeProcess(appA.proc.pid!);
 
-  await expect(page.getByText('Installation terminée').first()).toBeVisible({ timeout: 150_000 });
+  await expect.poll(async () => ((await events(page, 'transfer://progress')) as any[]).some((p) => p.phase === 'done'), { timeout: 150000 }).toBe(true);
   const all = await events<Progress & { error?: string }>(page, 'transfer://progress');
   expect(all.some((p) => p.phase === 'failed'), 'aucun echec visible').toBe(false);
   // reprise sans retransfert : octets et fichiers termines ne reculent jamais

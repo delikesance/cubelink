@@ -11,7 +11,7 @@ export const SECTIONS: LegalSection[] = [
   {
     id: "editeur", label: "Éditeur", content: (
       <>
-        <h2>Éditeur</h2>
+        <h3>Éditeur</h3>
         <p>Nom ou raison sociale&nbsp;: <Todo /></p>
         <p>Adresse et statut juridique&nbsp;: <Todo /></p>
       </>
@@ -20,7 +20,7 @@ export const SECTIONS: LegalSection[] = [
   {
     id: "non-affiliation", label: "Non-affiliation", content: (
       <>
-        <h2>Non-affiliation</h2>
+        <h3>Non-affiliation</h3>
         <p className="legal-strong">Cubelink est un projet indépendant. Il n'est pas un produit Minecraft officiel, n'est pas approuvé par Mojang ou Microsoft et n'est pas associé à eux.</p>
       </>
     ),
@@ -28,7 +28,7 @@ export const SECTIONS: LegalSection[] = [
   {
     id: "donnees", label: "Données traitées", content: (
       <>
-        <h2>Données traitées</h2>
+        <h3>Données traitées</h3>
         <ul>
           <li>Ton pseudo Minecraft, affiché à tes amis. Cubelink ne le vérifie pas auprès d'eux.</li>
           <li>Une clé publique générée au premier lancement, qui identifie ton installation.</li>
@@ -47,7 +47,7 @@ export const SECTIONS: LegalSection[] = [
   {
     id: "relais", label: "Le relais", content: (
       <>
-        <h2>Le relais</h2>
+        <h3>Le relais</h3>
         <p>Un relais est un serveur intermédiaire. Il transmet ton trafic quand la connexion directe échoue, ou si tu as choisi «&nbsp;Passer toujours par le relais&nbsp;». Il voit alors ton adresse IP.</p>
         <p>Ce que le relais peut lire du contenu transmis n'est pas encore établi&nbsp;: ne pars pas du principe qu'il ne voit rien. Cette partie sera précisée une fois le fonctionnement du relais validé.</p>
       </>
@@ -56,7 +56,7 @@ export const SECTIONS: LegalSection[] = [
   {
     id: "licences", label: "Licences", content: (
       <>
-        <h2>Licences des images et des polices</h2>
+        <h3>Licences des images et des polices</h3>
         <details className="legal-more">
           <summary>Images (licence OGA-BY&nbsp;3.0 et CC0)</summary>
           <p>«&nbsp;Moon and Sea Pixel Art Background&nbsp;» par CraftPix.net 2D Game Assets, <Ext href="https://opengameart.org/content/moon-and-sea-pixel-art-background">https://opengameart.org/content/moon-and-sea-pixel-art-background</Ext>, licence <Ext href="https://opengameart.org/content/oga-by-30-faq">OGA-BY&nbsp;3.0</Ext>. Modifié&nbsp;: converti en JPEG ; recadré pour la vignette «&nbsp;Créer un monde&nbsp;».</p>
@@ -72,7 +72,7 @@ export const SECTIONS: LegalSection[] = [
   {
     id: "contact", label: "Contact", content: (
       <>
-        <h2>Contact</h2>
+        <h3>Contact</h3>
         <p>Pour toute question sur tes données ou sur ces mentions&nbsp;: <Todo /> (adresse e-mail de contact).</p>
       </>
     ),

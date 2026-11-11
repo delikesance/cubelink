@@ -57,6 +57,9 @@ pub struct DownloadInfo {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct VersionDownloads {
     pub client: DownloadInfo,
+    /// Mappings ProGuard Mojang du client (absents des versions non obfusquées, 26.x).
+    #[serde(default)]
+    pub client_mappings: Option<DownloadInfo>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]

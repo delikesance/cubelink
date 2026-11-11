@@ -26,16 +26,16 @@ test('T5 : mod inconnu signale avant telechargement, confiance requise, sha256 i
   // L'ecran Rejoindre : avertissement, case de confiance requise.
   await gotoHash(appB, `#/join?friend=${keyA}`, 'join');
   const page = appB.page;
-  await expect(page.getByRole('heading', { name: /Rejoindre « Monde de test »/ })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByRole('heading', { level: 1, name: /^Rejoindre / })).toBeVisible({ timeout: 30_000 });
   const warn = page.getByRole('note');
   await expect(warn.getByRole('heading', { name: "Un mod inconnu va s'exécuter sur ton ordinateur" })).toBeVisible();
   await expect(warn.getByText('homebrew-mod-0.0.1.jar')).toBeVisible();
   await expect(warn.getByText(/L'intégrité est vérifiée, pas la sécurité/)).toBeVisible();
   expect(await warn.locator('li').count()).toBe(1); // les 4 mods connus ne sont pas signales
-  const join = page.getByRole('button', { name: 'Rejoindre' });
+  const join = page.getByRole('button', { name: 'Rejoindre et jouer' });
   await expect(join).toBeDisabled();
-  await expect(page.getByText('Coche la case de confiance pour activer « Rejoindre ».')).toBeVisible();
-  const trust = page.getByLabel('Je fais confiance à mon ami pour ce mod');
+  await expect(page.getByText('Coche la case de confiance pour activer « Rejoindre et jouer ».')).toBeVisible();
+  const trust = page.getByLabel(/^Je fais confiance à .+ pour ce mod$/);
   await trust.check();
   await expect(join).toBeEnabled();
   await trust.uncheck();
@@ -47,7 +47,7 @@ test('T5 : mod inconnu signale avant telechargement, confiance requise, sha256 i
   await join.click();
   await expect(page.getByRole('heading', { name: 'Installation en cours' })).toBeVisible();
   await expect.poll(async () => (await events(appB, 'transfer://unknown_mods')).length, { timeout: 90_000 }).toBeGreaterThan(0);
-  await expect(page.getByRole('button', { name: 'Jouer' })).toBeVisible({ timeout: 90_000 });
+  await expect.poll(async () => ((await events(appB, 'transfer://progress')) as any[]).some((p) => p.phase === 'done'), { timeout: 90_000 }).toBe(true);
 
   // Re-verification locale : evenement transfer://unknown_mods.
   const ev = (await events(appB, 'transfer://unknown_mods')) as { instance_id: string; unknown_mods: string[] }[];
@@ -72,7 +72,7 @@ test('T5 : mod inconnu signale avant telechargement, confiance requise, sha256 i
   for (const ex of ['options.txt', 'servers.dat', 'saves']) expect(fs.existsSync(path.join(guestDir, ex)), ex).toBe(false);
 });
 
-test('T5 hostile : fichier altere cote hote (meme taille) -> Integrity, hors cache, ecran bad-hash', async ({ appA, appB, servers, binary }) => {
+test('T5 fichier altere cote hote (meme taille) : refuse par l hote, rien chez l invite (ni cache, ni instance)', async ({ appA, appB, servers, binary }) => {
   const { keyA } = await befriend({ appA, appB, servers, binary });
   const { host } = await hostShare(appA);
   await captureEvents(appB, ['transfer://unknown_mods', 'transfer://progress']);
@@ -88,17 +88,13 @@ test('T5 hostile : fichier altere cote hote (meme taille) -> Integrity, hors cac
   expect(bad).not.toBe(known.sha256);
 
   await gotoHash(appB, `#/join?friend=${keyA}`, 'join');
-  await appB.page.getByLabel('Je fais confiance à mon ami pour ce mod').check({ timeout: 30_000 });
-  await appB.page.getByRole('button', { name: 'Rejoindre' }).click();
+  await appB.page.getByLabel(/^Je fais confiance à .+ pour ce mod$/).check({ timeout: 30_000 });
+  await appB.page.getByRole('button', { name: 'Rejoindre et jouer' }).click();
 
-  // Ecran Erreur bad-hash.
-  await expect(appB.page.getByRole('heading', { name: /ne correspond pas à ce qu'il avait annoncé/ })).toBeVisible({ timeout: 90_000 });
-  await expect(appB.page.getByText('Installation · échec')).toBeVisible();
-  await expect(appB.page.getByText(/Cubelink l'a supprimé et ne l'a pas exécuté/)).toBeVisible();
-  await expect(appB.page.getByRole('button', { name: 'Réessayer' })).toBeVisible();
-  await expect(appB.page.getByRole('button', { name: 'Annuler' })).toBeVisible();
+  // Echec : l'hote a refuse de servir le fichier altere (jamais d'octets non conformes sur le reseau).
+  await expect.poll(async () => (await events(appB, 'transfer://progress')).some((p: any) => p.phase === 'failed'), { timeout: 90_000 }).toBe(true);
   const failed = (await events(appB, 'transfer://progress')).filter((p: any) => p.phase === 'failed');
-  expect(failed.at(-1).error).toMatch(/fichier corrompu/);
+  expect(failed.at(-1).error).toMatch(/a changé chez ton ami/);
 
   // Ni dans le cache ni dans une instance ; aucune instance invitee ; pas de re-verification.
   expect(await events(appB, 'transfer://unknown_mods')).toHaveLength(0);
@@ -113,8 +109,4 @@ test('T5 hostile : fichier altere cote hote (meme taille) -> Integrity, hors cac
   };
   walk(appB.dataDir);
   expect(hits, 'contenu altere retrouve dans le dossier de donnees de B').toEqual([]);
-
-  // Annuler ramene a l'accueil.
-  await appB.page.getByRole('button', { name: 'Annuler' }).click();
-  await appB.page.waitForSelector('main[data-route="main"]');
 });

@@ -16,6 +16,21 @@ Toute commande renvoie `Result<T, String>` (message d'erreur affichable, en fran
 | instances | `instances_import_mrpack` | `{ path }` | `Instance` |
 | instances | `instances_launch` | `{ id }` | — (progression par événement) |
 | instances | `minecraft_versions` | — | `string[]` |
+| instances | `instances_kill` | `{ id }` | — (arrête le jeu en cours) |
+| instances | `instances_delete` | `{ id }` | — (refusé si l'instance est en lancement ou en jeu) |
+| instances | `instances_update` | `{ id, name?, ram_mb?, java_path?, jvm_args? }` | `Instance` |
+| instances | `instances_open_folder` | `{ id }` | — |
+| instances | `instances_logs` | `{ id }` | `string` (fin de `latest.log`, ou `latest.log.old`) |
+| art | `instances_art_image` | `{ instance_id, file }` | `string` (data URL) |
+| art | `instances_art_set` | `{ instance_id, path, role }` | `Instance` (image personnalisée) |
+| art | `instances_art_lookup` | `{ instance_id }` | `Instance` (cherche et applique l'art du modpack) |
+| browse | `browse_search` | `BrowseQuery` | `BrowsePage` |
+| browse | `browse_versions` | `{ source, id, kind, minecraft?, loader? }` | `BrowseVersion[]` |
+| browse | `browse_install` | `{ input: BrowseInstallInput }` | `BrowseInstallResult` (progression par `browse://progress`) |
+| mods | `mods_list` | `{ instance_id }` | `ModEntry[]` |
+| mods | `mods_toggle` | `{ instance_id, file, enabled }` | — |
+| mods | `mods_remove` | `{ instance_id, file }` | — |
+| mods | `mods_add` | `{ instance_id, path }` | `ModEntry` (chemin absolu requis) |
 | friends | `friend_my_code` | — | `FriendCode` |
 | friends | `friend_regenerate_code` | — | `FriendCode` |
 | friends | `friend_list` | — | `{ friend: Friend, presence: Presence }[]` |
@@ -35,18 +50,28 @@ Toute commande renvoie `Result<T, String>` (message d'erreur affichable, en fran
 | `launch://state` | `{ id, state: "preparing" \| "running" \| "exited" \| "failed", message? }` |
 | `transfer://progress` | `TransferProgress` (champ optionnel `error` en phase `failed`) |
 | `friend://presence` | `{ public_key, presence }` |
+| `tunnel://state` | `{ state: "ok" \| "reconnecting" \| "lost" }` : liaison du tunnel invité. `reconnecting` : connexion à l'hôte coupée, reconnexion automatique en cours (10 s max, le port local `127.0.0.1:<port>` reste le même : Minecraft peut se reconnecter sans relancer le jeu) ; `lost` : hôte parti ou refus, le tunnel est inutilisable. Émis seulement pendant un tunnel ouvert (`join_open_tunnel` / `join_play`). |
 | `friend://request` | `FriendRequest` |
+| `launch://log` | lignes de log du jeu en cours |
+| `browse://progress` | progression d'une installation depuis le catalogue (`done`, `total`, libellé) |
+| `import://warning` | avertissement pendant l'import d'un modpack |
+| `transfer://unknown_mods` | liste des mods inconnus des catalogues, pendant un join |
+| `transfer://error_details` | échec d'une étape d'installation invitée, émis juste avant la phase `failed` : `{ step, message, details, log_file }`. `message` = `TransferProgress.error` (« Étape : cause » quand la cause est générique) ; `details` = texte multi-ligne copiable (étape, détail, erreur, debug) pour un bloc « Détails » ; `log_file` = `join-errors.log` dans `<data>/logs/` (toujours écrit, horodaté UTC) |
 
 ## Règles
 - Le front n'accède ni au disque ni au réseau : tout passe par ces commandes.
 - Les tests de l'interface utilisent un faux service (`src/services/fake.ts`, propriété de la tâche U1) qui respecte exactement ces signatures.
 - Le profil hors ligne (`auth_offline_login`) n'existe que si l'application est lancée avec `CUBELINK_TEST_MODE=1`.
 - Les commandes Tauri sont déclarées avec `#[tauri::command(rename_all = "snake_case")]` : le front envoie les arguments en snake_case, comme dans le tableau ci-dessus (Tauri 2 attend du camelCase par défaut).
-- `Settings` : `{ language, default_ram_mb, java_path | null, trust_default, allow_relay, close_on_launch }` (voir `core/src/types.rs`).
+- `Settings` : `{ language, default_ram_mb, java_path | null, trust_default, allow_relay, close_on_launch, relay_only, share_mods, discovery, lan_auto }` (voir `core/src/types.rs`). `lan_auto` (bool, défaut `true`, `serde(default)`, `settings_set` : optionnel) charge au lancement des instances perso l'agent Java `core/resources/cubelink-lan-agent.jar` (ressource Tauri ; `CUBELINK_LAN_AGENT=<jar>` le remplace ; jamais chargé en mode test sans cette variable) qui ouvre le monde solo au réseau local ; diagnostic : lignes `[Cubelink] LAN: ...` dans `latest.log`. Reconstruction du jar : `core/resources/lan-agent/build.sh` (JDK >= 17). `discovery` (bool, défaut `true`, `serde(default)` : anciens fichiers compatibles) active la découverte d'adresses publique n0 (pkarr + DNS) ; lu au démarrage du backend, sans effet quand le relais est désactivé (mode test hors réseau).
+- Les schémas exacts de `BrowseQuery`, `BrowsePage`, `BrowseVersion`, `BrowseInstallInput`, `BrowseInstallResult` et `ModEntry` sont dans `core/src/browse.rs` et `core/src/mods.rs` ; le front les reprend dans `src/services/types.ts`.
+- Le contrat du `invoke_handler` est dans `src-tauri/src/lib.rs` (deux listes identiques : mode normal et mode test, la seconde ajoute `test_state`).
 - Fenêtre : `decorations: false` et permissions `core:window:allow-minimize` / `allow-close` (tâche U13).
 
 ## Ajouts (intégration)
-- `host_start_sharing` `{ instance_id, world_port }` → — ; `host_stop_sharing` → — : partage d'un monde LAN avec les amis (aucun écran ne l'appelle encore : le design n'en prévoit pas).
+- `host_start_sharing` `{ instance_id, world_port }` → — ; `host_stop_sharing` → — : partage d'un monde LAN avec les amis. Aucun écran ne les appelle : le partage est automatique (au passage de l'instance à `running`, manifeste partagé sans port ; port détecté dans la sortie du jeu `Started serving on N` / `Local game hosted on port N` ; arrêt à la fin du jeu). `world_port` accepte 0 (fichiers seulement) ; le dernier appel, manuel ou automatique, l'emporte.
+- `join_play` `{ friend_public_key, instance_id }` → — (MULTI) : invité, « Rejoindre et jouer » en un geste : ouvre le tunnel vers le monde de l'ami, lance l'instance invitée avec connexion automatique (`--quickPlayMultiplayer 127.0.0.1:<port>`, Minecraft ≥ 1.20 ; `--server`/`--port` avant), referme le tunnel quand le jeu s'arrête. Événements de lancement habituels (`launch://state`). Erreurs françaises distinctes : ami hors ligne / monde pas encore ouvert.
+- `host_state` → `HostState | null` ; événement `host://state` `{ instance_id, sharing, world_port | null }` (MULTI) : état du partage hôte, émis à chaque changement dans `HostAuto` (partage prêt, monde ouvert au LAN = port détecté, arrêt avec `sharing:false`). Sert l'indice de l'accueil (« Tes amis peuvent te rejoindre » / « Ouvre ton monde au réseau local »).
 - `test_state` → état de test (profil de données, URLs surchargées, port du tunnel) : enregistrée UNIQUEMENT si `CUBELINK_TEST_MODE=1`.
 - Variables de test (ignorées sans `CUBELINK_TEST_MODE=1`, URLs limitées à 127.0.0.1/localhost) : `CUBELINK_AUTH_{MS,XBOX,XSTS,MC}_URL`, `CUBELINK_MOJANG_META_URL`, `CUBELINK_FABRIC_META_URL`, `CUBELINK_ADOPTIUM_URL`, `CUBELINK_MODRINTH_API_URL`, `CUBELINK_JAVA_PATH`, `CUBELINK_DATA_DIR`, `CUBELINK_RELAY_MODE`, `CUBELINK_SKIP_JAVA_PROBE`.
 - `TransferProgress.error` (optionnel) en phase `failed`.

@@ -92,7 +92,7 @@ export async function setupHostAndGuest(world: Pick<World, 'appA' | 'appB' | 'se
   return { host, keyA };
 }
 
-/** Parcours UI de B : Accueil -> Rejoindre l'ami -> Rejoindre (coche la confiance si demandee) -> Installation. */
+/** Parcours UI de B : Ecran Amis -> Rejoindre l'ami -> Rejoindre (coche la confiance si demandee) -> Installation. */
 export async function waitOnline(page: Page, timeout = 60_000) {
   const end = Date.now() + timeout;
   while (Date.now() < end) {
@@ -105,13 +105,13 @@ export async function waitOnline(page: Page, timeout = 60_000) {
 
 export async function startJoinViaUi(page: Page) {
   await waitOnline(page);
-  await page.evaluate(() => { window.location.hash = '#/friends'; });
-  await sleep(300);
   await page.evaluate(() => { window.location.hash = '#/main'; });
+  await sleep(300);
+  await page.evaluate(() => { window.location.hash = '#/friends'; });
   const joinBtn = page.getByRole('button', { name: /^Rejoindre / });
   await expect(joinBtn).toBeVisible({ timeout: 30_000 });
   await joinBtn.click();
-  const go = page.getByRole('button', { name: 'Rejoindre', exact: true });
+  const go = page.getByRole('button', { name: 'Rejoindre et jouer' });
   await expect(go).toBeVisible({ timeout: 30_000 });
   const trust = page.getByRole('checkbox');
   if (await trust.count()) await trust.check();

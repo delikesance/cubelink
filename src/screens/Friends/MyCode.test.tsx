@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ShellContext } from "../../app/context";
 import { navigate } from "../../app/router";
@@ -10,7 +10,7 @@ afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 function mount(services: Services) {
   return render(
-    <ShellContext.Provider value={{ services, route: "friends" as never, params: {}, navigate, setTitle: () => {} }}>
+    <ShellContext.Provider value={{ services, route: "friends" as never, params: {}, navigate, setTitle: () => {}, goBack: () => {}, canGoBack: false }}>
       <MyCode />
     </ShellContext.Provider>,
   );
@@ -65,7 +65,7 @@ describe("Mon code ami", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Générer un nouveau code" }));
     const group = screen.getByRole("group");
-    fireEvent.click(group.querySelector("button.mycode-btn") as HTMLElement);
+    fireEvent.click(within(group).getByRole("button", { name: "Générer un nouveau code" }));
     await waitFor(() => expect(screen.queryByText(old)).toBeNull());
     expect(screen.getByLabelText(/Mon code ami : mcl1-/)).toBeTruthy();
     expect(screen.queryByRole("group")).toBeNull();

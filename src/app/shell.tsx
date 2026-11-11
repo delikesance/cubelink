@@ -2,21 +2,21 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ComponentType }
 import "./shell.css";
 import { createServices, type Services } from "../services";
 import { ShellContext, type ShellContextValue } from "./context";
-import { navigate, useLocation, type RouteName } from "./router";
+import { navigate, goBack, takePendingFocus, useCanGoBack, useLocation, type RouteName } from "./router";
 import { TitleBar } from "./TitleBar";
 
-export { useShell, useServices, useScreenTitle } from "./context";
-export { navigate, ROUTES, parseHash, type RouteName } from "./router";
+export { useShell, useServices, useScreenTitle, useBack } from "./context";
+export { navigate, goBack, canGoBack, useCanGoBack, ROUTES, parseHash, type RouteName } from "./router";
 
 export const ROUTE_LABELS: Record<RouteName, string> = {
   login: "Connexion", main: "Accueil", create: "Créer une instance", install: "Installation",
-  join: "Rejoindre", friends: "Amis", settings: "Paramètres", error: "Erreur", legal: "Mentions légales",
+  join: "Rejoindre", friends: "Amis", settings: "Paramètres", error: "Erreur", legal: "Mentions légales", browse: "Parcourir",
 };
 
 // Dossier d'écran par route. Les écrans sont chargés sans être modifiés.
 const SCREEN_DIRS: Record<RouteName, string> = {
   login: "Login", main: "Main", create: "Create", install: "Install", join: "Join",
-  friends: "Friends", settings: "Settings", error: "Error", legal: "Legal",
+  friends: "Friends", settings: "Settings", error: "Error", legal: "Legal", browse: "Browse",
 };
 type ScreenModule = { default?: ComponentType };
 const screenModules = import.meta.glob<ScreenModule>("../screens/*/index.tsx", { eager: true });
@@ -28,7 +28,7 @@ export function screenFor(route: RouteName): ComponentType | null {
 
 function Fallback({ route }: { route: RouteName }) {
   return (
-    <div role="status" style={{ padding: 24, color: "var(--text-dim)" }}>
+    <div role="status" style={{ padding: 24, color: "var(--muted)" }}>
       L'écran « {ROUTE_LABELS[route]} » n'est pas encore disponible.
     </div>
   );
@@ -47,15 +47,48 @@ export function Shell({ services }: { services?: Services } = {}) {
     // Les effets des enfants s'exécutent avant celui-ci : si l'écran a déjà placé le focus
     // dans le contenu (titre, champ...), on ne le lui reprend pas.
     const main = mainRef.current;
+    // Retour : tente de redonner le focus à l'élément qui avait déclenché la navigation.
+    const sel = takePendingFocus();
+    if (main && sel) {
+      try {
+        const el = main.querySelector<HTMLElement>(sel);
+        if (el) { el.focus(); if (document.activeElement === el) return; }
+      } catch { /* sélecteur invalide : on ignore */ }
+    }
     const active = document.activeElement;
     if (main && active !== main && main.contains(active)) return;
     main?.focus();
   }, [route]);
 
+  // Raccourcis globaux : Alt+← et bouton « précédent » de la souris.
+  useEffect(() => {
+    const modalOpen = () => document.querySelector('[aria-modal="true"]') !== null;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "ArrowLeft" || !e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+      if (modalOpen()) return;
+      const t = document.activeElement as HTMLElement | null;
+      if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
+      e.preventDefault();
+      goBack();
+    };
+    const onMouse = (e: MouseEvent) => {
+      if (e.button !== 3 || modalOpen()) return;
+      e.preventDefault();
+      goBack();
+    };
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("mouseup", onMouse);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("mouseup", onMouse);
+    };
+  }, []);
+
+  const canBack = useCanGoBack();
   const set = useCallback((t: string | null) => setTitle(t), []);
   const value = useMemo<ShellContextValue>(
-    () => ({ services: svc, route, params, navigate, setTitle: set }),
-    [svc, route, params, set],
+    () => ({ services: svc, route, params, navigate, goBack, canGoBack: canBack, setTitle: set }),
+    [svc, route, params, canBack, set],
   );
   const Screen = screenFor(route);
 

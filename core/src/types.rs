@@ -62,6 +62,37 @@ pub struct Instance {
     pub loader: LoaderSpec,
     pub ram_mb: u32,
     pub mod_count: u32,
+    /// Java propre à l'instance (surcharge le réglage global). `None` : réglage global.
+    #[serde(default)]
+    pub java_path: Option<String>,
+    /// Arguments JVM supplémentaires, séparés par des espaces.
+    #[serde(default)]
+    pub jvm_args: String,
+    /// Illustrations du modpack (icône, captures, couleur). Absent des anciens `instance.json`.
+    #[serde(default)]
+    pub art: Option<InstanceArt>,
+}
+
+/// Illustrations d'une instance. Les fichiers sont dans `<dossier de l'instance>/art/`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstanceArt {
+    /// "curseforge", "modrinth" ou "custom".
+    pub source: String,
+    pub project_id: String,
+    pub title: String,
+    pub author: String,
+    pub summary: String,
+    /// "#rrggbb" en minuscules.
+    #[serde(default)]
+    pub color: Option<String>,
+    /// Nom de fichier dans `art/`.
+    #[serde(default)]
+    pub icon: Option<String>,
+    /// Noms de fichiers dans `art/`, la capture « featured » en premier (6 au plus).
+    #[serde(default)]
+    pub screenshots: Vec<String>,
+    #[serde(default)]
+    pub page_url: Option<String>,
 }
 
 /// Un fichier du manifeste hôte.
@@ -167,6 +198,23 @@ pub struct Settings {
     pub relay_only: bool,
     /// Réglage du design : envoyer des mods à mes amis.
     pub share_mods: bool,
+    /// Découverte d'adresses publique (pkarr + DNS n0) : retrouver un ami dont l'adresse a changé.
+    /// Publie la clé publique, le relais et les IP auprès de n0. Lu à la création de l'endpoint
+    /// (redémarrage requis). `true` par défaut (fichiers de réglages anciens : `true`).
+    #[serde(default = "default_discovery")]
+    pub discovery: bool,
+    /// Ouvrir automatiquement mon monde solo au réseau local (agent Java Cubelink, instances `Own`) pour que mes
+    /// amis puissent le rejoindre sans manipulation. `true` par défaut (fichiers de réglages anciens : `true`).
+    #[serde(default = "default_lan_auto")]
+    pub lan_auto: bool,
+}
+
+fn default_discovery() -> bool {
+    true
+}
+
+fn default_lan_auto() -> bool {
+    true
 }
 
 #[cfg(test)]

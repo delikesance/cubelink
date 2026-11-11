@@ -45,17 +45,18 @@ async function waitState(page: any, state: string, timeout = 30_000) {
 test('lancement : preparation puis en cours, temoin correct, jeton jamais en clair', async ({ appA, appB, servers, world }) => {
   const { guest } = await installed({ appA, appB, servers, binary: world.binary });
   const page = appB.page;
-  const status = page.getByRole('status').filter({ hasText: /Préparation du jeu|Minecraft est/ });
 
   await page.getByRole('button', { name: 'Jouer' }).click();
-  await expect(page.getByRole('status').filter({ hasText: /Préparation du jeu…|Minecraft est en cours/ })).toBeVisible();
+  await expect(page.getByRole('status').filter({ hasText: 'Préparation du jeu…' })).toBeVisible();
   await waitState(page, 'running');
-  await expect(status).toHaveText('Minecraft est en cours d\'exécution.');
+  await expect(page.getByText('En jeu', { exact: true })).toBeVisible();
+  await expect(page.getByText(/session/)).toBeVisible();
   const seq = await states(page);
   expect(seq.indexOf('preparing')).toBeGreaterThanOrEqual(0);
   expect(seq.indexOf('preparing')).toBeLessThan(seq.indexOf('running'));
-  // le bouton est desactive pendant le jeu
-  await expect(page.getByRole('button', { name: 'En cours…' })).toBeDisabled();
+  // pendant le jeu, « Jouer » devient « Arrêter » (actif)
+  await expect(page.getByRole('button', { name: 'Arrêter' }).first()).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Jouer' })).toHaveCount(0);
 
   const witnessFile = path.join(guest.gameDir, WITNESS);
   for (let i = 0; i < 100 && !fs.existsSync(witnessFile); i++) await sleep(100);
@@ -83,7 +84,7 @@ test('lancement : preparation puis en cours, temoin correct, jeton jamais en cla
   // fermeture du faux java (fichier d'arret) : etat ferme
   fs.writeFileSync(path.join(guest.gameDir, STOP), '');
   await waitState(page, 'exited');
-  await expect(status).toHaveText('Minecraft est fermé.');
+  await expect(page.getByText('En jeu')).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Jouer' })).toBeEnabled();
   expect(await states(page)).not.toContain('failed');
 });
@@ -133,9 +134,9 @@ test.describe('echec de lancement', () => {
     await waitState(page, 'failed', 60_000);
     const failed = (await events<{ state: string; message?: string }>(page, 'launch://state')).find((e) => e.state === 'failed')!;
     expect(failed.message ?? '').toMatch(/[a-zàâçéèêëîïôûù]{3,}/i);
-    const alert = page.getByRole('status').filter({ hasText: 'Échec du lancement' });
+    const alert = page.getByRole('alert').filter({ hasText: 'Échec du lancement' });
     await expect(alert).toBeVisible();
-    await expect(alert).toHaveText(/^Échec du lancement/);
+    await expect(alert).toHaveText(/Échec du lancement/);
     expect(failed.message ?? '', 'message en francais (pas de texte technique anglais seul)').not.toMatch(/^(exit|error|failed)/i);
     await expect(page.getByRole('button', { name: 'Jouer' })).toBeEnabled();
   });

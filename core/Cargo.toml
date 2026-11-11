@@ -20,12 +20,14 @@ md-5.workspace = true
 uuid.workspace = true
 rusqlite.workspace = true
 zip.workspace = true
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 url.workspace = true
 aes-gcm.workspace = true
 rand.workspace = true
 hex.workspace = true
 futures-util.workspace = true
 tracing.workspace = true
+base64 = "0.22"
 
 [dev-dependencies]
 tempfile.workspace = true

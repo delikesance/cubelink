@@ -1,13 +1,17 @@
 //! Coque Tauri. Propriété : tâche U13 (commandes), selon docs/contrats.md.
 
 pub mod authz;
+pub mod commands_art;
 pub mod commands_auth;
+pub mod commands_browse;
 pub mod commands_friends;
+pub mod commands_game;
 pub mod commands_host;
 pub mod commands_instances;
 pub mod commands_join;
 pub mod commands_settings;
 pub mod error;
+pub mod foreground;
 pub mod iroh_backend;
 pub mod install;
 pub mod p2p_backend;
@@ -49,9 +53,14 @@ pub(crate) fn iroh_options(h: &test_hooks::Hooks) -> iroh_backend::IrohOptions {
 }
 
 pub fn run() {
+    // Charge un éventuel `.env` de dev (ex. CUBELINK_MS_CLIENT_ID). Silencieux si absent ;
+    // n'écrase jamais une variable déjà définie dans l'environnement du processus.
+    let _ = dotenvy::dotenv();
     let hooks = test_hooks::init().unwrap_or_else(|e| panic!("configuration de test invalide : {e}"));
     let test_mode = hooks.test_mode;
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .setup(move |app| {
             let root = match &hooks.data_dir {
                 Some(d) => d.clone(),
@@ -61,8 +70,30 @@ pub fn run() {
             let sink: state::EventSink = Arc::new(move |name, payload| {
                 let _ = handle.emit(name, payload);
             });
-            let (st, _backend) = tauri::async_runtime::block_on(iroh_backend::start_app(&root, sink, iroh_options(hooks)))?;
-            app.manage(st);
+            // L'état est créé tout de suite avec un backend « en démarrage » ; Iroh démarre en tâche de fond
+            // (les commandes réseau attendent sa disponibilité, voir `state::PendingBackend`).
+            let pending = Arc::new(state::PendingBackend::new());
+            let st = Arc::new(state::AppState::new(&root, sink, pending.clone())?);
+            // Agent LAN livré en ressource (`CUBELINK_LAN_AGENT` le remplace, voir commands_instances).
+            if let Ok(p) = app.path().resolve("cubelink-lan-agent.jar", tauri::path::BaseDirectory::Resource) {
+                if p.is_file() {
+                    *state::lock(&st.lan_agent) = Some(p);
+                }
+            }
+            app.manage(st.clone());
+            let opts = iroh_options(hooks);
+            tauri::async_runtime::spawn(async move {
+                match iroh_backend::IrohBackend::start(&st, opts).await {
+                    Ok(be) => {
+                        st.set_backend(be.clone());
+                        pending.ready(be);
+                    }
+                    Err(e) => {
+                        eprintln!("démarrage du réseau P2P impossible : {e}");
+                        pending.failed(e);
+                    }
+                }
+            });
             Ok(())
         })
         .invoke_handler(select_handler(test_mode, tauri::generate_handler![
@@ -76,6 +107,14 @@ pub fn run() {
             commands_instances::instances_import_mrpack,
             commands_instances::instances_launch,
             commands_instances::minecraft_versions,
+            commands_game::instances_kill,
+            commands_game::instances_delete,
+            commands_game::instances_update,
+            commands_game::instances_open_folder,
+            commands_game::instances_logs,
+            commands_art::instances_art_image,
+            commands_art::instances_art_set,
+            commands_art::instances_art_lookup,
             commands_friends::friend_my_code,
             commands_friends::friend_regenerate_code,
             commands_friends::friend_list,
@@ -91,10 +130,19 @@ pub fn run() {
             commands_join::join_cancel,
             commands_join::join_open_tunnel,
             commands_join::join_close_tunnel,
+            commands_join::join_play,
             commands_settings::settings_get,
             commands_settings::settings_set,
+            commands_browse::browse_search,
+            commands_browse::browse_versions,
+            commands_browse::browse_install,
+            commands_browse::mods_list,
+            commands_browse::mods_toggle,
+            commands_browse::mods_remove,
+            commands_browse::mods_add,
             commands_host::host_start_sharing,
             commands_host::host_stop_sharing,
+            commands_host::host_state,
         ], tauri::generate_handler![
             commands_auth::auth_status,
             commands_auth::auth_begin_login,
@@ -106,6 +154,14 @@ pub fn run() {
             commands_instances::instances_import_mrpack,
             commands_instances::instances_launch,
             commands_instances::minecraft_versions,
+            commands_game::instances_kill,
+            commands_game::instances_delete,
+            commands_game::instances_update,
+            commands_game::instances_open_folder,
+            commands_game::instances_logs,
+            commands_art::instances_art_image,
+            commands_art::instances_art_set,
+            commands_art::instances_art_lookup,
             commands_friends::friend_my_code,
             commands_friends::friend_regenerate_code,
             commands_friends::friend_list,
@@ -121,11 +177,21 @@ pub fn run() {
             commands_join::join_cancel,
             commands_join::join_open_tunnel,
             commands_join::join_close_tunnel,
+            commands_join::join_play,
             commands_settings::settings_get,
             commands_settings::settings_set,
+            commands_browse::browse_search,
+            commands_browse::browse_versions,
+            commands_browse::browse_install,
+            commands_browse::mods_list,
+            commands_browse::mods_toggle,
+            commands_browse::mods_remove,
+            commands_browse::mods_add,
             commands_host::host_start_sharing,
             commands_host::host_stop_sharing,
+            commands_host::host_state,
             test_hooks::test_state,
+            test_hooks::test_cut_guest_connection,
         ]))
         .run(tauri::generate_context!())
         .expect("erreur au lancement de Cubelink");

@@ -8,4 +8,4 @@ Node >= 18, aucune dépendance, écoute 127.0.0.1 uniquement, contenus fictifs.
 - Mod maison : `node build-home-mod.mjs [dossier]` (imprime le sha256, écrit le jar si dossier) ; absent du catalogue, 404 sur `/version_file/<sha1>`.
 - Instance hôte : `node make-instance-fixture.mjs <dir>` crée `mods/` (4 mods catalogue + mod maison), `config/cubelink-test.toml`, et `options.txt`, `saves/`, `servers.dat` (à ne pas partager) ; imprime le manifeste attendu (chemins, tailles, sha256).
 - Tests : `node --test "tests-fixtures/modrinth/*.test.mjs"` (Node >= 21 n’accepte plus un dossier nu ; sur Node 18/20, `node --test tests-fixtures/modrinth/` fonctionne).
-- Pointer l'app : aucune variable d'environnement n'existe aujourd'hui (voir docs/rapports/E0.3.md). Pour un `.mrpack`, ajouter `127.0.0.1` à `ImportOptions.allowed_hosts`.
+- Pointer l'app : avec `CUBELINK_TEST_MODE=1`, `CUBELINK_MODRINTH_API_URL` (127.0.0.1/localhost seulement) ; voir `docs/contrats.md` (historique : docs/rapports/E0.3.md). Pour un `.mrpack`, ajouter `127.0.0.1` à `ImportOptions.allowed_hosts`.

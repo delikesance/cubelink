@@ -426,6 +426,96 @@ mod tests {
         assert_eq!(s.files, 3);
     }
 
+
+    /// Hôte MALVEILLANT (binaire modifié, sans la garde de l'hôte légitime) : répond au contrôle avec le BLAKE3
+    /// d'un contenu de même taille mais altéré et le sert via iroh-blobs. L'invité doit le rejeter par sa propre
+    /// vérification sha256 (`Integrity`), sans rien mettre en cache ni laisser de résidu.
+    #[derive(Clone)]
+    struct HostileControl {
+        store: iroh_blobs::store::fs::FsStore,
+        evil_dir: std::path::PathBuf,
+    }
+
+    impl std::fmt::Debug for HostileControl {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("HostileControl")
+        }
+    }
+
+    impl iroh::protocol::ProtocolHandler for HostileControl {
+        async fn accept(&self, conn: iroh::endpoint::Connection) -> std::result::Result<(), iroh::protocol::AcceptError> {
+            while let Ok((mut send, mut recv)) = conn.accept_bi().await {
+                let this = self.clone();
+                tokio::spawn(async move {
+                    let mut sha = [0u8; 64];
+                    if recv.read_exact(&mut sha).await.is_err() {
+                        return;
+                    }
+                    let sha = String::from_utf8_lossy(&sha).into_owned();
+                    let tag = this
+                        .store
+                        .blobs()
+                        .add_path_with_opts(iroh_blobs::api::blobs::AddPathOptions {
+                            path: this.evil_dir.join(&sha),
+                            format: iroh_blobs::BlobFormat::Raw,
+                            mode: iroh_blobs::api::blobs::ImportMode::Copy,
+                        })
+                        .await
+                        .unwrap();
+                    let mut msg = vec![0u8];
+                    msg.extend_from_slice(tag.hash.as_bytes());
+                    let _ = send.write_all(&msg).await;
+                    let _ = send.finish();
+                    let _ = recv.read_to_end(16).await;
+                });
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn hostile_iroh_host_serving_altered_bytes_is_rejected_by_the_guest() {
+        use iroh::endpoint::presets;
+        use iroh::protocol::Router;
+        use iroh::{Endpoint, RelayMode};
+
+        let fx = fixture();
+        let dir = tempfile::tempdir().unwrap();
+        // Contenus altérés (même taille), un fichier par sha256 annoncé.
+        let evil_dir = dir.path().join("evil");
+        std::fs::create_dir_all(&evil_dir).unwrap();
+        for (f, data) in fx.manifest.files.iter().zip(&fx.contents) {
+            let mut bad = data.clone();
+            bad[0] ^= 0xff;
+            std::fs::write(evil_dir.join(&f.sha256), &bad).unwrap();
+        }
+        let ep_a = Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled).bind().await.unwrap();
+        let ep_b = Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled).bind().await.unwrap();
+        let store = iroh_blobs::store::fs::FsStore::load(dir.path().join("host-blobs")).await.unwrap();
+        let router = Router::builder(ep_a.clone())
+            .accept(crate::transfer::send::CONTROL_ALPN, HostileControl { store: store.clone(), evil_dir })
+            .accept(iroh_blobs::ALPN, iroh_blobs::BlobsProtocol::new(&store, None))
+            .spawn();
+        let b = IrohTransport::new(ep_b, dir.path().join("b")).await.unwrap();
+        let peer = b.add_peer(ep_a.addr());
+        let cancel = AtomicBool::new(false);
+        let opts = RecvOptions { concurrency: 1, ..RecvOptions::default() };
+        let r = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            receive_plan(&fx.plan, &peer, &b, fx.store.path(), &fx.index, &opts, &quiet, &cancel),
+        )
+        .await
+        .expect("délai dépassé");
+        assert!(matches!(r, Err(Error::Integrity { .. })), "{r:?}");
+        // Rien dans le cache, rien d'installé, aucun résidu.
+        for f in &fx.manifest.files {
+            assert!(fx.index.get(&f.sha256).unwrap().is_none());
+            assert!(!fx.store.path().join(object_rel_path(&f.sha256).unwrap()).exists());
+        }
+        assert_eq!(std::fs::read_dir(fx.store.path().join(".tmp")).unwrap().count(), 0);
+        let _ = router.shutdown().await;
+    }
+
     /// Intégration iroh locale : deux endpoints, relais désactivé, adresses IP locales (comme le spike N1).
     #[tokio::test]
     #[ignore = "ouvre de vrais sockets UDP locaux ; lancer avec --ignored"]

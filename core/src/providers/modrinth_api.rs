@@ -19,6 +19,8 @@ pub struct SearchFilters {
     pub project_type: Option<String>,
     pub limit: Option<u32>,
     pub offset: Option<u32>,
+    /// Tri Modrinth (`index`) : « relevance », « downloads », « updated », « newest », « follows ».
+    pub sort: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -76,7 +78,12 @@ pub struct Dependency {
 pub struct Version {
     pub id: String,
     pub project_id: String,
+    #[serde(default)]
+    pub name: String,
     pub version_number: String,
+    /// Date de publication ISO 8601.
+    #[serde(default)]
+    pub date_published: String,
     #[serde(default)]
     pub game_versions: Vec<String>,
     #[serde(default)]
@@ -85,6 +92,48 @@ pub struct Version {
     pub files: Vec<VersionFile>,
     #[serde(default)]
     pub dependencies: Vec<Dependency>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct GalleryImage {
+    pub url: String,
+    #[serde(default)]
+    pub featured: bool,
+    #[serde(default)]
+    pub ordering: Option<i64>,
+}
+
+/// Fiche d'un projet (`GET /project/{id}`), champs utiles à l'illustration.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Project {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub slug: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub icon_url: Option<String>,
+    /// Couleur 0xRRGGBB ou absente.
+    #[serde(default)]
+    pub color: Option<u64>,
+    #[serde(default)]
+    pub gallery: Vec<GalleryImage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct MemberUser {
+    #[serde(default)]
+    pub username: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ProjectMember {
+    #[serde(default)]
+    pub role: String,
+    pub user: MemberUser,
 }
 
 pub struct ModrinthClient {
@@ -151,6 +200,9 @@ impl ModrinthClient {
         if let Some(o) = filters.offset {
             params.push(("offset", o.to_string()));
         }
+        if let Some(s) = &filters.sort {
+            params.push(("index", s.clone()));
+        }
         self.json(self.get("/search").query(&params), "recherche Modrinth").await
     }
 
@@ -169,6 +221,24 @@ impl ModrinthClient {
         }
         let path = format!("/project/{}/version", encode_segment(project_id));
         self.json(self.get(&path).query(&params), &format!("projet Modrinth {project_id}")).await
+    }
+
+    /// Fiche d'un projet.
+    pub async fn project(&self, project_id: &str) -> Result<Project> {
+        let path = format!("/project/{}", encode_segment(project_id));
+        self.json(self.get(&path), &format!("projet Modrinth {project_id}")).await
+    }
+
+    /// Membres de l'équipe d'un projet (`GET /project/{id}/members`).
+    pub async fn project_members(&self, project_id: &str) -> Result<Vec<ProjectMember>> {
+        let path = format!("/project/{}/members", encode_segment(project_id));
+        self.json(self.get(&path), &format!("équipe du projet Modrinth {project_id}")).await
+    }
+
+    /// Une version par identifiant.
+    pub async fn version(&self, version_id: &str) -> Result<Version> {
+        let path = format!("/version/{}", encode_segment(version_id));
+        self.json(self.get(&path), &format!("version Modrinth {version_id}")).await
     }
 
     /// Version correspondant à un sha1 de fichier ; `Ok(None)` si Modrinth ne le connaît pas.
@@ -284,6 +354,7 @@ mod tests {
             project_type: Some("mod".into()),
             limit: Some(5),
             offset: Some(10),
+            sort: None,
         };
         let r = client(&s).search("create", &f).await.unwrap();
         assert_eq!(r.total_hits, 1);
@@ -384,6 +455,30 @@ mod tests {
         Mock::given(method("GET")).and(path("/search")).respond_with(ResponseTemplate::new(200).set_body_string("{oops")).mount(&s).await;
         let err = client(&s).search("x", &SearchFilters::default()).await.unwrap_err();
         assert!(matches!(err, Error::Network(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn search_sort_and_single_version() {
+        let s = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/search"))
+            .and(query_param("index", "downloads"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"hits": [], "total_hits": 0})))
+            .expect(1)
+            .mount(&s)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/version/v1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(version_json()))
+            .expect(1)
+            .mount(&s)
+            .await;
+        let f = SearchFilters { sort: Some("downloads".into()), ..Default::default() };
+        assert!(client(&s).search("x", &f).await.unwrap().hits.is_empty());
+        let v = client(&s).version("v1").await.unwrap();
+        assert_eq!(v.id, "v1");
+        assert_eq!(v.date_published, "");
+        assert!(matches!(client(&s).version("zz").await, Err(Error::NotFound(_))));
     }
 
     #[test]

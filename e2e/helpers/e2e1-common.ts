@@ -37,7 +37,6 @@ export async function readMyCode(app: App): Promise<string> {
 
 export async function openAddTab(app: App) {
   await gotoRoute(app, 'friends');
-  await app.page.getByRole('tab', { name: 'Ajouter un ami' }).click();
   return app.page.getByLabel('Code ami de ton ami');
 }
 
@@ -55,6 +54,8 @@ export async function makeFriends(a: App, b: App): Promise<void> {
   await expect(b.page.getByLabel(/^Code de vérification : /)).toBeVisible({ timeout: 30_000 });
   await gotoRoute(a, 'friends');
   await a.page.getByRole('tab', { name: /Demandes/ }).click();
+  await a.page.getByLabel(`J'ai comparé ce code avec ${NAME_B}`).check({ timeout: 30_000 });
+  await a.page.getByLabel(`J'ai comparé ce code avec ${NAME_B}`).check({ timeout: 30_000 });
   await a.page.getByRole('button', { name: `Accepter ${NAME_B}` }).click({ timeout: 30_000 });
   await expect.poll(async () => (await invoke<unknown[]>(a.page, 'friend_list')).length, { timeout: 20_000 }).toBe(1);
   await expect.poll(async () => (await invoke<unknown[]>(b.page, 'friend_list')).length, { timeout: 20_000 }).toBe(1);

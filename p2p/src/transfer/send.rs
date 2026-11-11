@@ -23,6 +23,11 @@ pub type PeerId = String;
 /// `FriendsDb` en fournira l'implémentation.
 pub trait PeerAuthorizer: Send + Sync {
     fn is_allowed(&self, public_key: &str) -> bool;
+
+    /// Raison du refus quand `is_allowed` est faux (annoncée à l'invité) : par défaut « pas ami ».
+    fn denial(&self, _public_key: &str) -> crate::reach::Reach {
+        crate::reach::Reach::NotFriend
+    }
 }
 
 /// Autorise un ensemble fixe de clés (tests, et usage simple).
@@ -72,12 +77,16 @@ pub struct ServeIndex {
 impl ServeIndex {
     /// Valide le manifeste puis associe chaque sha256 à son fichier du `game_dir`.
     pub fn from_manifest(manifest: &Manifest, game_dir: &Path) -> Result<Self> {
+        Self::from_manifest_with(manifest, |rel| game_dir.join(rel))
+    }
+
+    /// Comme [`Self::from_manifest`], avec le chemin local de chaque fichier choisi par `resolve`
+    /// (ex. instantané des configs, jars lus dans le jeu).
+    pub fn from_manifest_with(manifest: &Manifest, resolve: impl Fn(&str) -> PathBuf) -> Result<Self> {
         validate_manifest(manifest)?;
         let mut files = HashMap::new();
         for f in &manifest.files {
-            files
-                .entry(f.sha256.clone())
-                .or_insert_with(|| ServedFile { path: game_dir.join(&f.path), size: f.size });
+            files.entry(f.sha256.clone()).or_insert_with(|| ServedFile { path: resolve(&f.path), size: f.size });
         }
         Ok(Self { files })
     }
@@ -107,11 +116,25 @@ pub struct Host {
     authorizer: Arc<dyn PeerAuthorizer>,
     limits: ServeLimits,
     peers: Mutex<HashMap<PeerId, PeerState>>,
+    on_drift: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl Host {
     pub fn new(index: ServeIndex, authorizer: Arc<dyn PeerAuthorizer>, limits: ServeLimits) -> Arc<Self> {
-        Arc::new(Self { index, authorizer, limits, peers: Mutex::new(HashMap::new()) })
+        Arc::new(Self { index, authorizer, limits, peers: Mutex::new(HashMap::new()), on_drift: Mutex::new(None) })
+    }
+
+    /// Appelé quand un fichier du jeu ne correspond plus à son empreinte annoncée (le manifeste est périmé) :
+    /// l'application recalcule alors le manifeste pour que le « Réessayer » de l'invité reparte d'un état frais.
+    pub fn set_on_drift(&self, f: Arc<dyn Fn() + Send + Sync>) {
+        *self.on_drift.lock().unwrap_or_else(|p| p.into_inner()) = Some(f);
+    }
+
+    fn drift(&self) {
+        let f = self.on_drift.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        if let Some(f) = f {
+            f();
+        }
     }
 
     /// Contrôle d'accès seul (utilisé aussi à l'ouverture d'une connexion).
@@ -378,6 +401,9 @@ mod iroh_impl {
     use iroh_blobs::{BlobFormat, BlobsProtocol, Hash, HashAndFormat};
     use n0_future::StreamExt;
 
+    /// Statut de contrôle : le fichier du jeu a changé depuis le manifeste (à réessayer avec un manifeste frais).
+    const STATUS_CHANGED: u8 = 2;
+
     fn net(e: impl std::fmt::Debug) -> Error {
         Error::Network(format!("{e:?}"))
     }
@@ -476,8 +502,29 @@ mod iroh_impl {
         Some((m.len(), m.modified().ok()))
     }
 
+    /// Échec d'une requête de contrôle : refus (autorisation…) ou fichier modifié depuis le manifeste.
+    #[derive(Debug)]
+    enum AnswerErr {
+        Refused(#[allow(dead_code)] Error),
+        Changed,
+    }
+
+    impl From<Error> for AnswerErr {
+        fn from(e: Error) -> Self {
+            match e {
+                // Contenu absent du manifeste de l'hôte : l'hôte l'a recalculé depuis (ou le manifeste de l'invité est périmé).
+                Error::NotFound(_) => AnswerErr::Changed,
+                e => AnswerErr::Refused(e),
+            }
+        }
+    }
+
     impl ControlHandler {
-        async fn answer(&self, peer: &str, sha: &str) -> Result<(Permit, Hash)> {
+        async fn answer(&self, peer: &str, sha: &str) -> std::result::Result<(Permit, Hash), AnswerErr> {
+            self.answer_inner(peer, sha).await
+        }
+
+        async fn answer_inner(&self, peer: &str, sha: &str) -> std::result::Result<(Permit, Hash), AnswerErr> {
             let host = (self.host)().ok_or_else(|| Error::Auth("rien n'est partagé".into()))?;
             let permit = host.authorize(peer, sha)?;
             // Empreinte prise AVANT l'import : si le fichier change pendant, l'entrée sera périmée au prochain appel.
@@ -486,6 +533,14 @@ mod iroh_impl {
             let hash = match cached {
                 Some((h, st)) if now.is_some() && Some(st) == now => h,
                 _ => {
+                    // Jamais d'import d'un fichier qui ne correspond pas à l'empreinte annoncée (le jeu l'a réécrit
+                    // depuis le manifeste) : on refuse proprement et l'hôte recalcule son manifeste.
+                    let path = permit.file().path.clone();
+                    let live = tokio::task::spawn_blocking(move || crate::snapshot::sha256_of(&path)).await;
+                    if !matches!(&live, Ok(Ok(h)) if h == sha) {
+                        host.drift();
+                        return Err(AnswerErr::Changed);
+                    }
                     let tag = self
                         .store
                         .blobs()
@@ -532,8 +587,9 @@ mod iroh_impl {
                             // Attend que l'invité ait terminé (fin de son flux) avant de libérer le créneau.
                             let _ = recv.read_to_end(16).await;
                         }
-                        Err(_) => {
-                            let _ = send.write_all(&[1u8]).await;
+                        Err(e) => {
+                            let code = if matches!(e, AnswerErr::Changed) { STATUS_CHANGED } else { 1u8 };
+                            let _ = send.write_all(&[code]).await;
                             let _ = send.finish();
                         }
                     }
@@ -601,6 +657,13 @@ mod iroh_impl {
             send.write_all(req.sha256.as_bytes()).await.map_err(net)?;
             let mut status = [0u8; 1];
             recv.read_exact(&mut status).await.map_err(net)?;
+            if status[0] == STATUS_CHANGED {
+                // Pas `Network` : inutile de réessayer automatiquement avec le même manifeste périmé ; l'invité
+                // relance « Réessayer » et obtient un manifeste frais.
+                return Err(Error::Other(
+                    "Un fichier a changé chez ton ami pendant le transfert : réessaie dans un instant".into(),
+                ));
+            }
             if status[0] != 0 {
                 return Err(Error::Auth("requête refusée par l'hôte".into()));
             }
@@ -669,8 +732,8 @@ mod iroh_impl {
         use sha2::{Digest, Sha256};
         use std::time::Duration;
 
-        /// Non-régression (bogue « Réessayer échoue encore en fichier corrompu ») : un fichier altéré puis
-        /// réparé côté hôte ne doit plus être servi sous le BLAKE3 de sa version altérée.
+        /// Un fichier qui ne correspond plus à l'empreinte annoncée n'est JAMAIS importé ni servi (le manifeste
+        /// est périmé : l'hôte en est averti) ; une fois réparé, il est servi sous son vrai BLAKE3.
         #[tokio::test]
         async fn repaired_file_is_not_served_from_stale_cache() {
             let dir = tempfile::tempdir().unwrap();
@@ -693,13 +756,16 @@ mod iroh_impl {
                 ServeLimits::default(),
             );
             let store = FsStore::load(dir.path().join("blobs")).await.unwrap();
+            let drifts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let d2 = drifts.clone();
+            host.set_on_drift(Arc::new(move || {
+                d2.fetch_add(1, Ordering::SeqCst);
+            }));
             let ctl = ControlHandler { host: Arc::new(move || Some(host.clone())), store, known: Arc::default() };
 
             std::fs::write(&path, &evil).unwrap();
-            let (_, h_evil) = ctl.answer("p", &sha).await.unwrap();
-            assert_eq!(h_evil, Hash::new(&evil));
-            // Servi tel quel tant que rien ne change.
-            assert_eq!(ctl.answer("p", &sha).await.unwrap().1, h_evil);
+            assert!(matches!(ctl.answer("p", &sha).await, Err(AnswerErr::Changed)), "fichier altéré : refusé");
+            assert_eq!(drifts.load(Ordering::SeqCst), 1, "l'hôte est averti que son manifeste est périmé");
 
             // L'hôte répare (même taille ; date de modification forcée différente, la résolution du système de fichiers variant).
             std::fs::write(&path, &good).unwrap();
@@ -707,8 +773,7 @@ mod iroh_impl {
             f.set_modified(std::time::SystemTime::now() + Duration::from_secs(5)).unwrap();
             drop(f);
             let (_, h_good) = ctl.answer("p", &sha).await.unwrap();
-            assert_eq!(h_good, Hash::new(&good), "le fichier réparé doit être ré-importé");
-            assert_ne!(h_good, h_evil);
+            assert_eq!(h_good, Hash::new(&good), "le fichier réparé est servi sous son vrai BLAKE3");
         }
     }
 }

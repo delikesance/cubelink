@@ -10,7 +10,7 @@ afterEach(cleanup);
 
 function mount(services: Services) {
   return render(
-    <ShellContext.Provider value={{ services, route: "friends" as never, params: {}, navigate, setTitle: () => {} }}>
+    <ShellContext.Provider value={{ services, route: "friends" as never, params: {}, navigate, setTitle: () => {}, goBack: () => {}, canGoBack: false }}>
       <Requests />
     </ShellContext.Provider>,
   );
@@ -45,6 +45,7 @@ describe("Demandes", () => {
   it("accepte puis refuse : ligne retirée, total mis à jour, suivante dépliée", async () => {
     const svc = fake();
     mount(svc);
+    fireEvent.click(await screen.findByLabelText("J'ai comparé ce code avec Alex0"));
     fireEvent.click(await screen.findByRole("button", { name: "Accepter Alex0" }));
     expect(await screen.findByRole("heading", { level: 3, name: "Demande de Steve1" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Voir les 980 autres demandes" })).toBeTruthy();
@@ -112,5 +113,16 @@ describe("Demandes", () => {
     mount(fake(0));
     expect(await screen.findByText("Aucune demande en attente.")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Tout refuser" })).toBeNull();
+  });
+
+  it("Accepter reste désactivé tant que le code n'est pas coché comme comparé", async () => {
+    const svc = fake();
+    mount(svc);
+    const accept = (await screen.findByRole("button", { name: "Accepter Alex0" })) as HTMLButtonElement;
+    expect(accept.disabled).toBe(true);
+    fireEvent.click(screen.getByLabelText("J'ai comparé ce code avec Alex0"));
+    expect(accept.disabled).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "Voir la demande de Steve1" }));
+    expect((screen.getByRole("button", { name: "Accepter Steve1" }) as HTMLButtonElement).disabled).toBe(true);
   });
 });

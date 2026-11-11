@@ -55,7 +55,10 @@ impl MinecraftClient {
 
     pub fn with_base_url(base_url: impl Into<String>) -> Self {
         Self {
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                .user_agent(concat!("cubelink/", env!("CARGO_PKG_VERSION")))
+                .build()
+                .unwrap_or_default(),
             base_url: base_url.into().trim_end_matches('/').to_string(),
         }
     }
@@ -89,6 +92,14 @@ impl MinecraftClient {
                     .body(body.to_string()),
             )
             .await?;
+        if status == 403 {
+            return Err(Error::Auth(
+                "connexion Minecraft : jeton refusé (HTTP 403). L'application Azure (CUBELINK_MS_CLIENT_ID) \
+                 n'est probablement pas autorisée à utiliser l'API Minecraft : demande l'approbation via le \
+                 formulaire Mojang (aka.ms/AppRegInfo) ou utilise un client_id approuvé."
+                    .into(),
+            ));
+        }
         check_status(status, "connexion Minecraft")?;
         serde_json::from_str(&text).map_err(|e| Error::Auth(format!("réponse login_with_xbox invalide : {e}")))
     }

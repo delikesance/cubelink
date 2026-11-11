@@ -1,5 +1,7 @@
 # Sources et licences des images (assets/images/)
 
+> Mise à jour 2026-11-10 : la refonte du design réduit fortement l'usage d'images (décor de l'accueil et art d'instance seulement quand il est logique ; le reste en aplats). Ces fichiers et leurs licences restent la référence tant qu'ils sont dans le dépôt ; retirer de ce tableau toute image qui ne serait plus utilisée. L'attribution OGA-BY de `hero-1.jpg` / `instance-create.jpg` reste obligatoire tant que ces fichiers sont distribués.
+
 Toutes les images ont ete telechargees depuis OpenGameArt.org le 2026-11-09 ; la licence a ete lue sur chaque page source (champ "License(s)"). Les fichiers locaux sont des derives (recadrage et/ou agrandissement) des originaux : agrandissement en plus-proche-voisin pour le pixel-art, rien d'autre n'a ete modifie.
 
 Aucune texture, capture ou artwork Minecraft / Mojang n'est utilise.

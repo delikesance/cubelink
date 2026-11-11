@@ -39,6 +39,8 @@ pub struct Hooks {
     pub forge_files: Option<String>,
     pub adoptium: Option<String>,
     pub modrinth_api: Option<String>,
+    /// `CUBELINK_TEST_CF_API` : base de l'API CurseForge (sans `/v1`), clé factice `test-key`.
+    pub cf_api: Option<String>,
     pub java_path: Option<PathBuf>,
     pub data_dir: Option<PathBuf>,
     pub relay: Option<RelayMode>,
@@ -144,7 +146,12 @@ impl Hooks {
             forge_maven: url("CUBELINK_FORGE_MAVEN_URL")?,
             forge_files: url("CUBELINK_FORGE_FILES_URL")?,
             adoptium: url("CUBELINK_ADOPTIUM_URL")?,
-            modrinth_api: url("CUBELINK_MODRINTH_API_URL")?,
+            // `CUBELINK_TEST_MODRINTH_API` est prioritaire sur l'ancien nom `CUBELINK_MODRINTH_API_URL`.
+            modrinth_api: match url("CUBELINK_TEST_MODRINTH_API")? {
+                Some(u) => Some(u),
+                None => url("CUBELINK_MODRINTH_API_URL")?,
+            },
+            cf_api: url("CUBELINK_TEST_CF_API")?,
             java_path,
             data_dir,
             relay,
@@ -198,6 +205,7 @@ impl Hooks {
             ("CUBELINK_FORGE_FILES_URL", &self.forge_files),
             ("CUBELINK_ADOPTIUM_URL", &self.adoptium),
             ("CUBELINK_MODRINTH_API_URL", &self.modrinth_api),
+            ("CUBELINK_TEST_CF_API", &self.cf_api),
         ] {
             if let Some(v) = v {
                 m.insert(k, v.clone());
@@ -308,6 +316,16 @@ pub fn test_state(state: State<'_, Arc<AppState>>) -> Result<TestStateInfo, Stri
     Ok(state.test_state_info())
 }
 
+/// Coupe de force la connexion iroh du tunnel invité (test de reconnexion) ; mode test uniquement,
+/// jamais enregistrée ni exposée en production. Renvoie faux s'il n'y a pas de tunnel ouvert.
+#[tauri::command]
+pub async fn test_cut_guest_connection(state: State<'_, Arc<AppState>>) -> Result<bool, String> {
+    if !hooks().test_mode {
+        return Err("commande indisponible hors mode test".into());
+    }
+    Ok(state.backend().test_cut_guest_connection().await)
+}
+
 /// Sonde Java factice : prétend que l'exécutable est la version attendue (faux JRE non exécutable).
 pub struct FakeProbe(pub u32);
 
@@ -378,6 +396,26 @@ mod tests {
         assert!(h.skip_java_probe && h.java_path.is_some());
         assert_eq!(h.quilt_meta.as_deref(), Some("http://127.0.0.1:7001"));
         assert_eq!(h.active_urls().len(), 6);
+    }
+
+    #[test]
+    fn surcharges_parcourir() {
+        let p: &[(&str, &str)] = &[
+            ("CUBELINK_TEST_MODE", "1"),
+            ("CUBELINK_TEST_CF_API", "http://127.0.0.1:7100/"),
+            ("CUBELINK_TEST_MODRINTH_API", "http://127.0.0.1:7101"),
+            ("CUBELINK_MODRINTH_API_URL", "http://127.0.0.1:7999"),
+        ];
+        let h = Hooks::from_lookup(env(p)).unwrap();
+        assert_eq!(h.cf_api.as_deref(), Some("http://127.0.0.1:7100"));
+        assert_eq!(h.modrinth_base().unwrap(), "http://127.0.0.1:7101/v2");
+        // Ignorées hors mode test, refusées si non loopback.
+        let off: &[(&str, &str)] = &[("CUBELINK_TEST_CF_API", "http://127.0.0.1:7100")];
+        assert!(Hooks::from_lookup(env(off)).unwrap().cf_api.is_none());
+        let bad: &[(&str, &str)] = &[("CUBELINK_TEST_MODE", "1"), ("CUBELINK_TEST_CF_API", "https://api.curseforge.com")];
+        assert!(Hooks::from_lookup(env(bad)).is_err());
+        let bad: &[(&str, &str)] = &[("CUBELINK_TEST_MODE", "1"), ("CUBELINK_TEST_MODRINTH_API", "https://api.modrinth.com")];
+        assert!(Hooks::from_lookup(env(bad)).is_err());
     }
 
     #[test]

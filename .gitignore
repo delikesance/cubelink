@@ -7,3 +7,7 @@ e2e/artifacts/
 .vite/
 *.tsbuildinfo
 .DS_Store
+.env
+.env.*
+!.env.example
+core/resources/cubelink-lan-agent.jar

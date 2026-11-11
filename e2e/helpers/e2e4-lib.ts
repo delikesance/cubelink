@@ -8,16 +8,17 @@ const NO_FRIEND = '0000000000000000000000000000000000000000000000000000000000000
 
 /** Ecrans testes. `ready` = selecteur CSS qui doit etre visible avant mesure. */
 export const SCREENS: Screen[] = [
-  { id: 'login', hash: '#/login', route: 'login', ready: '.login-ms' },
+  { id: 'login', hash: '#/login', route: 'login', ready: 'button:has-text("Se connecter avec Microsoft")' },
   { id: 'main', hash: '#/main', route: 'main', ready: '.home-play' },
-  { id: 'create', hash: '#/create', route: 'create', ready: '[role=dialog] input[type=text]' },
+  { id: 'create', hash: '#/create', route: 'create', ready: 'main h1' },
+  { id: 'friends-list', hash: '#/friends', route: 'friends', ready: '[role=tab]' },
   { id: 'friends-requests', hash: '#/friends', route: 'friends', ready: '[role=tab]' },
   { id: 'friends-add', hash: '#/friends', route: 'friends', ready: '[role=tab]' },
-  { id: 'join', hash: `#/join?friend=${NO_FRIEND}`, route: 'join', ready: 'h1' },
+  { id: 'join', hash: `#/join?friend=${NO_FRIEND}`, route: 'join', ready: 'main h1' },
   { id: 'install', hash: '#/install?friend=abcd', route: 'install', ready: '.inst-card' },
-  { id: 'settings', hash: '#/settings', route: 'settings', ready: '[role=dialog]' },
-  { id: 'error', hash: '#/error?state=disk-full', route: 'error', ready: 'h2' },
-  { id: 'legal', hash: '#/legal', route: 'legal', ready: '[role=tablist]' },
+  { id: 'settings', hash: '#/settings', route: 'settings', ready: '[role=tablist]' },
+  { id: 'error', hash: '#/error?state=disk-full', route: 'error', ready: 'main h1' },
+  { id: 'legal', hash: '#/legal', route: 'legal', ready: 'article' },
 ];
 
 /** Connecte hors ligne et pose une instance hote (ecran d'accueil realiste). */
@@ -33,7 +34,7 @@ export async function gotoScreen(page: Page, s: Screen): Promise<void> {
   await page.evaluate((h) => { window.location.hash = h; }, s.hash);
   await waitForRoute(page, s.route);
   if (s.ready) await page.locator(s.ready).first().waitFor({ state: 'visible', timeout: 15_000 });
-  if (s.id === 'friends-add') await page.getByRole('tab', { name: 'Ajouter un ami' }).click();
+  if (s.id === 'friends-requests') await page.getByRole('tab', { name: /Demandes/ }).click();
   await page.waitForTimeout(300); // fin des transitions/chargements
 }
 
@@ -83,15 +84,15 @@ export async function tabThrough(page: Page, max = 60): Promise<{ steps: FocusSt
   await page.evaluate(() => { window.scrollTo(0, 0); (document.querySelector('a.skip-link') as HTMLElement | null)?.focus(); });
   const describe = () => page.evaluate(() => {
     const SEL = 'a[href],button,input,select,textarea,summary,[tabindex]';
-    const vis = (e: Element) => { const r = (e as HTMLElement).getBoundingClientRect(); const cs = getComputedStyle(e); return r.width > 0 && r.height > 0 && cs.visibility !== 'hidden' && cs.display !== 'none'; };
+    const vis = (e: Element) => { const cd = e.closest('details:not([open])'); if (cd && e.tagName !== 'SUMMARY') return false; const r = (e as HTMLElement).getBoundingClientRect(); const cs = getComputedStyle(e); return r.width > 0 && r.height > 0 && cs.visibility !== 'hidden' && cs.display !== 'none'; };
     const all = [...document.querySelectorAll(SEL)].filter((e) => vis(e) && !(e as HTMLInputElement).disabled && (e as HTMLElement).tabIndex >= 0);
     const el = document.activeElement as HTMLElement | null;
-    const label = (e: Element) => { const h = e as HTMLElement; return `${e.tagName.toLowerCase()}${h.getAttribute('role') ? '[' + h.getAttribute('role') + ']' : ''} "${(h.getAttribute('aria-label') || h.innerText || (h as HTMLInputElement).value || h.id || '').trim().replace(/\s+/g, ' ').slice(0, 40)}"`; };
+    const label = (e: Element) => { const h = e as HTMLElement; return `${e.tagName.toLowerCase()}${h.getAttribute('role') ? '[' + h.getAttribute('role') + ']' : ''} "${(h.getAttribute('aria-label') || h.innerText || (h as HTMLInputElement).value || h.id || h.getAttribute('href') || '').trim().replace(/\s+/g, ' ').slice(0, 40)}"`; };
     const pos = all.filter((e) => (e as HTMLElement).tabIndex > 0).length;
     if (!el || el === document.body || el === document.documentElement) return { body: true, focusables: all.map(label), pos };
     const cs = getComputedStyle(el);
     const outline = `${cs.outlineStyle} ${cs.outlineWidth} ${cs.outlineColor} | ${cs.boxShadow}`;
-    const focusOk = el.matches(':focus-visible') && ((cs.outlineStyle !== 'none' && parseFloat(cs.outlineWidth) >= 2 && cs.outlineColor === 'rgb(255, 138, 74)') || cs.boxShadow.includes('255, 138, 74'));
+    const focusOk = el.matches(':focus-visible') && ((cs.outlineStyle !== 'none' && parseFloat(cs.outlineWidth) >= 2 && cs.outlineColor === 'rgb(111, 211, 240)') || cs.boxShadow.includes('111, 211, 240'));
     const r = el.getBoundingClientRect();
     return { body: false, desc: label(el), visible: r.width > 0 && r.height > 0, focusOk, outline, inDom: all.indexOf(el), focusables: all.map(label), pos };
   });

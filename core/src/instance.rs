@@ -9,11 +9,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::{Error, Instance, LoaderSpec, Result};
+use crate::types::{Error, Instance, InstanceArt, LoaderSpec, Result};
 
 const META_FILE: &str = "instance.json";
 const META_TMP: &str = "instance.json.tmp";
 const GAME_DIR: &str = "minecraft";
+const ART_DIR: &str = "art";
 const MAX_NAME_CHARS: usize = 64;
 const MAX_ID_LEN: usize = 96;
 pub const MIN_RAM_MB: u32 = 512;
@@ -96,6 +97,9 @@ impl InstanceStore {
             loader,
             ram_mb,
             mod_count: 0,
+            java_path: None,
+            jvm_args: String::new(),
+            art: None,
         };
         let stored = StoredInstance { instance: instance.clone(), created_at: now_secs(), kind };
         let res = fs::create_dir_all(self.root.join(&id).join(GAME_DIR))
@@ -175,10 +179,58 @@ impl InstanceStore {
         Ok(self.with_live_mod_count(id, stored.instance))
     }
 
+    /// Met à jour nom, RAM, Java et arguments JVM. `None` : champ inchangé ; pour `java_path` et
+    /// `jvm_args`, une chaîne vide efface la valeur. L'id (donc le dossier) ne change jamais.
+    pub fn update(
+        &self,
+        id: &str,
+        name: Option<&str>,
+        ram_mb: Option<u32>,
+        java_path: Option<&str>,
+        jvm_args: Option<&str>,
+    ) -> Result<Instance> {
+        let mut stored = self.read_meta(id)?;
+        // Tout est validé avant la moindre écriture.
+        let name = name.map(validate_name).transpose()?;
+        if let Some(mb) = ram_mb {
+            check_ram(mb)?;
+        }
+        let java_path = java_path.map(validate_java_path).transpose()?;
+        let jvm_args = jvm_args.map(validate_jvm_args).transpose()?;
+        if let Some(n) = name {
+            stored.instance.name = n;
+        }
+        if let Some(mb) = ram_mb {
+            stored.instance.ram_mb = mb;
+        }
+        if let Some(j) = java_path {
+            stored.instance.java_path = (!j.is_empty()).then_some(j);
+        }
+        if let Some(a) = jvm_args {
+            stored.instance.jvm_args = a;
+        }
+        self.write_meta(id, &stored)?;
+        Ok(self.with_live_mod_count(id, stored.instance))
+    }
+
     /// Dossier de jeu (`<id>/minecraft`). L'id est validé ; le dossier peut ne pas exister.
     pub fn game_dir(&self, id: &str) -> Result<PathBuf> {
         validate_id(id)?;
         Ok(self.root.join(id).join(GAME_DIR))
+    }
+
+    /// Dossier des illustrations (`<id>/art`), à côté de `instance.json`. Le dossier peut ne pas exister.
+    pub fn art_dir(&self, id: &str) -> Result<PathBuf> {
+        validate_id(id)?;
+        Ok(self.root.join(id).join(ART_DIR))
+    }
+
+    /// Remplace (ou efface) les métadonnées d'illustration. Les fichiers sont gérés par l'appelant.
+    pub fn set_art(&self, id: &str, art: Option<InstanceArt>) -> Result<Instance> {
+        let mut stored = self.read_meta(id)?;
+        stored.instance.art = art;
+        self.write_meta(id, &stored)?;
+        Ok(self.with_live_mod_count(id, stored.instance))
     }
 
     /// Nombre de fichiers `.jar` dans `mods/`.
@@ -235,6 +287,33 @@ fn check_ram(mb: u32) -> Result<()> {
     } else {
         Err(Error::Invalid(format!("RAM hors bornes ({MIN_RAM_MB}-{MAX_RAM_MB} Mo) : {mb}")))
     }
+}
+
+const MAX_JVM_ARGS_CHARS: usize = 2048;
+const MAX_JAVA_PATH_CHARS: usize = 512;
+
+fn validate_java_path(p: &str) -> Result<String> {
+    let p = p.trim();
+    if p.chars().count() > MAX_JAVA_PATH_CHARS || p.chars().any(|c| c.is_control()) {
+        return Err(Error::Invalid("chemin Java invalide".into()));
+    }
+    Ok(p.to_string())
+}
+
+fn validate_jvm_args(a: &str) -> Result<String> {
+    let a = a.trim();
+    if a.chars().count() > MAX_JVM_ARGS_CHARS {
+        return Err(Error::Invalid(format!("arguments JVM trop longs (max {MAX_JVM_ARGS_CHARS} caractères)")));
+    }
+    if a.chars().any(|c| c.is_control()) {
+        return Err(Error::Invalid("arguments JVM : caractères de contrôle interdits".into()));
+    }
+    Ok(a.to_string())
+}
+
+/// Découpe la chaîne d'arguments JVM d'une instance (séparateur : espaces).
+pub fn split_jvm_args(args: &str) -> Vec<String> {
+    args.split_whitespace().map(str::to_string).collect()
 }
 
 fn count_jars(mods: &Path) -> u32 {
@@ -423,6 +502,81 @@ mod tests {
         assert!(s.update_ram(&i.id, 65536).is_ok());
         assert!(matches!(s.update_ram("nope", 1024), Err(Error::NotFound(_))));
         assert_eq!(s.get(&i.id).unwrap().ram_mb, 65536);
+    }
+
+    #[test]
+    fn update_fields() {
+        let (_t, s) = store();
+        let i = s.create("Avant", "1.21.1", spec(), 2048).unwrap();
+        let u = s.update(&i.id, Some("  Après "), Some(4096), Some(" /opt/java/bin/java "), Some(" -Xss1M  -Dfoo=bar ")).unwrap();
+        assert_eq!((u.name.as_str(), u.ram_mb, u.id.as_str()), ("Après", 4096, i.id.as_str()));
+        assert_eq!(u.java_path.as_deref(), Some("/opt/java/bin/java"));
+        assert_eq!(split_jvm_args(&u.jvm_args), vec!["-Xss1M", "-Dfoo=bar"]);
+        assert_eq!(s.get(&i.id).unwrap(), u);
+        // Champs absents : inchangés ; chaîne vide : effacé.
+        let u2 = s.update(&i.id, None, None, Some(""), None).unwrap();
+        assert_eq!(u2.java_path, None);
+        assert_eq!(u2.name, "Après");
+        assert_eq!(u2.jvm_args, "-Xss1M  -Dfoo=bar");
+    }
+
+    #[test]
+    fn update_rejects_invalid_without_writing() {
+        let (_t, s) = store();
+        let i = s.create("Stable", "1.21.1", spec(), 2048).unwrap();
+        assert!(matches!(s.update(&i.id, Some("a/b"), None, None, None), Err(Error::Invalid(_))));
+        assert!(matches!(s.update(&i.id, Some(""), None, None, None), Err(Error::Invalid(_))));
+        // Nom valide mais RAM invalide : rien ne doit être écrit.
+        assert!(s.update(&i.id, Some("Autre"), Some(100), None, None).is_err());
+        assert!(s.update(&i.id, None, None, None, Some("-Da
+b")).is_err());
+        assert!(s.update(&i.id, None, None, None, Some(&"x".repeat(3000))).is_err());
+        assert!(s.update(&i.id, None, None, Some("a b"), None).is_err());
+        assert_eq!(s.get(&i.id).unwrap(), i);
+        assert!(matches!(s.update("nope", Some("x"), None, None, None), Err(Error::NotFound(_))));
+    }
+
+    #[test]
+    fn legacy_instance_json_still_loads() {
+        let (_t, s) = store();
+        let dir = s.root().join("vieux");
+        fs::create_dir_all(dir.join(GAME_DIR)).unwrap();
+        fs::write(
+            dir.join(META_FILE),
+            br#"{"id":"vieux","name":"Vieux","minecraft":"1.20.1","loader":{"loader":"fabric","version":"0.15"},"ram_mb":3072,"mod_count":0,"created_at":5}"#,
+        )
+        .unwrap();
+        let i = s.get("vieux").unwrap();
+        assert_eq!((i.java_path, i.jvm_args.as_str(), i.ram_mb), (None, "", 3072));
+        assert_eq!(i.art, None);
+        assert_eq!(s.update("vieux", None, None, None, Some("-Xmx1G")).unwrap().jvm_args, "-Xmx1G");
+    }
+
+    #[test]
+    fn art_roundtrip_and_delete_removes_art_dir() {
+        let (_t, s) = store();
+        let i = s.create("Art", "1.21.1", spec(), 2048).unwrap();
+        assert_eq!(i.art, None);
+        let art = InstanceArt {
+            source: "modrinth".into(),
+            project_id: "P".into(),
+            title: "T".into(),
+            author: "a".into(),
+            summary: "s".into(),
+            color: Some("#aabbcc".into()),
+            icon: Some("icon.png".into()),
+            screenshots: vec!["shot-1.png".into()],
+            page_url: None,
+        };
+        let u = s.set_art(&i.id, Some(art.clone())).unwrap();
+        assert_eq!(u.art, Some(art.clone()));
+        assert_eq!(s.get(&i.id).unwrap().art, Some(art));
+        let dir = s.art_dir(&i.id).unwrap();
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("icon.png"), b"x").unwrap();
+        s.delete(&i.id).unwrap();
+        assert!(!dir.exists());
+        assert!(s.art_dir("../x").is_err());
     }
 
     #[test]

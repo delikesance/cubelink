@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import "./mycode.css";
 import { useServices } from "../../app/context";
+import { Button } from "../../ui";
 
 type State =
   | { step: "loading" }
@@ -92,7 +93,12 @@ export default function MyCode() {
   return (
     <section className="mycode" aria-labelledby="mycode-title">
       <div className="mycode-head">
-        <h2 id="mycode-title">Mon code ami</h2>
+        <div>
+          <h2 id="mycode-title">Mon code</h2>
+          <p className="mycode-sub">Partage-le pour qu'un ami t'ajoute.</p>
+        </div>
+      </div>
+      <div className="mycode-tools">
         {!confirming && (
           <button
             type="button"
@@ -109,12 +115,8 @@ export default function MyCode() {
         <div className="mycode-confirm" role="group" aria-label="Confirmer le nouveau code">
           <p>Ton ancien code ne fonctionnera plus. Tes amis actuels ne sont pas affectés. Continuer&nbsp;?</p>
           <div className="mycode-actions">
-            <button type="button" className="mycode-btn" onClick={() => { void regenerate(); }} disabled={busy}>
-              {busy ? "Génération…" : "Générer un nouveau code"}
-            </button>
-            <button type="button" className="mycode-ghost" onClick={() => setConfirming(false)} disabled={busy}>
-              Annuler
-            </button>
+            <Button variant="danger" onClick={() => { void regenerate(); }} loading={busy}>Générer un nouveau code</Button>
+            <Button variant="secondary" onClick={() => setConfirming(false)} disabled={busy}>Annuler</Button>
           </div>
           {regenError && <p className="mycode-error" role="alert">{regenError}</p>}
         </div>
@@ -125,18 +127,18 @@ export default function MyCode() {
         {state.step === "error" && (
           <>
             <p className="mycode-error" role="alert">{state.message}</p>
-            <button type="button" className="mycode-btn" onClick={() => { void load(); }}>Réessayer</button>
+            <Button onClick={() => { void load(); }}>Réessayer</Button>
           </>
         )}
         {state.step === "ready" && (
           <>
             <code className="mycode-code" ref={codeRef} aria-label={`Mon code ami : ${state.code}`}>{state.code}</code>
-            <button type="button" className="mycode-btn" onClick={() => { void copy(); }}>Copier</button>
+            <Button variant="secondary" className={notice === "Copié" ? "is-copied" : undefined} onClick={() => { void copy(); }}>{notice === "Copié" ? "Copié" : "Copier"}</Button>
           </>
         )}
       </div>
 
-      <div className="mycode-live" aria-live="polite" aria-atomic="true">{notice}</div>
+      <div className="mycode-live" aria-live="polite" aria-atomic="true">{notice === "Copié" ? "" : notice}</div>
       <span className="mycode-help">Ce code ne contient aucun secret. Il permet à ton ami de te joindre&nbsp;: ne le publie pas.</span>
     </section>
   );

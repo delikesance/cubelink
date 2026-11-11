@@ -14,7 +14,7 @@ function setup(over: Partial<Services> = {}) {
   const send = vi.fn(over.friendSendRequest ?? base.friendSendRequest);
   const services = { ...base, ...over, friendSendRequest: send } as Services;
   render(
-    <ShellContext.Provider value={{ services, route: "friends", params: {}, navigate: vi.fn(), setTitle: vi.fn() } as never}>
+    <ShellContext.Provider value={{ services, route: "friends", params: {}, navigate: vi.fn(), setTitle: vi.fn(), goBack: vi.fn(), canGoBack: false } as never}>
       <Add />
     </ShellContext.Provider>,
   );

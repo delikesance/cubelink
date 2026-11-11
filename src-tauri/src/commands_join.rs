@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use core_lib::guest;
 use core_lib::types::{Error, Manifest, TransferPhase, TransferProgress};
-use p2p_lib::transfer::plan::{compute_plan, to_join_summary, Plan, StoreCache};
+use p2p_lib::transfer::plan::{compute_plan, to_join_summary, DiskCache, Plan};
 use serde::Serialize;
 use tauri::State;
 
@@ -56,12 +56,55 @@ pub fn failure_message(e: &Error, stage: Stage) -> String {
     }
 }
 
+/// Date UTC `AAAA-MM-JJ hh:mm:ss` (sans dépendance), pour le journal des échecs.
+fn utc_now() -> String {
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0) as i64;
+    let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    // Algorithme de Howard Hinnant (jours depuis 1970 -> date civile).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!("{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02} UTC", rem / 3600, rem % 3600 / 60, rem % 60)
+}
+
+/// Texte technique complet d'un échec d'installation (étape, détail, cause) : jamais montré tel quel dans l'interface
+/// sans action de l'utilisateur (bloc « Détails »), toujours écrit dans `join-errors.log`.
+pub fn technical_details(step: &str, detail: &str, e: &Error) -> String {
+    format!("étape : {step}\ndétail : {detail}\nerreur : {e}\ndebug : {e:?}")
+}
+
 fn failed(msg: String, last: Option<TransferProgress>) -> TransferProgress {
     let base = last.unwrap_or_else(|| progress(TransferPhase::Failed));
     TransferProgress { phase: TransferPhase::Failed, error: Some(msg), speed_bps: 0, ..base }
 }
 
 impl AppState {
+    /// Échec d'une étape de `run_join` : journalise TOUT (fichier + stderr), prévient l'interface (événement
+    /// `transfer://error_details`) et renvoie le message court affichable (« Étape : cause » si la cause est générique).
+    fn join_fail(&self, step: &str, detail: &str, e: &Error, stage: Stage) -> String {
+        let base = failure_message(e, stage);
+        let short = if base == user_msg(e) { format!("{step} : {base}") } else { base };
+        let details = technical_details(step, detail, e);
+        eprintln!("[Cubelink] join échoué ({step}) : {e:?} ({detail})");
+        let log = self.paths.logs.join("join-errors.log");
+        let _ = std::fs::create_dir_all(&self.paths.logs);
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&log) {
+            use std::io::Write;
+            let _ = writeln!(f, "[{}] {}\nmessage affiché : {short}\n", utc_now(), details.replace('\n', "\n  "));
+        }
+        self.emit_event(
+            "transfer://error_details",
+            &serde_json::json!({ "step": step, "message": short, "details": details, "log_file": "join-errors.log" }),
+        );
+        short
+    }
+
     fn check_friend(&self, key: &str) -> Result<(), String> {
         let known = key.len() == 64 && self.friends.is_friend(key).map_err(|e| user_msg(&e))?;
         if known {
@@ -73,7 +116,7 @@ impl AppState {
 
     async fn host_plan(&self, key: &str) -> Result<(HostManifest, Plan), String> {
         let hm = self.backend().fetch_manifest(key.to_string()).await.map_err(|e| sanitize(&e))?;
-        let plan = compute_plan(&hm.manifest, &StoreCache(&self.store)).map_err(|e| user_msg(&e))?;
+        let plan = compute_plan(&hm.manifest, &DiskCache { index: &self.store, root: &self.paths.store }).map_err(|e| user_msg(&e))?;
         Ok((hm, plan))
     }
 
@@ -151,11 +194,22 @@ impl AppState {
         let manifest = hm.manifest;
         let mh = core_lib::manifest::manifest_hash(&manifest);
         let id = format!("{}-{}", &key[..16], &mh[..16]);
-        let res = self.backend().receive_files(key.to_string(), id, plan, cb, control.clone()).await;
+        let res = self.backend().receive_files(key.to_string(), id.clone(), plan, cb.clone(), control.clone()).await;
         if control.is_cancelled() {
             return Err(failure_message(&Error::Cancelled, Stage::Receive));
         }
-        res.map_err(|e| failure_message(&e, Stage::Receive))?;
+        res.map_err(|e| self.join_fail("Réception des fichiers", &format!("{} fichier(s) du plan", manifest.files.len()), &e, Stage::Receive))?;
+        // Filet : un objet que l'index croit présent mais absent du disque est purgé puis re-reçu UNE fois.
+        let missing = compute_plan(&manifest, &DiskCache { index: &self.store, root: &self.paths.store })
+            .map_err(|e| self.join_fail("Contrôle du cache", "plan après réception", &e, Stage::Install))?;
+        if missing.to_receive_count > 0 {
+            eprintln!("[Cubelink] join : {} objet(s) manquant(s) dans le cache après réception, nouvelle réception", missing.to_receive_count);
+            let again = self.backend().receive_files(key.to_string(), format!("{id}-r"), missing, cb, control.clone()).await;
+            if control.is_cancelled() {
+                return Err(failure_message(&Error::Cancelled, Stage::Receive));
+            }
+            again.map_err(|e| self.join_fail("Réception des fichiers (reprise)", "objets manquants du cache", &e, Stage::Receive))?;
+        }
 
         let phase = |ph: TransferPhase| {
             let base = lock(last).clone().unwrap_or_else(|| progress(ph));
@@ -164,10 +218,10 @@ impl AppState {
         phase(TransferPhase::Verifying);
         let host_label = self.friends.get_friend(key).ok().flatten().map(|f| f.name).unwrap_or_else(|| "ami".into());
         let inst = guest::create_guest_instance(&self.instances, &manifest, &host_label, &self.paths.store, &self.store)
-            .map_err(|e| failure_message(&e, Stage::Install))?;
+            .map_err(|e| self.join_fail("Création de l'instance invitée", &format!("monde {:?}, minecraft {}", manifest.name, manifest.minecraft), &e, Stage::Install))?;
         if let Err(e) = guest::install_manifest_files(&self.instances, &inst, &manifest, &self.paths.store, &self.store) {
             let _ = guest::remove_guest_instance(&self.instances, &inst.id, &self.store);
-            return Err(failure_message(&e, Stage::Install));
+            return Err(self.join_fail("Installation des fichiers", &format!("instance {}, {} fichier(s) du manifeste", inst.id, manifest.files.len()), &e, Stage::Install));
         }
         // Avertissement fiable : sha1 locaux des jars reçus, côté invité.
         if let Ok(gd) = self.instances.game_dir(&inst.id) {
@@ -180,7 +234,7 @@ impl AppState {
             let prog: crate::install::Progress = Arc::new(|_| {});
             if let Err(e) = crate::install::ensure_game(&self.paths, &inst, java, prog).await {
                 let _ = guest::remove_guest_instance(&self.instances, &inst.id, &self.store);
-                return Err(failure_message(&e, Stage::Install));
+                return Err(self.join_fail("Installation du jeu (loader, Java)", &format!("instance {}, minecraft {}", inst.id, inst.minecraft), &e, Stage::Install));
             }
         }
         Ok(())
@@ -198,6 +252,25 @@ impl AppState {
     pub async fn join_close_tunnel(&self) {
         self.backend().join_close_tunnel().await;
         crate::test_hooks::set_guest_tunnel_port(0);
+    }
+
+    /// Invité : « Rejoindre et jouer ». Ouvre le tunnel vers le monde de l'ami puis lance l'instance invitée avec
+    /// connexion automatique à `127.0.0.1:<port du tunnel>`. Le tunnel est refermé à la fin du jeu (ou si le lancement échoue).
+    pub async fn join_play(self: &Arc<Self>, friend_public_key: &str, instance_id: &str) -> Result<(), String> {
+        self.check_friend(friend_public_key)?;
+        if !crate::commands_instances::valid_id(instance_id) {
+            return Err("identifiant d'instance invalide".into());
+        }
+        self.instances.get(instance_id).map_err(|e| user_msg(&e))?;
+        if lock(&self.game).is_some() {
+            return Err("une partie est déjà en cours de préparation ou de jeu".into());
+        }
+        let port = self.join_open_tunnel(friend_public_key).await?;
+        if let Err(e) = self.launch_with(instance_id, Some(("127.0.0.1".to_string(), port))).await {
+            self.join_close_tunnel().await;
+            return Err(e);
+        }
+        Ok(())
     }
 
     fn with_session<R>(&self, f: impl FnOnce(&JoinSession) -> R) -> Result<R, String> {
@@ -257,6 +330,11 @@ pub fn join_cancel(state: State<'_, Arc<AppState>>) -> Result<(), String> {
 #[tauri::command(rename_all = "snake_case")]
 pub async fn join_open_tunnel(state: State<'_, Arc<AppState>>, friend_public_key: String) -> Result<u16, String> {
     state.join_open_tunnel(&friend_public_key).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn join_play(state: State<'_, Arc<AppState>>, friend_public_key: String, instance_id: String) -> Result<(), String> {
+    state.inner().join_play(&friend_public_key, &instance_id).await
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -341,9 +419,34 @@ mod tests {
         assert_eq!(st.test_state_info().guest_tunnel_port, 0);
     }
 
+    #[tokio::test]
+    async fn join_play_refus_avant_tunnel_et_fermeture_si_lancement_echoue() {
+        let dir = tempfile::tempdir().unwrap();
+        let (st, _) = test_state(dir.path());
+        let key = "c".repeat(64);
+        assert!(st.join_play("zz", "x").await.unwrap_err().contains("inconnu"));
+        st.friends
+            .add_friend(&Friend { public_key: key.clone(), name: "Bob".into(), trust: TrustLevel::Ask, added_at: 1 })
+            .unwrap();
+        assert!(st.join_play(&key, "../x").await.unwrap_err().contains("invalide"));
+        assert!(st.join_play(&key, "inconnue").await.is_err());
+        st.set_backend(Arc::new(TunnelBackend));
+        let inst = st
+            .instances
+            .create("Inv", "1.21.1", core_lib::types::LoaderSpec { loader: core_lib::types::Loader::Vanilla, version: String::new() }, 2048)
+            .unwrap();
+        // Pas de profil connecté : le lancement est refusé, le tunnel ouvert est refermé.
+        assert!(st.join_play(&key, &inst.id).await.unwrap_err().contains("connectez-vous"));
+        assert_eq!(st.test_state_info().guest_tunnel_port, 0);
+    }
+
     #[test]
     fn messages_d_echec_reconnaissables() {
-        use super::{failure_message, Stage};
+        use super::{failure_message, technical_details, utc_now, Stage};
+        let d = technical_details("Installation des fichiers", "mods/x.jar", &Error::NotFound("mods/x.jar absent du cache".into()));
+        assert!(d.contains("étape : Installation des fichiers") && d.contains("mods/x.jar") && d.contains("NotFound"), "{d}");
+        let t = utc_now();
+        assert!(t.len() == 23 && t.ends_with("UTC") && t.starts_with("20"), "{t}");
         use core_lib::types::Error;
         let full = Error::Io(std::io::Error::from(std::io::ErrorKind::StorageFull));
         assert!(failure_message(&full, Stage::Receive).contains("disque plein"));

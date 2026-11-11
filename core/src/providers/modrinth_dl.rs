@@ -49,6 +49,25 @@ impl Default for DlOptions {
     }
 }
 
+/// Clients HTTP partagés : réutilisent les connexions (pas de nouveau handshake TLS par fichier).
+fn build_client(follow_redirects: bool) -> reqwest::Client {
+    let mut b = reqwest::Client::builder().connect_timeout(Duration::from_secs(15)).pool_max_idle_per_host(32);
+    if !follow_redirects {
+        b = b.redirect(reqwest::redirect::Policy::none());
+    }
+    b.build().unwrap_or_default()
+}
+
+fn shared_client() -> &'static reqwest::Client {
+    static C: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    C.get_or_init(|| build_client(true))
+}
+
+fn shared_client_no_redirect() -> &'static reqwest::Client {
+    static C: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    C.get_or_init(|| build_client(false))
+}
+
 fn net(e: impl std::fmt::Display) -> Error {
     Error::Network(e.to_string())
 }
@@ -188,7 +207,7 @@ pub async fn fetch_into_store(file: &VersionFile, store_root: &Path, index: &Sto
     }
     let tmp_dir = store_root.join(".tmp");
     tokio::fs::create_dir_all(&tmp_dir).await?;
-    let client = reqwest::Client::new();
+    let client = shared_client().clone();
     let attempts = opts.attempts.max(1);
     let mut last = Error::Network("aucune tentative".into());
     for attempt in 0..attempts {
@@ -198,7 +217,7 @@ pub async fn fetch_into_store(file: &VersionFile, store_root: &Path, index: &Sto
             check_cancel(opts)?;
         }
         let tmp = tmp_dir.join(format!("{}.part", uuid::Uuid::new_v4()));
-        let res = download_once(&client, file, &tmp, opts).await;
+        let res = download_once(&client, &file.url, file.size, &tmp, opts, None).await;
         match res {
             Ok(d) => {
                 let r = finalize(file, store_root, index, &tmp, d);
@@ -232,13 +251,18 @@ struct Digests {
     size: u64,
 }
 
-async fn download_once(client: &reqwest::Client, file: &VersionFile, tmp: &Path, opts: &DlOptions) -> Result<Digests> {
-    let resp = client.get(&file.url).send().await.map_err(net)?;
+async fn download_once(client: &reqwest::Client, url: &str, size_hint: u64, tmp: &Path, opts: &DlOptions, max_bytes: Option<u64>) -> Result<Digests> {
+    let resp = client.get(url).send().await.map_err(net)?;
     let status = resp.status();
     if !status.is_success() {
-        return Err(Error::Network(format!("HTTP {} pour {}", status.as_u16(), file.url)));
+        return Err(Error::Network(format!("HTTP {} pour {}", status.as_u16(), url)));
     }
-    let total = if file.size > 0 { file.size } else { resp.content_length().unwrap_or(0) };
+    if let (Some(max), Some(len)) = (max_bytes, resp.content_length()) {
+        if len > max {
+            return Err(Error::Invalid(format!("fichier trop gros ({len} octets, maximum {max})")));
+        }
+    }
+    let total = if size_hint > 0 { size_hint } else { resp.content_length().unwrap_or(0) };
     let mut out = tokio::fs::File::create(tmp).await?;
     let (mut s1, mut s256, mut s512) = (Sha1::new(), Sha256::new(), Sha512::new());
     let mut size = 0u64;
@@ -251,6 +275,9 @@ async fn download_once(client: &reqwest::Client, file: &VersionFile, tmp: &Path,
         s512.update(&chunk);
         out.write_all(&chunk).await?;
         size += chunk.len() as u64;
+        if max_bytes.is_some_and(|m| size > m) {
+            return Err(Error::Invalid(format!("fichier trop gros (plus de {} octets)", max_bytes.unwrap_or(0))));
+        }
         if let Some(p) = &opts.progress {
             p(size, total);
         }
@@ -289,6 +316,61 @@ fn finalize(file: &VersionFile, store_root: &Path, index: &StoreIndex, tmp: &Pat
     index.insert(&d.sha256, &rel, d.size)?;
     add_aliases(store_root, &alias_keys(file), &d.sha256)?;
     Ok(StoredObject { sha256: d.sha256, rel_path: rel, size: d.size, from_cache: false })
+}
+
+/// Télécharge `url` SANS valeur de hash attendue (ex. CurseForge sans clé API) : calcule les
+/// empreintes pendant le flux et place l'objet dans le magasin sous son sha256. Aucune
+/// vérification d'intégrité contre une référence : l'appelant doit avoir validé l'URL (HTTPS, hôte).
+/// Le client ne suit aucune redirection. `max_bytes` borne la taille du fichier.
+pub async fn fetch_into_store_unverified(url: &str, max_bytes: u64, store_root: &Path, index: &StoreIndex, opts: &DlOptions) -> Result<StoredObject> {
+    check_cancel(opts)?;
+    let tmp_dir = store_root.join(".tmp");
+    tokio::fs::create_dir_all(&tmp_dir).await?;
+    let client = shared_client_no_redirect().clone();
+    let attempts = opts.attempts.max(1);
+    let mut last = Error::Network("aucune tentative".into());
+    for attempt in 0..attempts {
+        check_cancel(opts)?;
+        if attempt > 0 {
+            tokio::time::sleep(opts.retry_delay).await;
+            check_cancel(opts)?;
+        }
+        let tmp = tmp_dir.join(format!("{}.part", uuid::Uuid::new_v4()));
+        let res = download_once(&client, url, 0, &tmp, opts, Some(max_bytes)).await;
+        match res {
+            Ok(d) => {
+                let r = place_object(store_root, index, &tmp, &d);
+                let _ = tokio::fs::remove_file(&tmp).await;
+                return r;
+            }
+            Err(e) => {
+                let _ = tokio::fs::remove_file(&tmp).await;
+                match e {
+                    Error::Network(ref m) if !m.starts_with("HTTP 4") => last = e,
+                    other => return Err(other),
+                }
+            }
+        }
+    }
+    Err(last)
+}
+
+/// Rename atomique vers `object_rel_path(sha256)` + inscription dans l'index (sans alias).
+fn place_object(store_root: &Path, index: &StoreIndex, tmp: &Path, d: &Digests) -> Result<StoredObject> {
+    let rel = object_rel_path(&d.sha256)?;
+    let dest = store_root.join(&rel);
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if !dest.exists() {
+        if let Err(e) = std::fs::rename(tmp, &dest) {
+            if !dest.exists() {
+                return Err(e.into());
+            }
+        }
+    }
+    index.insert(&d.sha256, &rel, d.size)?;
+    Ok(StoredObject { sha256: d.sha256.clone(), rel_path: rel, size: d.size, from_cache: false })
 }
 
 // ---------- Installation ----------
@@ -512,5 +594,22 @@ mod tests {
         let (a, b) = tokio::join!(fetch_into_store(&f, dir.path(), &idx, &o), fetch_into_store(&f, dir.path(), &idx, &o));
         assert_eq!(a.unwrap().sha256, b.unwrap().sha256);
         assert_eq!(cache_files(dir.path()), 1);
+    }
+
+    #[tokio::test]
+    async fn unverified_download_stores_by_sha256_and_caps_size() {
+        let server = MockServer::start().await;
+        let content = b"sans hash".to_vec();
+        Mock::given(method("GET")).and(path("/f.jar")).respond_with(ResponseTemplate::new(200).set_body_bytes(content.clone())).mount(&server).await;
+        let (dir, idx) = setup();
+        let url = format!("{}/f.jar", server.uri());
+        let o = fetch_into_store_unverified(&url, 1024, dir.path(), &idx, &opts()).await.unwrap();
+        assert_eq!(o.sha256, hex::encode(Sha256::digest(&content)));
+        assert_eq!(std::fs::read(dir.path().join(&o.rel_path)).unwrap(), content);
+        assert!(idx.contains(&o.sha256).unwrap());
+        let (dir2, idx2) = setup();
+        let err = fetch_into_store_unverified(&url, 3, dir2.path(), &idx2, &opts()).await.unwrap_err();
+        assert!(matches!(err, Error::Invalid(_)), "{err:?}");
+        assert_eq!(cache_files(dir2.path()), 0);
     }
 }

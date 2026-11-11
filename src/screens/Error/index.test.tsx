@@ -15,7 +15,7 @@ describe("écran Erreur", () => {
   it.each(ERROR_STATES)("état %s : titre, rôle, focus", async (id) => {
     const { container } = show(`#/error?state=${id}`);
     expect(container.querySelector(`[data-state="${id}"]`)).toBeTruthy();
-    const h = await screen.findByRole("heading", { level: 2, name: STATES[id].title });
+    const h = await screen.findByRole("heading", { level: 1, name: STATES[id].title });
     await waitFor(() => expect(document.activeElement).toBe(h));
     expect(screen.getByRole(STATES[id].wait ? "status" : "alert")).toBeTruthy();
   });
@@ -61,11 +61,25 @@ describe("écran Erreur", () => {
     const base = createFakeServices({ tickMs: 0 });
     const start = vi.fn(async () => {});
     show("#/error?state=bad-hash&friend=pk-1&name=Léa&file=a.jar&others=2", { ...base, joinStart: start });
-    expect(screen.getByRole("heading", { level: 2 }).textContent).toContain("Léa");
+    expect(document.getElementById("err-title")?.textContent).toContain("Léa");
     expect(screen.getByText("a.jar")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Réessayer" }));
     await waitFor(() => expect(window.location.hash).toBe("#/install?friend=pk-1"));
     expect(start).toHaveBeenCalledWith("pk-1");
+  });
+
+  it("lancement échoué : détail technique copiable, Réessayer relance l'instance", async () => {
+    const base = createFakeServices({ tickMs: 0 });
+    const launch = vi.fn(async () => {});
+    show("#/error?state=launch-failed&instance=i-1&detail=Code%20de%20sortie%20%3A%201", { ...base, instancesLaunch: launch });
+    expect(screen.getByRole("heading", { level: 1, name: "Minecraft s'est arrêté avant de démarrer" })).toBeTruthy();
+    expect(screen.getByText("Code de sortie : 1")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Copier le détail" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /Détail technique/ }));
+    expect(screen.queryByText("Code de sortie : 1")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Réessayer" }));
+    await waitFor(() => expect(launch).toHaveBeenCalledWith("i-1"));
+    await waitFor(() => expect(window.location.hash).toBe("#/main"));
   });
 
   it("sans données : libellés neutres, aucune valeur inventée", () => {

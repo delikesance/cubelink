@@ -39,12 +39,12 @@ function killTree(pid: number | undefined) {
 }
 
 /** Filet de securite : tue les processus msedgewebview2 restants utilisant ce dossier de profil. */
-function killWebViewsOf(userDataDir: string) {
-  if (!isWin) return;
+function killWebViewsOf(userDataDirs: string[]) {
+  if (!isWin || userDataDirs.length === 0) return;
   try {
-    const needle = userDataDir.replace(/'/g, "''");
+    const cond = userDataDirs.map((d) => `$_.CommandLine -like '*${d.replace(/'/g, "''")}*'`).join(' -or ');
     execFileSync('powershell', ['-NoProfile', '-Command',
-      `Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe'" | Where-Object { $_.CommandLine -like '*${needle}*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`],
+      `Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe'" | Where-Object { ${cond} } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`],
       { stdio: 'ignore', timeout: 20_000 });
   } catch { /* meilleur effort */ }
 }
@@ -79,7 +79,8 @@ async function startServer(name: string, script: string): Promise<FakeServer> {
 export interface Servers { auth: FakeServer; mojang: FakeServer; modrinth: FakeServer }
 
 // ---------- application ----------
-export interface AppOptions { relayMode?: string; env?: Record<string, string> }
+/** `settings` : champs de Settings ecrits dans settings.json AVANT le demarrage (relay_only, discovery... sont lus au demarrage du backend). */
+export interface AppOptions { relayMode?: string; env?: Record<string, string>; settings?: Record<string, unknown> }
 
 export interface App {
   label: 'A' | 'B';
@@ -102,7 +103,7 @@ async function waitCdp(port: number, proc: ChildProcess, log: string[]): Promise
       const r = await fetch(`http://127.0.0.1:${port}/json/version`);
       if (r.ok) return;
     } catch { /* pas encore */ }
-    await sleep(250);
+    await sleep(100);
   }
   throw new Error(`CDP indisponible sur ${port} apres 60 s :\n${log.join('')}`);
 }
@@ -112,6 +113,10 @@ async function startApp(label: 'A' | 'B', bin: string, servers: Servers, tmpRoot
   const userDataDir = path.join(tmpRoot, `webview-${label}`);
   fs.mkdirSync(dataDir, { recursive: true });
   fs.mkdirSync(userDataDir, { recursive: true });
+  if (opts.settings) {
+    const base = { language: 'fr', default_ram_mb: 4096, java_path: null, trust_default: 'ask', allow_relay: true, close_on_launch: false, relay_only: false, share_mods: true, discovery: true };
+    fs.writeFileSync(path.join(dataDir, 'settings.json'), JSON.stringify({ ...base, ...opts.settings }));
+  }
   const cdpPort = await freePort();
   const env: Record<string, string> = {
     ...(process.env as Record<string, string>),
@@ -145,7 +150,7 @@ async function startApp(label: 'A' | 'B', bin: string, servers: Servers, tmpRoot
   let page: Page | undefined;
   while (!page && Date.now() < deadline) {
     page = browser.contexts().flatMap((c) => c.pages()).find((p) => !p.url().startsWith('devtools:'));
-    if (!page) await sleep(250);
+    if (!page) await sleep(100);
   }
   if (!page) throw new Error(`aucune page WebView2 pour ${label}`);
   await page.waitForLoadState('domcontentloaded');
@@ -242,8 +247,11 @@ export const test = base.extend<{ appOptions: AppOptions; world: World; appA: Ap
   appOptions: [{}, { option: true }],
 
   binary: [async ({}, use) => {
-    const { binaryPath, build } = await import(pathToFileURL(path.join(HERE, 'build.mjs')).href);
-    const bin: string = process.env.CUBELINK_E2E_BUILD === '1' || !fs.existsSync(binaryPath({})) ? build({}) : binaryPath({});
+    let bin = process.env.CUBELINK_E2E_BIN; // construit une seule fois par e2e/harness/global-setup.ts
+    if (!bin) {
+      const { binaryPath, build } = await import(pathToFileURL(path.join(HERE, 'build.mjs')).href);
+      bin = process.env.CUBELINK_E2E_BUILD === '1' || !fs.existsSync(binaryPath({})) ? build({}) : binaryPath({});
+    }
     await use(bin);
   }, { scope: 'worker', timeout: 900_000 }],
 
@@ -260,8 +268,11 @@ export const test = base.extend<{ appOptions: AppOptions; world: World; appA: Ap
         startServer('modrinth', 'modrinth/server.mjs').then(track),
       ]);
       const servers = { auth, mojang, modrinth };
-      await startApp('A', binary, servers, tmpRoot, appOptions, apps, browsers);
-      await startApp('B', binary, servers, tmpRoot, appOptions, apps, browsers);
+      await Promise.all([
+        startApp('A', binary, servers, tmpRoot, appOptions, apps, browsers),
+        startApp('B', binary, servers, tmpRoot, appOptions, apps, browsers),
+      ]);
+      apps.sort((x, y) => x.label.localeCompare(y.label)); // l'ordre d'enregistrement n'est plus garanti
       await use({ appA: apps[0], appB: apps[1], servers, binary });
     } finally {
       if (testInfo.status !== testInfo.expectedStatus || apps.some((a) => !a.page)) {
@@ -275,10 +286,9 @@ export const test = base.extend<{ appOptions: AppOptions; world: World; appA: Ap
         for (const p of a.extraProcs) killTree(p.pid);
         killTree(a.proc.pid);
       }
-      for (const a of apps) killWebViewsOf(a.userDataDir);
+      killWebViewsOf(apps.map((a) => a.userDataDir));
       for (const s of started) killTree(s.proc.pid);
-      await sleep(500);
-      rmDir(tmpRoot);
+      rmDir(tmpRoot); // maxRetries gere les verrous residuels : pas de sleep fixe
     }
   },
   appA: async ({ world }, use) => { await use(world.appA); },

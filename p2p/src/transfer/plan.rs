@@ -24,6 +24,32 @@ impl CacheLookup for StoreCache<'_> {
     }
 }
 
+/// Comme `StoreCache`, mais vérifie aussi que l'objet EXISTE sur le disque avec la bonne taille. Un objet que l'index
+/// déclare connu alors que son fichier a disparu (suppression d'un fichier invalide, nettoyage manuel, antivirus)
+/// est purgé de l'index et compté « à recevoir » : sinon l'installation échouerait ensuite (« absent du cache »).
+pub struct DiskCache<'a> {
+    pub index: &'a StoreIndex,
+    pub root: &'a std::path::Path,
+}
+
+impl CacheLookup for DiskCache<'_> {
+    fn has(&self, sha256: &str, size: u64) -> bool {
+        let Ok(Some(e)) = self.index.get(sha256) else { return false };
+        let on_disk = core_lib::store::index::object_rel_path(sha256)
+            .ok()
+            .and_then(|rel| std::fs::metadata(self.root.join(rel)).ok())
+            .map(|m| m.is_file() && m.len() == size);
+        if e.size == size && on_disk == Some(true) {
+            return true;
+        }
+        if e.size == size {
+            // index OK mais fichier absent ou de taille incorrecte : on oublie l'entrée pour le re-recevoir
+            let _ = self.index.remove(sha256);
+        }
+        false
+    }
+}
+
 /// Options de calcul.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlanOptions {
@@ -112,6 +138,55 @@ pub fn to_join_summary(plan: &Plan) -> (usize, usize, u64) {
 mod tests {
     use super::*;
     use core_lib::types::{Loader, LoaderSpec};
+
+    #[test]
+    fn objet_en_index_mais_absent_du_disque_est_redemande_puis_installable() {
+        use core_lib::guest::{create_guest_instance, install_manifest_files};
+        use core_lib::instance::InstanceStore;
+        use core_lib::store::index::object_rel_path;
+        use sha2::{Digest, Sha256};
+
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("store");
+        std::fs::create_dir_all(&root).unwrap();
+        let index = StoreIndex::open(t.path().join("index.db")).unwrap();
+        let put = |data: &[u8]| {
+            let sha = hex::encode(Sha256::digest(data));
+            let rel = object_rel_path(&sha).unwrap();
+            std::fs::create_dir_all(root.join(&rel).parent().unwrap()).unwrap();
+            std::fs::write(root.join(&rel), data).unwrap();
+            index.insert(&sha, &rel, data.len() as u64).unwrap();
+            ManifestFile { path: String::new(), size: data.len() as u64, sha256: sha, sha1: None }
+        };
+        let (d1, d2) = (b"premier fichier".as_slice(), b"second fichier, un peu plus long".as_slice());
+        let f1 = ManifestFile { path: "config/a.json".into(), ..put(d1) };
+        let f2 = ManifestFile { path: "config/b.json".into(), ..put(d2) };
+        let m = manifest(vec![f1.clone(), f2.clone()]);
+
+        // l'objet 2 disparaît du disque, l'index le déclare toujours connu
+        std::fs::remove_file(root.join(object_rel_path(&f2.sha256).unwrap())).unwrap();
+        assert!(StoreCache(&index).has(&f2.sha256, f2.size), "l'ancien comportement se fie à l'index seul");
+        let plan = compute_plan(&m, &DiskCache { index: &index, root: &root }).unwrap();
+        assert_eq!((plan.cached_count, plan.to_receive_count), (1, 1));
+        assert_eq!(plan.to_receive[0].path, "config/b.json");
+        assert!(index.get(&f2.sha256).unwrap().is_none(), "l'entrée orpheline est purgée de l'index");
+        // objet de taille incorrecte : même traitement
+        let rel1 = object_rel_path(&f1.sha256).unwrap();
+        std::fs::write(root.join(&rel1), b"tronque").unwrap();
+        let plan = compute_plan(&m, &DiskCache { index: &index, root: &root }).unwrap();
+        assert_eq!(plan.to_receive_count, 2);
+
+        // réception simulée des deux, puis l'installation réussit
+        put(d1);
+        put(d2);
+        let plan = compute_plan(&m, &DiskCache { index: &index, root: &root }).unwrap();
+        assert_eq!(plan.to_receive_count, 0);
+        let m = Manifest { files: vec![f1, f2], ..m };
+        let store = InstanceStore::new(t.path().join("instances"));
+        let g = create_guest_instance(&store, &m, "Hôte", &root, &index).unwrap();
+        install_manifest_files(&store, &g, &m, &root, &index).unwrap();
+        assert!(store.game_dir(&g.id).unwrap().join("config/b.json").is_file());
+    }
 
     #[derive(Default)]
     struct FakeCache(HashSet<(String, u64)>);

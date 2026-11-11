@@ -7,7 +7,7 @@ use serde::Deserialize;
 use crate::types::{Error, Result};
 
 pub const DEFAULT_BASE_URL: &str = "https://login.microsoftonline.com/consumers/oauth2/v2.0";
-pub const SCOPE: &str = "XboxLive.signin offline_access";
+pub const SCOPE: &str = "XboxLive.signin XboxLive.offline_access openid";
 
 /// Réponse de `/devicecode` : à afficher à l'utilisateur.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -96,6 +96,33 @@ impl DeviceCodeClient {
         serde_json::from_str(&text).map_err(|e| Error::Auth(format!("réponse devicecode invalide : {e}")))
     }
 
+    /// Renouvelle le jeton Microsoft avec le `refresh_token` stocké (même client et même scope que le flux d'appareil).
+    /// `Error::Network` : échec transitoire (réseau, serveur indisponible) ; `Error::Auth` : jeton révoqué ou expiré,
+    /// il faut se reconnecter. Le `refresh_token` renvoyé peut être vide : l'appelant garde alors l'ancien.
+    pub async fn refresh(&self, refresh_token: &str) -> Result<MsToken> {
+        let (status, text) = self
+            .post_form(
+                "/token",
+                &[
+                    ("grant_type", "refresh_token"),
+                    ("client_id", &self.client_id),
+                    ("refresh_token", refresh_token),
+                    ("scope", SCOPE),
+                ],
+            )
+            .await?;
+        if status == 200 {
+            return serde_json::from_str(&text).map_err(|_| Error::Auth("réponse de renouvellement invalide".into()));
+        }
+        match serde_json::from_str::<OAuthError>(&text) {
+            Ok(e) if matches!(e.error.as_str(), "invalid_grant" | "interaction_required" | "consent_required" | "unauthorized_client" | "invalid_client") => {
+                Err(Error::Auth("session Microsoft expirée ou révoquée : reconnectez-vous".into()))
+            }
+            _ if status >= 500 || status == 429 => Err(Error::Network(format!("renouvellement de la session : service indisponible (HTTP {status})"))),
+            _ => Err(Error::Auth(format!("renouvellement de la session refusé (HTTP {status})"))),
+        }
+    }
+
     /// Interroge `/token` jusqu'à validation, refus ou expiration.
     pub async fn poll(&self, code: &DeviceCode) -> Result<MsToken> {
         let mut interval = code.interval.max(1);
@@ -172,6 +199,39 @@ mod tests {
 
     fn ok_body() -> serde_json::Value {
         json!({"access_token":"at","refresh_token":"rt","expires_in":3600,"token_type":"Bearer"})
+    }
+
+    #[tokio::test]
+    async fn refresh_ok_envoie_le_bon_formulaire() {
+        use wiremock::matchers::body_string_contains;
+        let s = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .and(body_string_contains("grant_type=refresh_token"))
+            .and(body_string_contains("refresh_token=old-rt"))
+            .and(body_string_contains("client_id=cid"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(ok_body()))
+            .mount(&s)
+            .await;
+        let t = client(&s).refresh("old-rt").await.unwrap();
+        assert_eq!((t.access_token.as_str(), t.refresh_token.as_str()), ("at", "rt"));
+    }
+
+    #[tokio::test]
+    async fn refresh_revoque_est_une_erreur_d_authentification_sans_secret() {
+        let s = MockServer::start().await;
+        mount_token(&s, json!({"error":"invalid_grant","error_description":"AADSTS70008 expired old-rt-secret"}), 400, None).await;
+        let e = client(&s).refresh("old-rt-secret").await.unwrap_err();
+        assert!(matches!(e, Error::Auth(_)), "{e:?}");
+        let m = e.to_string();
+        assert!(m.contains("reconnectez-vous") && !m.contains("secret"), "{m}");
+    }
+
+    #[tokio::test]
+    async fn refresh_serveur_indisponible_est_transitoire() {
+        let s = MockServer::start().await;
+        mount_token(&s, json!({"error":"temporarily_unavailable"}), 503, None).await;
+        assert!(matches!(client(&s).refresh("rt").await.unwrap_err(), Error::Network(_)));
     }
 
     #[tokio::test]

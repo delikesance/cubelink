@@ -5,11 +5,11 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use core_lib::instance::{MAX_RAM_MB, MIN_RAM_MB};
-use core_lib::launch_args::{build_command, LaunchSpec};
+use core_lib::launch_args::{build_command, LaunchSpec, LaunchVersion};
 use core_lib::launch_run::{self, LaunchEvent, LaunchPhase, LaunchStateEvent};
 use core_lib::mojang::libraries::{Arch, Os};
 use core_lib::mojang::versions::release_ids;
-use core_lib::mrpack::{self, ImportOptions};
+use core_lib::mrpack::{self, ImportOptions, PackKind, PlainSpec};
 use core_lib::types::{Instance, Loader, LoaderSpec, Profile};
 use tauri::State;
 
@@ -45,17 +45,20 @@ pub fn validate_create(name: &str, minecraft: &str, loader: &LoaderSpec, ram_mb:
     Ok(())
 }
 
-/// Le fichier doit exister et porter l'extension `.mrpack`.
+/// Le fichier doit exister et porter l'extension `.mrpack` ou `.zip`.
 pub fn validate_mrpack_path(path: &str) -> Result<PathBuf, String> {
     let p = Path::new(path);
-    let ext_ok = p.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("mrpack"));
+    let ext_ok = p
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("mrpack") || e.eq_ignore_ascii_case("zip"));
     if !ext_ok {
-        return Err("le fichier doit avoir l'extension .mrpack".into());
+        return Err("le fichier doit avoir l'extension .mrpack ou .zip".into());
     }
     if !p.is_file() {
-        return Err("le fichier .mrpack est introuvable".into());
+        return Err("le fichier du modpack est introuvable".into());
     }
-    p.canonicalize().map_err(|_| "le fichier .mrpack est illisible".to_string())
+    p.canonicalize().map_err(|_| "le fichier du modpack est illisible".to_string())
 }
 
 /// Traduit un événement de lancement en état du contrat.
@@ -70,9 +73,171 @@ pub fn state_for(id: &str, ev: &LaunchEvent) -> Option<LaunchStateEvent> {
 }
 
 /// Libère `AppState.game` à la fin de la tâche de lancement.
+/// Agent qui ouvre le monde solo au réseau local (voir `core/resources/lan-agent`) : actif pour les instances
+/// `Own` si `Settings.lan_auto`. Jar : `CUBELINK_LAN_AGENT` sinon la ressource Tauri. En mode test, seulement si
+/// `CUBELINK_LAN_AGENT` est défini (les e2e ne chargent pas l'agent).
+///
+/// Invité (`join` = hôte:port du tunnel) : le même jar est chargé en mode `join=` (aucune ouverture de monde) ; il ne
+/// fait que relancer la connexion si le `--quickPlayMultiplayer` du jeu n'est pas parti (voir `LanAgent.joinLoop`).
+fn lan_agent_args(st: &AppState, own: bool, join: Option<&(String, u16)>) -> Option<String> {
+    let env = std::env::var_os("CUBELINK_LAN_AGENT").map(std::path::PathBuf::from);
+    if crate::test_hooks::hooks().test_mode && env.is_none() {
+        return None;
+    }
+    if st.lan_agent_off.load(std::sync::atomic::Ordering::SeqCst) || (join.is_none() && (!own || !st.settings_get().lan_auto)) {
+        return None;
+    }
+    let p = env.or_else(|| lock(&st.lan_agent).clone())?;
+    // La JVM refuse un `-javaagent` au format Windows étendu (préfixe verbatim, renvoyé par le résolveur de
+    // ressources Tauri) : « FATAL ERROR … appending to system class path failed ». On passe un chemin classique.
+    let p = plain_windows_path(&p);
+    p.is_file().then(|| {
+        let a = javaagent_arg(&p, None);
+        if let Some((host, port)) = join {
+            return with_join(a, host, *port);
+        }
+        let flag = std::env::var("CUBELINK_LAN_NOAUTH").ok();
+        with_test_noauth(a, noauth_enabled(crate::test_hooks::hooks().test_mode, flag.as_deref()))
+    })
+}
+
+/// TEST UNIQUEMENT : l'option `noauth` de l'agent (serveur LAN sans verification de session) n'est possible
+/// qu'en mode test (`CUBELINK_TEST_MODE=1`) ET avec `CUBELINK_LAN_NOAUTH=1`. Jamais un réglage utilisateur.
+pub(crate) fn noauth_enabled(test_mode: bool, env: Option<&str>) -> bool {
+    test_mode && env == Some("1")
+}
+
+/// Ajoute la table de noms `map=` à l'argument (`=` si c'est la première option, `,` sinon).
+pub(crate) fn with_map(arg: String, map: &std::path::Path) -> String {
+    let sep = if arg.contains('=') { "," } else { "=" };
+    format!("{arg}{sep}map={}", plain_windows_path(map).display())
+}
+
+/// Option `join=<hôte>:<port>` de l'agent (mode invité). L'hôte est le tunnel local : seuls `[A-Za-z0-9.-]` passent.
+pub(crate) fn with_join(arg: String, host: &str, port: u16) -> String {
+    let host: String = host.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '-').collect();
+    format!("{arg}=join={host}:{port}")
+}
+
+
+pub(crate) fn with_test_noauth(arg: String, enabled: bool) -> String {
+    if !enabled {
+        return arg;
+    }
+    match arg.find('=') {
+        Some(i) => format!("{}noauth,{}", &arg[..=i], &arg[i + 1..]),
+        None => format!("{arg}=noauth"),
+    }
+}
+
+/// Argument JVM exact produit en production : `-javaagent:<jar>[=map=<table>]`, chemins sans préfixe verbatim.
+pub(crate) fn javaagent_arg(jar: &std::path::Path, map: Option<&std::path::Path>) -> String {
+    let jar = ascii_safe_path(&plain_windows_path(jar));
+    let mut a = format!("-javaagent:{}", jar.display());
+    if let Some(m) = map {
+        a.push_str(&format!("=map={}", ascii_safe_path(&plain_windows_path(m)).display()));
+    }
+    a
+}
+
+/// La JVM Windows lit l'option `-javaagent` dans la page de code ANSI : un chemin avec des caractères hors de cette
+/// page (CJK, cyrillique sur une Windows occidentale…) donne « Error opening zip file or JAR manifest missing ».
+/// Un chemin non ASCII est donc copié sous un dossier ASCII (temp, `%PUBLIC%`, `%ProgramData%`) ; sinon renvoyé tel quel.
+pub(crate) fn ascii_safe_path(p: &std::path::Path) -> std::path::PathBuf {
+    if p.to_string_lossy().is_ascii() {
+        return p.to_path_buf();
+    }
+    let Some(name) = p.file_name().map(|n| n.to_string_lossy().into_owned()).filter(|n| n.is_ascii()) else { return p.to_path_buf() };
+    let mut bases = vec![std::env::temp_dir()];
+    bases.extend(["PUBLIC", "ProgramData"].iter().filter_map(|k| std::env::var_os(k).map(std::path::PathBuf::from)));
+    for b in bases {
+        let dir = b.join("cubelink-lan");
+        if !dir.to_string_lossy().is_ascii() {
+            continue;
+        }
+        let dest = dir.join(&name);
+        let same = match (std::fs::metadata(p), std::fs::metadata(&dest)) {
+            (Ok(a), Ok(b)) => a.len() == b.len(),
+            _ => false,
+        };
+        if same || (std::fs::create_dir_all(&dir).is_ok() && std::fs::copy(p, &dest).is_ok()) {
+            return dest;
+        }
+    }
+    p.to_path_buf()
+}
+
+/// Retire le préfixe Windows étendu (`\\?\` ou `\\?\UNC\`) d'un chemin ; sans effet sur les autres chemins.
+pub(crate) fn plain_windows_path(p: &std::path::Path) -> std::path::PathBuf {
+    let s = p.to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        std::path::PathBuf::from(format!(r"\\{rest}"))
+    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+        std::path::PathBuf::from(rest)
+    } else {
+        p.to_path_buf()
+    }
+}
+
+/// Fichier de correspondance de noms pour l'agent LAN (`core_lib::lan_map`), ou `None` quand les noms Mojang
+/// suffisent (NeoForge, Minecraft 26.x) ou ne sont pas gérés (Forge : non vérifié). Toute erreur est journalisée
+/// et rend `None` : l'agent signale alors lui-même dans `latest.log` qu'il ne trouve pas les noms.
+async fn lan_map_path(st: &AppState, inst: &Instance, version: &LaunchVersion, libs_dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    use core_lib::lan_map::{ensure_lanmap, Runtime};
+    let (downloads, libs) = match version {
+        LaunchVersion::Vanilla(v) => (&v.downloads, &v.libraries),
+        LaunchVersion::Merged(m) => (&m.downloads, &m.libraries),
+    };
+    // Jeu non obfusqué (26.x) : pas de mappings Mojang, les noms Mojang directs suffisent, aucune traduction.
+    downloads.client_mappings.as_ref()?;
+    let (runtime, inter) = match inst.loader.loader {
+        Loader::Vanilla => (Runtime::Official, None),
+        Loader::Fabric | Loader::Quilt => {
+            let jar = libs.iter().filter_map(|l| l.get("name")?.as_str()).find(|n| n.starts_with("net.fabricmc:intermediary:"))
+                .and_then(|n| core_lib::mojang::libraries::maven_path(n).ok())
+                .map(|rel| libs_dir.join(rel));
+            match jar {
+                Some(j) if j.is_file() => (Runtime::Intermediary, Some(j)),
+                _ => {
+                    eprintln!("[Cubelink] LAN: jar intermediary introuvable, noms Fabric non traduits");
+                    return None;
+                }
+            }
+        }
+        Loader::NeoForge | Loader::Forge => return None,
+    };
+    let mappings = downloads.client_mappings.as_ref()?; // absent : jeu non obfusqué (26.x)
+    let dir = st.paths.root.join("lanmap");
+    match ensure_lanmap(&dir, &reqwest::Client::new(), &inst.minecraft, runtime, mappings, inter.as_deref()).await {
+        Ok(p) => Some(p),
+        Err(e) => {
+            eprintln!("[Cubelink] LAN: correspondance de noms indisponible ({e}), l'ouverture auto peut échouer");
+            None
+        }
+    }
+}
+
+/// Une JVM qui s'arrête en moins de ce délai avec un message d'agent est attribuée à l'agent.
+const AGENT_CRASH_WINDOW: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Ligne de sortie typique d'un échec de chargement de `-javaagent` (erreur native de la JVM).
+pub(crate) fn agent_crash_marker(line: &str) -> bool {
+    let l = line.to_ascii_lowercase();
+    l.contains("processing of -javaagent failed")
+        || l.contains("agent library failed agent_onload")
+        || l.contains("error opening zip file or jar manifest missing")
+        || (l.contains("unable to add") && l.contains("system class path"))
+        || (l.contains("-javaagent") && (l.contains("error") || l.contains("failed")))
+}
+
+fn is_failure(ev: &LaunchEvent) -> bool {
+    matches!(ev, LaunchEvent::Failed { .. }) || matches!(ev, LaunchEvent::Exited { code } if *code != 0)
+}
+
 struct GameGuard(Arc<AppState>);
 impl Drop for GameGuard {
     fn drop(&mut self) {
+        *lock(&self.0.game_handle) = None;
         *lock(&self.0.game) = None;
     }
 }
@@ -98,7 +263,31 @@ impl AppState {
         }
     }
 
-    pub async fn instances_import_mrpack(&self, path: &str) -> Result<Instance, String> {
+    /// Importe un modpack : `.mrpack` (Modrinth), zip CurseForge (`manifest.json`, sans clé API ; les mods introuvables sont signalés par `import://warning`) ou
+    /// zip générique (contenu d'instance brut, avec nom / version de Minecraft / loader choisis par l'utilisateur).
+    pub async fn instances_import_mrpack(
+        &self,
+        path: &str,
+        name: Option<String>,
+        minecraft: Option<String>,
+        loader: Option<LoaderSpec>,
+    ) -> Result<Instance, String> {
+        let (inst, missing) = self.import_pack_file(path, name, minecraft, loader, None).await?;
+        if !missing.is_empty() {
+            self.emit_event("import://warning", &serde_json::json!({ "missing": missing }));
+        }
+        Ok(inst)
+    }
+
+    /// Cœur de l'import : renvoie l'instance et les mods CurseForge introuvables (sans émettre d'événement).
+    pub(crate) async fn import_pack_file(
+        &self,
+        path: &str,
+        name: Option<String>,
+        minecraft: Option<String>,
+        loader: Option<LoaderSpec>,
+        progress: Option<core_lib::mrpack::FilesProgress>,
+    ) -> Result<(Instance, Vec<String>), String> {
         let file = validate_mrpack_path(path)?;
         let mut opts = ImportOptions { ram_mb: self.settings_get().default_ram_mb, ..ImportOptions::default() };
         if crate::test_hooks::hooks().test_mode {
@@ -106,18 +295,55 @@ impl AppState {
             opts.allowed_hosts.extend(["127.0.0.1".to_string(), "localhost".to_string()]);
             opts.allow_http = true;
         }
-        // Le futur d'`import` n'est pas prouvé `Send` par rustc : on l'exécute sur un thread dédié.
+        let kind = {
+            let f = file.clone();
+            tokio::task::spawn_blocking(move || mrpack::detect(&f))
+                .await
+                .map_err(|_| "import interrompu".to_string())?
+                .map_err(|e| user_msg(&e))?
+        };
         let (instances, index, store_root) = (self.instances.clone(), self.store.clone(), self.paths.store.clone());
+        let cancel = Arc::new(AtomicBool::new(false));
+        // Les futurs d'import ne sont pas prouvés `Send` par rustc : on les exécute sur un thread dédié.
         let handle = tokio::runtime::Handle::current();
-        let inst = tokio::task::spawn_blocking(move || {
-            handle.block_on(mrpack::import(&file, &instances, &store_root, &index, &opts, None, Arc::new(AtomicBool::new(false))))
-        })
-        .await
-        .map_err(|_| "import interrompu".to_string())?
-        .map_err(|e| user_msg(&e))?;
+        let mut missing: Vec<String> = Vec::new();
+        let result = match kind {
+            PackKind::Modrinth => tokio::task::spawn_blocking(move || {
+                handle.block_on(mrpack::import(&file, &instances, &store_root, &index, &opts, progress, cancel))
+            })
+            .await,
+            PackKind::CurseForge => {
+                let r = tokio::task::spawn_blocking(move || {
+                    let cf = crate::commands_browse::cf_resolver();
+                    handle.block_on(mrpack::import_curseforge(&file, &cf, &instances, &store_root, &index, &opts, progress, cancel))
+                })
+                .await;
+                r.map(|res| {
+                    res.map(|c| {
+                        missing = c.missing;
+                        c.instance
+                    })
+                })
+            }
+            PackKind::Plain => {
+                let (Some(minecraft), Some(loader)) = (minecraft, loader) else {
+                    return Err("ce zip ne contient pas de métadonnées : choisis la version de Minecraft et le loader".into());
+                };
+                let default_name = file.file_stem().and_then(|s| s.to_str()).unwrap_or("Modpack").to_string();
+                let name = name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).unwrap_or(default_name);
+                validate_create(&name, &minecraft, &loader, opts.ram_mb)?;
+                let version = resolve_loader_version(&minecraft, &loader).await.map_err(|e| user_msg(&e))?;
+                let spec = PlainSpec { name, minecraft, loader: LoaderSpec { loader: loader.loader, version } };
+                tokio::task::spawn_blocking(move || {
+                    handle.block_on(mrpack::import_plain(&file, &spec, &instances, &store_root, &index, &opts, cancel))
+                })
+                .await
+            }
+        };
+        let inst = result.map_err(|_| "import interrompu".to_string())?.map_err(|e| user_msg(&e))?;
         let noop: Progress = Arc::new(|_| {});
         match ensure_game(&self.paths, &inst, self.settings_get().java_path, noop).await {
-            Ok(_) => Ok(inst),
+            Ok(_) => Ok((inst, missing)),
             Err(e) => {
                 let _ = self.instances.delete(&inst.id);
                 Err(user_msg(&e))
@@ -132,13 +358,18 @@ impl AppState {
 
     /// Vérifications synchrones puis tâche de fond ; la progression passe par `launch://state`.
     pub async fn instances_launch(self: &Arc<Self>, id: &str) -> Result<(), String> {
+        self.launch_with(id, None).await
+    }
+
+    /// Lance l'instance ; `join` : (hôte, port) à rejoindre automatiquement (tunnel invité, refermé à la fin du jeu).
+    pub(crate) async fn launch_with(self: &Arc<Self>, id: &str, join: Option<(String, u16)>) -> Result<(), String> {
         if !valid_id(id) {
             return Err("identifiant d'instance invalide".into());
         }
         let inst = self.instances.get(id).map_err(|e| user_msg(&e))?;
-        let profile = self.auth_status().ok_or("connectez-vous avant de lancer le jeu")?;
+        let profile = self.auth_status_refresh().await.ok_or("connectez-vous avant de lancer le jeu")?;
         let token = match &profile {
-            Profile::Online { .. } => Some(self.online_token()?),
+            Profile::Online { .. } => Some(self.online_token().await?),
             Profile::Offline { .. } => None,
         };
         {
@@ -152,7 +383,11 @@ impl AppState {
         // Runtime de Tauri (et non `tokio::spawn`) : valable même appelée hors d'un runtime tokio.
         tauri::async_runtime::spawn(async move {
             let _guard = GameGuard(me.clone());
-            me.run_game(inst, profile, token).await;
+            let joined = join.is_some();
+            me.run_game(inst, profile, token, join).await;
+            if joined {
+                me.join_close_tunnel().await;
+            }
         });
         Ok(())
     }
@@ -161,13 +396,26 @@ impl AppState {
         self.emit_event("launch://state", &LaunchStateEvent { id: id.to_string(), state, message });
     }
 
-    async fn run_game(self: &Arc<Self>, inst: Instance, profile: Profile, token: Option<String>) {
+    /// Lance le jeu ; si l'agent LAN fait planter la JVM au chargement (erreur native impossible à attraper côté
+    /// Java), relance UNE fois la même instance sans agent et désactive l'agent pour la session.
+    async fn run_game(self: &Arc<Self>, inst: Instance, profile: Profile, token: Option<String>, join_server: Option<(String, u16)>) {
+        let mut crashed = false;
+        self.run_game_once(inst.clone(), profile.clone(), token.clone(), join_server.clone(), &mut crashed).await;
+        if crashed {
+            self.lan_agent_off.store(true, std::sync::atomic::Ordering::SeqCst);
+            eprintln!("[Cubelink] LAN: l'agent a fait planter la JVM, relance sans agent");
+            self.run_game_once(inst, profile, token, join_server, &mut false).await;
+        }
+    }
+
+    async fn run_game_once(self: &Arc<Self>, inst: Instance, profile: Profile, token: Option<String>, join_server: Option<(String, u16)>, crashed: &mut bool) {
         let id = inst.id.clone();
         self.emit_state(&id, LaunchPhase::Preparing, None);
         let me = self.clone();
         let pid = id.clone();
         let progress: Progress = Arc::new(move |m| me.emit_state(&pid, LaunchPhase::Preparing, Some(m)));
-        let prepared = match ensure_game(&self.paths, &inst, self.settings_get().java_path, progress).await {
+        let java_setting = inst.java_path.clone().filter(|j| !j.trim().is_empty()).or_else(|| self.settings_get().java_path);
+        let prepared = match ensure_game(&self.paths, &inst, java_setting, progress).await {
             Ok(p) => p,
             Err(e) => return self.emit_state(&id, LaunchPhase::Failed, Some(user_msg(&e))),
         };
@@ -175,6 +423,10 @@ impl AppState {
             Ok(d) => d,
             Err(e) => return self.emit_state(&id, LaunchPhase::Failed, Some(user_msg(&e))),
         };
+        // Partage / agent LAN : seulement pour nos propres instances, jamais en rejoignant un ami.
+        let own = join_server.is_none() && self.instances.kind(&id).map(|k| k == core_lib::instance::InstanceKind::Own).unwrap_or(false);
+        let agent_on = lan_agent_args(self, own, join_server.as_ref()).is_some();
+        let lan_map = if agent_on && join_server.is_none() { lan_map_path(self, &inst, &prepared.version, &prepared.libs_dir).await } else { None };
         let spec = LaunchSpec {
             java_path: prepared.java,
             game_dir,
@@ -191,7 +443,17 @@ impl AppState {
             arch: Arch::current(),
             launcher_name: "Cubelink".into(),
             launcher_version: env!("CARGO_PKG_VERSION").into(),
-            extra_jvm_args: vec![],
+            extra_jvm_args: {
+                let mut a = core_lib::instance::split_jvm_args(&inst.jvm_args);
+                a.extend(lan_agent_args(self, own, join_server.as_ref()).map(|arg| match &lan_map {
+                    Some(m) => with_map(arg, m),
+                    None => arg,
+                }));
+                a
+            },
+            join_server: join_server.clone(),
+            // Outil de test réel (e2e/14) : jamais hors mode test.
+            quick_play_world: if crate::test_hooks::hooks().test_mode { std::env::var("CUBELINK_QUICKPLAY_WORLD").ok().filter(|w| !w.trim().is_empty()) } else { None },
         };
         let cmd = match build_command(&spec) {
             Ok(c) => c,
@@ -199,7 +461,7 @@ impl AppState {
         };
         drop(spec);
         let log_dir = self.paths.logs.join(&id);
-        // `game` reste vivant jusqu'à la fin de la boucle : le lâcher arrêterait le jeu.
+        // Le jeu reste vivant (via `game_handle`) jusqu'à la fin de la boucle : le lâcher l'arrêterait.
         let mut game = match launch_run::spawn(&cmd, &log_dir).await {
             Ok(g) => g,
             Err(e) => return self.emit_state(&id, LaunchPhase::Failed, Some(user_msg(&e))),
@@ -207,17 +469,52 @@ impl AppState {
         let Some(mut rx) = game.events() else {
             return self.emit_state(&id, LaunchPhase::Failed, Some("suivi du jeu indisponible".into()));
         };
+        let game = Arc::new(game);
+        // Invité : Dynamic FPS (et autres) bride le rendu hors premier plan et retarde le quickPlay (voir `foreground`).
+        if join_server.is_some() {
+            crate::foreground::bring_game_to_front(game.pid);
+        }
+        *lock(&self.game_handle) = Some((id.clone(), game.clone()));
+        let mut batch = crate::commands_game::LogBatcher::default();
+        let mut tick = tokio::time::interval(crate::commands_game::LOG_FLUSH_EVERY);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut finished = false;
-        while let Some(ev) = rx.recv().await {
-            if let Some(s) = state_for(&id, &ev) {
-                finished = matches!(s.state, LaunchPhase::Exited | LaunchPhase::Failed);
-                self.emit_event("launch://state", &s);
-            }
-            if finished {
-                break;
+        let mut host = own.then(|| crate::commands_host::HostAuto::start(self, &id));
+        let started = std::time::Instant::now();
+        let mut agent_marker = false;
+        loop {
+            tokio::select! {
+                ev = rx.recv() => {
+                    let Some(ev) = ev else { break };
+                    if let LaunchEvent::Output(line) = &ev {
+                        agent_marker |= agent_crash_marker(line);
+                        if let Some(h) = host.as_mut() {
+                            h.on_line(line);
+                        }
+                        batch.push(line);
+                        continue;
+                    }
+                    self.emit_logs(&id, &mut batch);
+                    if agent_on && agent_marker && started.elapsed() < AGENT_CRASH_WINDOW && is_failure(&ev) {
+                        *crashed = true; // pas d'état d'échec visible : on relance sans agent
+                        break;
+                    }
+                    if let Some(s) = state_for(&id, &ev) {
+                        finished = matches!(s.state, LaunchPhase::Exited | LaunchPhase::Failed);
+                        self.emit_event("launch://state", &s);
+                    }
+                    if finished {
+                        break;
+                    }
+                }
+                _ = tick.tick() => self.emit_logs(&id, &mut batch),
             }
         }
-        if !finished {
+        self.emit_logs(&id, &mut batch);
+        if let Some(h) = host {
+            h.finish().await;
+        }
+        if !finished && !*crashed {
             self.emit_state(&id, LaunchPhase::Exited, None);
         }
         game.wait().await;
@@ -241,8 +538,14 @@ pub async fn instances_create(
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub async fn instances_import_mrpack(state: State<'_, Arc<AppState>>, path: String) -> Result<Instance, String> {
-    state.instances_import_mrpack(&path).await
+pub async fn instances_import_mrpack(
+    state: State<'_, Arc<AppState>>,
+    path: String,
+    name: Option<String>,
+    minecraft: Option<String>,
+    loader: Option<LoaderSpec>,
+) -> Result<Instance, String> {
+    state.instances_import_mrpack(&path, name, minecraft, loader).await
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -259,6 +562,131 @@ pub async fn minecraft_versions(state: State<'_, Arc<AppState>>) -> Result<Vec<S
 mod tests {
     use super::*;
     use crate::state::test_support::test_state;
+
+    #[test]
+    fn marqueurs_d_echec_d_agent() {
+        for l in [
+            "FATAL ERROR in native method: processing of -javaagent failed, appending to system class path failed",
+            r"Unable to add \\?\C:\x\a.jar to system class path",
+            r"Error opening zip file or JAR manifest missing : \?\C:\a.jar",
+            "agent library failed Agent_OnLoad: instrument",
+        ] {
+            assert!(agent_crash_marker(l), "{l}");
+        }
+        assert!(!agent_crash_marker("[Cubelink] LAN: agent charge (java 25)"));
+        assert!(!agent_crash_marker("Exception in thread main"));
+        assert!(is_failure(&LaunchEvent::Exited { code: 1 }) && !is_failure(&LaunchEvent::Exited { code: 0 }));
+    }
+
+    /// Premier java trouvé : CUBELINK_TEST_JAVA, JAVA_HOME, JDK usuels, PATH.
+    fn find_java() -> Option<std::path::PathBuf> {
+        let exe = if cfg!(windows) { "java.exe" } else { "java" };
+        let mut c: Vec<std::path::PathBuf> = vec![];
+        c.extend(std::env::var_os("CUBELINK_TEST_JAVA").map(Into::into));
+        c.extend(std::env::var_os("JAVA_HOME").map(|h| std::path::PathBuf::from(h).join("bin").join(exe)));
+        for root in [r"C:\Program Files\Microsoft", r"C:\Program Files\Java", r"C:\Program Files\Eclipse Adoptium"] {
+            if let Ok(rd) = std::fs::read_dir(root) {
+                c.extend(rd.flatten().map(|e| e.path().join("bin").join(exe)));
+            }
+        }
+        c.push(std::path::PathBuf::from(exe));
+        c.into_iter().find(|p| std::process::Command::new(p).arg("-version").output().map(|o| o.status.success()).unwrap_or(false))
+    }
+
+    fn run_with_agent(java: &std::path::Path, arg: &str, jar: &std::path::Path) -> (Option<i32>, String) {
+        let mut cmd = std::process::Command::new(java);
+        core_lib::java::no_window(&mut cmd);
+        let o = cmd.arg(arg).arg("-cp").arg(jar).arg("app.cubelink.agent.LanAgent").arg("wait").output().unwrap();
+        (o.status.code(), format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr)))
+    }
+
+    /// VRAIE JVM, arguments exacts de la production, chemin avec espaces et caractères non ASCII.
+    #[test]
+    fn vraie_jvm_charge_l_agent_et_detecte_les_echecs() {
+        let Some(java) = find_java() else {
+            eprintln!("SKIP vraie_jvm : aucun java trouvé (CUBELINK_TEST_JAVA)");
+            return;
+        };
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../core/resources/cubelink-lan-agent.jar");
+        assert!(src.is_file(), "jar de l'agent absent : lance core/resources/lan-agent/build.sh");
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("Mon dossier é");
+        std::fs::create_dir_all(&sub).unwrap();
+        let jar = sub.join("cubelink-lan-agent.jar");
+        std::fs::copy(&src, &jar).unwrap();
+        let map = sub.join("table é.map");
+        std::fs::write(&map, "# cubelink-lanmap official\nC minecraft fgo\n").unwrap();
+
+        // 1. chemin normal, avec table
+        let (code, out) = run_with_agent(&java, &javaagent_arg(&jar, Some(&map)), &jar);
+        assert_eq!(code, Some(0), "{out}");
+        assert!(out.contains("[Cubelink] LAN:"), "{out}");
+        assert!(!agent_crash_marker(&out), "{out}");
+        // 2. variante verbatim (bug réel) : normalisée par `javaagent_arg`, et le mal d'origine est reproduit sans elle
+        #[cfg(windows)]
+        {
+            let verb = std::path::PathBuf::from(format!(r"\\?\{}", jar.display()));
+            let arg = javaagent_arg(&verb, None);
+            assert!(!arg.contains(r"\\?\"), "{arg}");
+            let (code, out) = run_with_agent(&java, &arg, &jar);
+            assert_eq!(code, Some(0), "{out}");
+            let (code, out) = run_with_agent(&java, &format!("-javaagent:{}", verb.display()), &jar);
+            assert_ne!(code, Some(0), "{out}");
+            assert!(agent_crash_marker(&out), "{out}");
+        }
+        // 2b. dossier CJK : copié sous un chemin ASCII par `javaagent_arg` (la JVM ne sait pas lire le chemin brut)
+        let cjk = dir.path().join("日本語 dossier");
+        std::fs::create_dir_all(&cjk).unwrap();
+        let jar_cjk = cjk.join("cubelink-lan-agent.jar");
+        std::fs::copy(&src, &jar_cjk).unwrap();
+        let arg = javaagent_arg(&jar_cjk, None);
+        assert!(arg.is_ascii(), "{arg}");
+        let (code, out) = run_with_agent(&java, &arg, &jar);
+        assert_eq!(code, Some(0), "{out}");
+        assert!(out.contains("[Cubelink] LAN:"), "{out}");
+        let (raw_code, raw_out) = run_with_agent(&java, &format!("-javaagent:{}", jar_cjk.display()), &jar);
+        eprintln!("chemin CJK brut (sans copie) : code {raw_code:?} {}", raw_out.lines().last().unwrap_or(""));
+        // 3. jar corrompu : la JVM échoue et la sortie est reconnue par le garde-fou
+        let bad = sub.join("corrompu.jar");
+        std::fs::write(&bad, b"pas un jar").unwrap();
+        let (code, out) = run_with_agent(&java, &javaagent_arg(&bad, None), &jar);
+        assert_ne!(code, Some(0), "{out}");
+        assert!(agent_crash_marker(&out), "{out}");
+    }
+
+    #[test]
+    fn noauth_jamais_sans_mode_test_et_variable() {
+        assert!(!noauth_enabled(false, Some("1")), "hors mode test");
+        assert!(!noauth_enabled(true, None), "sans variable");
+        assert!(!noauth_enabled(true, Some("0")));
+        assert!(noauth_enabled(true, Some("1")));
+        let base = "-javaagent:C:/x/a.jar".to_string();
+        assert_eq!(with_test_noauth(base.clone(), false), base, "désactivé : ligne inchangée");
+        assert_eq!(with_test_noauth(base.clone(), true), format!("{base}=noauth"));
+        assert_eq!(with_test_noauth(format!("{base}=map=m.tiny"), true), format!("{base}=noauth,map=m.tiny"));
+    }
+
+    #[test]
+    fn option_join_de_l_agent_invite() {
+        let base = "-javaagent:C:/x/a.jar".to_string();
+        assert_eq!(with_join(base.clone(), "127.0.0.1", 60061), format!("{base}=join=127.0.0.1:60061"));
+        // caractères hors liste retirés (pas d'injection d'options dans la ligne de lancement)
+        assert_eq!(with_join(base.clone(), "1.2.3.4,noauth", 1), format!("{base}=join=1.2.3.4noauth:1"));
+        let j = with_join(base.clone(), "127.0.0.1", 5);
+        assert_eq!(with_map(j, std::path::Path::new("m.tiny")), format!("{base}=join=127.0.0.1:5,map=m.tiny"));
+        assert_eq!(with_map(base.clone(), std::path::Path::new("m.tiny")), format!("{base}=map=m.tiny"));
+        assert!(!with_join(base, "127.0.0.1", 5).contains("noauth"), "invité : jamais noauth");
+    }
+
+    #[test]
+    fn chemin_agent_sans_prefixe_windows_etendu() {
+        use std::path::Path;
+        // Bug réel : « Unable to add \\?\C:\...\cubelink-lan-agent.jar to system class path » (la JVM plante).
+        assert_eq!(plain_windows_path(Path::new(r"\\?\C:\Users\x\AppData\Local\Cubelink\a.jar")), Path::new(r"C:\Users\x\AppData\Local\Cubelink\a.jar"));
+        assert_eq!(plain_windows_path(Path::new(r"\\?\UNC\srv\share\a.jar")), Path::new(r"\\srv\share\a.jar"));
+        assert_eq!(plain_windows_path(Path::new(r"C:\a\b.jar")), Path::new(r"C:\a\b.jar"));
+        assert_eq!(plain_windows_path(Path::new("/tmp/a.jar")), Path::new("/tmp/a.jar"));
+    }
 
     fn vanilla() -> LoaderSpec {
         LoaderSpec { loader: Loader::Vanilla, version: String::new() }

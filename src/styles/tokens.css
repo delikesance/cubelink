@@ -1,8 +1,67 @@
+/* Cubelink - tokens du design « REFONTE 2, clay doux sobre ».
+   Polices : Inter et Space Grotesk ne sont PAS embarquees dans le depot (pas de .woff2, pas de @fontsource).
+   Les piles ci-dessous retombent proprement sur les polices systeme (Segoe UI sous Windows).
+   Pour embarquer : deposer les .woff2 dans src/assets/fonts/ et ajouter des @font-face ici.
+   Pas de `zoom` CSS global : les coordonnees viewport restent des px CSS reels (menus/popovers en position:fixed). */
 :root{
-  --bg:#0A0A0A; --panel:#0D0D0D; --panel-2:#111111; --panel-3:#141414; --line:#262626; --line-strong:#6A6A6A;
-  --text:#F2F2F2; --text-dim:#B5B5B5; --accent:#FF5C00; --on-accent:#140700; --accent-text:#FF8A4A;
-  --green:#4ADE80; --warn:#FFB020; --danger:#FF9A9A; --focus:#FF8A4A;
-  --font-ui:Inter,system-ui,sans-serif; --font-title:Montserrat,sans-serif;
+  color-scheme:dark;
+  /* Couleurs */
+  --bg:#131116; --surface:#1B181F; --surface-2:#242029; --line:#332E3A;
+  --text:#F4F1EC; --muted:#B0A8B4;
+  --accent:#4FC3E8; --accent-hover:#6FD3F0; --accent-edge:#1E7FA3; --accent-ink:#06222E;
+  --ok:#5BD58A; --warn:#F2C14E; --danger:#F0706E; --danger-edge:#A63A3A; --danger-ink:#2A0808;
+  --edge-2:#0E0C10;            /* tranche du bouton secondaire */
+  --veil:rgba(10,8,12,.62);    /* voile derriere les tiroirs / sur le decor : seuls elements translucides */
+  --focus:#6FD3F0;
+  /* Rayons */
+  --r-md:16px; --r-lg:24px; --r-pill:999px;
+  /* Ombres */
+  --shadow-soft:0 8px 24px rgba(0,0,0,.28);
+  --shadow-drawer:-12px 0 40px rgba(0,0,0,.4);
+  --edge-primary:0 4px 0 var(--accent-edge); --edge-primary-active:0 1px 0 var(--accent-edge);
+  --edge-secondary:0 3px 0 var(--edge-2);
+  --edge-danger:0 4px 0 var(--danger-edge); --edge-danger-active:0 1px 0 var(--danger-edge);
+  /* Espacements */
+  --sp-1:4px; --sp-2:8px; --sp-3:12px; --sp-4:16px; --sp-5:24px; --sp-6:32px; --sp-7:48px;
+  /* Typo */
+  --font-ui:Inter,"Segoe UI",system-ui,-apple-system,sans-serif;
+  --font-display:"Space Grotesk",Inter,"Segoe UI",system-ui,sans-serif;
+  /* Mouvement : retour 120 ms, entree 240 ms (decalage 30 ms, jouee une fois), tiroir 280 ms */
+  --ease:cubic-bezier(.2,.8,.2,1);
+  --dur-feedback:120ms; --dur-enter:240ms; --dur-drawer:280ms; --stagger:30ms;
+  /* Cadre */
+  --titlebar-h:36px; --rail-w:76px; --drawer-w:360px;
+  /* Mise en page grands ecrans (.page / .page-fill dans shell.css) */
+  --page-max:1200px; --page-pad:24px; --gap:16px;
+
+  /* ---- Alias de compatibilite (anciens noms, utilises par src/screens/**). A remplacer par T4/T5. ---- */
+  --panel:var(--surface); --panel-2:var(--surface); --panel-3:var(--surface-2);
+  --line-strong:#4A4452;
+  --text-dim:var(--muted);
+  --on-accent:var(--accent-ink); --accent-text:var(--accent-hover);
+  --green:var(--ok);
+  --font-title:var(--font-display);
+  /* --accent-deep / --accent-glow : poses par src/screens/Main/accent.ts, non definis ici. */
 }
+@media (min-width:1440px){:root{--page-pad:40px}}
+@media (min-width:1920px){:root{--page-max:1480px;--page-pad:56px;--gap:20px}}
+@media (min-width:2560px){:root{--page-max:1800px;--gap:24px}}
+
 html,body,#root{height:100%;margin:0;background:var(--bg);color:var(--text);font-family:var(--font-ui);font-size:14px}
+*{box-sizing:border-box}
+h1,h2,h3{font-family:var(--font-display)}
 :focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+::selection{background:var(--accent);color:var(--accent-ink)}
+*{scrollbar-width:thin;scrollbar-color:var(--line) transparent}
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--line);border-radius:var(--r-pill);border:2px solid var(--bg)}
+::-webkit-scrollbar-thumb:hover{background:#4A4452}
+
+/* Animation d'entree, jouee une fois : .enter (+ style="--i:n" pour le decalage de 30 ms par element). */
+@keyframes cl-enter{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+.enter{animation:cl-enter var(--dur-enter) var(--ease) both;animation-delay:calc(var(--i,0) * var(--stagger))}
+
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{animation-duration:.01ms !important;animation-delay:0ms !important;animation-iteration-count:1 !important;transition-duration:.01ms !important;transition-delay:0ms !important;scroll-behavior:auto !important}
+}

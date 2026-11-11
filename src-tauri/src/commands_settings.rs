@@ -88,6 +88,8 @@ pub fn settings_set(
     close_on_launch: bool,
     relay_only: Option<bool>,
     share_mods: Option<bool>,
+    discovery: Option<bool>,
+    lan_auto: Option<bool>,
 ) -> Result<Settings, String> {
     let cur = state.settings_get();
     state.settings_set(Settings {
@@ -99,6 +101,8 @@ pub fn settings_set(
         close_on_launch,
         relay_only: relay_only.unwrap_or(cur.relay_only),
         share_mods: share_mods.unwrap_or(cur.share_mods),
+        discovery: discovery.unwrap_or(cur.discovery),
+        lan_auto: lan_auto.unwrap_or(cur.lan_auto),
     })
 }
 

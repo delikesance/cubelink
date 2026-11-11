@@ -19,6 +19,7 @@ use iroh::protocol::{AcceptError, ProtocolHandler};
 use iroh::{Endpoint, EndpointAddr};
 use tokio::time::timeout;
 
+use crate::reach::{Reach, CLOSE_BAD_REQUEST, CLOSE_DENIED, CLOSE_NOT_SHARED};
 use crate::transfer::send::PeerAuthorizer;
 
 /// ALPN du canal de manifeste.
@@ -26,10 +27,10 @@ pub const MANIFEST_ALPN: &[u8] = b"cubelink/manifest/1";
 /// Taille maximale d'un manifeste sérialisé (octets).
 pub const MAX_MANIFEST_BYTES: usize = 4 * 1024 * 1024;
 const REQUEST: u8 = b'M';
-const CLOSE_DENIED: u32 = 1;
-const CLOSE_BAD_REQUEST: u32 = 2;
 /// Délai d'une requête (connexion + réponse), et durée pendant laquelle l'hôte attend l'invité.
 const NET_TIMEOUT: Duration = Duration::from_secs(15);
+/// Délai pour établir la connexion : au-delà, l'ami est considéré hors ligne (échec rapide).
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
 
 struct Inner {
     authorizer: Arc<dyn PeerAuthorizer>,
@@ -86,10 +87,15 @@ impl std::fmt::Debug for ManifestHandler {
 
 impl ProtocolHandler for ManifestHandler {
     async fn accept(&self, conn: Connection) -> std::result::Result<(), AcceptError> {
-        let allowed = self.inner.authorizer.is_allowed(&conn.remote_id().to_string());
+        let peer = conn.remote_id().to_string();
         let current = self.inner.current.lock().unwrap_or_else(|p| p.into_inner()).clone();
-        let (true, Some(bytes)) = (allowed, current) else {
-            conn.close(CLOSE_DENIED.into(), b"denied");
+        if !self.inner.authorizer.is_allowed(&peer) {
+            let code = self.inner.authorizer.denial(&peer).close_code().unwrap_or(CLOSE_DENIED);
+            conn.close(code.into(), b"denied");
+            return Ok(());
+        }
+        let Some(bytes) = current else {
+            conn.close(CLOSE_NOT_SHARED.into(), b"not shared");
             return Ok(());
         };
         let served = async {
@@ -114,27 +120,33 @@ impl ProtocolHandler for ManifestHandler {
 
 /// Côté invité : récupère le manifeste de l'hôte `peer` (adresse déjà connue, ex. via le code ami).
 /// Le manifeste reçu est borné en taille et revalidé.
+///
+/// Échecs distincts (`Error::Other` avec le message de [`Reach`]) : ami hors ligne (connexion impossible
+/// en [`CONNECT_TIMEOUT`]), refus (pas ami / partage de mods désactivé) et rien d'ouvert.
 pub async fn fetch_manifest(endpoint: &Endpoint, peer: impl Into<EndpointAddr>) -> Result<Manifest> {
     let net = |e: String| Error::Network(format!("manifeste : {e}"));
+    let refused = |r: Reach| Error::Other(r.message().to_string());
     let work = async {
-        let conn = endpoint.connect(peer, MANIFEST_ALPN).await.map_err(|e| net(e.to_string()))?;
-        let res = async {
-            let (mut send, mut recv) = conn.open_bi().await.map_err(|e| net(e.to_string()))?;
-            send.write_all(&[REQUEST]).await.map_err(|e| net(e.to_string()))?;
-            send.finish().map_err(|e| net(e.to_string()))?;
-            match recv.read_to_end(MAX_MANIFEST_BYTES).await {
-                Ok(b) => Ok(b),
-                Err(e) => match conn.close_reason() {
-                    Some(iroh::endpoint::ConnectionError::ApplicationClosed(c))
-                        if u64::from(c.error_code) == u64::from(CLOSE_DENIED) =>
-                    {
-                        Err(Error::Auth("l'hôte refuse (pair non autorisé ou rien de partagé)".into()))
-                    }
-                    _ => Err(net(e.to_string())),
-                },
-            }
+        let conn = match timeout(CONNECT_TIMEOUT, endpoint.connect(peer, MANIFEST_ALPN)).await {
+            Ok(Ok(c)) => c,
+            _ => return Err(refused(Reach::Offline)),
+        };
+        // L'hôte qui refuse ferme la connexion tout de suite : l'échec peut survenir à n'importe quelle étape
+        // (ouverture du flux, écriture, lecture) ; on cherche alors la raison de fermeture.
+        let exchange = async {
+            let (mut send, mut recv) = conn.open_bi().await.map_err(|e| e.to_string())?;
+            send.write_all(&[REQUEST]).await.map_err(|e| e.to_string())?;
+            send.finish().map_err(|e| e.to_string())?;
+            recv.read_to_end(MAX_MANIFEST_BYTES).await.map_err(|e| e.to_string())
         }
         .await;
+        let res = match exchange {
+            Ok(b) => Ok(b),
+            Err(e) => match Reach::from_conn_settled(&conn).await {
+                Some(r) => Err(refused(r)),
+                None => Err(net(e)),
+            },
+        };
         conn.close(0u32.into(), b"done");
         let bytes = res?;
         let m: Manifest = serde_json::from_slice(&bytes).map_err(|e| Error::Invalid(format!("manifeste illisible : {e}")))?;
@@ -187,11 +199,11 @@ mod tests {
         let srv = ManifestServer::new(Arc::new(AllowList(vec![guest.id().to_string()])));
         let _router = Router::builder(host.clone()).accept(MANIFEST_ALPN, srv.handler()).spawn();
 
-        // Rien de partagé : refusé même pour un pair autorisé.
-        assert!(matches!(fetch_manifest(&guest, host.addr()).await, Err(Error::Auth(_))));
+        // Rien de partagé : refusé même pour un pair autorisé, avec une raison distincte.
+        assert!(matches!(fetch_manifest(&guest, host.addr()).await, Err(Error::Other(m)) if m == Reach::NothingShared.message()));
         srv.set(Some(&manifest())).unwrap();
         assert_eq!(fetch_manifest(&guest, host.addr()).await.unwrap(), manifest());
-        assert!(matches!(fetch_manifest(&stranger, host.addr()).await, Err(Error::Auth(_))));
+        assert!(matches!(fetch_manifest(&stranger, host.addr()).await, Err(Error::Other(m)) if m == Reach::NotFriend.message()));
         // Fin du partage.
         srv.set(None).unwrap();
         assert!(fetch_manifest(&guest, host.addr()).await.is_err());

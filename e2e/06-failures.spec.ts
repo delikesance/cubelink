@@ -3,6 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { test, expect, invoke, testState } from './harness/fixtures';
+import { guestInstance } from './helpers/e2e2-common';
 import {
   befriend, captureEvents, events, gotoHash, hostShare, killApp, resumeApp, sha256File, sleep, suspendApp,
 } from './helpers/e2e3-common';
@@ -18,10 +19,10 @@ test('T6 hote hors ligne pendant le join : message francais, Reessayer, Annuler'
 
   // Plan charge (hote en ligne), puis l'hote disparait avant le clic « Rejoindre ».
   await gotoHash(appB, `#/join?friend=${keyA}`, 'join');
-  await expect(page.getByRole('heading', { name: /Rejoindre « Monde de test »/ })).toBeVisible({ timeout: 30_000 });
-  await page.getByLabel('Je fais confiance à mon ami pour ce mod').check();
+  await expect(page.getByRole('button', { name: 'Rejoindre et jouer' })).toBeVisible({ timeout: 30_000 });
+  await page.getByLabel(/^Je fais confiance à .+ pour ce mod$/).check();
   killApp(appA);
-  await page.getByRole('button', { name: 'Rejoindre' }).click();
+  await page.getByRole('button', { name: 'Rejoindre et jouer' }).click();
   // join_start rejoue la demande de manifeste : echec affiche sur l'ecran, aucun transfert demarre.
   const startErr = page.getByRole('alert').filter({ hasText: /\S/ });
   await expect(startErr).toBeVisible({ timeout: 60_000 });
@@ -33,7 +34,7 @@ test('T6 hote hors ligne pendant le join : message francais, Reessayer, Annuler'
   await gotoHash(appB, `#/join?friend=${keyA}`, 'join');
   const title = page.getByRole('heading', { name: "Impossible de rejoindre pour l'instant" });
   await expect(title).toBeVisible({ timeout: 60_000 });
-  await expect(page.getByText("Vérifie que ton ami est en ligne avec Cubelink ouvert, puis réessaie.")).toBeVisible();
+  await expect(page.getByText(/^(Vérifie que .+ est en ligne avec Cubelink ouvert, puis réessaie\.|Demande à .+ d'ouvrir Cubelink\.|Demande à .+ de lancer le jeu.*)$/)).toBeVisible();
   const retry = page.getByRole('button', { name: 'Réessayer' });
   await retry.click(); // hote toujours absent : l'erreur revient
   await expect(title).toBeVisible({ timeout: 60_000 });
@@ -54,7 +55,7 @@ test('T6 hote injoignable puis de retour : Reessayer recharge le plan', async ({
   resumeApp(appA);
   await expect(async () => {
     await page.getByRole('button', { name: 'Réessayer' }).click({ timeout: 2000 });
-    await expect(page.getByRole('heading', { name: /Rejoindre « Monde de test »/ })).toBeVisible({ timeout: 45_000 });
+    await expect(page.getByRole('button', { name: 'Rejoindre et jouer' })).toBeVisible({ timeout: 45_000 });
   }).toPass({ timeout: 120_000 });
 });
 
@@ -66,8 +67,8 @@ test('T6 coupure au milieu du transfert puis retour de l hote : reprise, sha256 
   await captureEvents(appB, ['transfer://progress', 'transfer://unknown_mods']);
   const page = appB.page;
   await gotoHash(appB, `#/join?friend=${keyA}`, 'join');
-  await page.getByLabel('Je fais confiance à mon ami pour ce mod').check({ timeout: 30_000 });
-  await page.getByRole('button', { name: 'Rejoindre' }).click();
+  await page.getByLabel(/^Je fais confiance à .+ pour ce mod$/).check({ timeout: 30_000 });
+  await page.getByRole('button', { name: 'Rejoindre et jouer' }).click();
   await expect(page.getByRole('heading', { name: 'Installation en cours' })).toBeVisible();
 
   // Des octets sont arrives mais pas tout : on gele l'hote.
@@ -84,7 +85,7 @@ test('T6 coupure au milieu du transfert puis retour de l hote : reprise, sha256 
 
   // L'hote revient : le transfert reprend (reprise automatique) jusqu'au bout.
   resumeApp(appA);
-  await expect(page.getByRole('button', { name: 'Jouer' })).toBeVisible({ timeout: 180_000 });
+  await expect.poll(async () => ((await events(appB, 'transfer://progress')) as any[]).some((p) => p.phase === 'done'), { timeout: 180_000 }).toBe(true);
   const ev = (await events(appB, 'transfer://unknown_mods')) as { instance_id: string }[];
   expect(ev).toHaveLength(1);
   const st = await testState(appB.page);
@@ -102,8 +103,8 @@ test('T6 coupure prolongee : ecran friend-left, Annuler ramene a l accueil', asy
   await captureEvents(appB, ['transfer://progress']);
   const page = appB.page;
   await gotoHash(appB, `#/join?friend=${keyA}`, 'join');
-  await page.getByLabel('Je fais confiance à mon ami pour ce mod').check({ timeout: 30_000 });
-  await page.getByRole('button', { name: 'Rejoindre' }).click();
+  await page.getByLabel(/^Je fais confiance à .+ pour ce mod$/).check({ timeout: 30_000 });
+  await page.getByRole('button', { name: 'Rejoindre et jouer' }).click();
   await expect.poll(async () => {
     const p = ((await events(appB, 'transfer://progress')) as any[]).filter((e) => e.phase === 'receiving');
     return p.length ? p.at(-1).bytes_done : 0;
@@ -118,47 +119,53 @@ test('T6 coupure prolongee : ecran friend-left, Annuler ramene a l accueil', asy
   await page.waitForSelector('main[data-route="main"]');
 });
 
-// ---------------------------------------------------------------- fichier corrompu : Reessayer / Annuler
-test('T6 fichier corrompu cote hote (config) : ecran bad-hash, Reessayer et Annuler', async ({ appA, appB, servers, binary }) => {
+// ---------------------------------------------------------------- fichiers de l'hote modifies apres le manifeste
+// Le jeu reecrit ses configs en permanence : elles sont copiees (instantane) au moment du manifeste, l'invite recoit
+// EXACTEMENT ce qui a ete annonce, jamais d'echec d'empreinte. (L'ecran bad-hash reste couvert par « ecrans Erreur ».)
+test('T6 config reecrite par le jeu apres le partage : le transfert reussit avec la version annoncee', async ({ appA, appB, servers, binary }) => {
   const { keyA } = await befriend({ appA, appB, servers, binary });
   const { host } = await hostShare(appA);
   await captureEvents(appB, ['transfer://progress']);
   const target = path.join(host.gameDir, 'config', 'cubelink-test.toml');
-  const evil = Buffer.from(fs.readFileSync(target));
-  evil[0] ^= 0x01; // meme taille, contenu different
-  fs.writeFileSync(target, evil);
+  const announced = fs.readFileSync(target);
+  const rewritten = Buffer.from(announced); rewritten[0] ^= 0x01; // le jeu reecrit sa config
+  fs.writeFileSync(target, rewritten);
 
   const page = appB.page;
   await gotoHash(appB, `#/join?friend=${keyA}`, 'join');
-  await page.getByLabel('Je fais confiance à mon ami pour ce mod').check({ timeout: 30_000 });
-  await page.getByRole('button', { name: 'Rejoindre' }).click();
-  await expect(page.getByRole('heading', { name: /ne correspond pas à ce qu'il avait annoncé/ })).toBeVisible({ timeout: 90_000 });
+  await page.getByLabel(/^Je fais confiance à .+ pour ce mod$/).check({ timeout: 30_000 });
+  await page.getByRole('button', { name: 'Rejoindre et jouer' }).click();
+  await expect.poll(async () => ((await events(appB, 'transfer://progress')) as any[]).some((p) => p.phase === 'done'), { timeout: 90_000 }).toBe(true);
   const failed = ((await events(appB, 'transfer://progress')) as any[]).filter((p) => p.phase === 'failed');
-  expect(failed.at(-1).error).toBe("fichier corrompu : le contenu reçu ne correspond pas à l'empreinte annoncée");
-  expect(await invoke<unknown[]>(page, 'instances_list')).toHaveLength(0);
-
-  // Reessayer : ramene a l'ecran d'installation (le design ne prevoit pas plus).
-  await page.getByRole('button', { name: 'Réessayer' }).click();
-  await page.waitForSelector('main[data-route="install"]');
-  await gotoHash(appB, '#/main', 'main');
+  expect(failed).toHaveLength(0);
+  const g = await guestInstance(appB);
+  expect(g).not.toBeNull();
+  expect(fs.readFileSync(path.join(g!.gameDir, 'config', 'cubelink-test.toml')).equals(announced), 'invite a la version annoncee').toBe(true);
 });
 
-// Corrige (FIXX) : le cache `known` de l'hote est invalide si le fichier change (taille + mtime).
-test('T6 Reessayer (bad-hash / friend-left) relance reellement le transfert', async ({ appA, appB, servers, binary }) => {
+// Un MOD remplace apres le manifeste : jamais de fichier non conforme servi ; echec clair, puis le manifeste de l'hote est
+// recalcule tout seul et le nouvel essai reussit (plus besoin de repartager).
+test('T6 mod remplace apres le partage : echec clair puis nouvel essai avec un manifeste frais', async ({ appA, appB, servers, binary }) => {
   const { keyA } = await befriend({ appA, appB, servers, binary });
   const { host } = await hostShare(appA);
-  const target = path.join(host.gameDir, 'config', 'cubelink-test.toml');
-  const good = fs.readFileSync(target);
-  const evil = Buffer.from(good); evil[0] ^= 1; fs.writeFileSync(target, evil);
+  const jar = path.join(host.gameDir, ...host.manifest.files.find((f: { path: string }) => f.path.startsWith('mods/'))!.path.split('/'));
+  const good = fs.readFileSync(jar);
+  const updated = Buffer.concat([good, Buffer.from('maj')]);
+  fs.writeFileSync(jar, updated);
   const page = appB.page;
-  await gotoHash(appB, `#/join?friend=${keyA}`, 'join');
-  await page.getByLabel('Je fais confiance à mon ami pour ce mod').check({ timeout: 30_000 });
-  await page.getByRole('button', { name: 'Rejoindre' }).click();
-  await expect(page.getByRole('heading', { name: /ne correspond pas/ })).toBeVisible({ timeout: 90_000 });
-  fs.writeFileSync(target, good); // l'hote repare, (manifeste fige : il faut aussi repartager)
-  await invoke(appA.page, 'host_start_sharing', { instance_id: host.id, world_port: 25590 });
-  await page.getByRole('button', { name: 'Réessayer' }).click();
-  await expect(page.getByRole('button', { name: 'Jouer' })).toBeVisible({ timeout: 60_000 });
+  await captureEvents(appB, ['transfer://progress']);
+  await invoke(page, 'join_start', { friend_public_key: keyA });
+  await expect.poll(async () => ((await events(appB, 'transfer://progress')) as any[]).some((p) => p.phase === 'failed'), { timeout: 90_000 }).toBe(true);
+  const failed = ((await events(appB, 'transfer://progress')) as any[]).filter((p) => p.phase === 'failed');
+  expect(failed.at(-1).error).toMatch(/a changé chez ton ami/);
+  expect(await invoke<unknown[]>(page, 'instances_list')).toHaveLength(0);
+  // L'hote a recalcule son manifeste : le plan reflete le mod mis a jour, le nouvel essai aboutit.
+  await expect.poll(async () => {
+    const plan = await invoke<{ manifest: { files: { path: string; size: number }[] } }>(page, 'join_plan', { friend_public_key: keyA });
+    return plan.manifest.files.some((f) => f.size === updated.length);
+  }, { timeout: 30_000 }).toBe(true);
+  await invoke(page, 'join_start', { friend_public_key: keyA });
+  await expect.poll(async () => ((await events(appB, 'transfer://progress')) as any[]).some((p) => p.phase === 'done'), { timeout: 90_000 }).toBe(true);
 });
 
 // ---------------------------------------------------------------- disque plein

@@ -8,7 +8,7 @@ type Settings = { allow_relay: boolean; relay_only?: boolean; [k: string]: unkno
 const relayCheckbox = (page: import('@playwright/test').Page) => page.getByRole('checkbox', { name: /Passer toujours par le relais/ });
 
 async function openSettings(page: import('@playwright/test').Page) {
-  await page.evaluate(() => { window.location.hash = '#/settings'; });
+  await page.evaluate(() => { window.location.hash = '#/settings?tab=reseau'; });
   await waitForRoute(page, 'settings');
   await relayCheckbox(page).waitFor({ state: 'visible' });
   await expect(relayCheckbox(page)).toBeEnabled(); // reglages charges
@@ -43,6 +43,27 @@ test.describe('T7 relais : reglages (sans Internet)', () => {
     await waitForRoute(page, 'settings'); // le hash est conserve
     await openSettings(page);
     await expect(relayCheckbox(page)).toBeChecked();
+
+    // decouverte des amis : persistance dans settings.json
+    const disc = page.getByRole('checkbox', { name: /Retrouver mes amis même si leur adresse change/ });
+    await expect(disc).toBeChecked();
+    await disc.uncheck();
+    await expect(page.locator('[role=status]', { hasText: 'Enregistré' })).toBeVisible();
+    expect(JSON.parse(fs.readFileSync(st.paths.settings_file, 'utf8')).discovery).toBe(false);
+    await disc.check();
+    await expect(page.locator('[role=status]', { hasText: 'Enregistré' })).toBeVisible();
+    expect(JSON.parse(fs.readFileSync(st.paths.settings_file, 'utf8')).discovery).toBe(true);
+
+    // ouverture auto au reseau local : persistance, sans ecraser discovery
+    const lan = page.getByRole('checkbox', { name: /Ouvrir mon monde au réseau local automatiquement/ });
+    await expect(lan).toBeChecked();
+    await lan.uncheck();
+    await expect(page.locator('[role=status]', { hasText: 'Enregistré' })).toBeVisible();
+    const f2 = JSON.parse(fs.readFileSync(st.paths.settings_file, 'utf8'));
+    expect(f2.lan_auto).toBe(false);
+    expect(f2.discovery).toBe(true);
+    await lan.check();
+    await expect(page.locator('[role=status]', { hasText: 'Enregistré' })).toBeVisible();
 
     // retour arriere
     await relayCheckbox(page).uncheck();
@@ -116,22 +137,4 @@ test.describe('T7 relais : mode relais personnalise du harnais', () => {
   });
 });
 
-test.describe('T7 relais : chemin reel via le relais public n0 (E2E_RELAY=1, Internet requis)', () => {
-  test.use({ appOptions: { relayMode: 'default' } });
-  test.skip(process.env.E2E_RELAY !== '1', 'Reserve a E2E_RELAY=1 : le relais public n0 exige Internet (debit ~1 Mo/s) et aucun relais local de test n\'est disponible (iroh `test-utils` non active).');
-
-  test('direct impossible : les deux profils en « toujours le relais », mode relais par defaut', async ({ appA, appB }) => {
-    test.setTimeout(300_000);
-    for (const app of [appA, appB]) {
-      await waitForRoute(app.page, 'login');
-      await loginOffline(app.page, app.label === 'A' ? 'Alice' : 'Bob');
-      expect(JSON.stringify((await testState(app.page)).relay_mode)).toMatch(/default/i);
-      await openSettings(app.page);
-      await relayCheckbox(app.page).check();
-      await expect(app.page.locator('[role=status]', { hasText: 'Enregistré' })).toBeVisible();
-      expect((await invoke<Settings>(app.page, 'settings_get')).relay_only).toBe(true);
-    }
-    // TODO (necessite Internet + redemarrage des apps pour relire relay_only) : demande d'ami, join, puis
-    // verifier `transfer://progress.via_relay === true` et la note « via un relais » sur #/install.
-  });
-});
+// Le parcours reel (ami, partage, join, transfert relaye, tunnel TCP) est dans e2e/12-multiplayer-real.spec.ts (E2E_REAL=1).

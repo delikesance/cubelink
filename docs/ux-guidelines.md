@@ -1,6 +1,8 @@
 # Cubelink : guide UX appliqué aux 6 écrans
 
-> Rédigé par le coéquipier A (analyste UX). Statut : recommandations, rien n'est implémenté.
+> Rédigé par le coéquipier A (analyste UX). Statut : recommandations ; une partie est appliquée dans le code, le reste alimente la refonte.
+>
+> **Mise à jour 2026-11-10 : ce document décrit l'état d'origine (6 écrans, accent orange `#FF5C00`).** Le design en cours de validation (artifact « Cubelink Design », 25 artboards) le remplace pour le visuel : accent **cyan `#4FC3E8`**, fond `#131116`, un seul style de bouton, panneaux opaques, peu d'images. Les principes P1 à P13 et les checklists fonctionnelles (états d'attente, d'erreur et vides, Annuler dans l'installation, mod inconnu, vérification d'un ami, vocabulaire sans jargon) restent valables ; les mentions de couleur orange (`#FF5C00`, `#FF8A4A`) et de tailles de texte datent de l'ancien design.
 > Notation des sources : **[A p.N]** = « UX Design Principles & Best Practices Guidelines », v2.0, page N (pagination imprimée = pagination du PDF). **[B p.N]** = « L'UX Design », Digital Design Lab, École de design Nantes Atlantique, édition 2020, page N. **[Arch §N]** = `docs/architecture.md`. **[Écran]** = constat tiré du code HTML du canvas (`cv/project/*.dc.html`).
 
 ## (a) État des sources

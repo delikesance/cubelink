@@ -1,78 +1,45 @@
-import { useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useRef } from "react";
 import "./legal.css";
-import { useShell } from "../../app/context";
+import { useBack } from "../../app/context";
 import { SECTIONS } from "./sections";
 
-const Chevron = () => (
-  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M15 5l-7 7 7 7" /></svg>
-);
-const Cross = () => (
-  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" /></svg>
-);
+const TABS = [
+  { id: "compte", label: "Compte" },
+  { id: "reseau", label: "Réseau" },
+  { id: "java", label: "Java" },
+  { id: "stockage", label: "Stockage" },
+  { id: "apropos", label: "À propos" },
+] as const;
 
 export default function Legal() {
-  const { navigate } = useShell();
-  const [active, setActive] = useState(0);
-  const tabs = useRef<(HTMLButtonElement | null)[]>([]);
-
-  const select = (i: number) => {
-    const n = (i + SECTIONS.length) % SECTIONS.length;
-    setActive(n);
-    tabs.current[n]?.focus();
-  };
-  const onKey = (e: KeyboardEvent) => {
-    const keys: Record<string, number> = {
-      ArrowDown: active + 1, ArrowRight: active + 1, ArrowUp: active - 1, ArrowLeft: active - 1,
-      Home: 0, End: SECTIONS.length - 1,
+  const back = useBack("settings");
+  const backRef = useRef(back);
+  backRef.current = back;
+  const title = useRef<HTMLHeadingElement>(null);
+  useEffect(() => { title.current?.focus(); }, []);
+  useEffect(() => {
+    const onEsc = (e: globalThis.KeyboardEvent) => {
+      if (e.key === "Escape" && !e.defaultPrevented) { e.preventDefault(); backRef.current(); }
     };
-    if (e.key in keys) { e.preventDefault(); select(keys[e.key]); }
-  };
-  const current = SECTIONS[active];
+    document.addEventListener("keydown", onEsc);
+    return () => document.removeEventListener("keydown", onEsc);
+  }, []);
 
   return (
     <div className="legal">
-      <div className="legal-card" role="region" aria-labelledby="leg-title">
-        <header className="legal-head">
-          <div className="legal-head-l">
-            <button type="button" className="legal-btn" aria-label="Retour aux paramètres" onClick={() => navigate("settings")}>
-              <Chevron />Retour
-            </button>
-            <h1 id="leg-title">Mentions légales et confidentialité</h1>
-          </div>
-          <button type="button" className="legal-btn" aria-label="Fermer" onClick={() => navigate("main")}>
-            <Cross />
-          </button>
-        </header>
-        <div className="legal-body">
-          <div className="legal-nav" role="tablist" aria-label="Sommaire" aria-orientation="vertical" onKeyDown={onKey}>
-            {SECTIONS.map((s, i) => (
-              <button
-                key={s.id}
-                ref={(el) => { tabs.current[i] = el; }}
-                type="button"
-                role="tab"
-                id={`leg-tab-${s.id}`}
-                aria-selected={i === active}
-                aria-controls={`leg-panel-${s.id}`}
-                tabIndex={i === active ? 0 : -1}
-                className="legal-tab"
-                onClick={() => setActive(i)}
-              >
-                {s.label}
-              </button>
-            ))}
-          </div>
-          <section
-            key={current.id}
-            className="legal-pane"
-            role="tabpanel"
-            id={`leg-panel-${current.id}`}
-            aria-labelledby={`leg-tab-${current.id}`}
-          >
-            {current.content}
-          </section>
-        </div>
-      </div>
+      <h1 className="enter" ref={title} tabIndex={-1}>Réglages</h1>
+      <nav className="legal-nav enter" aria-label="Sections des réglages" style={{ "--i": 1 } as React.CSSProperties}>
+        {TABS.map((t) => (
+          <a key={t.id} className="legal-tab" href={`#/settings?tab=${t.id}`} aria-current={t.id === "apropos" ? "page" : undefined}>{t.label}</a>
+        ))}
+        <div className="legal-bar" aria-hidden="true" />
+      </nav>
+      <article className="legal-article enter" style={{ "--i": 2 } as React.CSSProperties} aria-labelledby="leg-title">
+        <h2 id="leg-title">Mentions légales et confidentialité</h2>
+        {SECTIONS.map((s) => (
+          <section key={s.id} className="legal-section" id={`leg-${s.id}`}>{s.content}</section>
+        ))}
+      </article>
     </div>
   );
 }

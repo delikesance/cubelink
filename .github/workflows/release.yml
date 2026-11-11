@@ -1,0 +1,68 @@
+# Build de l'installeur Windows (NSIS) sur GitHub Actions, puis signature gratuite via SignPath Foundation.
+# Declenche par un tag `vX.Y.Z` (ou a la main). Sans les secrets/variables SignPath, seul l'installeur NON signe est produit.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    outputs:
+      unsigned-artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '17' }
+      - run: npm ci
+      - name: Agent LAN (jar Java)
+        shell: bash
+        run: bash core/resources/lan-agent/build.sh
+      # Pas de CUBELINK_CF_API_KEY ici : une cle embarquee serait extractible de l'installeur public.
+      - name: Installeur NSIS
+        run: npx tauri build
+      - name: Preparer l'artefact a signer
+        shell: bash
+        run: |
+          mkdir -p unsigned
+          cp target/release/bundle/nsis/Cubelink_*_x64-setup.exe unsigned/
+      - id: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: installeur-non-signe
+          path: unsigned/*.exe
+
+  sign:
+    needs: build
+    runs-on: ubuntu-latest
+    # Ne tourne que si SignPath est configure (variable de depot SIGNPATH_ORGANIZATION_ID).
+    if: ${{ vars.SIGNPATH_ORGANIZATION_ID != '' }}
+    steps:
+      - uses: signpath/github-action-submit-signing-request@v1
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: cubelink
+          signing-policy-slug: release-signing
+          artifact-configuration-slug: default
+          github-artifact-id: ${{ needs.build.outputs.unsigned-artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signed
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installeur-signe
+          path: signed/*.exe
+      - name: Joindre a la release (tag uniquement)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: signed/*.exe

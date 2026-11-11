@@ -8,7 +8,37 @@ use core_lib::types::{Error, Friend, FriendRequest, Result, TrustLevel, VerifyCo
 use rusqlite::{params, Connection, OptionalExtension, Row, TransactionBehavior};
 
 /// Version courante du schéma (`PRAGMA user_version`).
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
+
+/// Nombre maximal d'adresses IP mémorisées par ami.
+pub const MAX_PEER_ADDRS: usize = 8;
+const MAX_RELAY_CHARS: usize = 256;
+
+/// Comment joindre un ami : relais d'attache (URL) + indices d'adresses IP directes (`ip:port`).
+/// Ce ne sont que des indices : ils peuvent être périmés (la clé publique reste la vérité).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PeerAddr {
+    pub relay: Option<String>,
+    pub addrs: Vec<String>,
+}
+
+impl PeerAddr {
+    /// Retire les valeurs invalides (adresse illisible, relais trop long), dédoublonne et borne.
+    fn sanitized(&self) -> PeerAddr {
+        let relay = self.relay.as_deref().map(str::trim).filter(|r| !r.is_empty() && r.chars().count() <= MAX_RELAY_CHARS);
+        let mut addrs: Vec<String> = Vec::new();
+        for a in &self.addrs {
+            if a.parse::<std::net::SocketAddr>().is_ok() && !addrs.contains(a) && addrs.len() < MAX_PEER_ADDRS {
+                addrs.push(a.clone());
+            }
+        }
+        PeerAddr { relay: relay.map(str::to_owned), addrs }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.relay.is_none() && self.addrs.is_empty()
+    }
+}
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_NAME_CHARS: usize = 64;
@@ -113,6 +143,12 @@ fn row_to_request(r: &Row<'_>) -> rusqlite::Result<FriendRequest> {
     })
 }
 
+/// Relit une adresse stockée ; une ligne corrompue donne une adresse vide (jamais une erreur).
+fn decode_addr(relay: Option<String>, addrs_json: &str) -> PeerAddr {
+    let addrs: Vec<String> = serde_json::from_str(addrs_json).unwrap_or_default();
+    PeerAddr { relay, addrs }.sanitized()
+}
+
 /// Échappe `%`, `_` et `\` pour un `LIKE ... ESCAPE '\'`.
 fn like_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
@@ -142,6 +178,14 @@ const MIGRATIONS: &[&str] = &[
         direction   TEXT NOT NULL CHECK (direction IN ('in','out'))
      );
      CREATE INDEX idx_requests_received ON requests(received_at DESC);",
+    // v1 -> v2 : adresses de contact des pairs (additif : aucune table existante n'est modifiée).
+    // Pas de clé étrangère : l'adresse d'une demande sortante est connue avant que l'ami n'existe.
+    "CREATE TABLE friend_addrs (
+        public_key TEXT PRIMARY KEY NOT NULL,
+        relay      TEXT,
+        addrs      TEXT NOT NULL DEFAULT '[]',
+        updated_at INTEGER NOT NULL
+     );",
 ];
 
 fn migrate(conn: &mut Connection) -> Result<()> {
@@ -241,11 +285,75 @@ impl FriendsDb {
     /// Supprime un ami ; renvoie `true` s'il existait.
     pub fn remove_friend(&self, public_key: &str) -> Result<bool> {
         check_key(public_key)?;
-        let n = self
-            .lock()
-            .execute("DELETE FROM friends WHERE public_key = ?1", params![public_key])
-            .map_err(db)?;
+        let conn = self.lock();
+        let n = conn.execute("DELETE FROM friends WHERE public_key = ?1", params![public_key]).map_err(db)?;
+        conn.execute("DELETE FROM friend_addrs WHERE public_key = ?1", params![public_key]).map_err(db)?;
         Ok(n > 0)
+    }
+
+    // ----- adresses de contact -----
+
+    /// Mémorise (remplace) l'adresse de contact d'un pair. Renvoie `true` si la valeur stockée a changé.
+    /// Une adresse vide n'écrase rien.
+    pub fn set_friend_addr(&self, public_key: &str, addr: &PeerAddr) -> Result<bool> {
+        check_key(public_key)?;
+        let addr = addr.sanitized();
+        if addr.is_empty() {
+            return Ok(false);
+        }
+        let json = serde_json::to_string(&addr.addrs).map_err(|e| Error::Other(e.to_string()))?;
+        let conn = self.lock();
+        let before: Option<(Option<String>, String)> = conn
+            .query_row("SELECT relay, addrs FROM friend_addrs WHERE public_key = ?1", params![public_key], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .optional()
+            .map_err(db)?;
+        if before.as_ref().is_some_and(|(r, a)| *r == addr.relay && *a == json) {
+            return Ok(false);
+        }
+        conn.execute(
+            "INSERT INTO friend_addrs (public_key, relay, addrs, updated_at) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(public_key) DO UPDATE SET relay = excluded.relay, addrs = excluded.addrs,
+                updated_at = excluded.updated_at",
+            params![public_key, addr.relay, json, now()],
+        )
+        .map_err(db)?;
+        Ok(true)
+    }
+
+    pub fn get_friend_addr(&self, public_key: &str) -> Result<Option<PeerAddr>> {
+        check_key(public_key)?;
+        let row: Option<(Option<String>, String)> = self
+            .lock()
+            .query_row("SELECT relay, addrs FROM friend_addrs WHERE public_key = ?1", params![public_key], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .optional()
+            .map_err(db)?;
+        Ok(row.map(|(relay, addrs)| decode_addr(relay, &addrs)))
+    }
+
+    /// Toutes les adresses mémorisées (amis et demandes en cours), clés triées.
+    pub fn list_friend_addrs(&self) -> Result<Vec<(String, PeerAddr)>> {
+        let conn = self.lock();
+        let mut st = conn.prepare("SELECT public_key, relay, addrs FROM friend_addrs ORDER BY public_key").map_err(db)?;
+        let rows = st
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, String>(2)?)))
+            .map_err(db)?;
+        let all = rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db)?;
+        Ok(all.into_iter().map(|(k, relay, addrs)| (k, decode_addr(relay, &addrs))).collect())
+    }
+
+    /// Supprime les adresses qui ne correspondent ni à un ami ni à une demande ; renvoie leur nombre.
+    pub fn prune_friend_addrs(&self) -> Result<usize> {
+        self.lock()
+            .execute(
+                "DELETE FROM friend_addrs WHERE public_key NOT IN (SELECT public_key FROM friends)
+                 AND public_key NOT IN (SELECT public_key FROM requests)",
+                [],
+            )
+            .map_err(db)
     }
 
     /// Change le niveau de confiance. `NotFound` si l'ami est absent.
@@ -459,7 +567,7 @@ mod tests {
         assert_eq!(v, SCHEMA_VERSION);
         // Idempotent.
         migrate(&mut conn).unwrap();
-        for t in ["friends", "requests"] {
+        for t in ["friends", "requests", "friend_addrs"] {
             let n: i64 = conn
                 .query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1", [t], |r| r.get(0))
                 .unwrap();
@@ -571,5 +679,63 @@ mod tests {
         assert_eq!(d.schema_version().unwrap(), SCHEMA_VERSION);
         assert_eq!(d.get_friend(&key(1)).unwrap().unwrap().trust, TrustLevel::Always);
         assert_eq!(d.list_requests(0, 10, None).unwrap()[0].received_at, 7);
+    }
+
+    #[test]
+    fn migration_v1_to_v2_keeps_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("friends.db");
+        {
+            // Base telle que l'écrivait la version 1 du schéma.
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(MIGRATIONS[0]).unwrap();
+            conn.pragma_update(None, "user_version", 1).unwrap();
+            conn.execute(
+                "INSERT INTO friends (public_key, name, trust, added_at) VALUES (?1, 'Ancien', 'always', 5)",
+                [key(1)],
+            )
+            .unwrap();
+        }
+        let d = FriendsDb::open(&path).unwrap();
+        assert_eq!(d.schema_version().unwrap(), 2);
+        assert_eq!(d.get_friend(&key(1)).unwrap().unwrap().name, "Ancien");
+        assert_eq!(d.get_friend_addr(&key(1)).unwrap(), None);
+        assert!(d.set_friend_addr(&key(1), &PeerAddr { relay: None, addrs: vec!["127.0.0.1:1".into()] }).unwrap());
+    }
+
+    #[test]
+    fn friend_addr_roundtrip_update_and_cleanup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("friends.db");
+        let a1 = PeerAddr { relay: Some("https://relay.example./".into()), addrs: vec!["10.0.0.2:4000".into(), "[::1]:9".into()] };
+        {
+            let d = FriendsDb::open(&path).unwrap();
+            d.add_friend(&friend(1, "A")).unwrap();
+            assert!(d.set_friend_addr(&key(1), &a1).unwrap());
+            assert!(!d.set_friend_addr(&key(1), &a1).unwrap(), "inchangé : pas d'écriture");
+            // Vide : n'écrase rien.
+            assert!(!d.set_friend_addr(&key(1), &PeerAddr::default()).unwrap());
+        }
+        let d = FriendsDb::open(&path).unwrap();
+        assert_eq!(d.get_friend_addr(&key(1)).unwrap(), Some(a1.clone()));
+        // Mise à jour : remplace.
+        let a2 = PeerAddr { relay: None, addrs: vec!["10.0.0.3:5".into()] };
+        assert!(d.set_friend_addr(&key(1), &a2).unwrap());
+        assert_eq!(d.list_friend_addrs().unwrap(), vec![(key(1), a2)]);
+        // Entrées invalides filtrées et bornées ; clé invalide refusée.
+        let many: Vec<String> = (1..=20).map(|i| format!("10.0.0.{i}:1")).chain(["pas une adresse".to_string()]).collect();
+        d.set_friend_addr(&key(2), &PeerAddr { relay: Some("x".repeat(300)), addrs: many }).unwrap();
+        let got = d.get_friend_addr(&key(2)).unwrap().unwrap();
+        assert_eq!((got.relay, got.addrs.len()), (None, MAX_PEER_ADDRS));
+        assert!(d.set_friend_addr("zz", &a1).is_err());
+        // Nettoyage : la clé 2 n'est ni ami ni demande ; elle disparaît, la clé 1 reste.
+        assert_eq!(d.prune_friend_addrs().unwrap(), 1);
+        assert!(d.get_friend_addr(&key(2)).unwrap().is_none() && d.get_friend_addr(&key(1)).unwrap().is_some());
+        // Une demande sortante conserve son adresse ; supprimer l'ami efface la sienne.
+        d.upsert_request(&req(3, "C", 1), Direction::Out).unwrap();
+        d.set_friend_addr(&key(3), &a1).unwrap();
+        assert_eq!(d.prune_friend_addrs().unwrap(), 0);
+        assert!(d.remove_friend(&key(1)).unwrap());
+        assert!(d.get_friend_addr(&key(1)).unwrap().is_none());
     }
 }

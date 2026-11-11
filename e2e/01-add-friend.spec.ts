@@ -18,15 +18,18 @@ test('T1 : B ajoute A, codes de verification identiques, A accepte, presence en 
 
   // A voit le badge (Accueil), puis la demande dans l'onglet Demandes.
   await gotoRoute(appA, 'main');
-  await expect(appA.page.getByRole('button', { name: /Amis \(1 demande\)/ })).toBeVisible({ timeout: 30_000 });
+  await expect(appA.page.getByRole('button', { name: /^Amis \(1 demande\)/ })).toBeVisible({ timeout: 30_000 });
   await gotoRoute(appA, 'friends');
   await expect(appA.page.getByRole('tab', { name: /Demandes/ }).getByLabel('1 demande en attente')).toBeVisible({ timeout: 30_000 });
+  await appA.page.getByRole('tab', { name: /Demandes/ }).click();
   await expect(appA.page.getByRole('heading', { name: `Demande de ${NAME_B}` })).toBeVisible();
   const verifyA = appA.page.getByLabel('Code de vérification', { exact: true });
   await expect(verifyA).toBeVisible();
   expect(((await verifyA.textContent()) ?? '').trim()).toBe(codeB);
 
-  // A accepte.
+  // A accepte : Accepter reste desactive tant que le code n'est pas coche comme compare.
+  await expect(appA.page.getByRole('button', { name: `Accepter ${NAME_B}` })).toBeDisabled();
+  await appA.page.getByLabel(`J'ai comparé ce code avec ${NAME_B}`).check();
   await appA.page.getByRole('button', { name: `Accepter ${NAME_B}` }).click();
   await expect(appA.page.getByText(`${NAME_B} est maintenant ton ami.`)).toBeVisible();
 
@@ -38,9 +41,10 @@ test('T1 : B ajoute A, codes de verification identiques, A accepte, presence en 
   // Chacun voit l'autre dans sa liste d'amis (Accueil) avec la presence en ligne.
   for (const [app, other] of [[appA, NAME_B], [appB, NAME_A]] as const) {
     await gotoRoute(app, 'main');
-    const friends = app.page.getByRole('complementary', { name: 'Amis' });
+    await app.page.getByRole('button', { name: /^Amis/ }).click();
+    const friends = app.page.getByRole('dialog', { name: 'Amis · 1' });
     await expect(friends.getByText(other).first()).toBeVisible({ timeout: 20_000 });
-    await expect(friends.getByRole('heading', { name: 'Amis · 1' })).toBeVisible();
+    await expect(friends.getByRole('list', { name: 'Amis' })).toBeVisible();
     await expect(friends.getByText('En ligne')).toBeVisible({ timeout: 30_000 });
   }
   const la = await invoke<{ friend: { name: string }; presence: string }[]>(appA.page, 'friend_list');
@@ -55,7 +59,6 @@ test('T1 negatif : code invalide, soi-meme, refus', async ({ world }) => {
 
   // Code invalide : erreur de validation, aucune demande chez A.
   await gotoRoute(appB, 'friends');
-  await appB.page.getByRole('tab', { name: 'Ajouter un ami' }).click();
   const input = appB.page.getByLabel('Code ami de ton ami');
   await input.fill('pas-un-code');
   await appB.page.getByRole('button', { name: 'Envoyer la demande' }).click();
@@ -68,7 +71,6 @@ test('T1 negatif : code invalide, soi-meme, refus', async ({ world }) => {
 
   // Demande a soi-meme : refusee, aucune demande ni ami cree.
   await gotoRoute(appA, 'friends');
-  await appA.page.getByRole('tab', { name: 'Ajouter un ami' }).click();
   await appA.page.getByLabel('Code ami de ton ami').fill(codeA);
   await appA.page.getByRole('button', { name: 'Envoyer la demande' }).click();
   await expect(appA.page.getByRole('alert').filter({ hasText: /\S/ })).toBeVisible({ timeout: 20_000 });
@@ -88,5 +90,6 @@ test('T1 negatif : code invalide, soi-meme, refus', async ({ world }) => {
   expect((await invoke<unknown[]>(appA.page, 'friend_list')).length).toBe(0);
   expect((await invoke<unknown[]>(appB.page, 'friend_list')).length).toBe(0);
   await gotoRoute(appA, 'main');
-  await expect(appA.page.getByRole('heading', { name: 'Amis · 0' })).toBeVisible();
+  await appA.page.getByRole('button', { name: /^Amis/ }).click();
+  await expect(appA.page.getByRole('dialog', { name: 'Amis · 0' })).toBeVisible();
 });

@@ -32,6 +32,7 @@ use tokio::sync::{oneshot, OwnedSemaphorePermit, Semaphore};
 use crate::friend_code;
 use crate::friends_db::{Direction, FriendsDb};
 use crate::identity::Identity;
+use crate::presence::{observed_addr, AddrSink};
 use crate::verify_code::verify_code;
 
 /// ALPN du protocole d'ajout d'ami.
@@ -327,6 +328,8 @@ struct Shared {
     name: Mutex<String>,
     state: Mutex<State>,
     handshakes: Arc<Semaphore>,
+    /// Reçoit l'adresse (relais + IP) du demandeur dont la demande vient d'être acceptée.
+    addr_sink: Mutex<Option<AddrSink>>,
 }
 
 /// Réservation d'un « état par pair » ; libérée à la fin (RAII).
@@ -435,6 +438,9 @@ impl Shared {
         self.db.upsert_request(&req, Direction::In)?;
         let (tx, rx) = oneshot::channel();
         lock(&self.state).pending.insert(peer.clone(), tx);
+        // Pair authentifié (signatures, engagement, admission) : on retient l'adresse de sa connexion,
+        // utilisée seulement si la demande est acceptée.
+        let observed = observed_addr(conn);
         (self.sink)(FriendEvent::IncomingRequest(req));
 
         let outcome = tokio::select! {
@@ -448,6 +454,12 @@ impl Shared {
             return Ok(());
         };
         let msg = self.sign(m1.from, Body::Decision { session, accept: d.accept, name: self.my_name() });
+        if d.accept {
+            let sink = lock(&self.addr_sink).clone();
+            if let Some(s) = sink {
+                s(observed);
+            }
+        }
         let written = write_frame(send, &msg).await;
         let _ = send.finish();
         if written.is_ok() {
@@ -558,8 +570,15 @@ impl FriendService {
             me,
             name: Mutex::new(name),
             state: Mutex::new(State::default()),
+            addr_sink: Mutex::new(None),
         });
         Ok(Self { shared, endpoint, router: None })
+    }
+
+    /// Destinataire de l'adresse d'un demandeur accepté (à persister) : appelé avant la réponse
+    /// d'acceptation, donc avant le retour de [`FriendService::accept`].
+    pub fn set_addr_sink(&self, sink: AddrSink) {
+        *lock(&self.shared.addr_sink) = Some(sink);
     }
 
     pub fn handler(&self) -> FriendHandler {
@@ -809,6 +828,37 @@ mod tests {
         assert_eq!(b.db.request_count().unwrap(), 0);
         // Une fois amis, nouvelle demande refusée localement.
         assert!(a.svc.send_request(&b.code).await.is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn accepted_requester_address_is_remembered_before_accept_returns() {
+        let a = Node::new("Alice").await;
+        let b = Node::new("Bob").await;
+        let got: Arc<Mutex<Vec<EndpointAddr>>> = Arc::default();
+        let g2 = got.clone();
+        b.svc.set_addr_sink(Arc::new(move |addr| lock(&g2).push(addr)));
+        a.svc.send_request(&b.code).await.unwrap();
+        b.wait_event(|e| matches!(e, FriendEvent::IncomingRequest(_))).await;
+        // Avant la décision : rien n'est mémorisé.
+        assert!(lock(&got).is_empty());
+        b.svc.accept(&a.hex()).await.unwrap();
+        let got = lock(&got).clone();
+        assert_eq!(got.len(), 1, "une seule adresse, dès le retour de accept (sans attendre de sonde)");
+        assert_eq!(got[0].id.as_bytes(), &a.pk());
+        assert!(got[0].ip_addrs().next().is_some(), "au moins une IP du demandeur");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn refused_requester_address_is_not_remembered() {
+        let a = Node::new("Alice").await;
+        let b = Node::new("Bob").await;
+        let got: Arc<Mutex<Vec<EndpointAddr>>> = Arc::default();
+        let g2 = got.clone();
+        b.svc.set_addr_sink(Arc::new(move |addr| lock(&g2).push(addr)));
+        let _ = a.svc.send_request(&b.code).await;
+        b.wait_event(|e| matches!(e, FriendEvent::IncomingRequest(_))).await;
+        b.svc.refuse(&a.hex()).await.unwrap();
+        assert!(lock(&got).is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

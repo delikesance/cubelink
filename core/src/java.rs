@@ -130,9 +130,22 @@ where
     Some(JavaInstall { path: java.to_path_buf(), major, vendor: None })
 }
 
+/// Empêche Windows d'ouvrir une fenêtre de console pour un sous-processus (`CREATE_NO_WINDOW`).
+/// Sans effet hors Windows. À appliquer à tout `Command` qui lance java ou un outil externe.
+pub fn no_window(cmd: &mut std::process::Command) -> &mut std::process::Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    cmd
+}
+
 /// Exécuteur réel pour `probe_with` : lance `java -version`.
 pub fn run_java_version(java: &Path) -> Option<String> {
-    let o = std::process::Command::new(java).arg("-version").output().ok()?;
+    let mut cmd = std::process::Command::new(java);
+    cmd.arg("-version");
+    let o = no_window(&mut cmd).output().ok()?;
     let mut s = String::from_utf8_lossy(&o.stderr).into_owned();
     s.push_str(&String::from_utf8_lossy(&o.stdout));
     Some(s)

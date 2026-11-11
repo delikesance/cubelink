@@ -41,7 +41,8 @@ pub struct RelaySettings {
     /// « Passer toujours par le relais » : aucun transport IP.
     pub relay_only: bool,
     pub allow_relay: bool,
-    /// Service de découverte d'adresses public (n0 : pkarr + DNS). **Désactivé par défaut.**
+    /// Service de découverte d'adresses public (n0 : pkarr + DNS). Désactivé dans `Default` (tests, hors
+    /// réseau) ; l'application le pilote par le réglage `Settings.discovery` (activé par défaut).
     /// Activé, l'endpoint PUBLIE auprès de n0 (`dns.iroh.link`) sa clé publique, son relais
     /// d'attache et ses adresses IP, et interroge ce service pour retrouver un pair par sa seule
     /// clé : n0 voit donc qui tu es (clé) et d'où tu te connectes (IP), et peut observer qui tu

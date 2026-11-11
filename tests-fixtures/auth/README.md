@@ -7,6 +7,6 @@ Scénarios : `POST /__control {"scenario": "..."}` (remet l'état à zéro) ; `G
 `ok`, `authorization_pending_then_ok` (2 attentes), `declined`, `expired_code`, `no_license`, `xbox_child_account`, `token_expired_then_refresh` (jetons Minecraft initiaux refusés en 401, valides après refresh), `server_error` (500 partout).
 Profil : `TestPlayer`, UUID `069a79f4-44e9-4726-a5be-fca90e38aaf5`. Jetons préfixés `fake-`.
 
-Variables d'environnement : l'app n'expose AUCUN moyen de surcharger les URLs (seuls `CUBELINK_MS_CLIENT_ID` et `CUBELINK_TEST_MODE=1` existent). Voir `docs/rapports/E0.1.md`.
+Variables d'environnement : avec `CUBELINK_TEST_MODE=1`, l'app accepte `CUBELINK_AUTH_{MS,XBOX,XSTS,MC}_URL` (limitées à 127.0.0.1/localhost) pour pointer vers ce faux serveur ; sans le mode test elles sont ignorées. Liste complète dans `docs/contrats.md`. (À l'origine, aucune surcharge n'existait : voir `docs/rapports/E0.1.md`.)
 
 Test : `node --test tests-fixtures/auth/server.test.mjs` (Node 24 : `node --test <dossier>` ne marche plus)

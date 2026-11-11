@@ -21,12 +21,13 @@ use futures_util::future::BoxFuture;
 use futures_util::stream::{self, StreamExt};
 use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
-use iroh::{Endpoint, EndpointAddr, EndpointId};
+use iroh::{Endpoint, EndpointAddr, EndpointId, TransportAddr};
 use rand::Rng;
 use tokio::sync::{watch, Semaphore};
 use tokio::task::JoinHandle;
 
 use crate::friends_db::FriendsDb;
+use crate::reach::Reach;
 
 /// ALPN du protocole de présence.
 pub const PRESENCE_ALPN: &[u8] = b"cubelink/presence/1";
@@ -92,6 +93,32 @@ impl Default for PresenceConfig {
             max_concurrent: 8,
         }
     }
+}
+
+/// Reçoit l'adresse observée d'un ami (relais + IP des chemins de la connexion) après une sonde réussie
+/// ou une connexion entrante d'un ami. Appelé de façon synchrone : ne doit pas bloquer.
+pub type AddrSink = Arc<dyn Fn(EndpointAddr) + Send + Sync>;
+
+type SharedSink = Arc<Mutex<Option<AddrSink>>>;
+
+fn notify(slot: &SharedSink, addr: EndpointAddr) {
+    let sink = slot.lock().unwrap_or_else(|p| p.into_inner()).clone();
+    if let Some(s) = sink {
+        s(addr);
+    }
+}
+
+/// Adresse de l'ami telle que vue par la connexion : relais et IP de tous les chemins connus.
+pub fn observed_addr(conn: &Connection) -> EndpointAddr {
+    let mut addr = EndpointAddr::new(conn.remote_id());
+    for p in conn.paths().iter() {
+        match p.remote_addr() {
+            TransportAddr::Relay(u) => addr = addr.with_relay_url(u.clone()),
+            TransportAddr::Ip(sa) => addr = addr.with_ip_addr(*sa),
+            _ => {}
+        }
+    }
+    addr
 }
 
 type PingFn = Arc<dyn Fn(PeerKey) -> BoxFuture<'static, bool> + Send + Sync>;
@@ -168,6 +195,7 @@ impl Inner {
 pub struct PresenceService {
     inner: Arc<Inner>,
     addrs: Arc<Mutex<HashMap<PeerKey, EndpointAddr>>>,
+    sink: SharedSink,
     stop: watch::Sender<bool>,
     task: Mutex<Option<JoinHandle<()>>>,
     /// Utilisé par `Drop` : évite d'attendre une tâche déjà arrêtée.
@@ -186,14 +214,30 @@ impl PresenceService {
         sink: EventSink,
         cfg: PresenceConfig,
     ) -> Self {
-        let addrs: Arc<Mutex<HashMap<PeerKey, EndpointAddr>>> = Arc::default();
+        Self::start_with_addrs(endpoint, friends, sink, cfg, Vec::new())
+    }
+
+    /// Comme `start_with_config`, avec des adresses déjà connues (rechargées depuis la base) disponibles
+    /// dès le premier tour de sonde : sans elles, un ami n'est joignable que par sa clé nue.
+    pub fn start_with_addrs(
+        endpoint: Endpoint,
+        friends: Arc<dyn FriendLookup>,
+        sink: EventSink,
+        cfg: PresenceConfig,
+        initial: Vec<EndpointAddr>,
+    ) -> Self {
+        let addrs: Arc<Mutex<HashMap<PeerKey, EndpointAddr>>> =
+            Arc::new(Mutex::new(initial.into_iter().map(|a| (*a.id.as_bytes(), a)).collect()));
         let addrs2 = Arc::clone(&addrs);
+        let slot: SharedSink = Arc::default();
+        let slot2 = Arc::clone(&slot);
         let pinger: PingFn = Arc::new(move |key| {
             let endpoint = endpoint.clone();
             let hint = addrs2.lock().unwrap_or_else(|p| p.into_inner()).get(&key).cloned();
-            Box::pin(async move { iroh_ping(&endpoint, key, hint).await })
+            let slot = Arc::clone(&slot2);
+            Box::pin(async move { iroh_ping(&endpoint, key, hint, &slot).await })
         });
-        Self::start_with(pinger, friends, sink, cfg, addrs)
+        Self::start_with(pinger, friends, sink, cfg, addrs, slot)
     }
 
     fn start_with(
@@ -202,6 +246,7 @@ impl PresenceService {
         sink: EventSink,
         cfg: PresenceConfig,
         addrs: Arc<Mutex<HashMap<PeerKey, EndpointAddr>>>,
+        sink_slot: SharedSink,
     ) -> Self {
         let inner = Arc::new(Inner {
             pinger,
@@ -227,7 +272,7 @@ impl PresenceService {
                 }
             }
         });
-        Self { inner, addrs, stop, task: Mutex::new(Some(task)), stopped: AtomicBool::new(false) }
+        Self { inner, addrs, sink: sink_slot, stop, task: Mutex::new(Some(task)), stopped: AtomicBool::new(false) }
     }
 
     /// Indique comment joindre un ami (sans découverte réseau, p. ex. adresses directes).
@@ -235,9 +280,14 @@ impl PresenceService {
         self.addrs.lock().unwrap_or_else(|p| p.into_inner()).insert(*addr.id.as_bytes(), addr);
     }
 
+    /// Destinataire des adresses observées (sonde réussie, connexion entrante d'un ami) : à persister.
+    pub fn set_addr_sink(&self, sink: AddrSink) {
+        *self.sink.lock().unwrap_or_else(|p| p.into_inner()) = Some(sink);
+    }
+
     /// Serveur : à enregistrer dans le `Router` sous `PRESENCE_ALPN`.
     pub fn handler(&self) -> PresenceHandler {
-        PresenceHandler { friends: Arc::clone(&self.inner.friends) }
+        PresenceHandler { friends: Arc::clone(&self.inner.friends), sink: Arc::clone(&self.sink) }
     }
 
     /// Présence de chaque ami (hors ligne tant qu'aucune sonde n'a réussi).
@@ -283,15 +333,27 @@ impl Drop for PresenceService {
 }
 
 /// Sonde réelle : connexion iroh, `PING`, attente de `PONG`.
-async fn iroh_ping(endpoint: &Endpoint, key: PeerKey, hint: Option<EndpointAddr>) -> bool {
+async fn iroh_ping(endpoint: &Endpoint, key: PeerKey, hint: Option<EndpointAddr>, slot: &SharedSink) -> bool {
+    match ping_reach(endpoint, key, hint).await {
+        Ok(addr) => {
+            notify(slot, addr);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// Sonde un ami et dit POURQUOI il ne répond pas : `Offline` (injoignable) ou `NotFriend` (il nous a refusé).
+/// En cas de succès, renvoie l'adresse observée de l'ami (à mémoriser). Sans délai propre : l'appelant borne.
+pub async fn ping_reach(endpoint: &Endpoint, key: PeerKey, hint: Option<EndpointAddr>) -> Result<EndpointAddr, Reach> {
     let addr = match hint {
         Some(a) => a,
         None => match EndpointId::from_bytes(&key) {
             Ok(id) => id.into(),
-            Err(_) => return false,
+            Err(_) => return Err(Reach::Offline),
         },
     };
-    let Ok(conn) = endpoint.connect(addr, PRESENCE_ALPN).await else { return false };
+    let Ok(conn) = endpoint.connect(addr, PRESENCE_ALPN).await else { return Err(Reach::Offline) };
     let ok = async {
         let (mut send, mut recv) = conn.open_bi().await.ok()?;
         send.write_all(PING).await.ok()?;
@@ -302,14 +364,21 @@ async fn iroh_ping(endpoint: &Endpoint, key: PeerKey, hint: Option<EndpointAddr>
     }
     .await
     .is_some();
+    let observed = observed_addr(&conn);
+    let reason = if ok { None } else { Reach::from_conn_settled(&conn).await };
     conn.close(0u32.into(), b"");
-    ok
+    if ok {
+        Ok(observed)
+    } else {
+        Err(reason.unwrap_or(Reach::Offline))
+    }
 }
 
 /// Côté serveur : répond `PONG` aux seuls amis acceptés.
 #[derive(Clone)]
 pub struct PresenceHandler {
     friends: Arc<dyn FriendLookup>,
+    sink: SharedSink,
 }
 
 impl std::fmt::Debug for PresenceHandler {
@@ -325,6 +394,8 @@ impl ProtocolHandler for PresenceHandler {
             conn.close(1u32.into(), b"");
             return Ok(());
         }
+        // Un ami nous joint : son adresse du moment est la meilleure qu'on ait.
+        notify(&self.sink, observed_addr(&conn));
         let served = async {
             let (mut send, mut recv) = conn.accept_bi().await.ok()?;
             let mut buf = [0u8; 4];
@@ -391,7 +462,7 @@ mod tests {
     }
 
     fn fake(pinger: PingFn, friends: Arc<dyn FriendLookup>, sink: EventSink, cfg: PresenceConfig) -> PresenceService {
-        PresenceService::start_with(pinger, friends, sink, cfg, Arc::default())
+        PresenceService::start_with(pinger, friends, sink, cfg, Arc::default(), Arc::default())
     }
 
     #[tokio::test]

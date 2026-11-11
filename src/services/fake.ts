@@ -1,5 +1,6 @@
 import type {
-  CreateInstanceInput, DeviceCode, FriendRequest, FriendWithPresence, Instance,
+  BrowseHit, BrowseInstallResult, BrowseKind, BrowseProgressEvent, BrowseSource, BrowseVersion, ModEntry,
+  CreateInstanceInput, DeviceCode, HostState, ImportWarningEvent, LaunchLogEvent, FriendRequest, FriendWithPresence, Instance, InstanceArt,
   JoinPlan, LaunchState, Manifest, PresenceEvent, UnknownModsEvent, Profile, Services, Settings,
   TransferProgress, Unsubscribe,
 } from "./types";
@@ -11,6 +12,106 @@ export interface FakeOptions {
   loginDelayMs?: number;
   /** Nombre de demandes d'amis initiales. */
   requestCount?: number;
+  /** Valeur renvoyée par pickFiles (configurable aussi via setPickedFiles). */
+  pickedFiles?: string[];
+}
+
+/** Commandes de test exposées par le faux service. */
+export interface FakeControls {
+  setPickedFiles(paths: string[]): void;
+  /** Simule un glisser-déposer natif de fichiers sur la fenêtre. */
+  dropFiles(paths: string[]): void;
+  /** Test : émet un événement host://state. */
+  emitHostState(e: HostState): void;
+}
+
+const KIND_WORDS: Record<BrowseKind, string[]> = {
+  modpack: ["Aventure", "Technologie", "Magie", "Skyblock", "Survie", "Exploration", "Industrie", "Médiéval"],
+  mod: ["Sodium", "Iris", "Lithium", "Create", "Jade", "Xaero", "Farmers", "Biomes", "Backpacks", "Waystones"],
+  resourcepack: ["Faithful", "Bare Bones", "Vanilla Tweaks", "Soartex", "Mizuno", "Stay True", "Default Dark", "Pixel"],
+  shader: ["Complementary", "BSL", "Sildur", "Photon", "Rethinking Voxels", "Solas", "Nostalgia", "Chocapic"],
+};
+const AUTHORS = ["Mojave", "Kaelis", "Ninox", "Tarn", "Brindille", "Orfeo"];
+const SUFFIXES = ["Reborn", "Plus", "Lite", "Remix", "Ultimate"];
+const KIND_LABEL: Record<BrowseKind, string> = {
+  modpack: "un modpack", mod: "un mod", shader: "un shader", resourcepack: "un pack de ressources",
+};
+
+function slug(s: string): string {
+  return s.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+}
+
+function makeHits(): BrowseHit[] {
+  const hits: BrowseHit[] = [];
+  for (const source of ["curseforge", "modrinth"] as BrowseSource[]) {
+    for (const kind of Object.keys(KIND_WORDS) as BrowseKind[]) {
+      const words = KIND_WORDS[kind];
+      for (let i = 0; i < 36; i++) {
+        const base = words[i % words.length];
+        const name = i < words.length ? base : `${base} ${SUFFIXES[Math.floor(i / words.length) % 5]} ${i}`;
+        hits.push({
+          source, kind, id: `${source}-${kind}-${i}`, name,
+          summary: `${name} : ${KIND_LABEL[kind]} pour Minecraft.`,
+          author: AUTHORS[i % AUTHORS.length],
+          icon_url: i % 4 === 3 ? null : `https://cdn.example.test/${source}/${slug(name)}.png`,
+          downloads: Math.max(100, 5_000_000 - i * 131_071 + (source === "modrinth" ? 12_345 : 0)),
+          page_url: source === "modrinth"
+            ? `https://modrinth.com/${kind}/${slug(name)}`
+            : `https://www.curseforge.com/minecraft/${kind}s/${slug(name)}`,
+          downloadable: !(source === "curseforge" && i % 6 === 5),
+        });
+      }
+    }
+  }
+  return hits;
+}
+const HITS = makeHits();
+
+const KNOWN_ART: Array<{ match: string; id: string; title: string; author: string; color: string; source: "curseforge" | "modrinth" }> = [
+  { match: "all the mods 10", id: "atm10", title: "All the Mods 10", author: "ATM Team", color: "#2f6fed", source: "curseforge" },
+  { match: "prominence", id: "prominence", title: "Prominence II", author: "Moosniffer", color: "#c0392b", source: "modrinth" },
+  { match: "better minecraft", id: "bmc", title: "Better Minecraft", author: "Lunapixel", color: "#27ae60", source: "modrinth" },
+];
+
+function makeArt(id: string, title: string, author: string, color: string, source: "curseforge" | "modrinth" | "custom"): InstanceArt {
+  return {
+    source, project_id: id, title, author, summary: `${title} : un modpack de démonstration.`, color,
+    icon: "icon.png", screenshots: [1, 2, 3, 4].map((n) => `screenshot-${n}.png`),
+    page_url: source === "custom" ? null : `https://example.test/${source}/${id}`,
+  };
+}
+
+function shade(hex: string, k: number): string {
+  const n = parseInt(hex.slice(1), 16);
+  const c = (v: number) => Math.max(0, Math.min(255, Math.round(v * k))).toString(16).padStart(2, "0");
+  return `#${c(n >> 16)}${c((n >> 8) & 255)}${c(n & 255)}`;
+}
+
+/** SVG dégradé encodé en data URL, distinct par (couleur, texte). */
+function svgImage(color: string, label: string, file: string): string {
+  const esc = label.replace(/[<>&"]/g, "");
+  const big = file.startsWith("icon");
+  const [w, h] = big ? [128, 128] : [320, 180];
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">`
+    + `<defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="${color}"/>`
+    + `<stop offset="1" stop-color="${shade(color, 0.45)}"/></linearGradient></defs>`
+    + `<rect width="${w}" height="${h}" fill="url(#g)"/>`
+    + `<text x="${w / 2}" y="${h / 2}" fill="#fff" font-family="sans-serif" font-size="${big ? 18 : 20}" text-anchor="middle">${esc}</text>`
+    + `<text x="${w / 2}" y="${h - 10}" fill="#ffffffaa" font-family="sans-serif" font-size="11" text-anchor="middle">${file}</text></svg>`;
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+}
+
+function makeVersions(hit: BrowseHit): BrowseVersion[] {
+  const defs: Array<[string, string[], string[]]> = [
+    ["1.2.0", ["1.21.4", "1.21.1"], ["neoforge", "fabric"]],
+    ["1.1.3", ["1.21.1"], ["neoforge"]],
+    ["1.0.5", ["1.20.1"], ["forge", "fabric"]],
+  ];
+  const withLoader = hit.kind === "mod" || hit.kind === "modpack";
+  return defs.map(([v, mc, loaders], i) => ({
+    id: `${hit.id}-v${v}`, name: `${hit.name} ${v}`, minecraft: mc, loaders: withLoader ? loaders : [],
+    published: new Date(Date.UTC(2025, 10 - i * 3, 12)).toISOString(), downloadable: hit.downloadable,
+  }));
 }
 
 const NAMES = ["Alex", "Steve", "Noor", "Mika", "Zoe", "Liam", "Inès", "Hugo", "Lola", "Ravi"];
@@ -55,7 +156,7 @@ function makeManifest(): Manifest {
   };
 }
 
-export function createFakeServices(opts: FakeOptions = {}): Services {
+export function createFakeServices(opts: FakeOptions = {}): Services & FakeControls {
   const tickMs = opts.tickMs ?? 250;
   const loginDelayMs = opts.loginDelayMs ?? 1200;
   const requestCount = opts.requestCount ?? 1000;
@@ -64,12 +165,21 @@ export function createFakeServices(opts: FakeOptions = {}): Services {
   let codeN = 1;
   let settings: Settings = {
     language: "fr", default_ram_mb: 4096, java_path: null,
-    trust_default: "ask", allow_relay: true, close_on_launch: false, relay_only: false, share_mods: true,
+    trust_default: "ask", allow_relay: true, close_on_launch: false, relay_only: false, share_mods: true, discovery: true, lan_auto: true,
   };
   const instances: Instance[] = [{
     id: "inst-aeronautics", name: "Create: Aeronautics", minecraft: "1.21.1",
     loader: { loader: "neoforge", version: "21.1.77" }, ram_mb: 6144, mod_count: 94,
+  }, {
+    id: "inst-atm10", name: "All the Mods 10", minecraft: "1.21.1",
+    loader: { loader: "neoforge", version: "21.1.77" }, ram_mb: 8192, mod_count: 420,
+    art: makeArt("atm10", "All the Mods 10", "ATM Team", "#2f6fed", "curseforge"),
+  }, {
+    id: "inst-prominence", name: "Prominence II", minecraft: "1.20.1",
+    loader: { loader: "fabric", version: "0.15.11" }, ram_mb: 6144, mod_count: 310,
+    art: makeArt("prominence", "Prominence II", "Moosniffer", "#c0392b", "modrinth"),
   }];
+  const artOf = (id: string) => need(id);
   let requests: FriendRequest[] = Array.from({ length: requestCount }, (_, i) => makeRequest(i));
   const friends: FriendWithPresence[] = [
     { friend: { public_key: hex(1, 64), name: "Alex", trust: "ask", added_at: NOW - 86400 }, presence: "online" },
@@ -83,6 +193,11 @@ export function createFakeServices(opts: FakeOptions = {}): Services {
     presence: new Set<(e: PresenceEvent) => void>(),
     request: new Set<(r: FriendRequest) => void>(),
     unknown: new Set<(e: UnknownModsEvent) => void>(),
+    log: new Set<(e: LaunchLogEvent) => void>(),
+    browse: new Set<(e: BrowseProgressEvent) => void>(),
+    drop: new Set<(p: string[]) => void>(),
+    warning: new Set<(e: ImportWarningEvent) => void>(),
+    host: new Set<(e: HostState) => void>(),
   };
   function sub<T>(set: Set<(v: T) => void>, cb: (v: T) => void): Unsubscribe {
     set.add(cb);
@@ -90,6 +205,44 @@ export function createFakeServices(opts: FakeOptions = {}): Services {
   }
   function emit<T>(set: Set<(v: T) => void>, v: T) { set.forEach((cb) => cb(v)); }
   const setProfile = (p: Profile | null) => { profile = p; emit(listeners.auth, p); };
+
+  // --- jeu simulé : logs et lancement ---
+  const logs = new Map<string, string[]>();
+  const launchTimers = new Map<string, ReturnType<typeof setTimeout>[]>();
+  const pushLog = (id: string, line: string) => {
+    logs.set(id, [...(logs.get(id) ?? []), line]);
+    emit(listeners.log, { id, line });
+  };
+  const clearLaunch = (id: string) => {
+    launchTimers.get(id)?.forEach(clearTimeout);
+    launchTimers.delete(id);
+  };
+  const need = (id: string) => {
+    const inst = instances.find((i) => i.id === id);
+    if (!inst) throw new Error("Instance introuvable.");
+    return inst;
+  };
+
+  // --- mods en mémoire ---
+  let picked = opts.pickedFiles ?? [];
+  const mods = new Map<string, ModEntry[]>();
+  mods.set("inst-aeronautics", [
+    ...["create", "sodium", "iris", "lithium", "jade", "xaero-minimap", "waystones", "farmers-delight"].map((n, i) => (
+      { file: `${n}-1.${i}.0.jar`, enabled: i !== 3, size: 800_000 + i * 345_678, custom: false }
+    )),
+    { file: "mod-maison.jar", enabled: true, size: 52_340, custom: true },
+  ]);
+  const modsOf = (id: string) => {
+    need(id);
+    if (!mods.has(id)) mods.set(id, []);
+    return mods.get(id)!;
+  };
+  const modFile = (id: string, file: string) => {
+    const m = modsOf(id).find((x) => x.file === file);
+    if (!m) throw new Error("Mod introuvable.");
+    return m;
+  };
+  const syncCount = (id: string) => { need(id).mod_count = modsOf(id).length; };
 
   // --- transfert simulé ---
   const TOTAL_STEPS = 10;
@@ -134,6 +287,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services {
       if (loginDelayMs <= 0) done(); else setTimeout(done, loginDelayMs);
     }),
     authLogout: async () => { setProfile(null); },
+    offlineAvailable: async () => true,
     authOfflineLogin: async (name) => {
       const n = name.trim();
       if (!n) throw new Error("Le pseudo est obligatoire.");
@@ -150,7 +304,8 @@ export function createFakeServices(opts: FakeOptions = {}): Services {
       return { ...inst };
     },
     instancesImportMrpack: async (path) => {
-      if (!path.endsWith(".mrpack")) throw new Error("Fichier .mrpack attendu.");
+      if (!/\.(mrpack|zip)$/i.test(path)) throw new Error("Fichier .mrpack ou .zip attendu.");
+      if (/manquant|missing/i.test(path)) emit(listeners.warning, { missing: ["sodium", "iris"] });
       const inst: Instance = {
         id: `inst-${instances.length + 1}`, name: "Pack importé", minecraft: "1.21.1",
         loader: { loader: "fabric", version: "0.16.5" }, ram_mb: 4096, mod_count: 12,
@@ -160,8 +315,68 @@ export function createFakeServices(opts: FakeOptions = {}): Services {
     },
     instancesLaunch: async (id) => {
       if (!instances.some((i) => i.id === id)) throw new Error("Instance introuvable.");
+      clearLaunch(id);
       emit(listeners.launch, { id, state: "preparing" });
-      if (tickMs > 0) setTimeout(() => emit(listeners.launch, { id, state: "running" }), tickMs);
+      pushLog(id, "[Cubelink] Préparation du jeu…");
+      if (tickMs > 0) {
+        launchTimers.set(id, [
+          setTimeout(() => { emit(listeners.launch, { id, state: "running" }); pushLog(id, "[Minecraft] Démarrage de Minecraft…"); }, tickMs),
+          setTimeout(() => pushLog(id, "[Minecraft] Chargement des mods…"), tickMs * 2),
+        ]);
+      }
+    },
+    instancesKill: async (id) => {
+      need(id);
+      clearLaunch(id);
+      pushLog(id, "[Cubelink] Processus arrêté.");
+      emit(listeners.launch, { id, state: "exited" });
+    },
+    instancesDelete: async (id) => {
+      const inst = need(id);
+      clearLaunch(id);
+      instances.splice(instances.indexOf(inst), 1);
+      logs.delete(id);
+    },
+    instancesUpdate: async (id, patch) => {
+      const inst = need(id);
+      if (patch.name !== undefined) {
+        if (!patch.name.trim()) throw new Error("Le nom de l'instance est obligatoire.");
+        inst.name = patch.name.trim();
+      }
+      if (patch.ram_mb !== undefined) inst.ram_mb = patch.ram_mb;
+      if (patch.java_path !== undefined) inst.java_path = patch.java_path;
+      if (patch.jvm_args !== undefined) inst.jvm_args = patch.jvm_args;
+      return { ...inst };
+    },
+    instancesArtImage: async (id, file) => {
+      const art = artOf(id).art;
+      if (!art) throw new Error("Cette instance n'a pas d'illustration.");
+      if (file !== art.icon && !art.screenshots.includes(file)) throw new Error("Image introuvable.");
+      return svgImage(art.color ?? "#555555", art.title, file);
+    },
+    instancesArtSet: async (id, path, role) => {
+      const inst = artOf(id);
+      const file = path.split(/[\\/]/).pop() ?? path;
+      if (!/\.(png|jpe?g|webp|gif)$/i.test(file)) throw new Error("Image attendue (png, jpg, webp ou gif).");
+      const art = inst.art ?? { ...makeArt(`custom-${id}`, inst.name, "", "#6c5ce7", "custom"), icon: null, screenshots: [] };
+      art.title = inst.name;
+      if (role === "icon") art.icon = file;
+      else art.screenshots = [file, ...art.screenshots.filter((x) => x !== file)];
+      inst.art = { ...art, source: art.source === "custom" ? "custom" : art.source };
+      return { ...inst };
+    },
+    instancesArtLookup: async (id) => {
+      const inst = artOf(id);
+      const name = inst.name.trim().toLowerCase();
+      const k = KNOWN_ART.find((x) => name.includes(x.match));
+      if (!k) throw new Error(`Aucun modpack correspondant à « ${inst.name} » trouvé. Choisis une image à la main.`);
+      inst.art = makeArt(k.id, k.title, k.author, k.color, k.source);
+      return { ...inst };
+    },
+    instancesOpenFolder: async (id) => { need(id); },
+    instancesLogs: async (id) => {
+      need(id);
+      return (logs.get(id) ?? ["[Cubelink] Aucun lancement pour le moment."]).join("\n");
     },
     minecraftVersions: async () => ["1.21.4", "1.21.1", "1.20.6", "1.20.1", "1.19.4", "1.18.2"],
 
@@ -196,6 +411,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services {
       manifest: makeManifest(), cached: 91, to_receive: 3, to_receive_bytes: bytes_total,
       unknown_mods: ["mods/mod-maison.jar"],
     }),
+    joinPlay: async () => {},
     joinStart: async () => {
       step = 0;
       emit(listeners.transfer, progress("preparing"));
@@ -208,11 +424,89 @@ export function createFakeServices(opts: FakeOptions = {}): Services {
     settingsGet: async () => ({ ...settings }),
     settingsSet: async (s) => { settings = { ...s }; return { ...settings }; },
 
+    browseSearch: async (q) => {
+      const t = q.query.trim().toLowerCase();
+      let all = HITS.filter((h) => h.source === q.source && h.kind === q.kind
+        && (!t || h.name.toLowerCase().includes(t) || h.summary.toLowerCase().includes(t)));
+      if (q.sort === "downloads") all = [...all].sort((a, b) => b.downloads - a.downloads);
+      else if (q.sort === "updated") all = [...all].reverse();
+      return { hits: all.slice(q.offset, q.offset + q.limit).map((h) => ({ ...h })), total: all.length };
+    },
+    browseVersions: async (source, id, kind, minecraft, loader) => {
+      const hit = HITS.find((h) => h.source === source && h.id === id && h.kind === kind);
+      if (!hit) throw new Error("Projet introuvable.");
+      return makeVersions(hit).filter((v) => (!minecraft || v.minecraft.includes(minecraft))
+        && (!loader || !v.loaders.length || v.loaders.includes(loader)));
+    },
+    browseInstall: async (input): Promise<BrowseInstallResult> => {
+      const hit = HITS.find((h) => h.source === input.source && h.id === input.id && h.kind === input.kind);
+      if (!hit) throw new Error("Projet introuvable.");
+      if (!hit.downloadable) throw new Error("Ce projet n'est pas téléchargeable depuis le launcher.");
+      const steps = input.kind === "modpack" ? 5 : 2;
+      for (let i = 0; i <= steps; i++) {
+        emit(listeners.browse, { done: i, total: steps, label: i === steps ? "Terminé" : `Téléchargement de ${hit.name}` });
+        if (tickMs > 0) await new Promise((r) => setTimeout(r, tickMs / 5));
+      }
+      if (input.kind === "modpack") {
+        const inst: Instance = {
+          id: `inst-${instances.length + 1}`, name: hit.name, minecraft: "1.21.1",
+          loader: { loader: "neoforge", version: "21.1.77" }, ram_mb: 4096, mod_count: 24,
+        };
+        inst.art = makeArt(`${hit.source}-${hit.id}`, hit.name, hit.author, hit.source === "modrinth" ? "#1bd96a" : "#f16436", hit.source);
+        instances.push(inst);
+        return {
+          instance: { ...inst }, installed: [`${slug(hit.name)}.mrpack`],
+          missing: hit.source === "curseforge" ? ["mod-exclusif"] : [],
+        };
+      }
+      const inst = need(input.instance_id ?? instances[0]?.id ?? "");
+      const ver = input.version_id?.split("-v")[1] ?? "1.2.0";
+      const file = `${slug(hit.name)}-${ver}.${input.kind === "mod" ? "jar" : "zip"}`;
+      if (input.kind === "mod") {
+        const list = modsOf(inst.id);
+        if (!list.some((m) => m.file === file)) list.push({ file, enabled: true, size: 1_200_000, custom: false });
+        syncCount(inst.id);
+      }
+      return { instance: { ...inst }, installed: [file], missing: [] };
+    },
+    modsList: async (id) => modsOf(id).map((m) => ({ ...m })),
+    modsToggle: async (id, file, enabled) => { modFile(id, file).enabled = enabled; },
+    modsRemove: async (id, file) => {
+      const m = modFile(id, file);
+      const list = modsOf(id);
+      list.splice(list.indexOf(m), 1);
+      syncCount(id);
+    },
+    modsAdd: async (id, path) => {
+      const list = modsOf(id);
+      const file = path.split(/[\\/]/).pop() ?? path;
+      if (!/\.jar$/i.test(file)) throw new Error("Fichier .jar attendu.");
+      if (list.some((m) => m.file === file)) throw new Error("Ce mod est déjà présent.");
+      const m: ModEntry = { file, enabled: true, size: 250_000, custom: true };
+      list.push(m);
+      syncCount(id);
+      return { ...m };
+    },
+    pickFiles: async ({ extensions, multiple }) => {
+      const ok = picked.filter((p) => extensions.some((e) => p.toLowerCase().endsWith(`.${e.toLowerCase()}`)));
+      return multiple ? ok : ok.slice(0, 1);
+    },
+    setPickedFiles: (paths) => { picked = paths; },
+    dropFiles: (paths) => emit(listeners.drop, paths),
+    emitHostState: (e) => emit(listeners.host, e),
+
     onAuthState: (cb) => sub(listeners.auth, cb),
     onLaunchState: (cb) => sub(listeners.launch, cb),
+    onLaunchLog: (cb) => sub(listeners.log, cb),
+    onImportWarning: (cb) => sub(listeners.warning, cb),
+    hostState: async () => null,
+    onHostState: (cb) => sub(listeners.host, cb),
     onTransferProgress: (cb) => sub(listeners.transfer, cb),
     onFriendPresence: (cb) => sub(listeners.presence, cb),
     onFriendRequest: (cb) => sub(listeners.request, cb),
     onUnknownMods: (cb) => sub(listeners.unknown, cb),
+    onTransferErrorDetails: () => () => {},
+    onBrowseProgress: (cb) => sub(listeners.browse, cb),
+    onFilesDropped: (cb) => sub(listeners.drop, cb),
   };
 }

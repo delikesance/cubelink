@@ -102,7 +102,7 @@ pub fn build_manifest_with(
     for (i, (rel, abs)) in candidates.iter().enumerate() {
         let base = total_bytes;
         let want_sha1 = rel.starts_with("mods/");
-        let (sha256, sha1, size) = hash_stream(abs, want_sha1, &mut |file_bytes| {
+        let hashed = hash_stream(abs, want_sha1, &mut |file_bytes| {
             on_progress(&ManifestProgress {
                 path: rel,
                 file_bytes,
@@ -111,7 +111,17 @@ pub fn build_manifest_with(
                 files_total,
                 file_done: false,
             })
-        })?;
+        });
+        let (sha256, sha1, size) = match hashed {
+            Ok(v) => v,
+            // Fichier verrouillé par le jeu (partage 32, verrou d'octets 33) ou disparu : jamais bloquant pour le partage.
+            Err(Error::Io(e)) if is_locked_or_gone(&e) => {
+                report.skipped.push((rel.clone(), format!("illisible pour l'instant ({e})")));
+                on_progress(&ManifestProgress { path: rel, file_bytes: 0, total_bytes: base, files_done: i + 1, files_total, file_done: true });
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
         total_bytes = base + size;
         on_progress(&ManifestProgress {
             path: rel,
@@ -159,6 +169,11 @@ fn hash_stream(
         progress(size);
     }
     Ok((hex::encode(hasher.finalize()), sha1.map(|s| s.finish()), size))
+}
+
+/// Erreurs d'E/S « le fichier est utilisé par le jeu » (Windows 32 partage, 33 verrou) ou « disparu entre-temps ».
+fn is_locked_or_gone(e: &std::io::Error) -> bool {
+    matches!(e.raw_os_error(), Some(32) | Some(33)) || e.kind() == std::io::ErrorKind::NotFound
 }
 
 fn is_hidden(name: &str, meta: &fs::Metadata) -> bool {
@@ -237,6 +252,10 @@ fn walk(
             continue;
         }
         let lower = name.to_ascii_lowercase();
+        if lower.ends_with(".lock") {
+            report.skipped.push((rel_path, "fichier de verrou (propre au jeu qui tourne)".into()));
+            continue;
+        }
         if SECRET_HINTS.iter().any(|h| lower.contains(h)) {
             report.skipped.push((rel_path, "nom évoquant un jeton ou un identifiant".into()));
             continue;
@@ -405,6 +424,9 @@ mod tests {
             loader: LoaderSpec { loader: Loader::NeoForge, version: "21.1.77".into() },
             ram_mb: 4096,
             mod_count: 2,
+            java_path: None,
+            jvm_args: String::new(),
+            art: None,
         }
     }
 
@@ -502,6 +524,27 @@ mod tests {
             for bad in ["saves", "logs", "crash-reports", "screenshots", ".cubelink", "options.txt", "servers.dat", "token", ".hidden"] {
                 assert!(!f.path.contains(bad), "{} ne doit pas être partagé", f.path);
             }
+        }
+    }
+
+    #[test]
+    fn fichiers_verrouilles_ne_bloquent_pas_le_manifeste() {
+        let d = fake_game();
+        put(d.path(), "config/controlify/profile-1.lock", b"");
+        put(d.path(), "config/ok.toml", b"v=1");
+        put(d.path(), "config/utilise.dat", b"verrouille par le jeu");
+        // Verrou exclusif tenu pendant la construction (Windows : lecture refusée, erreur 33 ; ailleurs : lecture permise).
+        let held = fs::File::open(d.path().join("config/utilise.dat")).unwrap();
+        let locked = held.try_lock().is_ok();
+        let opts = ManifestOptions { include_config: true, ..Default::default() };
+        let (m, report) = build_manifest_with(&inst(), d.path(), &opts, &mut |_| {}).expect("un verrou ne doit pas faire échouer le manifeste");
+        let p = paths(&m);
+        assert!(p.contains(&"config/ok.toml") && p.contains(&"config/c.toml"), "{p:?}");
+        assert!(!p.contains(&"config/controlify/profile-1.lock"), "{p:?}");
+        assert!(report.skipped.iter().any(|(f, why)| f.ends_with("profile-1.lock") && why.contains("verrou")), "{:?}", report.skipped);
+        if cfg!(windows) && locked {
+            assert!(!p.contains(&"config/utilise.dat"), "{p:?}");
+            assert!(report.skipped.iter().any(|(f, _)| f == "config/utilise.dat"), "{:?}", report.skipped);
         }
     }
 

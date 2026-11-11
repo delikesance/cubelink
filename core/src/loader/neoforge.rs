@@ -430,11 +430,9 @@ impl ProcessRunner for JavaRunner {
             .map(|p| p.to_string_lossy().into_owned())
             .collect::<Vec<_>>()
             .join(sep);
-        let out = std::process::Command::new(&self.java)
-            .arg("-cp")
-            .arg(cp)
-            .arg(&main)
-            .args(&spec.args)
+        let mut cmd = std::process::Command::new(&self.java);
+        cmd.arg("-cp").arg(cp).arg(&main).args(&spec.args);
+        let out = crate::java::no_window(&mut cmd)
             .output()
             .map_err(|e| Error::Other(format!("lancement de Java impossible ({}) : {e}", self.java.display())))?;
         if !out.status.success() {

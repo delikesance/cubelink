@@ -11,9 +11,9 @@
   },
   "app": {
     "windows": [
-      { "title": "Cubelink", "width": 1280, "height": 720, "minWidth": 960, "minHeight": 600, "decorations": false }
+      { "title": "Cubelink", "width": 1280, "height": 720, "minWidth": 960, "minHeight": 600, "decorations": false, "dragDropEnabled": true }
     ],
     "security": { "csp": null }
   },
-  "bundle": { "active": true, "targets": ["nsis"], "icon": ["icons/icon.ico"], "windows": { "nsis": { "installMode": "currentUser", "languages": ["French", "English"] } } }
+  "bundle": { "active": true, "resources": { "../core/resources/cubelink-lan-agent.jar": "cubelink-lan-agent.jar" }, "targets": ["nsis"], "icon": ["icons/icon.ico"], "windows": { "nsis": { "installMode": "currentUser", "languages": ["French", "English"] } } }
 }

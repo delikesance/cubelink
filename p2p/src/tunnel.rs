@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
+use crate::reach::Reach;
 use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
 use iroh::{Endpoint, EndpointAddr};
@@ -25,6 +26,9 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{watch, Semaphore};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::timeout;
+
+/// Attente du refus éventuel de l'hôte après l'établissement de la connexion.
+const SETTLE: Duration = Duration::from_millis(350);
 
 /// ALPN dédié au tunnel de jeu.
 pub const TUNNEL_ALPN: &[u8] = b"cubelink/tunnel/1";
@@ -53,6 +57,8 @@ pub struct TunnelConfig {
     pub connect_timeout: Duration,
     /// Inactivité maximale d'une connexion relayée (dans un sens).
     pub idle_timeout: Duration,
+    /// Durée maximale pendant laquelle l'invité retente de se reconnecter à l'hôte après une coupure.
+    pub reconnect_budget: Duration,
 }
 
 impl Default for TunnelConfig {
@@ -61,6 +67,7 @@ impl Default for TunnelConfig {
             max_connections: 8,
             connect_timeout: Duration::from_secs(10),
             idle_timeout: Duration::from_secs(120),
+            reconnect_budget: Duration::from_secs(10),
         }
     }
 }
@@ -305,6 +312,12 @@ async fn host_conn(incoming: iroh::endpoint::Incoming, core: Arc<HostCore>) {
 async fn serve_conn(core: Arc<HostCore>, conn: Connection) {
     let _guard = ConnGuard(conn.clone());
     let port = core.port.load(Ordering::SeqCst);
+    if !*core.stop.borrow() && port == 0 && core.authorizer.is_allowed(conn.remote_id().as_bytes()) {
+        // Ami autorisé mais aucun monde ouvert : raison distincte (annoncée à l'invité).
+        conn.close(crate::reach::CLOSE_NOT_SHARED.into(), b"not shared");
+        core.counters.rejected.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
     if port == 0 || *core.stop.borrow() || !core.authorizer.is_allowed(conn.remote_id().as_bytes()) {
         conn.close(1u32.into(), b"denied");
         core.counters.rejected.fetch_add(1, Ordering::Relaxed);
@@ -345,11 +358,86 @@ async fn serve_conn(core: Arc<HostCore>, conn: Connection) {
 
 // ---------------------------------------------------------------- invité
 
-/// Côté invité : port local `127.0.0.1:local_port` à donner à Minecraft.
+/// État de la liaison invité -> hôte.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TunnelState {
+    /// Connexion établie.
+    Ok,
+    /// Connexion perdue : reconnexion en cours (le port local reste le même).
+    Reconnecting,
+    /// Reconnexion impossible dans le délai (hôte parti ou refus) : le tunnel est inutilisable.
+    Lost,
+}
+
+impl TunnelState {
+    /// Nom stable pour l'événement `tunnel://state`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TunnelState::Ok => "ok",
+            TunnelState::Reconnecting => "reconnecting",
+            TunnelState::Lost => "lost",
+        }
+    }
+}
+
+/// Connexion à l'hôte (une seule tentative) : « hors ligne » si injoignable, raison précise s'il refuse.
+async fn dial(endpoint: &Endpoint, host: &EndpointAddr, wait: Duration) -> Result<Connection> {
+    let conn = match timeout(wait, endpoint.connect(host.clone(), TUNNEL_ALPN)).await {
+        Ok(Ok(c)) => c,
+        _ => return Err(anyhow::Error::new(Reach::Offline)),
+    };
+    // L'hôte qui refuse ferme tout de suite avec un code : on l'attend brièvement pour renvoyer la vraie raison.
+    if timeout(SETTLE, conn.closed()).await.is_ok() {
+        return Err(match Reach::from_conn(&conn) {
+            Some(r) => anyhow::Error::new(r),
+            None => anyhow!("l'hôte a fermé la connexion"),
+        });
+    }
+    Ok(conn)
+}
+
+struct GuestShared {
+    conn: std::sync::Mutex<Connection>,
+    state: tokio::sync::watch::Sender<TunnelState>,
+}
+
+impl GuestShared {
+    fn conn(&self) -> Connection {
+        self.conn.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+}
+
+/// Reconnexion avec attente croissante (0 s, 0,5 s, 1 s, 2 s, ...) dans la limite de `reconnect_budget`.
+/// Abandonne tout de suite si l'hôte REFUSE (raison explicite) plutôt que d'être injoignable.
+async fn redial(endpoint: &Endpoint, host: &EndpointAddr, cfg: &TunnelConfig) -> Option<Connection> {
+    let deadline = tokio::time::Instant::now() + cfg.reconnect_budget;
+    let mut pause = Duration::ZERO;
+    loop {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero() {
+            return None;
+        }
+        tokio::time::sleep(pause.min(left)).await;
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero() {
+            return None;
+        }
+        match dial(endpoint, host, left.min(cfg.connect_timeout)).await {
+            Ok(c) => return Some(c),
+            Err(e) if e.downcast_ref::<Reach>().is_some_and(|r| *r != Reach::Offline) => return None,
+            Err(_) => {}
+        }
+        pause = if pause.is_zero() { Duration::from_millis(500) } else { (pause * 2).min(Duration::from_secs(3)) };
+    }
+}
+
+/// Côté invité : port local `127.0.0.1:local_port` à donner à Minecraft. Si la connexion à l'hôte tombe
+/// (réseau, relais), elle est rétablie automatiquement ; le port local ne change pas.
 pub struct GuestTunnel {
     pub local_port: u16,
-    conn: Connection,
+    shared: Arc<GuestShared>,
     task: JoinHandle<()>,
+    supervisor: JoinHandle<()>,
     sem: Arc<Semaphore>,
     counters: Arc<Counters>,
     max: usize,
@@ -365,20 +453,47 @@ impl GuestTunnel {
         host: impl Into<EndpointAddr>,
         cfg: TunnelConfig,
     ) -> Result<Self> {
-        let conn = timeout(cfg.connect_timeout, endpoint.connect(host, TUNNEL_ALPN))
-            .await
-            .map_err(|_| anyhow!("délai de connexion à l'hôte dépassé"))??;
+        let host: EndpointAddr = host.into();
+        let conn = dial(&endpoint, &host, cfg.connect_timeout).await?;
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
         let local_port = listener.local_addr()?.port();
         let sem = Arc::new(Semaphore::new(cfg.max_connections));
         let counters = Arc::new(Counters::default());
-        let (c, s2, k2) = (conn.clone(), sem.clone(), counters.clone());
+        let (state, _) = tokio::sync::watch::channel(TunnelState::Ok);
+        let shared = Arc::new(GuestShared { conn: std::sync::Mutex::new(conn), state });
+
+        // Superviseur : à la chute de la connexion, la rétablit ; sinon le tunnel est perdu.
+        let (sh, ep, h) = (shared.clone(), endpoint, host);
+        let supervisor = tokio::spawn(async move {
+            loop {
+                let c = sh.conn();
+                c.closed().await;
+                if matches!(Reach::from_conn(&c), Some(r) if r != Reach::Offline) {
+                    // L'hôte a explicitement refusé / fermé le monde : inutile d'insister.
+                    sh.state.send_replace(TunnelState::Lost);
+                    return;
+                }
+                sh.state.send_replace(TunnelState::Reconnecting);
+                match redial(&ep, &h, &cfg).await {
+                    Some(n) => {
+                        *sh.conn.lock().unwrap_or_else(|p| p.into_inner()) = n;
+                        sh.state.send_replace(TunnelState::Ok);
+                    }
+                    None => {
+                        sh.state.send_replace(TunnelState::Lost);
+                        return;
+                    }
+                }
+            }
+        });
+
+        let (sh, s2, k2) = (shared.clone(), sem.clone(), counters.clone());
         let task = tokio::spawn(async move {
-            let _guard = ConnGuard(c.clone());
             let mut tasks = JoinSet::new();
+            let mut st = sh.state.subscribe();
             loop {
                 tokio::select! {
-                    _ = c.closed() => break,
+                    _ = st.wait_for(|s| *s == TunnelState::Lost) => break,
                     acc = listener.accept() => {
                         let Ok((tcp, _)) = acc else { break };
                         let Ok(permit) = s2.clone().try_acquire_owned() else {
@@ -386,10 +501,10 @@ impl GuestTunnel {
                             continue; // tcp fermé au drop
                         };
                         k2.total.fetch_add(1, Ordering::Relaxed);
-                        let (c, k) = (c.clone(), k2.clone());
+                        let (sh, k) = (sh.clone(), k2.clone());
                         tasks.spawn(async move {
                             let _permit = permit;
-                            if let Ok(Ok((send, recv))) = timeout(cfg.connect_timeout, c.open_bi()).await {
+                            if let Some((send, recv)) = open_stream(&sh, &cfg).await {
                                 relay(tcp, send, recv, cfg, &k).await;
                             }
                         });
@@ -398,12 +513,12 @@ impl GuestTunnel {
                 }
             }
         });
-        Ok(Self { local_port, conn, task, sem, counters, max: cfg.max_connections })
+        Ok(Self { local_port, shared, task, supervisor, sem, counters, max: cfg.max_connections })
     }
 
     /// Chemin sélectionné (direct ou relais).
     pub fn path_kind(&self) -> PathKind {
-        for p in self.conn.paths().iter() {
+        for p in self.shared.conn().paths().iter() {
             if p.is_selected() {
                 return if p.is_relay() { PathKind::Relay } else { PathKind::Direct };
             }
@@ -415,21 +530,69 @@ impl GuestTunnel {
         self.counters.snapshot(&self.sem, self.max)
     }
 
-    /// Se résout quand la connexion avec l'hôte est fermée (arrêt de l'hôte, refus, réseau).
+    /// État courant de la liaison.
+    pub fn state(&self) -> TunnelState {
+        *self.shared.state.borrow()
+    }
+
+    /// Suivi des changements d'état (événement `tunnel://state`).
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<TunnelState> {
+        self.shared.state.subscribe()
+    }
+
+    /// Se résout quand le tunnel est PERDU : l'hôte est parti ou refuse, et la reconnexion a échoué.
     pub async fn closed(&self) {
-        self.conn.closed().await;
+        let mut st = self.shared.state.subscribe();
+        let _ = st.wait_for(|s| *s == TunnelState::Lost).await;
+    }
+
+    /// Coupe de force la connexion à l'hôte (tests, bascule réseau simulée) : la reconnexion démarre.
+    pub fn force_drop_connection(&self) {
+        self.shared.conn().close(0u32.into(), b"test-drop");
     }
 
     pub async fn stop(mut self) {
-        self.conn.close(0u32.into(), b"stop");
+        self.shared.conn().close(0u32.into(), b"stop");
+        self.supervisor.abort();
         self.task.abort();
         let _ = (&mut self.task).await;
     }
 }
 
+/// Ouvre un flux vers l'hôte pour une connexion TCP de jeu. Si la liaison est perdue, attend la
+/// reconnexion (au plus `reconnect_budget`) puis réessaie UNE fois ; sinon abandonne (le TCP est fermé).
+async fn open_stream(
+    sh: &GuestShared,
+    cfg: &TunnelConfig,
+) -> Option<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream)> {
+    for attempt in 0..2 {
+        let mut st = sh.state.subscribe();
+        let ready = timeout(cfg.reconnect_budget + SETTLE, st.wait_for(|s| *s != TunnelState::Reconnecting))
+            .await
+            .map(|r| r.map(|s| *s));
+        if !matches!(ready, Ok(Ok(TunnelState::Ok))) {
+            return None;
+        }
+        let c = sh.conn();
+        match timeout(cfg.connect_timeout, c.open_bi()).await {
+            Ok(Ok(streams)) => return Some(streams),
+            _ if attempt == 0 => {
+                // Liaison morte sans que QUIC l'ait encore signalé : on la ferme pour déclencher la reconnexion.
+                c.close(0u32.into(), b"dead");
+                let _ = timeout(Duration::from_millis(200), c.closed()).await;
+                // Laisse le superviseur passer en « reconnexion » avant de relire l'état.
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            _ => return None,
+        }
+    }
+    None
+}
+
 impl Drop for GuestTunnel {
     fn drop(&mut self) {
-        self.conn.close(0u32.into(), b"stop");
+        self.shared.conn().close(0u32.into(), b"stop");
+        self.supervisor.abort();
         self.task.abort();
     }
 }
@@ -465,6 +628,10 @@ mod tests {
             }
         });
         port
+    }
+
+    fn reach_of(e: anyhow::Error) -> Reach {
+        *e.downcast_ref::<Reach>().expect("erreur de type Reach")
     }
 
     fn key(e: &Endpoint) -> [u8; 32] {
@@ -506,6 +673,51 @@ mod tests {
         s
     }
 
+
+    #[tokio::test]
+    async fn guest_reconnects_after_the_connection_is_cut_and_keeps_its_port() {
+        let (host, guest, _h, _g) = setup(true, TunnelConfig::default()).await;
+        let port = guest.local_port;
+        assert_eq!(mc_session(port, b"avant").await, b"avant");
+
+        // Coupure de force de la connexion iroh invité -> hôte (changement de réseau simulé).
+        guest.force_drop_connection();
+        // Même port local, sans rien relancer : le prochain flux de jeu aboutit.
+        let t = std::time::Instant::now();
+        assert_eq!(timeout(Duration::from_secs(15), mc_session(port, b"apres")).await.expect("reconnexion"), b"apres");
+        assert_eq!(guest.local_port, port);
+        assert_eq!(guest.state(), TunnelState::Ok);
+        // La reprise est rapide en local.
+        assert!(t.elapsed() < Duration::from_secs(10), "{:?}", t.elapsed());
+        // Deuxième coupure : ça recommence.
+        guest.force_drop_connection();
+        assert_eq!(timeout(Duration::from_secs(15), mc_session(port, b"encore")).await.expect("2e reconnexion"), b"encore");
+        assert!(host.stats().total_connections >= 3);
+    }
+
+    #[tokio::test]
+    async fn guest_gives_up_cleanly_when_the_host_is_really_gone() {
+        let cfg = TunnelConfig { reconnect_budget: Duration::from_secs(2), connect_timeout: Duration::from_secs(1), ..TunnelConfig::default() };
+        let (_host, guest, h, _g) = setup(true, cfg).await;
+        let port = guest.local_port;
+        assert_eq!(mc_session(port, b"ok").await, b"ok");
+
+        // L'hôte disparaît pour de bon (endpoint fermé) puis la connexion tombe.
+        h.close().await;
+        guest.force_drop_connection();
+        let t = std::time::Instant::now();
+        timeout(Duration::from_secs(20), guest.closed()).await.expect("abandon borné, pas de boucle infinie");
+        assert_eq!(guest.state(), TunnelState::Lost);
+        assert!(t.elapsed() < Duration::from_secs(12), "{:?}", t.elapsed());
+        // Plus rien n'est servi sur le port local.
+        if let Ok(mut s) = TcpStream::connect(("127.0.0.1", port)).await {
+            let _ = s.write_all(b"MCHS    ").await;
+            let mut b = [0u8; 3];
+            let r = timeout(Duration::from_secs(2), s.read(&mut b)).await;
+            assert!(!matches!(r, Ok(Ok(n)) if n > 0));
+        }
+    }
+
     #[tokio::test]
     async fn tunnel_echo_and_handshake() {
         let (host, guest, _h, _g) = setup(true, TunnelConfig::default()).await;
@@ -537,23 +749,20 @@ mod tests {
 
     #[tokio::test]
     async fn tunnel_unauthorized_peer_refused() {
-        let (host, guest, _h, _g) = setup(false, TunnelConfig::default()).await;
-        timeout(Duration::from_secs(5), guest.closed())
-            .await
-            .expect("connexion fermée par l'hôte");
-        if let Ok(mut s) = TcpStream::connect(("127.0.0.1", guest.local_port)).await {
-            let _ = s.write_all(b"MCHS\x00\x00\x00\x00").await;
-            let mut b = [0u8; 3];
-            let r = timeout(Duration::from_secs(2), s.read(&mut b)).await;
-            assert!(!matches!(r, Ok(Ok(n)) if n > 0));
-        }
+        let port = world().await;
+        let (h, g) = (ep(true).await, ep(false).await);
+        let host = HostTunnel::start_with_config(h.clone(), port, Arc::new(AllowKeys(vec![])), TunnelConfig::default()).unwrap();
+        let err = GuestTunnel::connect(g.clone(), h.addr()).await.err().expect("refusé");
+        assert_eq!(reach_of(err), Reach::NotFriend);
         assert_eq!(host.stats().total_connections, 0);
         assert!(host.stats().rejected_connections >= 1);
     }
 
     #[tokio::test]
     async fn tunnel_host_stop_closes_guest_cleanly() {
-        let (host, guest, _h, _g) = setup(true, TunnelConfig::default()).await;
+        // L'hôte s'arrête : l'invité tente de se reconnecter (budget court ici) puis déclare le tunnel perdu.
+        let cfg = TunnelConfig { reconnect_budget: Duration::from_secs(2), connect_timeout: Duration::from_secs(1), ..TunnelConfig::default() };
+        let (host, guest, _h, _g) = setup(true, cfg).await;
         let mut s = open_session(guest.local_port).await;
         host.stop().await;
         let mut rest = Vec::new();
@@ -561,7 +770,7 @@ mod tests {
             .await
             .expect("pas de blocage");
         assert!(rest.is_empty());
-        timeout(Duration::from_secs(5), guest.closed())
+        timeout(Duration::from_secs(10), guest.closed())
             .await
             .expect("invité notifié");
     }
@@ -610,8 +819,8 @@ mod tests {
         let router = Router::builder(h.clone()).accept(TUNNEL_ALPN, host.handler()).spawn();
 
         // Rien d'exposé tant qu'aucun port n'est défini.
-        let closed = GuestTunnel::connect(g.clone(), h.addr()).await.unwrap();
-        timeout(Duration::from_secs(5), closed.closed()).await.expect("refusé : rien n'est partagé");
+        let err = GuestTunnel::connect(g.clone(), h.addr()).await.err().expect("refusé : rien n'est partagé");
+        assert_eq!(reach_of(err), Reach::NothingShared);
         assert!(host.stats().rejected_connections >= 1);
 
         host.set_world_port(port);

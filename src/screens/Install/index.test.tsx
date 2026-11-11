@@ -18,7 +18,7 @@ function setup(over: Partial<Services> = {}, params: Record<string, string> = { 
   let cb: (p: TransferProgress) => void = () => {};
   services.onTransferProgress = (c) => { cb = c; return () => {}; };
   const navigate = vi.fn();
-  const value = { services, route: "install", params, navigate, setTitle: () => {} } as ShellContextValue;
+  const value = { services, route: "install", params, navigate, goBack: vi.fn(), canGoBack: false, setTitle: () => {} } as ShellContextValue;
   render(<ShellContext.Provider value={value}><Install /></ShellContext.Provider>);
   const emit = (p: TransferProgress) => act(() => cb(p));
   return { services, navigate, emit };
@@ -36,7 +36,7 @@ describe("Install", () => {
     expect(bar.getAttribute("aria-valuemax")).toBe("100");
     expect(flat(bar.getAttribute("aria-valuetext"))).toContain("12 / 40 fichiers · 340 Mo / 1,2 Go · 8 Mo/s");
     expect(flat(document.querySelector(".inst-stats")?.textContent ?? "")).toMatch(/12 \/ 40 fichiers · 340 Mo \/ 1,2 Go · 8 Mo\/s · environ/);
-    expect(screen.getByText("2. Réception des fichiers").parentElement?.getAttribute("aria-current")).toBe("step");
+    expect(screen.getByText("2. Réception des fichiers").closest("li")?.getAttribute("aria-current")).toBe("step");
   });
 
   it("l'annonce live ne change qu'avec la phase", () => {
@@ -75,7 +75,7 @@ describe("Install", () => {
     await waitFor(() => expect(pause).toHaveBeenCalled());
     emit(P({ phase: "paused", speed_bps: 0 }));
     expect(screen.getByRole("status").textContent).toBe("Transfert en pause");
-    expect(screen.getByText("2. Réception des fichiers").parentElement?.getAttribute("aria-current")).toBe("step");
+    expect(screen.getByText("2. Réception des fichiers").closest("li")?.getAttribute("aria-current")).toBe("step");
     fireEvent.click(screen.getByRole("button", { name: "Reprendre" }));
     await waitFor(() => expect(resume).toHaveBeenCalled());
   });
@@ -103,6 +103,19 @@ describe("Install", () => {
     expect(navigate).not.toHaveBeenCalledWith("error", expect.anything());
   });
 
+  it("échec : message réel, bloc Détails et journal", async () => {
+    let det: (e: { step: string; message: string; details: string; log_file: string }) => void = () => {};
+    const { emit } = setup({ onTransferErrorDetails: (c: typeof det) => { det = c; return () => {}; } } as never);
+    act(() => det({ step: "Réception", message: "Réception : réponse inattendue de l'hôte", details: "étape: Réception | détail: reset", log_file: "C:\logs\join-errors.log" }));
+    emit(P({ phase: "failed", error: "Réception : réponse inattendue de l'hôte" }));
+    expect((await screen.findByRole("alert")).textContent).toMatch(/^Réception : réponse inattendue de l'hôte/);
+    expect(screen.queryByText(/Le transfert a échoué\./)).toBeNull();
+    expect(screen.getByText("Détails")).toBeTruthy();
+    expect(screen.getByLabelText("Détails de l'erreur").textContent).toContain("détail: reset");
+    expect(screen.getByRole("button", { name: "Copier" })).toBeTruthy();
+    expect(screen.getByText(/join-errors\.log/)).toBeTruthy();
+  });
+
   it("échec identifiable : écran d'erreur", () => {
     const { emit, navigate } = setup();
     emit(P({ phase: "failed", error: "no space left on device" }));
@@ -119,22 +132,23 @@ describe("Install", () => {
     await waitFor(() => expect(start).toHaveBeenCalledWith("pk-alex"));
   });
 
-  it("done : Jouer lance l'instance puis retourne à l'accueil", async () => {
-    const launch = vi.fn(async () => {});
-    const { emit, navigate } = setup({ instancesLaunch: launch });
+  it("done : joinPlay se lance automatiquement puis retour à l'accueil", async () => {
+    const play = vi.fn(async () => {});
+    const { emit, navigate } = setup({ joinPlay: play });
     emit(P({ phase: "done", files_done: 40, bytes_done: 1_200_000_000, speed_bps: 0 }));
     expect(screen.getByRole("progressbar").getAttribute("aria-valuenow")).toBe("100");
-    fireEvent.click(screen.getByRole("button", { name: "Jouer" }));
     await waitFor(() => expect(navigate).toHaveBeenCalledWith("main"));
-    expect(launch).toHaveBeenCalledWith("i1");
+    expect(play).toHaveBeenCalledWith("pk-alex", "i1");
   });
 
-  it("échec du lancement affiché", async () => {
-    const { emit, navigate } = setup({ instancesLaunch: async () => { throw new Error("x"); } });
+  it("échec de la connexion : message de l'ami et Réessayer", async () => {
+    const play = vi.fn().mockRejectedValueOnce(new Error("Ton ami est hors ligne.")).mockResolvedValue(undefined);
+    const { emit, navigate } = setup({ joinPlay: play, friendList: async () => [{ friend: { public_key: "pk-alex", name: "Alex", trust: "trusted", added_at: 0 }, presence: "online" }] } as never);
     emit(P({ phase: "done" }));
-    fireEvent.click(screen.getByRole("button", { name: "Jouer" }));
-    expect((await screen.findByRole("alert")).textContent).toMatch(/lancement a échoué/);
+    expect((await screen.findByRole("alert")).textContent).toBe("Alex est hors ligne.");
     expect(navigate).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Réessayer" }));
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith("main"));
   });
 
   it("pas de <main> imbriqué et titre focalisé", () => {

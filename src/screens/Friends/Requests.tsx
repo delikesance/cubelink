@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import "./requests.css";
 import { useServices } from "../../app/context";
+import { Button } from "../../ui";
 import type { FriendRequest, Services } from "../../services/types";
 
 const PAGE = 20;
@@ -60,6 +61,7 @@ export default function Requests() {
   const [confirming, setConfirming] = useState(false);
   const [bulkBusy, setBulkBusy] = useState(false);
   const [notice, setNotice] = useState("");
+  const [compared, setCompared] = useState<string | null>(null);
   const seq = useRef(0);
   const queryRef = useRef("");
   const cancelRef = useRef<HTMLButtonElement>(null);
@@ -162,6 +164,7 @@ export default function Requests() {
     }
   };
 
+  const isCompared = compared !== null && compared === openKey;
   const remaining = Math.max(0, total - items.length);
   const current = items.find((x) => x.public_key === openKey) ?? null;
   const others = items.filter((x) => x.public_key !== openKey);
@@ -226,13 +229,18 @@ export default function Requests() {
           </p>
           <div className="rq-row">
             <code className="rq-verify" aria-label="Code de vérification">{current.verify_code}</code>
-            <div className="rq-actions rq-push">
-              <button type="button" className="rq-btn" disabled={busyKey === current.public_key}
-                aria-label={`Accepter ${current.name}`} onClick={() => { void answer(current, true); }}>Accepter</button>
-              <button type="button" className="rq-ghost" disabled={busyKey === current.public_key}
-                aria-label={`Refuser ${current.name}`} onClick={() => { void answer(current, false); }}>Refuser</button>
-            </div>
           </div>
+          <label className="rq-compare">
+            <input type="checkbox" checked={isCompared} onChange={(e) => setCompared(e.target.checked ? current.public_key : null)} />
+            <span>J&apos;ai comparé ce code avec {current.name}</span>
+          </label>
+          <div className="rq-actions">
+            <Button disabled={!isCompared || busyKey === current.public_key} loading={busyKey === current.public_key}
+              aria-label={`Accepter ${current.name}`} onClick={() => { void answer(current, true); }}>Accepter</Button>
+            <Button variant="secondary" disabled={busyKey === current.public_key}
+              aria-label={`Refuser ${current.name}`} onClick={() => { void answer(current, false); }}>Refuser</Button>
+          </div>
+          {!isCompared && <p className="rq-hint">Coche la case une fois le code comparé pour pouvoir accepter.</p>}
         </section>
       )}
 

@@ -45,6 +45,24 @@ pub struct LaunchSpec {
     pub launcher_name: String,
     pub launcher_version: String,
     pub extra_jvm_args: Vec<String>,
+    /// Connexion automatique à un serveur (hôte, port) au démarrage du jeu (tunnel P2P : `127.0.0.1:port`).
+    pub join_server: Option<(String, u16)>,
+    /// Ouvre directement ce monde solo (`--quickPlaySingleplayer`, Minecraft >= 1.20) : outil de test réel uniquement.
+    pub quick_play_world: Option<String>,
+}
+
+/// Minecraft gère `--quickPlayMultiplayer` à partir de 1.20 (les versions « 26.x » et les snapshots récents aussi).
+/// Seule une version `1.N` avec N < 20 reconnue dans l'identifiant utilise l'ancien `--server`/`--port`.
+/// L'identifiant peut être celui d'un profil de loader (`fabric-loader-0.16.5-1.21.1`, `1.20.1-forge-47.2.0`).
+pub fn supports_quick_play(version_id: &str) -> bool {
+    let first = version_id
+        .split(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .map(|t| t.trim_matches('.'))
+        .find(|t| t.starts_with("1.") && t.len() > 2);
+    match first.and_then(|t| t.split('.').nth(1)).and_then(|m| m.parse::<u32>().ok()) {
+        Some(minor) => minor >= 20,
+        None => true,
+    }
 }
 
 impl fmt::Debug for LaunchSpec {
@@ -319,9 +337,17 @@ pub fn build_command(spec: &LaunchSpec) -> Result<LaunchCommand> {
     let mut args: Vec<String> = vec![format!("-Xms{}M", spec.ram_mb.min(512)), format!("-Xmx{}M", spec.ram_mb)];
     args.extend(spec.extra_jvm_args.iter().cloned());
     let mut sensitive = Vec::new();
-    let mut push = |args: &mut Vec<String>, tpl: &str| -> Result<()> {
+    // Côté JVM, `${version_name}` désigne le jar client posé sur le classpath (ex. `-DignoreList=...,${version_name}.jar`
+    // de Forge/NeoForge) : c'est le nom du jar vanilla parent, pas l'id du profil du loader. Sinon le jar vanilla n'est
+    // pas ignoré par BootstrapLauncher et devient un module automatique en doublon du client patché
+    // (« Modules minecraft and _1._21._1 export package net.minecraft.client »). Côté jeu, `--version` garde l'id du profil.
+    let mut jvm_vars = vars.clone();
+    if let Some(stem) = spec.client_jar.file_stem().and_then(|x| x.to_str()) {
+        jvm_vars.insert("version_name", stem.to_string());
+    }
+    let mut push = |args: &mut Vec<String>, tpl: &str, vars: &HashMap<&'static str, String>| -> Result<()> {
         let mut secret = false;
-        let v = substitute(tpl, &vars, &mut secret)?;
+        let v = substitute(tpl, vars, &mut secret)?;
         if secret {
             sensitive.push(args.len());
         }
@@ -329,11 +355,25 @@ pub fn build_command(spec: &LaunchSpec) -> Result<LaunchCommand> {
         Ok(())
     };
     for t in &jvm_tpl {
-        push(&mut args, t)?;
+        push(&mut args, t, &jvm_vars)?;
     }
     args.push(norm.main_class.to_string());
     for t in &game_tpl {
-        push(&mut args, t)?;
+        push(&mut args, t, &vars)?;
+    }
+    if let Some((host, port)) = &spec.join_server {
+        if supports_quick_play(norm.id) {
+            args.push("--quickPlayMultiplayer".into());
+            args.push(format!("{host}:{port}"));
+        } else {
+            args.extend(["--server".to_string(), host.clone(), "--port".to_string(), port.to_string()]);
+        }
+    }
+
+    if let Some(world) = &spec.quick_play_world {
+        if supports_quick_play(norm.id) {
+            args.extend(["--quickPlaySingleplayer".to_string(), world.clone()]);
+        }
     }
 
     Ok(LaunchCommand { program: spec.java_path.clone(), args, cwd: spec.game_dir.clone(), sensitive })
@@ -374,6 +414,8 @@ mod tests {
             launcher_name: "Cubelink".into(),
             launcher_version: "0.1".into(),
             extra_jvm_args: vec!["-XX:+UseG1GC".into()],
+            join_server: None,
+            quick_play_world: None,
         }
     }
 
@@ -473,6 +515,25 @@ mod tests {
     }
 
     #[test]
+    fn jvm_version_name_is_client_jar_stem_but_game_version_keeps_profile_id() {
+        // NeoForge : `-DignoreList=client-extra,${version_name}.jar` doit viser le jar client réel (1.21.1.jar),
+        // sinon il devient un module automatique en doublon du client patché.
+        let profile = json!({
+            "id": "neoforge-21.1.250", "inheritsFrom": "1.21",
+            "mainClass": "cpw.mods.bootstraplauncher.BootstrapLauncher",
+            "arguments": {"game": [], "jvm": ["-DignoreList=client-extra,${version_name}.jar"]},
+            "libraries": []
+        });
+        let m = merge_with_vanilla(&v121(), &profile);
+        let mut sp = spec(LaunchVersion::Merged(m), offline(), Os::Linux);
+        sp.client_jar = "versions/1.21.1/1.21.1.jar".into();
+        let cmd = build_command(&sp).unwrap();
+        assert!(cmd.args.contains(&"-DignoreList=client-extra,1.21.1.jar".to_string()), "{:?}", cmd.args);
+        let i = cmd.args.iter().position(|a| a == "--version").unwrap();
+        assert_eq!(cmd.args[i + 1], "neoforge-21.1.250");
+    }
+
+    #[test]
     fn merged_fabric_profile() {
         let profile = json!({
             "id": "fabric-loader-0.16.5-1.21", "inheritsFrom": "1.21",
@@ -552,5 +613,37 @@ mod tests {
         sp.ram_mb = 256;
         let c = build_command(&sp).unwrap();
         assert_eq!(&c.args[..2], ["-Xms256M", "-Xmx256M"]);
+    }
+
+    #[test]
+    fn version_quick_play() {
+        for v in ["1.20", "1.20.1", "1.21.1", "26.1", "1.20.1-forge-47.2.0", "fabric-loader-0.16.5-1.21.1", "neoforge-21.1.77", "24w14a"] {
+            assert!(supports_quick_play(v), "{v}");
+        }
+        for v in ["1.19.4", "1.12.2", "1.7.10", "1.16.5-forge-36.2.39", "fabric-loader-0.14.0-1.18.2"] {
+            assert!(!supports_quick_play(v), "{v}");
+        }
+    }
+
+    #[test]
+    fn connexion_auto_quick_play_ou_server_port() {
+        let mut v = v121();
+        v.id = "1.21".into();
+        let mut sp = spec(LaunchVersion::Vanilla(v.clone()), offline(), Os::Windows);
+        sp.join_server = Some(("127.0.0.1".into(), 54321));
+        let a = build_command(&sp).unwrap().args;
+        assert_eq!(&a[a.len() - 2..], ["--quickPlayMultiplayer", "127.0.0.1:54321"]);
+        assert!(!a.contains(&"--server".to_string()));
+
+        v.id = "1.19.4".into();
+        let mut sp = spec(LaunchVersion::Vanilla(v), offline(), Os::Windows);
+        sp.join_server = Some(("127.0.0.1".into(), 40001));
+        let a = build_command(&sp).unwrap().args;
+        assert_eq!(&a[a.len() - 4..], ["--server", "127.0.0.1", "--port", "40001"]);
+        assert!(!a.contains(&"--quickPlayMultiplayer".to_string()));
+
+        let sp = spec(LaunchVersion::Vanilla(v121()), offline(), Os::Windows);
+        let a = build_command(&sp).unwrap().args;
+        assert!(!a.iter().any(|x| x.contains("quickPlay") || x == "--server"));
     }
 }

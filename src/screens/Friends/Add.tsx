@@ -1,6 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import "./add.css";
 import { useServices } from "../../app/context";
+import { Button } from "../../ui";
+
+const ErrIcon = () => (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M12 7.5v5.5M12 16.5v.01" /></svg>
+);
 
 const CODE_RE = /^(mcl1-[A-Za-z0-9-]{16,}|launcher:\/\/add\/\S+)$/i;
 
@@ -86,7 +91,8 @@ export default function Add() {
 
   return (
     <section className="add" aria-labelledby="add-title">
-      <h2 id="add-title">Colle le code de ton ami</h2>
+      <h2 id="add-title">Ajouter un ami</h2>
+      <p className="add-sub">Colle le code de ton ami. Il reçoit ta demande tout de suite.</p>
       <form
         className="add-row"
         noValidate
@@ -107,16 +113,12 @@ export default function Add() {
           spellCheck={false}
           disabled={sending}
         />
-        <button type="button" className="add-ghost" onClick={() => { void paste(); }} disabled={sending}>
-          Coller
-        </button>
-        <button type="submit" className="add-btn" disabled={empty || sending}>
-          {sending ? "Envoi…" : "Envoyer la demande"}
-        </button>
+        <Button variant="secondary" onClick={() => { void paste(); }} disabled={sending}>Coller</Button>
+        <Button type="submit" disabled={empty} loading={sending}>Envoyer la demande</Button>
       </form>
       <p id="add-help" className="add-help">Il commence par «&nbsp;mcl1-&nbsp;» ou par launcher://add/…</p>
-      {fieldError && <p id="add-error" className="add-error">{fieldError}</p>}
-      {serviceError && <p id="add-svc-error" className="add-error" role="alert">{serviceError}</p>}
+      {fieldError && <p id="add-error" className="add-error"><ErrIcon />{fieldError}</p>}
+      {serviceError && <p id="add-svc-error" className="add-error" role="alert"><ErrIcon />{serviceError}</p>}
 
       {status.step === "sent" && (
         <div className="add-sent">

@@ -17,13 +17,16 @@ describe("écran Connexion", () => {
   });
 
   it("flux réussi : code affiché puis navigation vers main", async () => {
-    const svc = createFakeServices({ tickMs: 0, loginDelayMs: 30 });
+    const svc = createFakeServices({ tickMs: 0, loginDelayMs: 800 });
     render(<Shell services={svc} />);
     fireEvent.click(btn());
     const expected = await svc.authBeginLogin();
-    expect(await screen.findByText(expected.user_code)).toBeTruthy();
+    expect((await screen.findByLabelText(/^Code :/)).textContent).toBe(expected.user_code);
     expect(screen.getByTestId("countdown").textContent).toMatch(/^\d+:\d\d$/);
-    await waitFor(() => expect(window.location.hash).toBe("#/main"));
+    expect(screen.getByRole("link", { name: /^Ouvrir / })).toBeTruthy();
+    // Connecté : « Bienvenue » puis accueil.
+    expect((await screen.findByText(/^Bienvenue /)).textContent).toMatch(/Bienvenue \S+/);
+    await waitFor(() => expect(window.location.hash).toBe("#/main"), { timeout: 3000 });
   });
 
   it.each([
@@ -59,7 +62,7 @@ describe("écran Connexion", () => {
     fireEvent.click(btn());
     expect((await screen.findByRole("alert")).textContent).toContain("Compte sans droit daccès.");
     fireEvent.click(screen.getByRole("button", { name: "Réessayer" }));
-    await waitFor(() => expect(window.location.hash).toBe("#/main"));
+    await waitFor(() => expect(window.location.hash).toBe("#/main"), { timeout: 3000 });
   });
 
   it("expiration du code", async () => {
@@ -73,9 +76,34 @@ describe("écran Connexion", () => {
     render(<Shell services={svc} />);
     fireEvent.click(btn());
     await act(async () => { await vi.advanceTimersByTimeAsync(0); });
-    expect(screen.getByText("ABCD-1234")).toBeTruthy();
+    expect(screen.getByLabelText(/^Code :/).textContent).toBe("ABCD-1234");
     await act(async () => { await vi.advanceTimersByTimeAsync(3100); });
     expect(screen.getByRole("alert").textContent).toContain("expiré");
     expect(screen.getByRole("button", { name: "Réessayer" })).toBeTruthy();
+  });
+
+  it("jouer hors ligne : pseudo requis puis accueil", async () => {
+    const base = createFakeServices({ tickMs: 0 });
+    const offline = vi.fn(base.authOfflineLogin);
+    render(<Shell services={{ ...base, authOfflineLogin: offline }} />);
+    const toggle = await screen.findByRole("button", { name: "Jouer hors ligne" });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    fireEvent.click(screen.getByRole("button", { name: "Jouer" }));
+    expect((await screen.findByRole("alert")).textContent).toContain("pseudo");
+    expect(offline).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByLabelText("Pseudo hors ligne"), { target: { value: "Alex" } });
+    fireEvent.click(screen.getByRole("button", { name: "Jouer" }));
+    await waitFor(() => expect(offline).toHaveBeenCalledWith("Alex"));
+    await waitFor(() => expect(window.location.hash).toBe("#/main"));
+  });
+
+  it("hors ligne indisponible (application normale) : le bouton n'est pas proposé", async () => {
+    const base = createFakeServices({ tickMs: 0 });
+    render(<Shell services={{ ...base, offlineAvailable: async () => false }} />);
+    await screen.findByRole("button", { name: "Se connecter avec Microsoft" });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(screen.queryByRole("button", { name: "Jouer hors ligne" })).toBeNull();
   });
 });

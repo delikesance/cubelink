@@ -1,7 +1,23 @@
-.fr{display:flex;flex-direction:column;height:100%;min-height:0;font-family:var(--font-ui)}
-.fr-tabs{display:flex;gap:8px;flex:none;padding:12px 24px 0;border-bottom:1px solid var(--line)}
-.fr-tab{min-height:44px;padding:0 18px;border:1.5px solid transparent;border-bottom:0;border-radius:10px 10px 0 0;background:transparent;color:var(--text-dim);font:inherit;font-weight:600;cursor:pointer;display:inline-flex;align-items:center;gap:8px}
-.fr-tab:hover{background:var(--panel-3);color:var(--text)}
-.fr-tab[aria-selected="true"]{background:#1A0E06;border-color:var(--accent);color:var(--text);font-weight:700}
+/* Amis (C4-C6) : titre + pastille, deux cartes côte à côte (une colonne sous 900 px), onglets Tes amis / Demandes pleine largeur. */
+.fr{box-sizing:border-box;min-height:100%;padding:var(--sp-6) var(--page-pad) var(--sp-7);font-family:var(--font-ui);color:var(--text);overflow-x:hidden}
+.fr-page{max-width:1100px;margin:0 auto;display:flex;flex-direction:column;gap:var(--sp-5);min-width:0}
+.fr-head{display:flex;align-items:center;gap:var(--sp-4);flex-wrap:wrap;min-height:44px}
+.fr-title{margin:0;font:700 28px/1.2 var(--font-display)}
+.fr-title:focus{outline:none}
+.fr-pill{margin-left:auto;display:inline-flex;align-items:center;gap:10px;height:44px;padding:0 18px;border-radius:var(--r-pill);background:var(--surface-2);border:1px solid var(--line);font-weight:600;font-size:14px;white-space:nowrap}
+.fr-dot{width:8px;height:8px;border-radius:50%;background:#4A4452}
+.fr-dot.on{background:var(--ok)}
+.fr-back{min-height:44px;min-width:44px;padding:0 16px 0 10px;display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:var(--r-md);background:transparent;color:var(--text);font:inherit;font-weight:600;cursor:pointer}
+.fr-back:hover{background:var(--surface-2)}
+.fr-cards{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--sp-5);align-items:stretch}
+.fr-card{min-width:0;padding:32px;display:flex;flex-direction:column}
+.fr-card>section{flex:1;display:flex;flex-direction:column;gap:12px;min-width:0}
+.fr-tabs{display:flex;box-shadow:inset 0 -1px 0 var(--line);overflow-x:auto;overflow-y:hidden;scrollbar-width:none}
+.fr-tabs::-webkit-scrollbar{display:none}
+.fr-tab{min-height:48px;padding:0 24px;border:0;border-bottom:2px solid transparent;background:transparent;color:var(--muted);font:600 14px var(--font-ui);cursor:pointer;display:inline-flex;align-items:center;gap:8px;white-space:nowrap;transition:color var(--dur-feedback) var(--ease)}
+.fr-tab:hover{color:var(--text)}
+.fr-tab[aria-selected="true"]{color:var(--text);border-bottom-color:var(--accent)}
 .fr-tab:focus-visible{outline:2px solid var(--focus);outline-offset:-2px}
-.fr-panel{flex:1;min-height:0;overflow-y:auto;padding:16px 24px}
+.fr-panel{min-width:0}
+@media (max-width:900px){.fr-cards{grid-template-columns:minmax(0,1fr)}.fr-card{padding:24px}}
+.fr-title:focus-visible{outline:none}

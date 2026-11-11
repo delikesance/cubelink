@@ -113,8 +113,12 @@ jobs:
           deb http://mirrors.edge.kernel.org/ubuntu jammy-updates main restricted universe multiverse
           deb http://mirrors.edge.kernel.org/ubuntu jammy-security main restricted universe multiverse
           LIST
-          sudo timeout 240 apt-get update
-          sudo timeout 600 apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev patchelf xdg-utils
+          pkgs='libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev patchelf xdg-utils'
+          for i in 1 2 3; do
+            sudo timeout 240 apt-get update && sudo timeout 600 apt-get install -y --no-install-recommends $pkgs && break
+            echo "apt : essai $i échoué, nouvel essai"; sleep 5
+            [ $i = 3 ] && exit 1
+          done
       - run: npm ci
       - name: Version
         run: node scripts/release-version.mjs "$GITHUB_RUN_NUMBER" --write

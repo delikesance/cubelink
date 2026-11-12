@@ -1,5 +1,5 @@
-//! Fenetre du rideau : contenu (texte et avancement), rendu a transparence par pixel, minuteur. Commun aux deux modes ; chaque
-//! mode a sa procedure de fenetre, qui s'appuie sur `tick` / `finish_tick` / `base_proc`.
+//! Fenetre du rideau : contenu (texte et avancement), rendu a transparence par pixel, minuteur. Sa procedure de fenetre est dans
+//! `embedded.rs` et s'appuie sur `tick` / `finish_tick`.
 
 use std::cell::RefCell;
 use std::ptr::{null, null_mut};
@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU8, Ordering};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
+use windows_sys::Win32::Foundation::{HWND, POINT, RECT, SIZE};
 use windows_sys::Win32::Graphics::Dwm::DwmFlush;
 use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
@@ -46,6 +46,8 @@ struct Frame {
     t: f32,
     cover: f32,
     card: f32,
+    /// Mouvement reduit : logo et reflet de la barre figes.
+    calm: bool,
 }
 
 /// Phrase, ligne rassurante et avancement brut du suivi correspondant a `content` ; `None` : rien a suivre.
@@ -88,7 +90,8 @@ fn frame(s: &Shared) -> Frame {
         Some((sentence, note, raw)) => (sentence, note, bar_fraction(content, raw)),
         None => ("Un instant…", None, bar_fraction(Content::Wait, 0.0)),
     };
-    Frame { title: st.title.clone(), caption: st.caption.clone(), sentence: sentence.to_string(), note: note.map(str::to_string), fraction, t, cover, card }
+    let calm = st.machine.calm();
+    Frame { title: st.title.clone(), caption: st.caption.clone(), sentence: sentence.to_string(), note: note.map(str::to_string), fraction, t, cover, card, calm }
 }
 
 /// Regle la cadence du minuteur du rideau (un seul appel systeme quand elle change). A appeler sur le fil du rideau.
@@ -224,7 +227,7 @@ pub(super) unsafe fn present(s: &Shared, hwnd: HWND) {
     let scale = dpi_scale(hwnd);
     let f = frame(s);
     let t0 = Instant::now();
-    let m = Model { title: &f.title, caption: &f.caption, sentence: &f.sentence, note: f.note.as_deref(), fraction: f.fraction, cover: f.cover, card: f.card, t: f.t, calm: false };
+    let m = Model { title: &f.title, caption: &f.caption, sentence: &f.sentence, note: f.note.as_deref(), fraction: f.fraction, cover: f.cover, card: f.card, t: f.t, calm: f.calm };
     let screen = GetDC(null_mut());
     let mem = CreateCompatibleDC(screen);
     let bi = bitmap_info(w, h);
@@ -259,15 +262,5 @@ pub(super) unsafe fn present(s: &Shared, hwnd: HWND) {
         stats::FRAMES.fetch_add(1, Ordering::Relaxed);
         stats::RENDER_US.fetch_add(us, Ordering::Relaxed);
         stats::RENDER_MAX_US.fetch_max(us, Ordering::Relaxed);
-    }
-}
-
-/// Messages du rideau communs aux deux modes.
-pub(super) unsafe fn base_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
-    match msg {
-        WM_ERASEBKGND => 1,
-        // le contenu est pousse par `present` (fenetre a transparence par pixel)
-        WM_NCHITTEST => HTTRANSPARENT as LRESULT,
-        _ => DefWindowProcW(hwnd, msg, wp, lp),
     }
 }

@@ -76,11 +76,11 @@ pub fn toggle(app: &AppHandle) {
     st.stage.set_panel(&w, open);
 }
 
-/// Aligne l'enregistrement du raccourci sur l'état (réglages + jeu en cours + zone de jeu disponible).
+/// Aligne l'enregistrement du raccourci sur l'état (réglages + jeu en cours + jeu affiché dans la fenêtre du launcher).
 pub fn apply_settings(app: &AppHandle) {
     let Some(ctl) = app.try_state::<Arc<HotkeyCtl>>() else { return };
     let (enabled, hotkey) = settings_of(app);
-    let staged = app.try_state::<Arc<AppState>>().is_some_and(|s| s.stage.enabled());
+    let staged = app.try_state::<Arc<AppState>>().is_some_and(|s| s.stage.staged());
     let available = enabled && staged && ctl.game_running.load(Ordering::SeqCst);
     let gs = app.global_shortcut();
     let mut reg = lock(&ctl.registered);
@@ -123,6 +123,13 @@ pub fn setup(app: &AppHandle, test_mode: bool) {
             // Le gestionnaire d'événement ne doit pas bloquer l'émetteur.
             std::thread::spawn(move || apply_settings(&h));
         }
+    });
+    // Repli : le jeu a repris sa propre fenêtre, le panneau « en jeu » n'existe plus pour lui ; le raccourci est rendu
+    // aux autres applications.
+    let h = app.clone();
+    app.listen("stage://fallback", move |_| {
+        let h = h.clone();
+        std::thread::spawn(move || apply_settings(&h));
     });
     let h = app.clone();
     app.listen("friend://invite", move |ev| {

@@ -3,15 +3,11 @@ name = "cubelink-host"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Fenetre hote Cubelink : adopte la fenetre native du jeu (Windows) pour changer de modpack sans que le joueur voie un jeu se lancer puis se raccrocher."
+description = "La Scene Cubelink : le jeu tourne dans la fenetre du launcher (Windows), un rideau couvre lancements et changements de modpack."
 
 [lib]
 name = "cubelink_host"
 path = "src/lib.rs"
-
-[[bin]]
-name = "host-proto"
-path = "src/bin/host-proto.rs"
 
 [dependencies]
 serde.workspace = true
@@ -23,8 +19,14 @@ ab_glyph = "0.2"
 name = "curtain-preview"
 path = "src/bin/curtain-preview.rs"
 
+# Faux jeu des tests d'integration (`tests/`) : une fenetre de la classe demandee, rien d'autre. Jamais distribue : le launcher ne
+# depend que de la bibliotheque.
+[[bin]]
+name = "fake-game"
+path = "src/bin/fake-game.rs"
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Graphics_Dwm", "Win32_System_LibraryLoader", "Win32_UI_Accessibility",
-  "Win32_UI_HiDpi", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading",
+  "Win32_UI_HiDpi", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading",
 ] }

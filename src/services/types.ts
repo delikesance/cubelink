@@ -97,6 +97,8 @@ export interface Settings {
   overlay_enabled: boolean;
   /** Raccourci global du panneau en jeu, ex. « Ctrl+Shift+C ». */
   overlay_hotkey: string;
+  /** Jeu intégré (Windows) : le jeu s'affiche dans la fenêtre de Cubelink. Pris en compte au prochain lancement. Défaut true. */
+  embedded_game: boolean;
 }
 
 // Entrées / sorties de commandes

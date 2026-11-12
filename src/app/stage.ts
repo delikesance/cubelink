@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { isTauri } from "../services";
 
 /** Zone de jeu intégrée (Windows) : un jeu est rattaché, c'est lui qu'on voit, panneau « en jeu » ouvert. */
@@ -20,6 +20,57 @@ export function useStage(): StageState {
     return () => { dead = true; off?.(); };
   }, []);
   return st;
+}
+
+/** Événement `stage://fallback` : le jeu n'a pas pu être affiché dans la fenêtre de Cubelink, il a gardé la sienne. */
+export type StageFallback = {
+  /** Identifiant technique de la raison (journal `stage.log`), jamais montré au joueur. */
+  reason: string;
+  /** Trop d'échecs de suite : le jeu s'ouvrira dans sa propre fenêtre jusqu'au redémarrage de Cubelink (le message dit comment revenir). */
+  session_off: boolean;
+};
+
+/** Phrase montrée au joueur après un repli : ce qu'il voit, sans jargon ni raison technique. */
+export function stageFallbackMessage(f: StageFallback): string {
+  return f.session_off
+    ? "Le jeu s'est ouvert dans sa propre fenêtre, et ce sera le cas jusqu'à la fermeture de Cubelink. Pour retrouver le jeu dans Cubelink, ferme puis rouvre Cubelink."
+    : "Le jeu s'est ouvert dans sa propre fenêtre.";
+}
+
+/** Dernier repli annoncé par Rust (`stage://fallback`), jusqu'à ce qu'il soit écarté. Hors Tauri : jamais. */
+export function useStageFallback(): { notice: StageFallback | null; dismiss: () => void } {
+  const [notice, setNotice] = useState<StageFallback | null>(null);
+  useEffect(() => {
+    if (!isTauri()) return;
+    let off: (() => void) | undefined;
+    let dead = false;
+    void (async () => {
+      const { listen } = await import("@tauri-apps/api/event");
+      const un = await listen<StageFallback>("stage://fallback", (e) => {
+        setNotice({ reason: String(e.payload?.reason ?? ""), session_off: e.payload?.session_off === true });
+      });
+      if (dead) un(); else off = un;
+    })().catch(() => { /* best effort */ });
+    return () => { dead = true; off?.(); };
+  }, []);
+  const dismiss = useCallback(() => setNotice(null), []);
+  return { notice, dismiss };
+}
+
+/** La zone de jeu intégrée existe sur ce système (Windows). Hors Tauri, ou tant que Rust n'a pas répondu : non. */
+export function useStageSupported(): boolean {
+  const [ok, setOk] = useState(false);
+  useEffect(() => {
+    if (!isTauri()) return;
+    let dead = false;
+    void (async () => {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const v = await invoke<boolean>("stage_supported");
+      if (!dead) setOk(v === true);
+    })().catch(() => { /* réglage masqué */ });
+    return () => { dead = true; };
+  }, []);
+  return ok;
 }
 
 /** Rectangle de la zone de jeu et largeur du panneau, en pixels physiques (origine : coin haut-gauche de la zone cliente). */

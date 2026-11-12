@@ -84,11 +84,20 @@ pub struct LaunchCommand {
     pub program: PathBuf,
     pub args: Vec<String>,
     pub cwd: PathBuf,
+    /// Windows : le processus est créé avec la consigne « première fenêtre cachée » (`STARTUPINFO`, `SW_HIDE`), que
+    /// GLFW applique à son premier affichage. Réservé au jeu intégré à la fenêtre du launcher, qui affiche lui-même
+    /// la fenêtre une fois posée : partout ailleurs ce serait un jeu invisible. Sans effet hors Windows.
+    pub hide_first_window: bool,
     /// Indices des arguments contenant une valeur sensible.
     sensitive: Vec<usize>,
 }
 
 impl LaunchCommand {
+    /// Commande quelconque, sans valeur sensible (outils, tests).
+    pub fn new(program: PathBuf, args: Vec<String>, cwd: PathBuf) -> Self {
+        Self { program, args, cwd, hide_first_window: false, sensitive: Vec::new() }
+    }
+
     /// Arguments avec les valeurs sensibles masquées (sûr pour un journal).
     pub fn redacted_args(&self) -> Vec<String> {
         self.args
@@ -376,7 +385,7 @@ pub fn build_command(spec: &LaunchSpec) -> Result<LaunchCommand> {
         }
     }
 
-    Ok(LaunchCommand { program: spec.java_path.clone(), args, cwd: spec.game_dir.clone(), sensitive })
+    Ok(LaunchCommand { program: spec.java_path.clone(), args, cwd: spec.game_dir.clone(), hide_first_window: false, sensitive })
 }
 
 #[cfg(test)]

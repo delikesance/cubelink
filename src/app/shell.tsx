@@ -5,6 +5,7 @@ import { ShellContext, type ShellContextValue } from "./context";
 import { navigate, goBack, parseHash, takePendingFocus, useCanGoBack, useLocation, type RouteName } from "./router";
 import { TitleBar } from "./TitleBar";
 import { UpdateBanner } from "./UpdateBanner";
+import { StageNotice } from "./StageNotice";
 import { setStagePanel, useStage, useStageLayout } from "./stage";
 import InGamePanel from "../screens/Overlay";
 import "../screens/Overlay/overlay.css";
@@ -179,6 +180,7 @@ export function Shell({ services }: { services?: Services } = {}) {
             : Screen ? <Screen /> : <Fallback route={route} />}
         </main>
         <UpdateBanner services={svc} />
+        <StageNotice />
         <div className="stage-slot" ref={slotRef} aria-hidden="true" />
         {stage.panel && <div className="ov-dock"><InGamePanel /></div>}
       </div>

@@ -32,6 +32,11 @@
 @keyframes update-in{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
 @media (prefers-reduced-motion:reduce){.update-banner{animation:none}}
 @media (max-width:640px){.update-banner{flex-wrap:wrap;width:auto;left:var(--page-pad);right:var(--page-pad);bottom:20px}.update-banner-actions{width:100%;margin:0;justify-content:flex-end}}
+/* Jeu ouvert dans sa propre fenêtre (repli de la zone de jeu) : message discret en bas à gauche, superposé au contenu. */
+.stage-notice{position:fixed;left:20px;bottom:20px;z-index:30;display:flex;align-items:center;gap:12px;max-width:min(440px,calc(100vw - 2 * var(--page-pad)));padding:10px 10px 10px 16px;background:var(--surface);border:1px solid var(--line-strong);border-radius:var(--r-lg);box-shadow:var(--shadow-soft);font-size:13px;line-height:1.4;color:var(--text);animation:update-in var(--dur-enter) var(--ease)}
+.stage-notice-txt{min-width:0}
+.stage-notice .cl-btn{flex:none}
+@media (prefers-reduced-motion:reduce){.stage-notice{animation:none}}
 
 /* Démarrage : contrôle de la session avant d'afficher l'écran Connexion */
 .boot{height:100%;display:grid;place-items:center;color:var(--muted);font-size:14px}

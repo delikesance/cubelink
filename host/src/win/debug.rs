@@ -1,12 +1,7 @@
-//! Diagnostic (`CUBELINK_STAGE_DEBUG`) : journal, mesures du minuteur et du rendu, sonde des clics.
+//! Diagnostic fin (`CUBELINK_STAGE_DEBUG`) : journal horodate sur la sortie d'erreur, mesures du minuteur et du rendu. Les etapes
+//! cles, elles, sont TOUJOURS journalisees par l'observateur (`Shared::log`, `HostEvent::Log`).
 
 use std::sync::OnceLock;
-use std::time::Duration;
-
-use windows_sys::Win32::Foundation::{POINT, RECT};
-use windows_sys::Win32::UI::WindowsAndMessaging::*;
-
-use super::util::{class_name, hw};
 
 pub(super) fn dbg_on() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
@@ -17,44 +12,6 @@ pub(super) fn dbg(m: &str) {
     if dbg_on() {
         static T0: OnceLock<std::time::Instant> = OnceLock::new();
         eprintln!("[Cubelink/zone] +{:>6} ms {m}", T0.get_or_init(std::time::Instant::now).elapsed().as_millis());
-    }
-}
-
-/// A chaque clic REEL du joueur, journalise la chaine de fenetres sous le curseur, le focus du fil du jeu et la zone de confinement
-/// du curseur. N'envoie aucune entree.
-pub(super) fn mouse_diag() {
-    use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
-    let mut down = false;
-    loop {
-        std::thread::sleep(Duration::from_millis(15));
-        let now = unsafe { GetAsyncKeyState(0x01) } < 0;
-        if now && !down {
-            unsafe {
-                let mut pt = POINT { x: 0, y: 0 };
-                GetCursorPos(&mut pt);
-                let under = WindowFromPoint(pt);
-                let mut chain = String::new();
-                let mut w = under;
-                while !w.is_null() {
-                    chain.push_str(&format!(" {}({:#x})", class_name(w), w as isize));
-                    w = GetParent(w);
-                }
-                let cur = super::shared().and_then(|s| s.lock().current);
-                let mut info: GUITHREADINFO = std::mem::zeroed();
-                info.cbSize = std::mem::size_of::<GUITHREADINFO>() as u32;
-                let mut pid = 0u32;
-                let tid = cur.map(|c| GetWindowThreadProcessId(hw(c), &mut pid)).unwrap_or(0);
-                GetGUIThreadInfo(tid, &mut info);
-                let mut clip: RECT = std::mem::zeroed();
-                GetClipCursor(&mut clip);
-                let fg = GetForegroundWindow();
-                dbg(&format!(
-                    "clic a ({},{}) sous le curseur :{chain} | jeu : actif={:#x} focus={:#x} capture={:#x} | avant-plan={:#x} | clip=({},{},{},{})",
-                    pt.x, pt.y, info.hwndActive as isize, info.hwndFocus as isize, info.hwndCapture as isize, fg as isize, clip.left, clip.top, clip.right, clip.bottom
-                ));
-            }
-        }
-        down = now;
     }
 }
 

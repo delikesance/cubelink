@@ -82,7 +82,8 @@ impl Default for RunOptions {
 pub struct RunningGame {
     pub pid: u32,
     events: Option<mpsc::Receiver<LaunchEvent>>,
-    kill_tx: mpsc::Sender<()>,
+    /// `true` : arrêt propre d'abord ; `false` : arrêt forcé tout de suite.
+    kill_tx: mpsc::Sender<bool>,
     done: watch::Receiver<bool>,
 }
 
@@ -94,9 +95,16 @@ impl RunningGame {
 
     /// Termine proprement le jeu, puis le tue après `kill_grace`. Rend la main à la fin du processus.
     pub async fn kill(&self) -> Result<()> {
-        let _ = self.kill_tx.send(()).await;
+        let _ = self.kill_tx.send(true).await;
         self.wait().await;
         Ok(())
+    }
+
+    /// Tue le jeu (et ses processus enfants) tout de suite, sans demande d'arrêt propre ni délai : pour un jeu qui
+    /// n'a encore rien à enregistrer (en cours de chargement). Rend la main à la fin du processus.
+    pub async fn kill_now(&self) {
+        let _ = self.kill_tx.send(false).await;
+        self.wait().await;
     }
 
     /// Attend la fin du processus.
@@ -126,6 +134,7 @@ pub async fn spawn_with(cmd: &LaunchCommand, log_dir: &Path, opts: RunOptions) -
         args: cmd.args.clone(),
         shown_args: redacted,
         cwd: cmd.cwd.clone(),
+        hide_first_window: cmd.hide_first_window,
         secrets,
         log_dir: log_dir.to_path_buf(),
         opts,
@@ -138,19 +147,51 @@ struct Plan {
     args: Vec<String>,
     shown_args: Vec<String>,
     cwd: PathBuf,
+    hide_first_window: bool,
     secrets: Vec<String>,
     log_dir: PathBuf,
     opts: RunOptions,
 }
 
-async fn start(plan: Plan) -> Result<RunningGame> {
-    if !plan.cwd.is_dir() {
-        return Err(Error::NotFound(format!("dossier de l'instance introuvable : {}", plan.cwd.display())));
-    }
-    tokio::fs::create_dir_all(&plan.log_dir).await?;
-    let log_path = plan.log_dir.join("latest.log");
-    let mut sink = Sink::open(log_path, &plan).await?;
+/// Le processus du jeu, quel que soit le chemin qui l'a créé : `tokio` (cas normal) ou `hidden_spawn` (Windows,
+/// première fenêtre cachée). Le suivi (`supervise`) ne connaît que ceci.
+// Une seule valeur par jeu lancé : la différence de taille ne coûte rien, et le cas normal reste sans indirection.
+#[allow(clippy::large_enum_variant)]
+enum Proc {
+    Tokio(Child),
+    #[cfg(windows)]
+    Hidden(crate::hidden_spawn::Process),
+}
 
+impl Proc {
+    async fn wait(&mut self) -> std::io::Result<ExitStatus> {
+        match self {
+            Proc::Tokio(c) => c.wait().await,
+            #[cfg(windows)]
+            Proc::Hidden(p) => p.wait().await,
+        }
+    }
+
+    fn start_kill(&mut self) {
+        match self {
+            Proc::Tokio(c) => {
+                let _ = c.start_kill();
+            }
+            #[cfg(windows)]
+            Proc::Hidden(p) => p.kill(),
+        }
+    }
+}
+
+/// Crée le processus et branche ses sorties sur `lines`. Rend le processus et son PID.
+fn launch(plan: &Plan, lines: &mpsc::Sender<String>) -> std::io::Result<(Proc, u32)> {
+    #[cfg(windows)]
+    if plan.hide_first_window {
+        let (process, out) = crate::hidden_spawn::spawn(&plan.program, &plan.args, &plan.cwd)?;
+        let pid = process.pid();
+        tokio::spawn(read_lines(tokio::fs::File::from_std(out), lines.clone()));
+        return Ok((Proc::Hidden(process), pid));
+    }
     let mut command = Command::new(&plan.program);
     command
         .args(&plan.args)
@@ -161,8 +202,28 @@ async fn start(plan: Plan) -> Result<RunningGame> {
         .kill_on_drop(true);
     #[cfg(windows)]
     command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    let mut child = command.spawn()?;
+    let pid = child.id().unwrap_or(0);
+    if let Some(out) = child.stdout.take() {
+        tokio::spawn(read_lines(out, lines.clone()));
+    }
+    if let Some(err) = child.stderr.take() {
+        tokio::spawn(read_lines(err, lines.clone()));
+    }
+    Ok((Proc::Tokio(child), pid))
+}
+
+async fn start(plan: Plan) -> Result<RunningGame> {
+    if !plan.cwd.is_dir() {
+        return Err(Error::NotFound(format!("dossier de l'instance introuvable : {}", plan.cwd.display())));
+    }
+    tokio::fs::create_dir_all(&plan.log_dir).await?;
+    let log_path = plan.log_dir.join("latest.log");
+    let mut sink = Sink::open(log_path, &plan).await?;
+
     let started_at = SystemTime::now();
-    let mut child = command.spawn().map_err(|e| {
+    let (line_tx, line_rx) = mpsc::channel::<String>(256);
+    let (child, pid) = launch(&plan, &line_tx).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             Error::NotFound(format!(
                 "Java introuvable : {} (installez Java ou vérifiez le chemin dans les réglages)",
@@ -172,15 +233,6 @@ async fn start(plan: Plan) -> Result<RunningGame> {
             Error::Io(e)
         }
     })?;
-    let pid = child.id().unwrap_or(0);
-
-    let (line_tx, line_rx) = mpsc::channel::<String>(256);
-    if let Some(out) = child.stdout.take() {
-        tokio::spawn(read_lines(out, line_tx.clone()));
-    }
-    if let Some(err) = child.stderr.take() {
-        tokio::spawn(read_lines(err, line_tx.clone()));
-    }
     drop(line_tx);
 
     let (ev_tx, ev_rx) = mpsc::channel(EVENT_CAPACITY);
@@ -318,10 +370,10 @@ async fn rotate(path: &Path) {
 
 #[allow(clippy::too_many_arguments)]
 async fn supervise(
-    mut child: Child,
+    mut child: Proc,
     pid: u32,
     mut lines: mpsc::Receiver<String>,
-    mut kill_rx: mpsc::Receiver<()>,
+    mut kill_rx: mpsc::Receiver<bool>,
     mut sink: Sink,
     ev_tx: mpsc::Sender<LaunchEvent>,
     opts: RunOptions,
@@ -339,9 +391,9 @@ async fn supervise(
                 None => lines_open = false,
             },
             req = kill_rx.recv() => {
-                // `Some` : kill() explicite (arrêt propre) ; `None` : RunningGame abandonné.
+                // `Some(true)` : kill() explicite (arrêt propre) ; `Some(false)` : kill_now() ; `None` : RunningGame abandonné.
                 killed = true;
-                break terminate(&mut child, pid, req.is_some(), opts.kill_grace).await;
+                break terminate(&mut child, pid, req.unwrap_or(false), opts.kill_grace).await;
             }
             st = child.wait() => break st,
         }
@@ -367,7 +419,7 @@ async fn supervise(
     let _ = ev_tx.send(event).await;
 }
 
-async fn terminate(child: &mut Child, pid: u32, graceful: bool, grace: Duration) -> std::io::Result<ExitStatus> {
+async fn terminate(child: &mut Proc, pid: u32, graceful: bool, grace: Duration) -> std::io::Result<ExitStatus> {
     if graceful {
         request_stop(pid).await;
         if let Ok(st) = tokio::time::timeout(grace, child.wait()).await {
@@ -375,7 +427,7 @@ async fn terminate(child: &mut Child, pid: u32, graceful: bool, grace: Duration)
         }
     }
     force_kill_tree(pid).await;
-    let _ = child.start_kill();
+    child.start_kill();
     child.wait().await
 }
 
@@ -485,6 +537,7 @@ mod tests {
             shown_args: args.iter().map(|a| secrets.iter().fold(a.clone(), |a, s| a.replace(s, MASK))).collect(),
             args,
             cwd,
+            hide_first_window: false,
             secrets: secrets.iter().map(|s| s.to_string()).collect(),
             log_dir: dir.join("logs"),
             opts,
@@ -560,6 +613,38 @@ mod tests {
             Ok(_) => panic!("devrait échouer"),
             Err(e) => panic!("{e}"),
         }
+    }
+
+    /// Chemin « première fenêtre cachée » (Windows) : même suivi que le chemin normal, de bout en bout.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn hidden_start_same_supervision() {
+        let d = tempfile::tempdir().unwrap();
+        let hidden = |lines: &[&str]| Plan { hide_first_window: true, ..plan(lines, d.path(), &["s3cret"], fast()) };
+        let mut g = start(hidden(&["echo bonjour s3cret", "echo erreur 1>&2", "exit 3"])).await.unwrap();
+        assert_ne!(g.pid, 0);
+        let evs = collect(&mut g).await;
+        assert!(matches!(evs.first(), Some(LaunchEvent::Started { .. })));
+        assert!(evs.iter().any(|e| matches!(e, LaunchEvent::Output(l) if l.trim() == "bonjour ***")), "stdout, secret masqué : {evs:?}");
+        assert!(evs.iter().any(|e| matches!(e, LaunchEvent::Output(l) if l.trim() == "erreur")), "stderr : {evs:?}");
+        assert!(matches!(evs.last(), Some(LaunchEvent::Failed { .. })), "code de sortie non nul : {evs:?}");
+        let log = std::fs::read_to_string(d.path().join("logs/latest.log")).unwrap();
+        assert!(log.contains("bonjour ***") && !log.contains("s3cret"), "{log}");
+        // sortie normale, arrêt immédiat, abandon
+        let mut g = start(hidden(&["exit 0"])).await.unwrap();
+        assert_eq!(collect(&mut g).await.last(), Some(&LaunchEvent::Exited { code: 0 }));
+        let mut g = start(hidden(&["ping -n 30 127.0.0.1 >nul"])).await.unwrap();
+        let mut rx = g.events().unwrap();
+        let t = Instant::now();
+        g.kill_now().await;
+        assert!(t.elapsed() < Duration::from_secs(10), "{:?}", t.elapsed());
+        let mut last = None;
+        while let Some(e) = rx.recv().await {
+            last = Some(e);
+        }
+        assert!(matches!(last, Some(LaunchEvent::Exited { .. })), "{last:?}");
+        let missing = Plan { program: PathBuf::from(r"C:\introuvable\java.exe"), ..hidden(&["exit 0"]) };
+        assert!(matches!(start(missing).await, Err(Error::NotFound(_))));
     }
 
     #[tokio::test]

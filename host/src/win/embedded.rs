@@ -1,4 +1,4 @@
-//! Mode integre (production) : la zone de jeu vit dans la fenetre du launcher.
+//! La zone de jeu vit dans la fenetre du launcher.
 //!
 //! SDL3 n'accorde le focus clavier (et donc la souris relative) qu'a la fenetre qui est AU PREMIER PLAN de Windows
 //! (`GetForegroundWindow() == hwnd`) : une fenetre fille n'y arrive jamais. Le jeu reste donc une fenetre de premier niveau, sans
@@ -18,7 +18,7 @@ use super::curtain_window::{self, TIMER_CURTAIN};
 use super::debug::dbg;
 use super::game_window::{self, FRAME_BITS, STRIP};
 use super::util::{hw, rect_differs, register_class, wide};
-use super::{on_reveal, run_if, shared, watch, Shared, WM_APP_CURTAIN_ON, WM_APP_RAISE, WM_APP_REVEAL, WM_APP_SYNC};
+use super::{guard_tick, on_reveal, Exposed, run_if, shared, watch, Shared, WM_APP_CURTAIN_ON, WM_APP_RAISE, WM_APP_REVEAL, WM_APP_SYNC};
 use crate::flow::{Cadence, Effect};
 
 /// Cree la zone du jeu (fenetre fille de la fenetre du launcher : cible des messages de l'API) et le rideau. Sur le fil du launcher.
@@ -66,7 +66,7 @@ unsafe extern "system" fn stage_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
         }
         WM_ERASEBKGND => 1,
         WM_PAINT => {
-            super::util::paint_background(hwnd, false);
+            super::util::paint_background(hwnd);
             0
         }
         WM_SETFOCUS => 0,
@@ -138,6 +138,7 @@ unsafe extern "system" fn curtain_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
             let todo = curtain_window::tick(s);
             let t1 = t0.elapsed();
             run_if(s, &todo, |e| matches!(e, Effect::PlaceGame | Effect::HideGame));
+            settle_pose(s, false);
             let t2 = t0.elapsed();
             sync(s);
             let t3 = t0.elapsed();
@@ -156,9 +157,96 @@ unsafe extern "system" fn curtain_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
                     }
                 }
             }
+            cover_exposed(s);
+            // en dernier : un repli referme le rideau et remet lui-meme le minuteur en cadence rapide
+            guard_tick(s);
             0
         }
-        _ => curtain_window::base_proc(hwnd, msg, wp, lp),
+        WM_ERASEBKGND => 1,
+        // le contenu est pousse par `present` (fenetre a transparence par pixel) ; la souris traverse le rideau
+        WM_NCHITTEST => HTTRANSPARENT as LRESULT,
+        _ => DefWindowProcW(hwnd, msg, wp, lp),
+    }
+}
+
+/// `a` est au-dessus de `b` dans l'ordre Z. Lectures locales ; parcours borne (une fenetre de jeu qui vient de s'afficher est en
+/// haut de la pile : quelques pas).
+unsafe fn above(a: HWND, b: HWND) -> bool {
+    let mut w = b;
+    for _ in 0..4096 {
+        w = GetWindow(w, GW_HWNDPREV);
+        if w.is_null() {
+            return false;
+        }
+        if w == a {
+            return true;
+        }
+    }
+    false
+}
+
+/// Duree au bout de laquelle une fenetre de jeu visible sans etre rattachee est signalee au journal (pas sur un etat fugitif :
+/// une adoption normale prend quelques millisecondes).
+const EXPOSED_AFTER: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// Fenetre de jeu AFFICHEE par le jeu avant son rattachement, quand son fil ne pompe plus ses messages (mesure : NeoForge, 20 s
+/// pendant le chargement des mods). Le garage hors ecran et l'adoption attendent ce fil : on ne peut ni la deplacer ni lui
+/// retirer son cadre. Reste a la COUVRIR : le rideau, qui est a nous, est remis juste au-dessus d'elle dans l'ordre Z chaque fois
+/// qu'elle repasse devant (le jeu se met au premier plan en s'affichant, APRES la remontee faite a sa creation). Ce qui deborde de
+/// la zone de jeu reste visible : le journal le dit. A chaque battement du rideau (fil de l'interface), au plus dix fois par seconde.
+unsafe fn cover_exposed(s: &Shared) {
+    static LAST: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+    let now = std::time::Instant::now();
+    {
+        let mut l = LAST.lock().unwrap_or_else(|e| e.into_inner());
+        if l.is_some_and(|t| now.saturating_duration_since(t) < std::time::Duration::from_millis(100)) {
+            return;
+        }
+        *l = Some(now);
+    }
+    let (wins, view) = {
+        let st = s.lock();
+        if st.fell_back || st.pids.is_empty() {
+            return;
+        }
+        (st.origin.keys().copied().collect::<Vec<isize>>(), st.view)
+    };
+    let curtain = s.curtain();
+    let covering = IsWindowVisible(curtain) != 0;
+    for w in wins {
+        let g = hw(w);
+        let exposed = IsWindow(g) != 0 && IsWindowVisible(g) != 0 && GetWindow(g, GW_OWNER) as isize != s.parent && !MonitorFromWindow(g, MONITOR_DEFAULTTONULL).is_null();
+        if exposed && covering && !above(curtain, g) {
+            let prev = GetWindow(g, GW_HWNDPREV);
+            SetWindowPos(curtain, if prev.is_null() { HWND_TOP } else { prev }, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        }
+        let report = {
+            let mut st = s.lock();
+            if !st.origin.contains_key(&w) {
+                continue; // rendue ou oubliee entre-temps
+            }
+            if !exposed {
+                if st.exposed.get(&w).is_some_and(|e| !e.logged) {
+                    st.exposed.remove(&w); // etat fugitif : le constat repartira de zero
+                }
+                continue;
+            }
+            let e = st.exposed.entry(w).or_insert(Exposed { since: now, logged: false });
+            let report = !e.logged && now.saturating_duration_since(e.since) >= EXPOSED_AFTER;
+            e.logged |= report;
+            report
+        };
+        if report {
+            let mut r: windows_sys::Win32::Foundation::RECT = std::mem::zeroed();
+            GetWindowRect(g, &mut r);
+            let rect = (r.left, r.top, r.right - r.left, r.bottom - r.top);
+            let spill = match to_screen(s, view) {
+                Some(zone) if !crate::guard::overflows(rect, zone) => "dans la zone de jeu",
+                _ => "DEBORDE de la zone de jeu",
+            };
+            let cover = if covering { "rideau maintenu au-dessus" } else { "rideau ouvert, rien ne la couvre" };
+            s.log(format!("fenetre du jeu affichee avant son rattachement : le jeu ne repond pas, {cover} (fenetre {} x {} en ({}, {}), {spill})", rect.2, rect.3, rect.0, rect.1));
+        }
     }
 }
 
@@ -176,37 +264,99 @@ pub(super) unsafe fn on_detected(s: &Shared, win: isize) {
     }
 }
 
-/// Si c'est la fenetre du jeu qui bouge (recentrage, plein ecran) : recalage sur le fil de l'interface.
+/// Une fenetre du jeu bouge d'elle-meme (recentrage, plein ecran, agrandissement).
+/// * LA fenetre du jeu, posee : recalage sur la zone, via le fil de l'interface.
+/// * Une fenetre a nous (garee, adoptee) qui n'est PAS posee et que le jeu ramene VISIBLE sur un ecran : regaree tout de suite.
+///   Une fenetre adoptee ne se voit que posee sur la zone, sous le rideau ; sans cela elle resterait a l'ecran, sans cadre, jusqu'a
+///   sa pose.
+///
+/// Dans les deux cas la demande est asynchrone : elle prend effet quand le jeu pompe ses messages. Entre le moment ou il se
+/// deplace lui-meme et celui ou il traite notre demande, sa fenetre est la ou IL l'a mise : ce delai-la est le sien.
 pub(super) unsafe fn on_moved(s: &Shared, hwnd: HWND) {
-    let ours = {
-        let st = s.lock();
-        st.machine.flow().placed() && st.current == Some(hwnd as isize)
+    let h = hwnd as isize;
+    let (placed, ours, view) = {
+        let mut st = s.lock();
+        let placed = st.machine.flow().placed() && !st.pose_pending && st.current == Some(h);
+        // Pas encore posee, et le jeu lui a remis son cadre (il change ses attributs de fenetre pendant son demarrage) : il est
+        // retire tout de suite, la ou elle est garee, et la pose attendra le calme (`guard::pose_waits`).
+        let reframed = !placed && st.adopted.contains(&h) && GetWindowLongPtrW(hwnd, GWL_STYLE) as u32 & FRAME_BITS != 0;
+        if reframed {
+            st.reframed_at = Some(std::time::Instant::now());
+            let closing = st.close_asked;
+            drop(st);
+            if !closing {
+                game_window::request_fix(s, h, s.parent, None);
+            }
+            st = s.lock();
+        }
+        (placed, st.origin.contains_key(&h), st.view)
     };
-    if ours {
+    if placed {
+        // Recalage DIRECT, d'ici (fil de surveillance : sans fenetre, donc vraiment asynchrone) : il n'attend ni le fil de
+        // l'interface ni la file des appels synchrones, ou une correction de cadre peut occuper le jeu pendant deux allers-retours.
+        // Une fenetre posee a qui le jeu remet cadre et taille (mesure : 8/31/8/8 px autour de la zone) revient ainsi sur la zone,
+        // donc sous le rideau, au premier passage du jeu dans sa file ; le cadre est retire ensuite (`sync`).
+        if let Some((x, y, w, hgt)) = to_screen(s, view) {
+            if rect_differs(hwnd, x, y, w, hgt) {
+                SetWindowPos(hwnd, null_mut(), x, y, w, hgt, SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
+            }
+        }
         curtain_window::request_sync(s);
+    } else if ours && IsWindowVisible(hwnd) != 0 && !MonitorFromWindow(hwnd, MONITOR_DEFAULTTONULL).is_null() {
+        dbg(&format!("fenetre {h:#x} revenue a l'ecran avant sa pose : regaree"));
+        watch::park_offscreen(hwnd);
     }
+}
+
+/// Issue d'une adoption.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Adoption {
+    /// La fenetre n'existe deja plus (fenetre d'essai) ou a ete rendue entre-temps : rien n'est retenu.
+    Gone,
+    /// Les appels sont revenus. Le proprietaire reste a verifier (`game_window::note_owner`) : le jeu peut l'avoir refuse.
+    Done,
 }
 
 /// Adoption : fenetre de premier niveau sans cadre, possedee par le launcher ; elle reste hors ecran jusqu'a ce que le rideau soit
 /// ferme. Sur le fil de la fenetre du jeu (appels synchrones vers le jeu).
-pub(super) unsafe fn adopt(s: &Shared, h: isize) {
+pub(super) unsafe fn adopt(s: &Shared, h: isize) -> Adoption {
     let win = hw(h);
     let style = GetWindowLongPtrW(win, GWL_STYLE) as u32;
-    SetWindowLongPtrW(win, GWL_STYLE, ((style & !STRIP) | WS_POPUP) as isize);
+    // Cet appel attend le fil du jeu : mesure, plus de 20 s quand il charge ses mods. Le style lu juste avant peut donc etre
+    // perime quand il s'applique. Le cas qui compte : le jeu a AFFICHE sa fenetre entre-temps ; lui reecrire un style sans
+    // `WS_VISIBLE` la laisse « invisible » pour Windows, plus aucun affichage ne viendra, et elle ne serait jamais reconnue comme
+    // LA fenetre du jeu (rideau ferme jusqu'au delai de garde). On le constate (ancien style rendu par l'appel, ou evenement
+    // d'affichage vu par la surveillance) et on la reaffiche plus bas, une fois garee.
+    let old = SetWindowLongPtrW(win, GWL_STYLE, ((style & !STRIP) | WS_POPUP) as isize) as u32;
+    let was_shown = style & WS_VISIBLE == 0 && (old & WS_VISIBLE != 0 || s.lock().shown_early.contains(&h));
     SetWindowLongPtrW(win, GWLP_HWNDPARENT, s.parent);
     game_window::hide_from_taskbar(win);
     // SDL cree puis detruit plusieurs fenetres d'essai (choix du contexte graphique) avant la vraie : mesure, 7 creations pour une
     // seule fenetre de jeu. Une fenetre deja detruite n'est pas retenue.
     if IsWindow(win) == 0 {
         dbg(&format!("fenetre {h:#x} ephemere (deja detruite) : ignoree"));
-        return;
+        s.lock().origin.remove(&h);
+        return Adoption::Gone;
     }
-    s.lock().adopted.push(h);
+    {
+        let mut st = s.lock();
+        if !st.origin.contains_key(&h) {
+            return Adoption::Gone; // rendue au jeu pendant l'adoption (repli) : la restitution, en file derriere nous, la remet en etat
+        }
+        st.adopted.push(h);
+        st.adopted_at.insert(h, std::time::Instant::now());
+    }
+    // Synchrone, comme les appels precedents : quand il revient, le jeu a traite le rattachement, et le proprietaire que l'appelant
+    // relit est celui qui tient vraiment.
     SetWindowPos(win, null_mut(), -32000, -32000, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
-    let owner = GetWindow(win, GW_OWNER) as isize;
-    if owner != s.parent && IsWindow(win) != 0 {
-        dbg(&format!("ECHEC : proprietaire de la fenetre {h:#x} = {owner:#x} (attendu {:#x})", s.parent));
+    if IsWindow(win) == 0 {
+        return Adoption::Gone;
     }
+    if was_shown && IsWindowVisible(win) == 0 {
+        dbg(&format!("fenetre {h:#x} affichee par le jeu pendant son adoption : reaffichee (hors ecran)"));
+        ShowWindow(win, SW_SHOWNA);
+    }
+    Adoption::Done
 }
 
 /// Zone de jeu `view` (coordonnees client du launcher) en coordonnees ecran ; `None` si le launcher est reduit ou la zone vide.
@@ -226,17 +376,28 @@ unsafe fn to_screen(s: &Shared, view: (i32, i32, i32, i32)) -> Option<(i32, i32,
 
 /// Cale le rideau (toujours) et le jeu (quand il est pose) sur la zone de jeu ; maintient le jeu SOUS le rideau.
 pub(super) unsafe fn sync(s: &Shared) {
-    let (view, placed, cur, pw, applied) = {
+    let (view, placed, cur, pw, applied, closing) = {
         let st = s.lock();
-        (st.view, st.machine.flow().placed(), st.current, st.machine.panel_width(), st.region)
+        // premiere pose en attente : la fenetre est garee hors ecran, rien ne la cale sur la zone
+        (st.view, st.machine.flow().placed() && !st.pose_pending, st.current, st.machine.panel_width(), st.region, st.close_asked)
     };
     let Some((x, y, w, h)) = to_screen(s, view) else { return };
     let curtain = s.curtain();
     if rect_differs(curtain, x, y, w, h) {
         SetWindowPos(curtain, null_mut(), x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
     }
-    if let (true, Some(g)) = (placed, cur) {
+    // une fenetre detruite (jeu ferme ou tue, avant que le launcher ne l'apprenne) n'est ni calee ni corrigee
+    if let (true, Some(g)) = (placed, cur.filter(|g| IsWindow(hw(*g)) != 0)) {
         let g = hw(g);
+        // Le calage part AVANT la correction, et sur le fil de la fenetre du jeu (voir `game_window::show`) : il est asynchrone, le
+        // jeu le traite a son prochain passage dans sa file. La correction du cadre, elle, lui coute deux allers-retours synchrones.
+        // Quand le jeu repose son cadre ET une taille plus grande que la zone (mesure : NeoForge au demarrage, ~185 ms), sa fenetre
+        // revient ainsi d'abord sous le rideau, puis perd son cadre, au lieu de deborder de la zone pendant toute la correction.
+        let rect = rect_differs(g, x, y, w, h).then_some((x, y, w, h));
+        let below = (IsWindowVisible(curtain) != 0 && GetWindow(curtain, GW_HWNDNEXT) != g).then_some(curtain as isize);
+        if rect.is_some() || below.is_some() {
+            game_window::place(s, g as isize, rect, below);
+        }
         // Detection (lectures locales, sans message vers le jeu). Les CORRECTIONS (style, proprietaire, decoupe) sont synchrones
         // vers le fil du jeu, qui ne pompe plus ses messages pendant le chargement : elles partent sur le fil de la fenetre du jeu,
         // jamais sur celui de l'interface (sinon le launcher « ne repond plus »).
@@ -253,21 +414,59 @@ pub(super) unsafe fn sync(s: &Shared) {
         let need_ex = ((ex & !WS_EX_APPWINDOW) | WS_EX_TOOLWINDOW) != ex; // le jeu peut reposer ses styles (plein ecran)
         let need_owner = GetWindow(g, GW_OWNER) as isize != s.parent; // adoption incomplete (fil du jeu occupe)
         let need_style = style & FRAME_BITS != 0 || style & WS_POPUP == 0; // F11 : le jeu rend son cadre
-        if need_ex || need_owner || need_style || need_region {
+        // jamais apres une demande de fermeture : la fenetre se defait, ses styles ne sont plus a corriger
+        if !closing && (need_ex || need_owner || need_style || need_region) {
             game_window::request_fix(s, g as isize, s.parent, need_region.then_some((w, h, pw)));
-        }
-        // sur le fil de la fenetre du jeu (voir `game_window::show`) : ne bloque jamais l'interface sur un jeu occupe
-        let rect = rect_differs(g, x, y, w, h).then_some((x, y, w, h));
-        let below = (IsWindowVisible(curtain) != 0 && GetWindow(curtain, GW_HWNDNEXT) != g).then_some(curtain as isize);
-        if rect.is_some() || below.is_some() {
-            game_window::place(s, g as isize, rect, below);
         }
     }
 }
 
 /// Affiche la fenetre du jeu sur la zone de jeu (sous le rideau) et lui donne le premier plan si le launcher l'a.
+///
+/// La PREMIERE pose attend que la fenetre soit calme (`guard::pose_waits`) : d'ici la elle reste garee hors ecran, et
+/// `settle_pose` la pose a un battement suivant.
 pub(super) unsafe fn show_game(s: &Shared, g: HWND) {
-    let view = s.lock().view;
+    pose(s, g, false);
+}
+
+/// Pose en attente : la faire si son heure est venue (a chaque battement), ou tout de suite (`force`). Fil de l'interface.
+pub(super) unsafe fn settle_pose(s: &Shared, force: bool) {
+    let g = {
+        let mut st = s.lock();
+        if !st.pose_pending {
+            return;
+        }
+        match st.current.filter(|_| st.machine.flow().placed()) {
+            Some(g) => g,
+            None => {
+                st.pose_pending = false; // retour au launcher, jeu rendu ou termine entre-temps
+                return;
+            }
+        }
+    };
+    pose(s, hw(g), force);
+}
+
+unsafe fn pose(s: &Shared, g: HWND, force: bool) {
+    let framed = GetWindowLongPtrW(g, GWL_STYLE) as u32 & FRAME_BITS != 0;
+    let (view, waits, was_pending) = {
+        let mut st = s.lock();
+        let now = std::time::Instant::now();
+        let since = |t: Option<std::time::Instant>| t.map(|t| now.saturating_duration_since(t));
+        let waits = !force && crate::guard::pose_waits(since(st.shown_at), since(st.reframed_at), framed);
+        let was_pending = std::mem::replace(&mut st.pose_pending, waits);
+        (st.view, waits, was_pending)
+    };
+    if waits {
+        if !was_pending {
+            dbg("premiere pose : attente du calme de la fenetre (garee hors ecran)");
+        }
+        if framed {
+            game_window::request_fix(s, g as isize, s.parent, None);
+        }
+        return;
+    }
+    s.log("fenetre du jeu posee sur la zone de jeu");
     let Some((x, y, w, h)) = to_screen(s, view) else { return };
     game_window::show(s, g as isize, s.curtain() as isize, (x, y, w, h));
     if GetForegroundWindow() == hw(s.parent) {
@@ -277,6 +476,7 @@ pub(super) unsafe fn show_game(s: &Shared, g: HWND) {
 
 /// Cache la fenetre du jeu (retour au launcher) et rend le premier plan au launcher.
 pub(super) unsafe fn hide_game(s: &Shared, g: HWND) {
+    s.lock().pose_pending = false;
     game_window::hide(s, g as isize);
     if GetForegroundWindow() == g {
         game_window::foreground(s, s.parent);

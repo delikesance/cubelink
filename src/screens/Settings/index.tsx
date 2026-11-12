@@ -6,6 +6,7 @@ import { Button, Card, Field, Input } from "../../ui";
 import { UpdateSection } from "./UpdateSection";
 import { Logo } from "../Login/Logo";
 import { Accounts } from "./Accounts";
+import { useStageSupported } from "../../app/stage";
 import type { Settings as BaseSettings } from "../../services/types";
 
 export type SettingsData = BaseSettings;
@@ -96,6 +97,10 @@ export default function Settings({ testConnection, clearCache }: SettingsProps =
   const [javaPath, setJavaPath] = useState("");
   const [ram, setRam] = useState("");
   const [hotkey, setHotkey] = useState(DEFAULT_HOTKEY);
+  // Le jeu intégré n'existe que sous Windows : ailleurs le réglage n'aurait aucun effet, il n'est pas montré.
+  const stageSupported = useStageSupported();
+  // Sans jeu intégré il n'y a pas de panneau « en jeu » : son raccourci ne sert à rien, on le dit plutôt que de le laisser modifiable.
+  const embeddedOff = stageSupported && settings?.embedded_game === false;
 
   useEffect(() => {
     alive.current = true;
@@ -283,13 +288,25 @@ export default function Settings({ testConnection, clearCache }: SettingsProps =
           </label>
         </Card>
         <Card as="section" aria-label="Raccourci jeu et launcher" className="set-field">
+          {stageSupported && (
+            <label className="set-row" style={{ cursor: "pointer" }}>
+              <div className="set-txt"><b>Jeu intégré</b><span>Le jeu s'affiche dans la fenêtre de Cubelink. Désactive si le jeu ne s'affiche pas correctement. Appliqué au prochain lancement du jeu.</span></div>
+              <input type="checkbox" className="set-check" disabled={dis} checked={settings?.embedded_game !== false} onChange={(e) => void update({ embedded_game: e.target.checked })} />
+            </label>
+          )}
           <label className="set-row" style={{ cursor: "pointer" }}>
             <div className="set-txt"><b>Raccourci jeu et launcher</b><span>Pendant une partie, un raccourci bascule entre le jeu et le launcher (écran Amis : invitations, rejoindre un ami), même quand le jeu a le clavier.</span></div>
             <input type="checkbox" className="set-check" disabled={dis} checked={settings?.overlay_enabled !== false} onChange={(e) => void update({ overlay_enabled: e.target.checked })} />
           </label>
-          <Field label="Raccourci du panneau" hint="Exemple : Ctrl+Shift+C. Windows uniquement : le jeu est affiché dans la fenêtre du launcher." error={hotkeyError}>
+          <Field
+            label="Raccourci du panneau"
+            hint={embeddedOff
+              ? "Indisponible : le panneau s'ouvre par-dessus le jeu intégré. Active « Jeu intégré » pour t'en servir."
+              : "Exemple : Ctrl+Shift+C. Windows uniquement : le jeu est affiché dans la fenêtre du launcher."}
+            error={embeddedOff ? undefined : hotkeyError}
+          >
             {(p) => (
-              <Input {...p} type="text" autoComplete="off" spellCheck={false} disabled={dis || settings?.overlay_enabled === false}
+              <Input {...p} type="text" autoComplete="off" spellCheck={false} disabled={dis || embeddedOff || settings?.overlay_enabled === false}
                 value={hotkey} onChange={(e) => setHotkey(e.target.value)} onBlur={commitHotkey}
                 onKeyDown={(e) => { if (e.key === "Enter") commitHotkey(); }} />
             )}

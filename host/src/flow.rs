@@ -23,6 +23,45 @@ pub const OPEN_MS: f32 = 650.0;
 /// Panneaux consideres comme fermes a partir de ce niveau.
 const COVERED: f32 = 0.999;
 
+/// Allure des panneaux. `Calm` (mouvement reduit, preference systeme) : aucun glissement, les panneaux sont poses puis retires d'un
+/// bloc. Les fondus du contenu (opacite, pas un mouvement) et le delai d'ouverture restent : c'est ce delai, panneaux fermes, qui
+/// cache la pose ou le retrait de la fenetre du jeu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Pace {
+    #[default]
+    Normal,
+    Calm,
+}
+
+impl Pace {
+    /// Duree de la fermeture des panneaux.
+    pub fn close_ms(self) -> f32 {
+        match self {
+            Pace::Normal => CLOSE_MS,
+            Pace::Calm => 0.0,
+        }
+    }
+
+    /// Duree de l'ouverture des panneaux.
+    pub fn open_ms(self) -> f32 {
+        match self {
+            Pace::Normal => OPEN_MS,
+            Pace::Calm => 0.0,
+        }
+    }
+}
+
+/// Part ecoulee d'une duree `dur` apres `e` ms ; une duree nulle est terminee des son debut (jamais de division par zero).
+fn part(e: f32, dur: f32) -> f32 {
+    if dur > 0.0 {
+        e / dur
+    } else if e >= 0.0 {
+        1.0
+    } else {
+        0.0
+    }
+}
+
 /// Ce que le joueur doit voir une fois le rideau retire.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum View {
@@ -91,7 +130,7 @@ pub enum Flow {
     Closing { shut: Shut, placed: bool },
     /// Lancement : panneaux fermes, etapes du chargement ; l'ouverture attend [`Event::Reveal`].
     Loading { shut: Shut, placed: bool, bar: Bar },
-    /// Rideau ferme a la main (`GameHost::show_curtain`) ou fermeture abandonnee : l'ouverture attend [`Event::Reveal`].
+    /// Rideau tenu ferme ([`Event::Hold`]) ou fermeture abandonnee : l'ouverture attend [`Event::Reveal`].
     Held { shut: Shut, to: View, placed: bool },
     /// Basculement launcher <-> jeu (ou retour au launcher a la fin du jeu) : les panneaux se ferment, la fenetre du jeu est posee
     /// ou retiree dessous, puis ils se rouvrent tout seuls.
@@ -107,7 +146,7 @@ pub enum Event {
     BeginLaunch,
     /// Un changement de modpack commence (`begin_close`) : fermeture propre de l'ancien jeu.
     BeginClose,
-    /// Fermer le rideau sans rien changer d'autre (`show_curtain`).
+    /// Fermer le rideau sans rien changer d'autre.
     Hold,
     /// Le jeu est pret, ouvrir le rideau (`reveal`).
     Reveal,
@@ -118,7 +157,8 @@ pub enum Event {
     /// La tache de jeu est terminee (`run_finished`) : pendant une fermeture propre, la barre atteint 50 % et rien d'autre ; sinon
     /// retour au launcher.
     GameExited,
-    /// Retour au launcher sans condition (`leave`).
+    /// Retour au launcher sans condition : le jeu n'est plus dans la Scene. C'est aussi le REPLI (`GameHost::release`, adoption
+    /// impossible, aucune fenetre) : la couche systeme rend sa fenetre au jeu, la machine rouvre le rideau sur le launcher.
     Leave,
     /// Basculer vers le jeu ou le launcher sans arreter le jeu (`set_view`).
     SetView(View),
@@ -241,19 +281,19 @@ impl Flow {
     }
 
     /// Etat des panneaux a `now` : (fermeture 0..1, opacite du contenu 0..1).
-    pub fn levels(&self, now: Instant) -> (f32, f32) {
+    pub fn levels(&self, now: Instant, pace: Pace) -> (f32, f32) {
         if let Flow::Revealing { open, .. } = *self {
             // ouverture : le contenu s'efface, puis les panneaux s'ecartent
             let e = ms(now, open.from);
             let card = (1.0 - e / (OPEN_DELAY_MS * 0.9)).clamp(0.0, 1.0) * open.card0;
-            return (open.cover0 * (1.0 - ease((e - OPEN_DELAY_MS) / OPEN_MS)), card);
+            return (open.cover0 * (1.0 - ease(part(e - OPEN_DELAY_MS, pace.open_ms()))), card);
         }
         match self.shut() {
             Some((shut, quick)) => {
                 let e = ms(now, shut.from);
-                let cover = shut.cover0 + (1.0 - shut.cover0) * ease(e / CLOSE_MS);
+                let cover = shut.cover0 + (1.0 - shut.cover0) * ease(part(e, pace.close_ms()));
                 let delay = if quick { QUICK_CARD_DELAY_MS } else { 0.0 };
-                let card = ((e - CLOSE_MS - delay) / CARD_IN_MS).clamp(0.0, 1.0);
+                let card = ((e - pace.close_ms() - delay) / CARD_IN_MS).clamp(0.0, 1.0);
                 (cover, if cover >= COVERED { card } else { 0.0 })
             }
             None => (0.0, 0.0),
@@ -261,8 +301,8 @@ impl Flow {
     }
 
     /// Panneaux fermes : on peut basculer dessous sans que le joueur voie la coupure.
-    pub fn covered(&self, now: Instant) -> bool {
-        self.shut().is_some() && self.levels(now).0 >= COVERED
+    pub fn covered(&self, now: Instant, pace: Pace) -> bool {
+        self.shut().is_some() && self.levels(now, pace).0 >= COVERED
     }
 
     fn set_placed(&mut self, v: bool) {
@@ -274,8 +314,8 @@ impl Flow {
     }
 
     /// Debut d'ouverture a `now`, en continuite avec l'etat courant des panneaux et du contenu.
-    fn open(&self, now: Instant) -> Open {
-        let (cover, card) = self.levels(now);
+    fn open(&self, now: Instant, pace: Pace) -> Open {
+        let (cover, card) = self.levels(now, pace);
         Open { from: now, cover0: if cover >= COVERED { 1.0 } else { cover }, card0: card }
     }
 }
@@ -291,6 +331,8 @@ pub struct Machine {
     /// Fermeture propre de l'ancien jeu en cours : sa fin n'est pas un retour au launcher, et le lancement qui suit prend la
     /// seconde moitie de la barre.
     closing: bool,
+    /// Allure des panneaux (mouvement reduit).
+    pace: Pace,
 }
 
 impl Default for Machine {
@@ -301,7 +343,16 @@ impl Default for Machine {
 
 impl Machine {
     pub fn new() -> Machine {
-        Machine { flow: Flow::Launcher, window: false, attached: false, closing: false }
+        Machine { flow: Flow::Launcher, window: false, attached: false, closing: false, pace: Pace::Normal }
+    }
+
+    /// Mouvement reduit : les panneaux ne glissent plus (voir [`Pace`]). Pris en compte tout de suite, animation en cours comprise.
+    pub fn set_calm(&mut self, calm: bool) {
+        self.pace = if calm { Pace::Calm } else { Pace::Normal };
+    }
+
+    pub fn calm(&self) -> bool {
+        self.pace == Pace::Calm
     }
 
     pub fn flow(&self) -> Flow {
@@ -325,7 +376,7 @@ impl Machine {
     }
 
     pub fn levels(&self, now: Instant) -> (f32, f32) {
-        self.flow.levels(now)
+        self.flow.levels(now, self.pace)
     }
 
     /// Une fermeture propre de l'ancien jeu est en cours.
@@ -448,7 +499,7 @@ impl Machine {
         let placed = self.flow.placed();
         let (shut, fresh) = match self.flow.shut() {
             Some((shut, _)) => (shut, false),
-            None if self.flow.curtain_on() => (Shut { from: now, cover0: self.flow.levels(now).0 }, false),
+            None if self.flow.curtain_on() => (Shut { from: now, cover0: self.flow.levels(now, self.pace).0 }, false),
             None => (Shut { from: now, cover0: 0.0 }, true),
         };
         fx.push(Effect::ShowCurtain { fresh });
@@ -456,7 +507,7 @@ impl Machine {
     }
 
     fn reveal(&mut self, now: Instant, fx: &mut Vec<Effect>) {
-        let open = self.flow.open(now);
+        let open = self.flow.open(now, self.pace);
         match self.flow {
             Flow::Loading { placed, bar, .. } => self.flow = Flow::Revealing { open, to: View::Game, placed, content: Content::Launch(bar) },
             Flow::Closing { placed, .. } => self.flow = Flow::Revealing { open, to: View::Game, placed, content: Content::Close },
@@ -494,7 +545,7 @@ impl Machine {
 
     fn tick(&mut self, now: Instant, fx: &mut Vec<Effect>) {
         // 1. pose / retrait de la fenetre du jeu : seulement sous les panneaux fermes (ou pendant qu'ils s'ouvrent sur le jeu)
-        let covered = self.flow.covered(now);
+        let covered = self.flow.covered(now, self.pace);
         if self.window {
             let (to, placed) = (self.flow.view(), self.flow.placed());
             if to == View::Game && !placed && (covered || matches!(self.flow, Flow::Revealing { .. })) {
@@ -508,12 +559,12 @@ impl Machine {
         // 2. basculement fait sous les panneaux (ou plus de fenetre de jeu a attendre) : ils se rouvrent
         if let Flow::Switching { to, placed, .. } = self.flow {
             if covered && (placed == (to == View::Game) || !self.window) {
-                self.flow = Flow::Revealing { open: self.flow.open(now), to, placed, content: Content::Wait };
+                self.flow = Flow::Revealing { open: self.flow.open(now, self.pace), to, placed, content: Content::Wait };
             }
         }
         // 3. panneaux ouverts : le rideau se retire
         if let Flow::Revealing { open, to, placed, .. } = self.flow {
-            if ms(now, open.from) >= OPEN_DELAY_MS + OPEN_MS {
+            if ms(now, open.from) >= OPEN_DELAY_MS + self.pace.open_ms() {
                 self.flow = match (to, placed) {
                     (View::Game, true) => Flow::InGame,
                     (View::Game, false) => Flow::Pending,
@@ -852,13 +903,14 @@ mod tests {
         let at = |ms: u64| t0 + Duration::from_millis(ms);
         // ouverture commencee a 0 (contenu visible), refermee a 500 ms
         let opening = Flow::Revealing { open: Open { from: t0, cover0: 1.0, card0: 1.0 }, to: View::Game, placed: true, content: Content::Wait };
-        assert_eq!(opening.levels(at(0)), (1.0, 1.0));
-        let (c170, k170) = opening.levels(at(170));
+        let n = Pace::Normal;
+        assert_eq!(opening.levels(at(0), n), (1.0, 1.0));
+        let (c170, k170) = opening.levels(at(170), n);
         assert_eq!((c170, k170), (1.0, 0.0), "le contenu est efface avant que les panneaux ne bougent");
-        let (c500, _) = opening.levels(at(500));
+        let (c500, _) = opening.levels(at(500), n);
         assert!(c500 > 0.3 && c500 < 0.7, "{c500}");
-        assert_eq!(opening.levels(at(820)).0, 0.0);
-        let mut m = Machine { flow: opening, window: true, attached: true, closing: false };
+        assert_eq!(opening.levels(at(820), n).0, 0.0);
+        let mut m = Machine { flow: opening, window: true, attached: true, closing: false, pace: n };
         m.apply(Event::BeginLaunch, at(500));
         let Flow::Loading { shut, .. } = m.flow() else { panic!("{:?}", m.flow()) };
         assert_eq!(shut, Shut { from: at(500), cover0: c500 });
@@ -875,8 +927,8 @@ mod tests {
         assert_eq!(m.levels(at(1020 + 260)).1, 1.0);
         // un basculement differe son contenu de QUICK_CARD_DELAY_MS
         let quick = Flow::Switching { shut: Shut { from: t0, cover0: 0.0 }, to: View::Game, placed: false };
-        assert_eq!(quick.levels(at(520 + 1990)), (1.0, 0.0));
-        assert_eq!(quick.levels(at(520 + 2000 + 260)), (1.0, 1.0));
+        assert_eq!(quick.levels(at(520 + 1990), n), (1.0, 0.0));
+        assert_eq!(quick.levels(at(520 + 2000 + 260), n), (1.0, 1.0));
     }
 
     #[test]
@@ -1082,6 +1134,137 @@ mod tests {
         assert_eq!(m.flow(), Flow::Launcher);
         assert!(matches!(n.flow(), Flow::Loading { .. }));
         assert_eq!(fx, vec![Effect::ShowCurtain { fresh: true }]);
+    }
+
+    /// Battements de 16 ms pendant `ms` millisecondes, SANS le controle de continuite de `run` (en mouvement reduit les panneaux
+    /// sautent, c'est voulu) ; verifie a chaque battement que les panneaux sont soit ouverts soit fermes, jamais entre les deux.
+    fn run_calm(s: &mut Sim, ms: u64) -> Vec<Effect> {
+        let end = s.now + Duration::from_millis(ms);
+        let mut all = Vec::new();
+        while s.now < end {
+            s.now = (s.now + Duration::from_millis(16)).min(end);
+            let fx = s.m.apply(Event::Tick, s.now);
+            let c = s.cover();
+            assert!(c == 0.0 || c == 1.0, "glissement en mouvement reduit : {c} ({:?})", s.m.flow());
+            all.extend(fx.into_iter().filter(|e| !matches!(e, Effect::Timer(_))));
+        }
+        all
+    }
+
+    #[test]
+    fn mouvement_reduit_sans_glissement() {
+        assert_eq!((Pace::Calm.close_ms(), Pace::Calm.open_ms()), (0.0, 0.0));
+        assert_eq!((Pace::Normal.close_ms(), Pace::Normal.open_ms()), (CLOSE_MS, OPEN_MS));
+        let mut s = Sim::new();
+        assert!(!s.m.calm());
+        s.m.set_calm(true);
+        assert!(s.m.calm());
+        // lancement : panneaux poses d'un bloc, des l'instant du `begin`
+        assert_eq!(s.send(Event::BeginLaunch), vec![Effect::ShowCurtain { fresh: true }]);
+        assert_eq!(s.cover(), 1.0);
+        s.send(Event::Watch);
+        s.send(Event::WindowShown);
+        assert_eq!(run_calm(&mut s, 16), vec![Effect::PlaceGame], "panneaux deja fermes : pose au premier battement");
+        run_calm(&mut s, 300);
+        assert_eq!(s.card(), 1.0, "le contenu apparait toujours en fondu");
+        assert_eq!(run_calm(&mut s, 3000), vec![], "jamais d'ouverture sans `reveal`");
+        // ouverture : le contenu s'efface (fondu), puis les panneaux sont retires d'un bloc
+        s.send(Event::Reveal);
+        assert_eq!(run_calm(&mut s, 160), vec![]);
+        assert_eq!(s.cover(), 1.0);
+        assert_eq!(run_calm(&mut s, 32), vec![Effect::HideCurtain]);
+        assert_eq!(s.m.flow(), Flow::InGame);
+        assert_eq!(s.cover(), 0.0);
+        // basculement : la fenetre du jeu est retiree sous des panneaux FERMES, qui le restent le temps du delai d'ouverture
+        assert_eq!(s.send(Event::SetView(View::Launcher)), vec![Effect::ShowCurtain { fresh: true }]);
+        assert_eq!(s.cover(), 1.0);
+        assert_eq!(run_calm(&mut s, 16), vec![Effect::HideGame]);
+        assert_eq!(s.cover(), 1.0, "le retrait est cache : panneaux encore fermes");
+        assert_eq!(run_calm(&mut s, 200), vec![Effect::HideCurtain]);
+        assert_eq!(s.m.flow(), Flow::Launcher);
+        s.send(Event::SetView(View::Game));
+        assert_eq!(run_calm(&mut s, 16), vec![Effect::PlaceGame]);
+        assert_eq!(run_calm(&mut s, 200), vec![Effect::HideCurtain]);
+        assert_eq!(s.m.flow(), Flow::InGame);
+        // retour au mouvement normal : les panneaux glissent a nouveau (continuite verifiee par `run`)
+        s.m.set_calm(false);
+        s.send(Event::SetView(View::Launcher));
+        s.run(260);
+        assert!(s.cover() > 0.05 && s.cover() < 0.95);
+    }
+
+    #[test]
+    fn mouvement_reduit_niveaux() {
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let shut = Flow::Loading { shut: Shut { from: t0, cover0: 0.0 }, placed: false, bar: Bar::Full };
+        assert_eq!(shut.levels(at(0), Pace::Calm), (1.0, 0.0));
+        assert!(shut.covered(at(0), Pace::Calm));
+        assert!(!shut.covered(at(0), Pace::Normal));
+        assert_eq!(shut.levels(at(260), Pace::Calm), (1.0, 1.0));
+        let open = Flow::Revealing { open: Open { from: t0, cover0: 1.0, card0: 1.0 }, to: View::Game, placed: true, content: Content::Wait };
+        assert_eq!(open.levels(at(0), Pace::Calm), (1.0, 1.0));
+        assert_eq!(open.levels(at(169), Pace::Calm).0, 1.0);
+        assert_eq!(open.levels(at(170), Pace::Calm), (0.0, 0.0));
+    }
+
+    #[test]
+    fn repli_pendant_un_chargement() {
+        // aucune fenetre : le rideau, ferme sur le launcher, se rouvre sur lui
+        let mut s = Sim::new();
+        s.send(Event::BeginLaunch);
+        s.send(Event::Watch);
+        s.run(5000);
+        assert_eq!(s.send(Event::Leave), vec![Effect::Detach, Effect::ShowCurtain { fresh: false }]);
+        assert!(!s.m.attached() && !s.m.window());
+        assert_eq!(s.cover(), 1.0);
+        s.run(16);
+        assert!(matches!(s.m.flow(), Flow::Revealing { to: View::Launcher, placed: false, .. }));
+        assert_eq!(s.run(REVEAL_MS), vec![Effect::HideCurtain]);
+        assert_eq!(s.m.flow(), Flow::Launcher);
+        assert_eq!(s.m.cadence(), Cadence::Off);
+        // fenetre deja posee sous le rideau : la machine ne demande NI de la cacher NI de la poser (la couche systeme la rend)
+        let mut s = Sim::new();
+        s.send(Event::BeginLaunch);
+        s.send(Event::Watch);
+        s.run(1000);
+        s.send(Event::WindowShown);
+        s.run(500);
+        assert!(matches!(s.m.flow(), Flow::Loading { placed: true, .. }));
+        assert_eq!(s.send(Event::Leave), vec![Effect::Detach, Effect::ShowCurtain { fresh: false }]);
+        assert_eq!(s.run(3000), vec![Effect::HideCurtain]);
+        assert_eq!(s.m.flow(), Flow::Launcher);
+        // le jeu rendu annonce plus tard qu'il est pret : rien ne bouge
+        assert_eq!(s.send(Event::WindowShown), vec![]);
+        assert_eq!(s.send(Event::Reveal), vec![]);
+        assert_eq!(s.run(1000), vec![]);
+        assert_eq!(s.m.flow(), Flow::Launcher);
+    }
+
+    #[test]
+    fn repli_depuis_le_jeu_puis_nouveau_lancement() {
+        // `release` en plein jeu, panneau ouvert : decoupe retiree, panneaux fermes puis rouverts sur le launcher
+        let mut s = launched();
+        s.send(Event::PanelOpen { width: 380 });
+        assert_eq!(s.send(Event::Leave), vec![Effect::ClearRegion, Effect::Detach, Effect::ShowCurtain { fresh: true }]);
+        assert!(matches!(s.m.flow(), Flow::Switching { to: View::Launcher, placed: false, .. }));
+        assert_eq!(s.run(3000), vec![Effect::HideCurtain], "jamais HideGame : la fenetre rendue reste visible");
+        assert_eq!(s.m.flow(), Flow::Launcher);
+        // le lancement suivant repart de zero, sur toute la barre
+        assert_eq!(s.send(Event::BeginLaunch), vec![Effect::ShowCurtain { fresh: true }]);
+        assert_eq!(s.m.content(), Content::Launch(Bar::Full));
+        s.send(Event::Watch);
+        s.run(1000);
+        s.send(Event::WindowShown);
+        assert_eq!(s.run(32), vec![Effect::PlaceGame]);
+        // repli pendant la fermeture propre de l'ancien jeu (changement de modpack) : la fermeture est oubliee
+        let mut s = launched();
+        s.send(Event::BeginClose);
+        s.run(1000);
+        assert_eq!(s.send(Event::Leave), vec![Effect::Detach, Effect::ShowCurtain { fresh: false }]);
+        assert!(!s.m.closing());
+        s.run(3000);
+        assert_eq!(s.m.flow(), Flow::Launcher);
     }
 
     #[test]

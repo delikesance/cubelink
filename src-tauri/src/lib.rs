@@ -19,6 +19,7 @@ pub mod invites;
 pub mod hotkey;
 pub mod p2p_backend;
 pub mod stage;
+pub mod stage_log;
 pub mod state;
 pub mod test_hooks;
 
@@ -90,8 +91,16 @@ pub fn run() {
             app.manage(st.clone());
             commands_update::setup(app, test_mode);
             hotkey::setup(app.handle(), test_mode);
-            // Zone de jeu integree : la fenetre du jeu est adoptee dans celle du launcher (CUBELINK_NO_STAGE=1 : desactive).
-            if std::env::var_os("CUBELINK_NO_STAGE").is_none() && (!test_mode || std::env::var_os("CUBELINK_STAGE_TEST").is_some()) {
+            // Zone de jeu integree (Windows) : la fenetre du jeu est adoptee dans celle du launcher. Le joueur la coupe par le reglage
+            // « Jeu integre » ; CUBELINK_NO_STAGE=1 est un coupe-circuit de developpement (la zone n'est meme pas creee).
+            let stage_allowed = !test_mode || std::env::var_os("CUBELINK_STAGE_TEST").is_some();
+            if cfg!(windows) && stage_allowed {
+                st.stage.open_log(&st.paths.logs);
+                st.stage.note(&format!("demarrage de Cubelink {}", env!("CARGO_PKG_VERSION")));
+            }
+            if std::env::var_os("CUBELINK_NO_STAGE").is_some() {
+                st.stage.note("Scene desactivee : CUBELINK_NO_STAGE");
+            } else if stage_allowed {
                 if let Some(w) = app.get_webview_window("main") {
                     let h = app.handle().clone();
                     let sink: state::EventSink = Arc::new(move |name, payload| {
@@ -100,30 +109,25 @@ pub fn run() {
                     st.stage.attach(&w, sink);
                     let (st2, h2) = (st.clone(), app.handle().clone());
                     w.on_window_event(move |e| {
-                        // Fermer la fenetre du launcher ferme aussi le jeu rattache : fermeture propre (monde enregistre), jamais
-                        // abandonne en tache de fond ; force seulement apres 60 s.
+                        // Fermer la fenetre du launcher arrete aussi le jeu de la zone integree, jamais abandonne en tache de fond
+                        // (regles dans `quit_requested` / `quit_game`) : tue net tant qu'il charge derriere le rideau, ferme
+                        // proprement (monde enregistre, force apres 60 s) une fois montre au joueur. Un jeu dans sa PROPRE fenetre
+                        // (reglage « Jeu integre » coupe, ou repli) n'est pas concerne : le launcher se ferme, le jeu continue.
+                        // Pendant la simple preparation (aucun processus) le launcher se ferme tout de suite ; le rideau, fenetre du
+                        // launcher, disparait avec lui.
                         if let tauri::WindowEvent::CloseRequested { api, .. } = e {
                             static CLOSING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-                            if st2.stage.state().attached {
+                            if st2.quit_requested() {
                                 api.prevent_close();
                                 if !CLOSING.swap(true, std::sync::atomic::Ordering::SeqCst) {
                                     let (st3, h3) = (st2.clone(), h2.clone());
                                     tauri::async_runtime::spawn(async move {
-                                        st3.stage.request_close();
-                                        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
-                                        loop {
-                                            let current = state::lock(&st3.game).clone();
-                                            let Some(id) = current else { break };
-                                            if tokio::time::Instant::now() >= deadline {
-                                                let _ = st3.instances_kill(&id).await;
-                                                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                                                break;
-                                            }
-                                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                                        }
+                                        st3.quit_game(std::time::Duration::from_secs(60)).await;
                                         h3.exit(0);
                                     });
                                 }
+                            } else {
+                                st2.stage.flush_log();
                             }
                         }
                         if matches!(e, tauri::WindowEvent::Resized(_) | tauri::WindowEvent::Moved(_) | tauri::WindowEvent::ScaleFactorChanged { .. }) {
@@ -134,9 +138,12 @@ pub fn run() {
                     });
                 }
             }
-            // Diagnostic : lance une instance sans clic (CUBELINK_STAGE_AUTOLAUNCH=<id>), jamais utilise en production.
-            if let Ok(id) = std::env::var("CUBELINK_STAGE_AUTOLAUNCH") {
+            // Diagnostic : lance une instance sans clic (CUBELINK_STAGE_AUTOLAUNCH=<id>). Ignore sur une installation normale :
+            // il faut le mode test ou CUBELINK_STAGE_DEBUG, pour qu'une variable d'environnement oubliee ne lance jamais un jeu.
+            let diagnostic = test_mode || std::env::var_os("CUBELINK_STAGE_DEBUG").is_some();
+            if let Some(id) = std::env::var("CUBELINK_STAGE_AUTOLAUNCH").ok().filter(|_| diagnostic) {
                 let st = st.clone();
+                st.stage.note(&format!("diagnostic : lancement automatique de {id}"));
                 tauri::async_runtime::spawn(async move {
                     tokio::time::sleep(std::time::Duration::from_secs(4)).await;
                     if let Err(e) = st.instances_launch(&id).await {
@@ -221,6 +228,7 @@ pub fn run() {
             stage::stage_state,
             stage::stage_panel,
             stage::stage_layout,
+            stage::stage_supported,
         ], tauri::generate_handler![
             commands_auth::auth_status,
             commands_auth::auth_accounts,
@@ -280,6 +288,7 @@ pub fn run() {
             stage::stage_state,
             stage::stage_panel,
             stage::stage_layout,
+            stage::stage_supported,
             test_hooks::test_state,
             test_hooks::test_cut_guest_connection,
         ]))

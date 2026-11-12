@@ -121,9 +121,57 @@ pub struct AppState {
     /// Instance invitée créée par le dernier `join_start` réussi (lue par `game_join_friend`).
     pub last_join_instance: Mutex<Option<String>>,
     backend: RwLock<Arc<dyn P2pBackend>>,
+    /// Fermeture du launcher et démarrage du jeu ne se croisent jamais (voir `QuitGate`).
+    pub quit: QuitGate,
     /// Test : saute l'installation du jeu (Mojang, loader, Java) après un transfert d'invité.
     pub skip_game_install: AtomicBool,
     pub emit: EventSink,
+}
+
+/// Fermeture du launcher contre démarrage du jeu. Un java créé pendant que le launcher sort lui survivrait sans
+/// personne pour le suivre (ni rideau, ni journal, ni arrêt propre) : dès que la fermeture est demandée plus aucun
+/// jeu ne démarre, et un démarrage déjà engagé (du `spawn` jusqu'à ce que le jeu soit suivi) est attendu avant de
+/// sortir. Chaque côté écrit son drapeau PUIS lit l'autre : au moins l'un des deux voit l'autre.
+#[derive(Default)]
+pub struct QuitGate {
+    quitting: AtomicBool,
+    spawning: AtomicBool,
+}
+
+/// Démarrage du jeu en cours ; le lâcher rend la main à une fermeture qui attend.
+pub struct SpawnPass<'a>(&'a QuitGate);
+
+impl Drop for SpawnPass<'_> {
+    fn drop(&mut self) {
+        self.0.spawning.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl QuitGate {
+    /// La fermeture du launcher est demandée. Vrai : un démarrage de jeu est engagé, il faut attendre `spawning()`
+    /// faux avant de sortir.
+    pub fn begin_quit(&self) -> bool {
+        self.quitting.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.spawning()
+    }
+
+    pub fn quitting(&self) -> bool {
+        self.quitting.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn spawning(&self) -> bool {
+        self.spawning.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Avant de créer le processus du jeu. `None` : le launcher se ferme, le jeu ne doit pas démarrer.
+    pub fn enter_spawn(&self) -> Option<SpawnPass<'_>> {
+        self.spawning.store(true, std::sync::atomic::Ordering::SeqCst);
+        let pass = SpawnPass(self);
+        if self.quitting() {
+            return None;
+        }
+        Some(pass)
+    }
 }
 
 /// Délai maximal d'attente du backend P2P par une commande avant de renvoyer « en démarrage ».
@@ -295,6 +343,7 @@ pub fn default_settings() -> Settings {
         lan_auto: true,
         overlay_enabled: true,
         overlay_hotkey: core_lib::types::DEFAULT_OVERLAY_HOTKEY.into(),
+        embedded_game: true,
     }
 }
 
@@ -306,6 +355,8 @@ impl AppState {
         let identity = Identity::load_or_create(&paths.p2p).map_err(|e| crate::error::user_msg_any(&e))?;
         let friends = FriendsDb::open(paths.p2p.join("friends.db")).map_err(|e| crate::error::user_msg(&e))?;
         let settings = crate::commands_settings::load_settings(&paths.settings_file);
+        let stage = crate::stage::Stage::default();
+        stage.set_wanted(settings.embedded_game);
         Ok(Self {
             instances: Arc::new(InstanceStore::new(paths.instances.clone())),
             store: Arc::new(store),
@@ -316,7 +367,7 @@ impl AppState {
             pending_login: Mutex::new(None),
             game: Mutex::new(None),
             game_handle: Mutex::new(None),
-            stage: Default::default(),
+            stage,
             join: Mutex::new(None),
             lan_agent: Mutex::new(None),
             lan_agent_off: std::sync::atomic::AtomicBool::new(false),
@@ -325,6 +376,7 @@ impl AppState {
             invites_sent: Mutex::new(std::collections::HashMap::new()),
             last_join_instance: Mutex::new(None),
             backend: RwLock::new(backend),
+            quit: QuitGate::default(),
             skip_game_install: AtomicBool::new(false),
             emit,
             paths,
@@ -343,6 +395,35 @@ impl AppState {
         if let Ok(v) = serde_json::to_value(payload) {
             (self.emit)(name, v);
         }
+    }
+}
+
+#[cfg(test)]
+mod quit_tests {
+    use super::QuitGate;
+
+    #[test]
+    fn fermeture_demandee_plus_aucun_jeu_ne_demarre() {
+        let g = QuitGate::default();
+        let pass = g.enter_spawn();
+        assert!(pass.is_some() && g.spawning(), "hors fermeture : le jeu demarre");
+        drop(pass);
+        assert!(!g.spawning());
+        assert!(!g.begin_quit(), "aucun demarrage engage : le launcher sort tout de suite");
+        assert!(g.quitting());
+        assert!(g.enter_spawn().is_none(), "fermeture demandee : pas de java derriere le launcher");
+        assert!(!g.spawning(), "le refus ne retient pas la fermeture");
+    }
+
+    #[test]
+    fn fermeture_pendant_le_demarrage_attend_puis_le_jeu_est_arrete() {
+        let g = QuitGate::default();
+        let pass = g.enter_spawn().expect("demarrage engage avant la fermeture");
+        assert!(g.begin_quit(), "le launcher doit attendre la fin du demarrage");
+        // le lanceur relit le drapeau une fois le processus cree : il l'arrete, puis rend la main
+        assert!(g.quitting());
+        drop(pass);
+        assert!(!g.spawning(), "la fermeture peut se terminer");
     }
 }
 

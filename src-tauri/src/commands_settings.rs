@@ -67,6 +67,8 @@ impl AppState {
         write_atomic(&self.paths.settings_file, &data)
             .map_err(|_| "impossible d'enregistrer les réglages".to_string())?;
         *lock(&self.settings) = new.clone();
+        // Pris en compte au prochain lancement : un jeu deja ouvert dans la fenetre du launcher y reste.
+        self.stage.set_wanted(new.embedded_game);
         Ok(new)
     }
 }
@@ -93,6 +95,7 @@ pub fn settings_set(
     lan_auto: Option<bool>,
     overlay_enabled: Option<bool>,
     overlay_hotkey: Option<String>,
+    embedded_game: Option<bool>,
     app: tauri::AppHandle,
 ) -> Result<Settings, String> {
     let cur = state.settings_get();
@@ -109,6 +112,7 @@ pub fn settings_set(
         lan_auto: lan_auto.unwrap_or(cur.lan_auto),
         overlay_enabled: overlay_enabled.unwrap_or(cur.overlay_enabled),
         overlay_hotkey: overlay_hotkey.map(|h| h.trim().to_string()).unwrap_or(cur.overlay_hotkey),
+        embedded_game: embedded_game.unwrap_or(cur.embedded_game),
     })?;
     crate::hotkey::apply_settings(&app);
     Ok(saved)
@@ -196,6 +200,23 @@ mod tests {
         assert_eq!(s.default_ram_mb, 6144, "l'ancien fichier est bien lu, pas remplacé par les défauts");
         assert!(s.overlay_enabled);
         assert_eq!(s.overlay_hotkey, "Ctrl+Shift+C");
+        assert!(s.embedded_game, "jeu integre : active par defaut pour un ancien fichier");
+    }
+
+    #[test]
+    fn jeu_integre_enregistre_et_transmis_a_la_scene() {
+        let dir = tempfile::tempdir().unwrap();
+        let (st, _) = test_state(dir.path());
+        assert!(st.stage.wanted(), "active par defaut");
+        let mut s = default_settings();
+        s.embedded_game = false;
+        assert!(!st.settings_set(s).unwrap().embedded_game);
+        assert!(!st.stage.wanted());
+        assert!(!st.stage.available(), "reglage coupe : le prochain lancement est hors de la fenetre du launcher");
+        // Redemarrage : le reglage enregistre est relu et transmis.
+        let (st2, _) = test_state(dir.path());
+        assert!(!st2.settings_get().embedded_game);
+        assert!(!st2.stage.wanted());
     }
 
     #[test]

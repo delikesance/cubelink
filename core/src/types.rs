@@ -226,6 +226,10 @@ pub struct Settings {
     /// Raccourci global du panneau (format du plugin global-shortcut, p. ex. `Ctrl+Shift+C`).
     #[serde(default = "default_overlay_hotkey")]
     pub overlay_hotkey: String,
+    /// Jeu intégré (Windows) : le jeu s'affiche dans la fenêtre du launcher. Lu au lancement du jeu : un jeu déjà
+    /// ouvert n'est pas touché. `true` par défaut (fichiers de réglages anciens : `true`).
+    #[serde(default = "default_embedded_game")]
+    pub embedded_game: bool,
 }
 
 pub const DEFAULT_OVERLAY_HOTKEY: &str = "Ctrl+Shift+C";
@@ -246,6 +250,10 @@ fn default_lan_auto() -> bool {
     true
 }
 
+fn default_embedded_game() -> bool {
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -257,6 +265,7 @@ mod tests {
         assert!(s.overlay_enabled);
         assert_eq!(s.overlay_hotkey, "Ctrl+Shift+C");
         assert!(s.discovery && s.lan_auto);
+        assert!(s.embedded_game);
     }
 
     #[test]

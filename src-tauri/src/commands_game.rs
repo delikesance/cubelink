@@ -203,23 +203,112 @@ impl AppState {
 
     /// Ferme le jeu en cours avant de lancer `next_title`. Avec la zone de jeu integree : fermeture PROPRE (comme la croix de la
     /// fenetre : le monde est quitte et enregistre, Java s'arrete tout seul), barre de chargement de 0 a 50 %, jamais de kill ;
-    /// si le jeu ne s'est pas ferme dans `STAGE_CLOSE_TIMEOUT`, on renonce et le jeu reste ouvert. Sinon : `stop_game_and_wait`.
+    /// si le jeu ne s'est pas ferme dans `STAGE_CLOSE_TIMEOUT`, on renonce et le jeu reste ouvert. Sinon (jeu lance hors de la
+    /// zone integree, ou sorti d'elle par un repli) : `stop_game_and_wait`.
     pub async fn close_game_for_switch(&self, next_title: &str) -> Result<(), String> {
-        let attached = self.stage.enabled() && lock(&self.game_handle).is_some();
+        let attached = self.stage.staged() && lock(&self.game_handle).is_some();
         if !attached {
             return self.stop_game_and_wait(GAME_STOP_TIMEOUT).await;
         }
-        self.stage.begin_close(next_title);
-        self.stage.request_close();
+        // Le rideau de changement de modpack attend le lancement suivant pour finir sa barre : il n'est ferme que si ce
+        // lancement ira lui aussi dans la zone integree (reglage coupe entre-temps : fermeture propre, sans rideau en attente).
+        let curtain = self.stage.available();
+        // Lu AVANT `begin_close` : le jeu en cours a-t-il deja ete montre au joueur ?
+        let loading = !self.stage.revealed();
+        if curtain {
+            self.stage.begin_close(next_title);
+        } else {
+            self.stage.note("changement de modpack : le jeu suivant s'ouvrira dans sa propre fenetre, pas de rideau");
+        }
+        if loading {
+            // Jeu encore en chargement : il n'a pas de fenetre a qui demander de se fermer (la demande serait ignoree jusqu'au
+            // delai) et aucun monde ouvert. Il est arrete net, le rideau reste ferme pour le jeu suivant.
+            self.kill_loading_game("changement de modpack pendant le chargement").await;
+        } else {
+            self.stage.request_close();
+        }
         let deadline = tokio::time::Instant::now() + STAGE_CLOSE_TIMEOUT;
         while lock(&self.game).is_some() {
             if tokio::time::Instant::now() >= deadline {
-                self.stage.cancel_close();
+                if curtain {
+                    self.stage.cancel_close();
+                }
                 return Err("le jeu ne s'est pas fermé à temps (il n'a pas été forcé) : fermez-le depuis le jeu puis réessayez".into());
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         Ok(())
+    }
+
+    /// Arrete tout de suite le jeu de la zone integree s'il n'a jamais ete revele (rideau jamais ouvert sur lui : aucun monde
+    /// n'a pu etre ouvert, rien a enregistrer). Vrai s'il y avait un tel jeu.
+    pub async fn kill_loading_game(&self, why: &str) -> bool {
+        if !self.stage.staged() || self.stage.revealed() {
+            return false;
+        }
+        let Some((id, game)) = lock(&self.game_handle).clone() else { return false };
+        self.stage.note(&format!("{why} : jeu {id} arrete tout de suite (processus {}, jamais revele, aucun monde ouvert)", game.pid));
+        game.kill_now().await;
+        true
+    }
+
+    /// La fermeture de la fenetre du launcher est demandee (appel synchrone, depuis le gestionnaire de fenetre). Des cet
+    /// instant plus aucun jeu ne demarre et le rideau ne s'ouvre plus. Vrai : il reste un jeu a arreter, la fenetre doit
+    /// rester ouverte le temps de `quit_game` ; faux : le launcher peut se fermer tout de suite (pas de jeu, jeu dans sa
+    /// propre fenetre qui continue sans lui, ou simple preparation sans processus).
+    pub fn quit_requested(&self) -> bool {
+        let starting = self.quit.begin_quit();
+        self.stage.forbid_reveal();
+        let staged = self.stage.staged();
+        let running = lock(&self.game_handle).is_some();
+        if staged && !running && !starting {
+            self.stage.note("fermeture du launcher pendant la preparation du jeu : lancement abandonne");
+        }
+        starting || (staged && running)
+    }
+
+    /// Arrete le jeu de la zone integree avant la sortie du launcher. Jamais revele (chargement) : tue tout de suite. Deja
+    /// revele : fermeture propre (le monde s'enregistre), forcee seulement apres `grace`, et le journal le dit.
+    pub async fn quit_game(&self, grace: Duration) {
+        // Un demarrage de processus engage se termine d'abord (voir `QuitGate`) : il s'arrete de lui-meme, ou le jeu est suivi.
+        let gate = tokio::time::Instant::now() + Duration::from_secs(10);
+        while self.quit.spawning() && tokio::time::Instant::now() < gate {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        if self.stage.staged() {
+            if self.kill_loading_game("fermeture du launcher pendant le chargement du jeu").await {
+                self.wait_game_gone(Duration::from_secs(2)).await;
+                return self.stage.flush_log();
+            }
+            // Copie sortie du verrou avant toute attente.
+            let handle = lock(&self.game_handle).clone();
+            if let Some((id, game)) = handle {
+                self.stage.note("fermeture du launcher : fermeture propre du jeu rattache");
+                self.stage.request_close();
+                if !self.wait_game_gone(grace).await {
+                    self.stage.note(&format!(
+                        "fermeture du launcher : le jeu {id} ne s'est pas ferme en {} s, arret force (processus {})",
+                        grace.as_secs(),
+                        game.pid
+                    ));
+                    game.kill_now().await;
+                    self.wait_game_gone(Duration::from_secs(2)).await;
+                }
+            }
+        }
+        self.stage.flush_log();
+    }
+
+    /// Attend la fin de la tache de jeu (verrou libere) au plus `max`. Vrai si elle est terminee.
+    async fn wait_game_gone(&self, max: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + max;
+        while lock(&self.game).is_some() {
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        true
     }
 
     /// Change de modpack : ferme le jeu en cours (la confirmation est à la charge de l'interface), attend sa fin,
@@ -265,7 +354,13 @@ impl AppState {
         };
         let title = self.instances.get(&instance).map(|i| i.name).unwrap_or_default();
         self.close_game_for_switch(&title).await?;
-        self.join_play(public_key, &instance).await
+        let r = self.join_play(public_key, &instance).await;
+        if let Err(e) = &r {
+            // `join_play` peut echouer avant meme d'atteindre le lancement (tunnel vers l'ami) : le rideau ferme par le
+            // changement de modpack se rouvre sur le launcher, qui affiche l'erreur.
+            self.stage.abort_switch(&format!("impossible de rejoindre l'ami : {e}"));
+        }
+        r
     }
 }
 
@@ -405,6 +500,169 @@ mod tests {
         *lock(&st.game) = Some("y".into());
         let e = st.stop_game_and_wait(Duration::from_millis(300)).await.unwrap_err();
         assert!(e.contains("ne se ferme pas"), "{e}");
+    }
+
+    /// Fermeture du launcher et changement de modpack selon que le jeu a deja ete montre au joueur : faux hote (vraie machine du
+    /// rideau) et un processus temoin inoffensif a la place de java.
+    #[cfg(windows)]
+    mod quit {
+        use super::*;
+        use crate::stage::fake::{play, FakeHost};
+        use core_lib::launch_args::LaunchCommand;
+        use core_lib::launch_run::{self, RunningGame};
+        use std::path::Path;
+
+        /// Processus temoin (30 s) tenu comme le jeu en cours ; une tache joue le role de la tache de jeu (fin du processus :
+        /// fin annoncee a la Scene, verrou libere).
+        async fn fake_game(st: &Arc<AppState>, dir: &Path) -> Arc<RunningGame> {
+            let cwd = dir.join("jeu");
+            std::fs::create_dir_all(&cwd).unwrap();
+            let cmd = LaunchCommand::new("cmd".into(), vec!["/C".into(), "ping -n 30 127.0.0.1 >nul".into()], cwd);
+            let game = Arc::new(launch_run::spawn(&cmd, &dir.join("journal-jeu")).await.unwrap());
+            *lock(&st.game) = Some("jeu".into());
+            *lock(&st.game_handle) = Some(("jeu".into(), game.clone()));
+            let (st2, g2) = (st.clone(), game.clone());
+            tokio::spawn(async move {
+                g2.wait().await;
+                st2.stage.run_finished();
+                *lock(&st2.game_handle) = None;
+                *lock(&st2.game) = None;
+            });
+            game
+        }
+
+        fn setup(dir: &Path) -> (Arc<AppState>, FakeHost) {
+            let (st, _) = test_state(dir);
+            let fake = FakeHost::new();
+            fake.install(&st.stage);
+            st.stage.open_log(dir);
+            (st, fake)
+        }
+
+        fn log(st: &AppState, dir: &Path) -> String {
+            st.stage.flush_log();
+            std::fs::read_to_string(dir.join(crate::stage_log::FILE_NAME)).unwrap_or_default()
+        }
+
+        /// Le jeu charge derriere le rideau (processus cree, fenetre adoptee ou non, jamais revele).
+        async fn loading(st: &Arc<AppState>, fake: &FakeHost, dir: &Path) -> Arc<RunningGame> {
+            let p = Path::new("x");
+            st.stage.begin("Jeu", p, p);
+            let game = fake_game(st, dir).await;
+            st.stage.watch(game.pid);
+            fake.run(4_600);
+            assert!(fake.flow().curtain_on() && !st.stage.revealed());
+            game
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn fermeture_pendant_le_chargement_tue_le_jeu_tout_de_suite_sans_reveler() {
+            let dir = tempfile::tempdir().unwrap();
+            let (st, fake) = setup(dir.path());
+            loading(&st, &fake, dir.path()).await;
+            assert!(st.quit_requested(), "un jeu charge : la fenetre attend son arret");
+            let t = std::time::Instant::now();
+            st.quit_game(Duration::from_secs(60)).await;
+            assert!(t.elapsed() < Duration::from_secs(8), "arret immediat, pas l'echeance de fermeture propre : {:?}", t.elapsed());
+            assert!(lock(&st.game).is_none(), "le processus est termine");
+            assert_eq!(fake.count("request_close"), 0, "aucune demande de fermeture a un jeu sans fenetre");
+            assert_eq!(fake.count("reveal"), 0);
+            let text = log(&st, dir.path());
+            assert!(text.contains("fermeture du launcher pendant le chargement du jeu : jeu jeu arrete tout de suite"), "{text}");
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn plus_aucun_reveal_apres_la_demande_de_fermeture() {
+            let dir = tempfile::tempdir().unwrap();
+            let (st, fake) = setup(dir.path());
+            let game = loading(&st, &fake, dir.path()).await;
+            fake.window_shown();
+            assert!(st.quit_requested());
+            // la tache de jeu constate que le jeu est pret juste apres la demande : le rideau ne doit pas s'ouvrir
+            st.stage.reveal();
+            assert_eq!(fake.count("reveal"), 0);
+            fake.run(10_000);
+            assert!(fake.flow().curtain_on(), "{:?}", fake.flow());
+            assert!(!st.stage.revealed());
+            game.kill_now().await;
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn fermeture_apres_reveal_fermeture_propre_puis_arret_force_consigne() {
+            let dir = tempfile::tempdir().unwrap();
+            let (st, fake) = setup(dir.path());
+            play(&st.stage, &fake);
+            assert!(st.stage.revealed());
+            fake_game(&st, dir.path()).await;
+            assert!(st.quit_requested());
+            // le temoin ignore la demande de fermeture : echeance (ici 1 s) puis arret force
+            st.quit_game(Duration::from_secs(1)).await;
+            assert_eq!(fake.count("request_close"), 1, "jeu revele : fermeture propre d'abord");
+            assert!(lock(&st.game).is_none(), "le processus est termine");
+            let text = log(&st, dir.path());
+            assert!(text.contains("fermeture propre du jeu rattache"), "{text}");
+            assert!(text.contains("ne s'est pas ferme en 1 s, arret force"), "{text}");
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn fermeture_propre_reussie_sans_arret_force() {
+            let dir = tempfile::tempdir().unwrap();
+            let (st, fake) = setup(dir.path());
+            play(&st.stage, &fake);
+            let game = fake_game(&st, dir.path()).await;
+            assert!(st.quit_requested());
+            // le jeu obeit a la demande de fermeture (ici : il se termine pendant l'attente)
+            let g2 = game.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                g2.kill_now().await;
+            });
+            st.quit_game(Duration::from_secs(30)).await;
+            assert_eq!(fake.count("request_close"), 1);
+            assert!(!log(&st, dir.path()).contains("arret force"));
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn fermeture_sans_jeu_a_arreter_le_launcher_sort_tout_de_suite() {
+            let dir = tempfile::tempdir().unwrap();
+            // aucun jeu
+            let (st, _fake) = setup(dir.path());
+            assert!(!st.quit_requested());
+            // preparation dans la Scene : rideau ferme, aucun processus
+            let (st, fake) = setup(dir.path());
+            let p = Path::new("x");
+            st.stage.begin("Jeu", p, p);
+            *lock(&st.game) = Some("jeu".into());
+            assert!(!st.quit_requested());
+            assert!(st.quit.quitting() && st.quit.enter_spawn().is_none(), "et aucun java ne demarrera");
+            assert_eq!(fake.count("request_close"), 0);
+            // jeu dans sa propre fenetre (hors Scene) : il continue sans le launcher
+            let (st, fake) = setup(dir.path());
+            let game = fake_game(&st, dir.path()).await;
+            assert!(!st.quit_requested());
+            st.quit_game(Duration::from_secs(1)).await;
+            assert!(lock(&st.game).is_some(), "le jeu hors Scene n'est pas touche");
+            assert!(fake.calls().is_empty());
+            game.kill_now().await;
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn changement_de_modpack_pendant_le_chargement_tue_le_jeu_et_garde_le_rideau() {
+            let dir = tempfile::tempdir().unwrap();
+            let (st, fake) = setup(dir.path());
+            loading(&st, &fake, dir.path()).await;
+            let t = std::time::Instant::now();
+            st.close_game_for_switch("Suivant").await.unwrap();
+            assert!(t.elapsed() < Duration::from_secs(8), "{:?}", t.elapsed());
+            assert_eq!(fake.count("request_close"), 0);
+            assert_eq!(fake.count("begin_close"), 1);
+            assert!(fake.curtain_stuck(), "rideau ferme en attendant le jeu suivant");
+            // le jeu suivant se lance et s'ouvre normalement
+            play(&st.stage, &fake);
+            // ou n'a pas lieu : retour au launcher
+            st.stage.run_finished();
+            assert!(!fake.curtain_stuck());
+        }
     }
 
     #[tokio::test]

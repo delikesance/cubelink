@@ -6,6 +6,8 @@ pub mod java_install;
 pub mod instance;
 pub mod launch_args;
 pub mod launch_run;
+#[cfg(windows)]
+pub mod hidden_spawn;
 pub mod mrpack;
 pub mod manifest;
 pub mod guest;

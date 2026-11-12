@@ -1,4 +1,4 @@
-// Panneau « en jeu » : fenêtre secondaire affichée par-dessus Minecraft (raccourci global).
+// Panneau « en jeu » : bande à droite du jeu (la fenêtre du jeu y est découpée, le launcher apparaît dessous).
 // Invitations reçues, amis (inviter / rejoindre) et changement de modpack.
 import { useCallback, useEffect, useRef, useState } from "react";
 import "./overlay.css";
@@ -7,7 +7,8 @@ import { useServices } from "../../app/context";
 import { canInviteFrom, hostingKeys, useHostState, useInvites } from "../../app/useInvites";
 import { Badge, Button } from "../../ui";
 import { Avatar } from "../Friends/Avatar";
-import type { FriendWithPresence, Instance, Invite, OverlayState } from "../../services/types";
+import type { FriendWithPresence, Instance, Invite } from "../../services/types";
+import { setStagePanel } from "../../app/stage";
 
 type Confirm =
   | { kind: "join"; publicKey: string; name: string }
@@ -19,11 +20,10 @@ function messageOf(e: unknown): string {
   return "Une erreur est survenue. Réessaie dans un instant.";
 }
 
-export default function Overlay() {
+export default function InGamePanel() {
   const services = useServices();
   const [friends, setFriends] = useState<FriendWithPresence[]>([]);
   const [instances, setInstances] = useState<Instance[]>([]);
-  const [state, setState] = useState<OverlayState | null>(null);
   const [running, setRunning] = useState(false);
   const [confirm, setConfirm] = useState<Confirm | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -38,16 +38,15 @@ export default function Overlay() {
   const confirmRef = useRef<Confirm | null>(null);
   confirmRef.current = confirm;
 
-  const close = useCallback(() => { void services.overlayToggle().catch(() => {}); }, [services]);
+  const close = useCallback(() => { void setStagePanel(false).catch(() => {}); }, []);
 
   useEffect(() => {
     let alive = true;
     services.friendList().then((l) => { if (alive) setFriends(l); }, () => {});
     services.instancesList().then((l) => { if (alive) setInstances(l); }, () => {});
-    services.overlayState().then((s) => { if (alive) { setState(s); setRunning(s.game_running); } }, () => {});
+    setRunning(true); // le panneau n'existe que pendant une partie
     const offs = [
       services.onFriendPresence((e) => setFriends((l) => l.map((f) => (f.friend.public_key === e.public_key ? { ...f, presence: e.presence } : f)))),
-      services.onOverlayState((s) => { setState(s); setRunning(s.game_running); }),
       services.onLaunchState((s) => {
         if (s.state === "running") setRunning(true);
         else if (s.state === "exited" || s.state === "failed") setRunning(false);
@@ -119,20 +118,14 @@ export default function Overlay() {
 
   return (
     <section className="ov" aria-labelledby="ov-title">
-      <header className="ov-head" data-tauri-drag-region>
-        <h1 id="ov-title" className="ov-title" ref={titleRef} tabIndex={-1} data-tauri-drag-region>Cubelink</h1>
-        {state?.hotkey && <span className="ov-hint" data-tauri-drag-region>{state.hotkey}</span>}
+      <header className="ov-head">
+        <h1 id="ov-title" className="ov-title" ref={titleRef} tabIndex={-1}>Cubelink</h1>
         <button type="button" className="ov-close" aria-label="Fermer le panneau" onClick={close}>
           <svg width="12" height="12" viewBox="0 0 10 10" aria-hidden="true"><path d="M0 0l10 10M10 0L0 10" stroke="currentColor" fill="none" /></svg>
         </button>
       </header>
 
       <div className="ov-body">
-        {state?.fullscreen_exclusive && (
-          <p className="ov-warn" role="note">
-            En plein écran exclusif, le panneau peut être masqué&nbsp;: passe en fenêtré/sans bordure.
-          </p>
-        )}
         {error && <p className="ov-error" role="alert">{error}</p>}
 
         <section className="ov-sec" aria-labelledby="ov-inv">
@@ -221,6 +214,7 @@ export default function Overlay() {
           </div>
         </div>
       )}
+      <footer className="ov-foot">Échap pour retourner au jeu</footer>
       <div className="ov-live" role="status" aria-live="polite">{notice}</div>
     </section>
   );

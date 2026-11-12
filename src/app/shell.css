@@ -4,6 +4,7 @@
 .titlebar-spacer{width:138px;flex:none;display:flex}
 .tb-back{width:46px}
 .tb-back[disabled]{visibility:hidden}
+.tb-stage{width:auto;flex:1;padding:0 8px;font:600 11px/var(--titlebar-h) var(--font-display);letter-spacing:.04em;color:var(--accent-hover);white-space:nowrap}
 .titlebar-title{flex:1;margin:0;display:flex;align-items:center;justify-content:center;font:600 12px/var(--titlebar-h) var(--font-display);letter-spacing:.04em;color:var(--muted)}
 .titlebar-buttons{display:flex;width:138px;flex:none}
 .tb-btn{width:46px;height:var(--titlebar-h);border:0;padding:0;background:transparent;color:var(--text);display:flex;align-items:center;justify-content:center;cursor:default;transition:background var(--dur-feedback) var(--ease)}
@@ -12,10 +13,14 @@
 .tb-btn:focus-visible{outline-offset:-2px}
 .skip-link{position:absolute;left:8px;top:-48px;z-index:10;padding:6px 12px;background:var(--surface-2);color:var(--accent-hover);border:1px solid var(--focus);border-radius:var(--r-md)}
 .skip-link:focus{top:calc(var(--titlebar-h) + 4px)}
+/* Zone de jeu : emplacement réservé sous la barre de titre, seulement mesuré (publié à Rust) ; ni peint ni cliquable. */
+.stage-slot{position:fixed;top:var(--titlebar-h);left:0;right:0;bottom:0;pointer-events:none;visibility:hidden}
 .content{flex:1;min-height:0;overflow:auto;outline:none}
 /* Conteneurs de page : .page plafonne la largeur, .page-fill remplit tout (grilles). Blocs de texte : ~68ch. */
 .page{width:100%;max-width:var(--page-max);margin-inline:auto;padding-inline:var(--page-pad);box-sizing:border-box}
 .page-fill{width:100%;padding-inline:var(--page-pad);box-sizing:border-box}
+/* Écran standard : même bord gauche (--page-pad) et mêmes marges verticales partout (Parcourir, Amis, Paramètres, Créer). */
+.screen{box-sizing:border-box;width:100%;min-height:100%;padding:var(--sp-5) var(--page-pad) var(--sp-7)}
 /* Mise à jour prête : carte flottante en bas à droite, au-dessus du crédit modpack, superposée au contenu (ne le pousse pas). */
 .update-banner{position:fixed;right:20px;bottom:64px;z-index:30;display:flex;align-items:center;gap:14px;width:max-content;max-width:calc(100vw - 2 * var(--page-pad));padding:12px 14px 12px 16px;background:var(--surface);border:1px solid var(--line-strong);border-radius:var(--r-lg);box-shadow:var(--shadow-soft);animation:update-in var(--dur-enter) var(--ease)}
 .update-banner-ico{flex:none;width:36px;height:36px;display:grid;place-items:center;border-radius:var(--r-pill);background:var(--accent);color:var(--accent-ink)}
@@ -49,6 +54,3 @@
 .acc-err{margin:4px 10px;color:var(--danger);font-size:12px}
 
 /* Panneau en jeu (#/overlay) : fenêtre sans cadre et transparente ; l'écran dessine sa propre carte. */
-html[data-overlay],html[data-overlay] body,html[data-overlay] #root{background:transparent}
-.app-overlay{background:transparent}
-.content-overlay{overflow:hidden;display:flex;flex-direction:column}

@@ -24,7 +24,7 @@ describe("validation", () => {
 describe("écran Paramètres", () => {
   it("titre, 5 onglets, flèches du clavier, lien Mentions légales", () => {
     render(<Shell services={createFakeServices({ tickMs: 0 })} />);
-    expect(screen.getByRole("heading", { name: "Réglages", level: 1 })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Paramètres", level: 1 })).toBeTruthy();
     const tabs = screen.getAllByRole("tab");
     expect(tabs.map((t) => t.textContent)).toEqual(["Compte", "Réseau", "Java", "Stockage", "À propos"]);
     expect(tabs[0].getAttribute("aria-selected")).toBe("true");

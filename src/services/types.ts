@@ -57,8 +57,6 @@ export interface Invite {
   received_at: number;
   expires_at: number;
 }
-/** État du panneau en jeu (commande overlay_state, événement overlay://state). */
-export interface OverlayState { available: boolean; game_running: boolean; hotkey: string; fullscreen_exclusive: boolean }
 export interface FriendRequest {
   public_key: string;
   name: string;
@@ -212,8 +210,6 @@ export interface Services {
   /** Invitations reçues en attente. */
   friendInvites(): Promise<Invite[]>;
   friendInviteDismiss(id: string): Promise<void>;
-  overlayToggle(): Promise<void>;
-  overlayState(): Promise<OverlayState>;
   /** Ferme le jeu en cours puis lance l'instance. */
   gameSwitch(instanceId: string): Promise<void>;
   /** Ferme le jeu si besoin puis rejoint l'ami (plan, transfert, jeu). */
@@ -256,7 +252,6 @@ export interface Services {
   onFriendInvite(cb: (i: Invite) => void): Unsubscribe;
   /** Liste complète des invitations à chaque changement. */
   onFriendInvites(cb: (l: Invite[]) => void): Unsubscribe;
-  onOverlayState(cb: (s: OverlayState) => void): Unsubscribe;
   onUnknownMods(cb: (e: UnknownModsEvent) => void): Unsubscribe;
   onTransferErrorDetails(cb: (e: TransferErrorDetails) => void): Unsubscribe;
   onBrowseProgress(cb: (e: BrowseProgressEvent) => void): Unsubscribe;

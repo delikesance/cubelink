@@ -1,6 +1,6 @@
 /* Réglages (B7) : titre, onglets à 140 px avec soulignement glissant, panneaux opaques. */
-.set{box-sizing:border-box;min-height:100%;padding:var(--sp-6) var(--page-pad) var(--sp-7);color:var(--text);font-family:var(--font-ui);display:flex;flex-direction:column;gap:var(--sp-5)}
-.set>*{width:100%;max-width:800px}
+.set{color:var(--text);font-family:var(--font-ui);display:flex;flex-direction:column;gap:var(--sp-5)}
+.set>*{width:100%;max-width:960px}
 .set h1{margin:0;font:700 28px/1.2 var(--font-display)}
 .set-tabs{position:relative;display:flex;box-shadow:inset 0 -1px 0 var(--line);overflow-x:auto;overflow-y:hidden;scrollbar-width:none}
 .set-tabs::-webkit-scrollbar{display:none}

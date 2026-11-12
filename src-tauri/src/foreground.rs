@@ -5,8 +5,9 @@
 //! 15 s à plus de 7 min entre « Overlay is removed » et « Connecting to »). Quand l'ami clique sur « Rejoindre », la
 //! fenêtre du jeu doit donc passer devant.
 //!
-//! Périmètre : uniquement les fenêtres de haut niveau visibles du PROCESSUS du jeu (celui lancé par Cubelink). Aucune
-//! autre fenêtre n'est touchée, aucune capture d'écran, aucune saisie simulée.
+//! Périmètre : uniquement les fenêtres de haut niveau visibles du PROCESSUS du jeu (celui lancé par Cubelink) et notre
+//! propre fenêtre. Aucune autre fenêtre n'est touchée, aucune capture d'écran. Une seule saisie simulée existe, en tout
+//! dernier recours (`focus_own` : appui sur Alt si Windows refuse deux fois le premier plan) ; elle est journalisée.
 
 #[cfg(windows)]
 mod imp {
@@ -14,7 +15,8 @@ mod imp {
     use windows_sys::core::BOOL;
     use windows_sys::Win32::Foundation::{HWND, LPARAM};
     use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
-    use windows_sys::Win32::UI::Input::KeyboardAndMouse::SetFocus;
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{keybd_event, SetFocus, KEYEVENTF_KEYUP, VK_MENU};
+    use windows_sys::Win32::UI::WindowsAndMessaging::ClipCursor;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         BringWindowToTop, EnumWindows, GetForegroundWindow, GetWindow, GetWindowTextLengthW, GetWindowThreadProcessId,
         IsIconic, IsWindowVisible, SetForegroundWindow, ShowWindow, GW_OWNER, SW_RESTORE,
@@ -85,6 +87,28 @@ mod imp {
         }
     }
 
+    /// Prend le premier plan pour NOTRE fenêtre `hwnd` (panneau en jeu) et libère le curseur : `AttachThreadInput` (voir
+    /// `front`), puis, en dernier recours, la touche Alt qui lève le verrou de premier plan. Mesuré en réel (2026-11-12) : une
+    /// demande simple `SetForegroundWindow` est refusée à chaque ouverture du panneau, `AttachThreadInput` est donc nécessaire ;
+    /// le repli sur Alt est journalisé (jamais déclenché pendant cet essai) pour savoir s'il peut être supprimé.
+    pub fn focus_own(hwnd: isize) -> bool {
+        let hwnd = hwnd as HWND;
+        if hwnd.is_null() {
+            return false;
+        }
+        let mut ok = front(hwnd);
+        if !ok {
+            eprintln!("[Cubelink] premier plan : AttachThreadInput refusé, repli sur la touche Alt");
+            unsafe {
+                keybd_event(VK_MENU as u8, 0, 0, 0);
+                keybd_event(VK_MENU as u8, 0, KEYEVENTF_KEYUP, 0);
+            }
+            ok = front(hwnd);
+        }
+        unsafe { ClipCursor(std::ptr::null()) };
+        ok
+    }
+
     pub fn bring_to_front(pid: u32) {
         if pid == 0 {
             return;
@@ -112,6 +136,17 @@ pub fn bring_game_to_front(pid: u32) {
     imp::bring_to_front(pid);
     #[cfg(not(windows))]
     let _ = pid;
+}
+
+/// Prend le premier plan pour notre propre fenêtre (HWND natif), `false` si Windows refuse ou hors Windows.
+pub fn focus_own_window(hwnd: isize) -> bool {
+    #[cfg(windows)]
+    return imp::focus_own(hwnd);
+    #[cfg(not(windows))]
+    {
+        let _ = hwnd;
+        false
+    }
 }
 
 /// Pur : la fenêtre `(gauche, haut, droite, bas)` couvre-t-elle exactement le moniteur, sans barre de titre ?

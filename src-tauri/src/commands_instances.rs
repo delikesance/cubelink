@@ -404,6 +404,10 @@ impl AppState {
 
     /// Vérifications synchrones puis tâche de fond ; la progression passe par `launch://state`.
     pub async fn instances_launch(self: &Arc<Self>, id: &str) -> Result<(), String> {
+        // Un jeu tourne dans la zone integree : lancer une autre instance = changement de modpack (fermeture propre puis lancement).
+        if self.stage.enabled() && lock(&self.game_handle).as_ref().is_some_and(|(g, _)| g != id) {
+            return self.game_switch(id).await;
+        }
         self.launch_with(id, None).await
     }
 
@@ -425,12 +429,25 @@ impl AppState {
             }
             *g = Some(inst.id.clone());
         }
+        // Zone de jeu integree : les panneaux se ferment des le clic (sur le launcher, ou sur le jeu qui vient de se fermer).
+        if self.stage.enabled() {
+            if let Ok(dir) = self.instances.game_dir(&inst.id) {
+                if matches!(inst.loader.loader, core_lib::types::Loader::NeoForge | core_lib::types::Loader::Forge) {
+                    // L'ecran de chargement precoce de (Neo)Forge est une fenetre a part (visible des sa creation) : notre rideau le remplace.
+                    if let Err(e) = disable_early_window(&dir.join("config").join("fml.toml")) {
+                        eprintln!("[Cubelink] fml.toml : {e}");
+                    }
+                }
+                self.stage.begin(&inst.name, &dir.join("mods"), &self.paths.logs.join(&inst.id).join("launch-profile.json"));
+            }
+        }
         let me = self.clone();
         // Runtime de Tauri (et non `tokio::spawn`) : valable même appelée hors d'un runtime tokio.
         tauri::async_runtime::spawn(async move {
             let _guard = GameGuard(me.clone());
             let joined = join.is_some();
             me.run_game(inst, profile, token, join).await;
+            me.stage.run_finished();
             if joined {
                 me.join_close_tunnel().await;
             }
@@ -532,6 +549,12 @@ impl AppState {
             crate::foreground::bring_game_to_front(game.pid);
         }
         *lock(&self.game_handle) = Some((id.clone(), game.clone()));
+        let staged = self.stage.enabled();
+        let mut revealed = false;
+        let profile_path = self.paths.logs.join(&id).join("launch-profile.json");
+        if staged {
+            self.stage.watch(game.pid);
+        }
         let mut batch = crate::commands_game::LogBatcher::default();
         let mut tick = tokio::time::interval(crate::commands_game::LOG_FLUSH_EVERY);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -545,6 +568,9 @@ impl AppState {
                     let Some(ev) = ev else { break };
                     if let LaunchEvent::Output(line) = &ev {
                         agent_marker |= agent_crash_marker(line);
+                        if staged {
+                            self.stage.feed_line(line);
+                        }
                         if let Some(h) = host.as_mut() {
                             h.on_line(line);
                         }
@@ -564,7 +590,16 @@ impl AppState {
                         break;
                     }
                 }
-                _ = tick.tick() => self.emit_logs(&id, &mut batch),
+                _ = tick.tick() => {
+                    self.emit_logs(&id, &mut batch);
+                    if staged && !revealed && self.stage.is_ready() {
+                        // le jeu est pret : la barre atteint 100 % puis les panneaux s'ecartent sur lui
+                        revealed = true;
+                        self.stage.mark_ready(&profile_path);
+                        tokio::time::sleep(std::time::Duration::from_millis(450)).await;
+                        self.stage.reveal();
+                    }
+                }
             }
         }
         self.emit_logs(&id, &mut batch);
@@ -841,5 +876,45 @@ mod tests {
         // Comme Tauri : le futur de la commande est piloté par le runtime de Tauri.
         let r = tauri::async_runtime::block_on(async move { st2.instances_launch(&id).await });
         assert!(r.is_ok(), "{r:?}");
+    }
+}
+
+/// Met `earlyWindowControl = false` dans le `fml.toml` de l'instance (cree le fichier au besoin). Sans effet s'il l'est deja.
+fn disable_early_window(path: &std::path::Path) -> std::io::Result<()> {
+    let cur = std::fs::read_to_string(path).unwrap_or_default();
+    let out = early_window_off(&cur);
+    if out != cur {
+        if let Some(d) = path.parent() {
+            std::fs::create_dir_all(d)?;
+        }
+        std::fs::write(path, out)?;
+    }
+    Ok(())
+}
+
+/// Pur : texte du `fml.toml` avec `earlyWindowControl = false` (ligne remplacee, ou ajoutee en tete du fichier).
+fn early_window_off(toml: &str) -> String {
+    let is_key = |l: &str| l.trim_start().strip_prefix("earlyWindowControl").is_some_and(|r| r.trim_start().starts_with('='));
+    if toml.lines().any(is_key) {
+        let mut out: Vec<String> = toml.lines().map(|l| if is_key(l) { "earlyWindowControl = false".to_string() } else { l.to_string() }).collect();
+        if toml.ends_with('\n') {
+            out.push(String::new());
+        }
+        return out.join("\n");
+    }
+    format!("earlyWindowControl = false\n{toml}")
+}
+
+#[cfg(test)]
+mod early_window_tests {
+    use super::early_window_off;
+
+    #[test]
+    fn ajoute_remplace_et_est_idempotent() {
+        assert_eq!(early_window_off(""), "earlyWindowControl = false\n");
+        assert_eq!(early_window_off("a = 1\n"), "earlyWindowControl = false\na = 1\n");
+        let r = early_window_off("x = 2\n#c\nearlyWindowControl = true\ny = 3\n");
+        assert_eq!(r, "x = 2\n#c\nearlyWindowControl = false\ny = 3\n");
+        assert_eq!(early_window_off(&r), r);
     }
 }

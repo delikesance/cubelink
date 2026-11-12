@@ -1,7 +1,7 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
 
 export const ROUTES = [
-  "login", "main", "create", "install", "join", "friends", "settings", "error", "legal", "browse", "overlay",
+  "login", "main", "create", "install", "join", "friends", "settings", "error", "legal", "browse",
 ] as const;
 export type RouteName = (typeof ROUTES)[number];
 export const DEFAULT_ROUTE: RouteName = "login";
@@ -39,7 +39,7 @@ export function navigate(route: RouteName, params?: Record<string, string>): voi
 
 const HISTORY_MAX = 50;
 /** Routes qui ne sont jamais une cible de retour. */
-const NO_BACK: readonly RouteName[] = ["login", "error", "overlay"];
+const NO_BACK: readonly RouteName[] = ["login", "error"];
 
 interface Entry { hash: string; focus: string | null }
 

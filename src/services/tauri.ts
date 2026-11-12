@@ -54,8 +54,6 @@ export function createTauriServices(): Services {
     friendInvite: (public_key) => invoke("friend_invite", { public_key }),
     friendInvites: () => invoke("friend_invites"),
     friendInviteDismiss: (id) => invoke("friend_invite_dismiss", { id }),
-    overlayToggle: () => invoke("overlay_toggle"),
-    overlayState: () => invoke("overlay_state"),
     gameSwitch: (instance_id) => invoke("game_switch", { instance_id }),
     gameJoinFriend: (public_key, instance_id) => invoke("game_join_friend", { public_key, instance_id }),
 
@@ -95,7 +93,6 @@ export function createTauriServices(): Services {
     onFriendRequest: (cb) => on("friend://request", cb),
     onFriendInvite: (cb) => on("friend://invite", cb),
     onFriendInvites: (cb) => on("friend://invites", cb),
-    onOverlayState: (cb) => on("overlay://state", cb),
     onUnknownMods: (cb) => on("transfer://unknown_mods", cb),
     onTransferErrorDetails: (cb) => on("transfer://error_details", cb),
     updateState: () => invoke("update_state"),

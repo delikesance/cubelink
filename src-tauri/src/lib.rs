@@ -16,8 +16,9 @@ pub mod foreground;
 pub mod iroh_backend;
 pub mod install;
 pub mod invites;
-pub mod overlay;
+pub mod hotkey;
 pub mod p2p_backend;
+pub mod stage;
 pub mod state;
 pub mod test_hooks;
 
@@ -88,7 +89,61 @@ pub fn run() {
             }
             app.manage(st.clone());
             commands_update::setup(app, test_mode);
-            overlay::setup(app.handle(), test_mode);
+            hotkey::setup(app.handle(), test_mode);
+            // Zone de jeu integree : la fenetre du jeu est adoptee dans celle du launcher (CUBELINK_NO_STAGE=1 : desactive).
+            if std::env::var_os("CUBELINK_NO_STAGE").is_none() && (!test_mode || std::env::var_os("CUBELINK_STAGE_TEST").is_some()) {
+                if let Some(w) = app.get_webview_window("main") {
+                    let h = app.handle().clone();
+                    let sink: state::EventSink = Arc::new(move |name, payload| {
+                        let _ = h.emit(name, payload);
+                    });
+                    st.stage.attach(&w, sink);
+                    let (st2, h2) = (st.clone(), app.handle().clone());
+                    w.on_window_event(move |e| {
+                        // Fermer la fenetre du launcher ferme aussi le jeu rattache : fermeture propre (monde enregistre), jamais
+                        // abandonne en tache de fond ; force seulement apres 60 s.
+                        if let tauri::WindowEvent::CloseRequested { api, .. } = e {
+                            static CLOSING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                            if st2.stage.state().attached {
+                                api.prevent_close();
+                                if !CLOSING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                                    let (st3, h3) = (st2.clone(), h2.clone());
+                                    tauri::async_runtime::spawn(async move {
+                                        st3.stage.request_close();
+                                        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+                                        loop {
+                                            let current = state::lock(&st3.game).clone();
+                                            let Some(id) = current else { break };
+                                            if tokio::time::Instant::now() >= deadline {
+                                                let _ = st3.instances_kill(&id).await;
+                                                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                                                break;
+                                            }
+                                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                                        }
+                                        h3.exit(0);
+                                    });
+                                }
+                            }
+                        }
+                        if matches!(e, tauri::WindowEvent::Resized(_) | tauri::WindowEvent::Moved(_) | tauri::WindowEvent::ScaleFactorChanged { .. }) {
+                            if let Some(w) = h2.get_webview_window("main") {
+                                st2.stage.relayout(&w);
+                            }
+                        }
+                    });
+                }
+            }
+            // Diagnostic : lance une instance sans clic (CUBELINK_STAGE_AUTOLAUNCH=<id>), jamais utilise en production.
+            if let Ok(id) = std::env::var("CUBELINK_STAGE_AUTOLAUNCH") {
+                let st = st.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+                    if let Err(e) = st.instances_launch(&id).await {
+                        eprintln!("[Cubelink] lancement automatique : {e}");
+                    }
+                });
+            }
             let opts = iroh_options(hooks);
             tauri::async_runtime::spawn(async move {
                 match iroh_backend::IrohBackend::start(&st, opts).await {
@@ -162,8 +217,10 @@ pub fn run() {
             invites::friend_invite_dismiss,
             commands_game::game_switch,
             commands_game::game_join_friend,
-            overlay::overlay_toggle,
-            overlay::overlay_state,
+            stage::stage_view,
+            stage::stage_state,
+            stage::stage_panel,
+            stage::stage_layout,
         ], tauri::generate_handler![
             commands_auth::auth_status,
             commands_auth::auth_accounts,
@@ -219,8 +276,10 @@ pub fn run() {
             invites::friend_invite_dismiss,
             commands_game::game_switch,
             commands_game::game_join_friend,
-            overlay::overlay_toggle,
-            overlay::overlay_state,
+            stage::stage_view,
+            stage::stage_state,
+            stage::stage_panel,
+            stage::stage_layout,
             test_hooks::test_state,
             test_hooks::test_cut_guest_connection,
         ]))

@@ -169,6 +169,8 @@ impl AppState {
 
 /// Délai maximal pour que le jeu en cours se ferme (kill propre 5 s, puis forcé).
 pub const GAME_STOP_TIMEOUT: Duration = Duration::from_secs(30);
+/// Fermeture propre d'un jeu dans la zone integree : on laisse le temps d'enregistrer un gros monde, sans jamais forcer.
+pub const STAGE_CLOSE_TIMEOUT: Duration = Duration::from_secs(180);
 /// Délai maximal du téléchargement du monde d'un ami avant d'abandonner l'attente.
 const JOIN_WAIT_TIMEOUT: Duration = Duration::from_secs(2 * 3600);
 
@@ -199,6 +201,27 @@ impl AppState {
         }
     }
 
+    /// Ferme le jeu en cours avant de lancer `next_title`. Avec la zone de jeu integree : fermeture PROPRE (comme la croix de la
+    /// fenetre : le monde est quitte et enregistre, Java s'arrete tout seul), barre de chargement de 0 a 50 %, jamais de kill ;
+    /// si le jeu ne s'est pas ferme dans `STAGE_CLOSE_TIMEOUT`, on renonce et le jeu reste ouvert. Sinon : `stop_game_and_wait`.
+    pub async fn close_game_for_switch(&self, next_title: &str) -> Result<(), String> {
+        let attached = self.stage.enabled() && lock(&self.game_handle).is_some();
+        if !attached {
+            return self.stop_game_and_wait(GAME_STOP_TIMEOUT).await;
+        }
+        self.stage.begin_close(next_title);
+        self.stage.request_close();
+        let deadline = tokio::time::Instant::now() + STAGE_CLOSE_TIMEOUT;
+        while lock(&self.game).is_some() {
+            if tokio::time::Instant::now() >= deadline {
+                self.stage.cancel_close();
+                return Err("le jeu ne s'est pas fermé à temps (il n'a pas été forcé) : fermez-le depuis le jeu puis réessayez".into());
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        Ok(())
+    }
+
     /// Change de modpack : ferme le jeu en cours (la confirmation est à la charge de l'interface), attend sa fin,
     /// puis lance `instance_id`. Les vérifications (instance, compte) passent AVANT la fermeture du jeu.
     pub async fn game_switch(self: &Arc<Self>, instance_id: &str) -> Result<(), String> {
@@ -207,8 +230,9 @@ impl AppState {
         if self.auth_status_refresh().await.is_none() {
             return Err("connectez-vous avant de lancer le jeu".into());
         }
-        self.stop_game_and_wait(GAME_STOP_TIMEOUT).await?;
-        self.instances_launch(instance_id).await
+        let title = self.instances.get(instance_id).map(|i| i.name).unwrap_or_default();
+        self.close_game_for_switch(&title).await?;
+        self.launch_with(instance_id, None).await
     }
 
     /// Rejoint le monde d'un ami depuis n'importe où (p. ex. le panneau en jeu). Enchaîne `join_plan` (échec
@@ -239,7 +263,8 @@ impl AppState {
                 lock(&self.last_join_instance).clone().ok_or("la préparation du monde de l'ami a échoué")?
             }
         };
-        self.stop_game_and_wait(GAME_STOP_TIMEOUT).await?;
+        let title = self.instances.get(&instance).map(|i| i.name).unwrap_or_default();
+        self.close_game_for_switch(&title).await?;
         self.join_play(public_key, &instance).await
     }
 }

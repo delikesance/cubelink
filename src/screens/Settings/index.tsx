@@ -226,8 +226,8 @@ export default function Settings({ testConnection, clearCache }: SettingsProps =
   });
 
   return (
-    <div className="set">
-      <h1 ref={h1} tabIndex={-1} className="enter">Réglages</h1>
+    <div className="set screen">
+      <h1 ref={h1} tabIndex={-1} className="enter">Paramètres</h1>
       <div role="tablist" aria-label="Sections des réglages" className="set-tabs enter" style={{ "--i": 1 } as CSSProperties}>
         {SECTIONS.map((s, i) => (
           <button
@@ -282,12 +282,12 @@ export default function Settings({ testConnection, clearCache }: SettingsProps =
             <input type="checkbox" className="set-check" disabled={dis} checked={settings?.lan_auto !== false} onChange={(e) => void update({ lan_auto: e.target.checked })} />
           </label>
         </Card>
-        <Card as="section" aria-label="Panneau en jeu" className="set-field">
+        <Card as="section" aria-label="Raccourci jeu et launcher" className="set-field">
           <label className="set-row" style={{ cursor: "pointer" }}>
-            <div className="set-txt"><b>Panneau en jeu</b><span>Affiche par-dessus Minecraft tes amis, les invitations et tes modpacks, avec un raccourci. Appliqué au prochain lancement du jeu.</span></div>
+            <div className="set-txt"><b>Raccourci jeu et launcher</b><span>Pendant une partie, un raccourci bascule entre le jeu et le launcher (écran Amis : invitations, rejoindre un ami), même quand le jeu a le clavier.</span></div>
             <input type="checkbox" className="set-check" disabled={dis} checked={settings?.overlay_enabled !== false} onChange={(e) => void update({ overlay_enabled: e.target.checked })} />
           </label>
-          <Field label="Raccourci du panneau" hint="Exemple : Ctrl+Shift+C. En plein écran exclusif, le panneau peut être masqué : passe en fenêtré ou sans bordure." error={hotkeyError}>
+          <Field label="Raccourci du panneau" hint="Exemple : Ctrl+Shift+C. Windows uniquement : le jeu est affiché dans la fenêtre du launcher." error={hotkeyError}>
             {(p) => (
               <Input {...p} type="text" autoComplete="off" spellCheck={false} disabled={dis || settings?.overlay_enabled === false}
                 value={hotkey} onChange={(e) => setHotkey(e.target.value)} onBlur={commitHotkey}

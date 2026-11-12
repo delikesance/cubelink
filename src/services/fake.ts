@@ -1,7 +1,7 @@
 import { validateOfflineName } from "./accounts";
 import type {
   AccountInfo, AccountsState, BrowseHit, BrowseInstallResult, BrowseKind, BrowseProgressEvent, BrowseSource, BrowseVersion, ModEntry,
-  CreateInstanceInput, DeviceCode, HostState, Invite, OverlayState, ImportWarningEvent, LaunchLogEvent, FriendRequest, FriendWithPresence, Instance, InstanceArt,
+  CreateInstanceInput, DeviceCode, HostState, Invite, ImportWarningEvent, LaunchLogEvent, FriendRequest, FriendWithPresence, Instance, InstanceArt,
   JoinPlan, LaunchState, Manifest, PresenceEvent, UnknownModsEvent, Profile, Services, Settings,
   TransferProgress, Unsubscribe, UpdateState,
 } from "./types";
@@ -28,8 +28,6 @@ export interface FakeControls {
   emitHostState(e: HostState): void;
   /** Test : reçoit une invitation (friend://invite + friend://invites). */
   emitInvite(i: Partial<Invite> & { public_key: string }): Invite;
-  /** Test : fixe l'état du panneau en jeu et émet overlay://state. */
-  emitOverlayState(patch: Partial<OverlayState>): void;
   /** Test : appels de commandes de jeu enregistrés (switch, join, invite). */
   readonly gameCalls: Array<{ kind: "switch" | "join" | "invite"; arg: string; instanceId?: string }>;
   /** Test : fusionne `patch` dans l'état de mise à jour et émet update://state (ex. available, downloading, ready). */
@@ -208,7 +206,6 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
 
   let invites: Invite[] = [];
   let inviteN = 0;
-  let overlaySt: OverlayState = { available: true, game_running: false, hotkey: "Ctrl+Shift+C", fullscreen_exclusive: false };
   const gameCalls: Array<{ kind: "switch" | "join" | "invite"; arg: string; instanceId?: string }> = [];
 
   const listeners = {
@@ -226,7 +223,6 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     host: new Set<(e: HostState) => void>(),
     invite: new Set<(i: Invite) => void>(),
     invites: new Set<(l: Invite[]) => void>(),
-    overlay: new Set<(s: OverlayState) => void>(),
     update: new Set<(s: UpdateState) => void>(),
   };
   let updateSt: UpdateState = { phase: "idle", current: "0.1.0", version: null, notes: null, downloaded: 0, total: null, message: null };
@@ -457,8 +453,6 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
       invites = invites.filter((i) => i.id !== id);
       emit(listeners.invites, invites.map((i) => ({ ...i })));
     },
-    overlayToggle: async () => {},
-    overlayState: async () => ({ ...overlaySt }),
     gameSwitch: async (id) => { need(id); gameCalls.push({ kind: "switch", arg: id }); },
     gameJoinFriend: async (pk, instanceId) => { gameCalls.push({ kind: "join", arg: pk, instanceId }); },
     friendSendRequest: async (code) => {
@@ -584,7 +578,6 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
       emit(listeners.invites, invites.map((i) => ({ ...i })));
       return { ...inv };
     },
-    emitOverlayState: (patch) => { overlaySt = { ...overlaySt, ...patch }; emit(listeners.overlay, { ...overlaySt }); },
     gameCalls,
     emitUpdateState: (patch) => setUpdate(patch),
     setUpdateCheckResult: (patch) => { updateCheckPatch = patch; },
@@ -612,7 +605,6 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     onFriendRequest: (cb) => sub(listeners.request, cb),
     onFriendInvite: (cb) => sub(listeners.invite, cb),
     onFriendInvites: (cb) => sub(listeners.invites, cb),
-    onOverlayState: (cb) => sub(listeners.overlay, cb),
     onUnknownMods: (cb) => sub(listeners.unknown, cb),
     onTransferErrorDetails: () => () => {},
     onBrowseProgress: (cb) => sub(listeners.browse, cb),

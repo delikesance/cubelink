@@ -129,7 +129,7 @@ fn rules_allow(rules: Option<&Value>, os: Os, arch: Arch) -> Result<bool> {
             .ok_or_else(|| invalid("règle sans `action`"))?;
         let value = match action {
             "allow" => true,
-            "deny" => false,
+            "deny" | "disallow" => false,
             other => return Err(invalid(format!("action de règle inconnue « {other} »"))),
         };
         if rule_applies(rule, os, arch) {
@@ -289,6 +289,19 @@ mod tests {
         assert_eq!(names(&l), ["org.example:a:1", "org.example:b:1"]);
         let m = resolve(&libs, Os::Osx, Arch::Arm64).unwrap();
         assert_eq!(names(&m), ["ca.weblite:java-objc-bridge:1.1"]);
+    }
+
+    #[test]
+    fn rules_disallow_ancien_est_un_deny() {
+        // Les JSON de version anciens (1.14.x a 1.16.x) ecrivent "disallow" au lieu de "deny".
+        let lib = json!({
+            "name": "org.example:d:1",
+            "rules": [{"action": "allow"}, {"action": "disallow", "os": {"name": "osx"}}]
+        });
+        let w = resolve(std::slice::from_ref(&lib), Os::Windows, Arch::X86_64).unwrap();
+        assert_eq!(names(&w), ["org.example:d:1"]);
+        let m = resolve(&[lib], Os::Osx, Arch::Arm64).unwrap();
+        assert!(names(&m).is_empty());
     }
 
     #[test]

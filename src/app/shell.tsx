@@ -1,30 +1,65 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentType } from "react";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentType } from "react";
 import "./shell.css";
 import { createServices, type Services } from "../services";
 import { ShellContext, type ShellContextValue } from "./context";
 import { navigate, goBack, parseHash, takePendingFocus, useCanGoBack, useLocation, type RouteName } from "./router";
 import { TitleBar } from "./TitleBar";
 import { UpdateBanner } from "./UpdateBanner";
+import { setStagePanel, useStage, useStageLayout } from "./stage";
+import InGamePanel from "../screens/Overlay";
+import "../screens/Overlay/overlay.css";
 
 export { useShell, useServices, useScreenTitle, useBack } from "./context";
 export { navigate, goBack, canGoBack, useCanGoBack, ROUTES, parseHash, type RouteName } from "./router";
 
 export const ROUTE_LABELS: Record<RouteName, string> = {
   login: "Connexion", main: "Accueil", create: "Créer une instance", install: "Installation",
-  join: "Rejoindre", friends: "Amis", settings: "Paramètres", error: "Erreur", legal: "Mentions légales", browse: "Parcourir", overlay: "Panneau en jeu",
+  join: "Rejoindre", friends: "Amis", settings: "Paramètres", error: "Erreur", legal: "Mentions légales", browse: "Parcourir",
 };
 
 // Dossier d'écran par route. Les écrans sont chargés sans être modifiés.
 const SCREEN_DIRS: Record<RouteName, string> = {
   login: "Login", main: "Main", create: "Create", install: "Install", join: "Join",
-  friends: "Friends", settings: "Settings", error: "Error", legal: "Legal", browse: "Browse", overlay: "Overlay",
+  friends: "Friends", settings: "Settings", error: "Error", legal: "Legal", browse: "Browse",
 };
 type ScreenModule = { default?: ComponentType };
-const screenModules = import.meta.glob<ScreenModule>("../screens/*/index.tsx", { eager: true });
+// Accueil et connexion : chargés tout de suite ; les autres écrans le sont à la demande (code splitting).
+const eagerModules = import.meta.glob<ScreenModule>("../screens/{Main,Login}/index.tsx", { eager: true });
+const lazyModules = import.meta.glob<ScreenModule>(["../screens/*/index.tsx", "!../screens/Main/index.tsx", "!../screens/Login/index.tsx", "!../screens/Overlay/index.tsx"]);
+const lazyCache = new Map<RouteName, ComponentType>();
+const loaded = new Map<RouteName, ComponentType>();
+
+/** Précharge tous les écrans (utilisé par les tests pour un rendu synchrone). */
+export async function preloadScreens(): Promise<void> {
+  await Promise.all((Object.keys(SCREEN_DIRS) as RouteName[]).map(async (route) => {
+    const loader = lazyModules[`../screens/${SCREEN_DIRS[route]}/index.tsx`];
+    if (!loader) return;
+    const m = await loader();
+    if (typeof m.default === "function") loaded.set(route, m.default);
+  }));
+}
 
 export function screenFor(route: RouteName): ComponentType | null {
-  const mod = screenModules[`../screens/${SCREEN_DIRS[route]}/index.tsx`];
-  return typeof mod?.default === "function" ? mod.default : null;
+  const key = `../screens/${SCREEN_DIRS[route]}/index.tsx`;
+  const mod = eagerModules[key];
+  if (mod) return typeof mod.default === "function" ? mod.default : null;
+  const loader = lazyModules[key];
+  if (!loader) return null;
+  const ready = loaded.get(route);
+  if (ready) return ready;
+  let Comp = lazyCache.get(route);
+  if (!Comp) {
+    const Lazy = lazy(async () => {
+      const m = await loader();
+      if (typeof m.default === "function") loaded.set(route, m.default);
+      return { default: typeof m.default === "function" ? m.default : () => <Fallback route={route} /> };
+    });
+    Comp = function LazyScreen() {
+      return <Suspense fallback={<div role="status" aria-busy="true" style={{ padding: 24, color: "var(--muted)" }}>Chargement…</div>}><Lazy /></Suspense>;
+    };
+    lazyCache.set(route, Comp);
+  }
+  return Comp;
 }
 
 function Fallback({ route }: { route: RouteName }) {
@@ -114,26 +149,18 @@ export function Shell({ services }: { services?: Services } = {}) {
     [svc, route, params, canBack, set],
   );
   const Screen = screenFor(route);
-  const overlay = route === "overlay";
+  const stage = useStage();
+  // Zone de jeu : l'élément réservé est mesuré et son rectangle publié à Rust.
+  const slotRef = useRef<HTMLDivElement>(null);
+  useStageLayout(slotRef);
 
-  // Fenêtre du panneau en jeu : fond transparent (le panneau est une carte arrondie).
-  useLayoutEffect(() => {
-    if (!overlay) return;
-    document.documentElement.setAttribute("data-overlay", "");
-    return () => document.documentElement.removeAttribute("data-overlay");
-  }, [overlay]);
-
-  if (overlay) {
-    return (
-      <ShellContext.Provider value={value}>
-        <div className="app app-overlay">
-          <main id="contenu" className="content content-overlay" ref={mainRef} tabIndex={-1} data-route={route}>
-            {Screen ? <Screen /> : <Fallback route={route} />}
-          </main>
-        </div>
-      </ShellContext.Provider>
-    );
-  }
+  // Échap : ferme le panneau « en jeu » et rend le clavier au jeu (la confirmation du panneau gère sa propre touche Échap avant).
+  useEffect(() => {
+    if (!stage.panel) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape" && !e.defaultPrevented) { e.preventDefault(); void setStagePanel(false).catch(() => {}); } };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [stage.panel]);
 
   return (
     <ShellContext.Provider value={value}>
@@ -152,6 +179,8 @@ export function Shell({ services }: { services?: Services } = {}) {
             : Screen ? <Screen /> : <Fallback route={route} />}
         </main>
         <UpdateBanner services={svc} />
+        <div className="stage-slot" ref={slotRef} aria-hidden="true" />
+        {stage.panel && <div className="ov-dock"><InGamePanel /></div>}
       </div>
     </ShellContext.Provider>
   );

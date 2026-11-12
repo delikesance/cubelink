@@ -1,16 +1,16 @@
 /* Amis (C4-C6) : titre + pastille, deux cartes côte à côte (une colonne sous 900 px), onglets Tes amis / Demandes pleine largeur. */
-.fr{box-sizing:border-box;min-height:100%;padding:var(--sp-6) var(--page-pad) var(--sp-7);font-family:var(--font-ui);color:var(--text);overflow-x:hidden}
-.fr-page{max-width:1100px;margin:0 auto;display:flex;flex-direction:column;gap:var(--sp-5);min-width:0}
+.fr{font-family:var(--font-ui);color:var(--text);overflow-x:hidden}
+.fr-page{max-width:var(--page-max);display:flex;flex-direction:column;gap:var(--sp-5);min-width:0}
 .fr-head{display:flex;align-items:center;gap:var(--sp-4);flex-wrap:wrap;min-height:44px}
 .fr-title{margin:0;font:700 28px/1.2 var(--font-display)}
 .fr-title:focus{outline:none}
-.fr-pill{margin-left:auto;display:inline-flex;align-items:center;gap:10px;height:44px;padding:0 18px;border-radius:var(--r-pill);background:var(--surface-2);border:1px solid var(--line);font-weight:600;font-size:14px;white-space:nowrap}
+.fr-pill{display:inline-flex;align-items:center;gap:10px;height:36px;padding:0 14px;border-radius:var(--r-pill);background:var(--surface-2);border:1px solid var(--line);font-weight:600;font-size:14px;white-space:nowrap}
 .fr-dot{width:8px;height:8px;border-radius:50%;background:#4A4452}
 .fr-dot.on{background:var(--ok)}
-.fr-back{min-height:44px;min-width:44px;padding:0 16px 0 10px;display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:var(--r-md);background:transparent;color:var(--text);font:inherit;font-weight:600;cursor:pointer}
-.fr-back:hover{background:var(--surface-2)}
+.fr-add-btn{margin-left:auto}
+.fr-add{scroll-margin-top:var(--sp-5);padding-top:var(--sp-5);border-top:1px solid var(--line)}
 .fr-cards{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--sp-5);align-items:stretch}
-.fr-card{min-width:0;padding:32px;display:flex;flex-direction:column}
+.fr-card{min-width:0;padding:24px;display:flex;flex-direction:column}
 .fr-card>section{flex:1;display:flex;flex-direction:column;gap:12px;min-width:0}
 .fr-tabs{display:flex;box-shadow:inset 0 -1px 0 var(--line);overflow-x:auto;overflow-y:hidden;scrollbar-width:none}
 .fr-tabs::-webkit-scrollbar{display:none}
@@ -19,5 +19,7 @@
 .fr-tab[aria-selected="true"]{color:var(--text);border-bottom-color:var(--accent)}
 .fr-tab:focus-visible{outline:2px solid var(--focus);outline-offset:-2px}
 .fr-panel{min-width:0}
-@media (max-width:900px){.fr-cards{grid-template-columns:minmax(0,1fr)}.fr-card{padding:24px}}
+@media (max-width:900px){.fr-add-btn{margin-left:auto}
+.fr-add{scroll-margin-top:var(--sp-5);padding-top:var(--sp-5);border-top:1px solid var(--line)}
+.fr-cards{grid-template-columns:minmax(0,1fr)}}
 .fr-title:focus-visible{outline:none}

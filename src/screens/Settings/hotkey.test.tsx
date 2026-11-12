@@ -20,7 +20,7 @@ describe("validation du raccourci", () => {
   });
 });
 
-describe("Panneau en jeu (Réglages > Réseau)", () => {
+describe("Raccourci jeu et launcher (Réglages > Réseau)", () => {
   async function open(svc = createFakeServices({ tickMs: 0 })) {
     render(<Shell services={svc} />);
     fireEvent.click(screen.getByRole("tab", { name: "Réseau" }));
@@ -33,7 +33,7 @@ describe("Panneau en jeu (Réglages > Réseau)", () => {
     const svc = createFakeServices({ tickMs: 0 });
     const set = vi.spyOn(svc, "settingsSet");
     await open(svc);
-    const sw = screen.getByLabelText(/Panneau en jeu/, { selector: "input" }) as HTMLInputElement;
+    const sw = screen.getByLabelText(/Raccourci jeu et launcher/, { selector: "input" }) as HTMLInputElement;
     expect(sw.checked).toBe(true);
     fireEvent.click(sw);
     await waitFor(() => expect(set).toHaveBeenCalledTimes(1));

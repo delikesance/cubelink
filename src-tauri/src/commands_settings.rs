@@ -36,7 +36,7 @@ pub fn validate_with(s: &Settings, test_mode: bool) -> Result<(), String> {
     if s.relay_only && !s.allow_relay {
         return Err("« Toujours le relais » est incompatible avec un relais désactivé : autorisez le relais ou désactivez « Toujours le relais »".into());
     }
-    crate::overlay::validate_hotkey(&s.overlay_hotkey)?;
+    crate::hotkey::validate_hotkey(&s.overlay_hotkey)?;
     if let Some(j) = &s.java_path {
         let p = Path::new(j);
         let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("").to_ascii_lowercase();
@@ -110,7 +110,7 @@ pub fn settings_set(
         overlay_enabled: overlay_enabled.unwrap_or(cur.overlay_enabled),
         overlay_hotkey: overlay_hotkey.map(|h| h.trim().to_string()).unwrap_or(cur.overlay_hotkey),
     })?;
-    crate::overlay::apply_settings(&app);
+    crate::hotkey::apply_settings(&app);
     Ok(saved)
 }
 

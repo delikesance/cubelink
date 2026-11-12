@@ -1,5 +1,5 @@
 /* Mentions légales (B8) : même cadre que Réglages, onglet « À propos » actif, article de 720 px. */
-.legal{box-sizing:border-box;min-height:100%;padding:var(--sp-6) var(--page-pad) var(--sp-7);color:var(--text);font-family:var(--font-ui);display:flex;flex-direction:column;gap:var(--sp-5)}
+.legal{box-sizing:border-box;color:var(--text);font-family:var(--font-ui);display:flex;flex-direction:column;gap:var(--sp-5)}
 .legal>*{width:100%;max-width:800px}
 .legal h1{margin:0;font:700 28px/1.2 var(--font-display)}
 .legal-nav{position:relative;display:flex;box-shadow:inset 0 -1px 0 var(--line);overflow-x:auto;overflow-y:hidden;scrollbar-width:none}

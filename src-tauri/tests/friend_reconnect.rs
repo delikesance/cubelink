@@ -45,7 +45,7 @@ impl Node {
                 Err(e) => panic!("{e}"),
             }
         };
-        st.auth_offline_login(name, true).unwrap();
+        st.auth_offline_login(name).unwrap();
         Node { st, be }
     }
     fn key(&self) -> String {

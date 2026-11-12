@@ -1,7 +1,7 @@
 /* Créer (B3 choix, B4 formulaire) : cartes opaques centrées sur le fond de l'app. */
-.create{box-sizing:border-box;min-height:100%;padding:var(--sp-6) var(--sp-5);display:flex;align-items:center;justify-content:center;background:var(--bg);color:var(--text);font:500 14px/1.4 var(--font-ui)}
+.create{display:flex;align-items:flex-start;justify-content:flex-start;background:var(--bg);color:var(--text);font:500 14px/1.4 var(--font-ui)}
 .create :focus-visible{outline:2px solid var(--focus);outline-offset:2px}
-.create-wrap{width:100%;max-width:960px;display:flex;flex-direction:column;gap:var(--sp-5)}
+.create-wrap{width:100%;display:flex;flex-direction:column;gap:var(--sp-5)}
 .create-head h1,.create-form h1{margin:0;font:700 32px/1.1 var(--font-display);letter-spacing:-.01em}
 .create-head p{margin:var(--sp-2) 0 0;color:var(--muted);font-size:15px}
 .create-choices{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:var(--sp-4)}

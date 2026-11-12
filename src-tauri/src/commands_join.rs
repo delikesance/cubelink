@@ -105,7 +105,7 @@ impl AppState {
         short
     }
 
-    fn check_friend(&self, key: &str) -> Result<(), String> {
+    pub(crate) fn check_friend(&self, key: &str) -> Result<(), String> {
         let known = key.len() == 64 && self.friends.is_friend(key).map_err(|e| user_msg(&e))?;
         if known {
             Ok(())
@@ -152,6 +152,7 @@ impl AppState {
             }
             *j = Some(JoinSession { control: control.clone(), last: last.clone() });
         }
+        *lock(&self.last_join_instance) = None;
         let me = self.clone();
         let key = friend_public_key.to_string();
         let (l2, me2) = (last.clone(), self.clone());
@@ -237,6 +238,7 @@ impl AppState {
                 return Err(self.join_fail("Installation du jeu (loader, Java)", &format!("instance {}, minecraft {}", inst.id, inst.minecraft), &e, Stage::Install));
             }
         }
+        *lock(&self.last_join_instance) = Some(inst.id.clone());
         Ok(())
     }
 

@@ -79,7 +79,7 @@ pub fn state_for(id: &str, ev: &LaunchEvent) -> Option<LaunchStateEvent> {
 ///
 /// Invité (`join` = hôte:port du tunnel) : le même jar est chargé en mode `join=` (aucune ouverture de monde) ; il ne
 /// fait que relancer la connexion si le `--quickPlayMultiplayer` du jeu n'est pas parti (voir `LanAgent.joinLoop`).
-fn lan_agent_args(st: &AppState, own: bool, join: Option<&(String, u16)>) -> Option<String> {
+fn lan_agent_jar(st: &AppState, own: bool, join: Option<&(String, u16)>) -> Option<std::path::PathBuf> {
     let env = std::env::var_os("CUBELINK_LAN_AGENT").map(std::path::PathBuf::from);
     if crate::test_hooks::hooks().test_mode && env.is_none() {
         return None;
@@ -91,14 +91,50 @@ fn lan_agent_args(st: &AppState, own: bool, join: Option<&(String, u16)>) -> Opt
     // La JVM refuse un `-javaagent` au format Windows étendu (préfixe verbatim, renvoyé par le résolveur de
     // ressources Tauri) : « FATAL ERROR … appending to system class path failed ». On passe un chemin classique.
     let p = plain_windows_path(&p);
-    p.is_file().then(|| {
-        let a = javaagent_arg(&p, None);
-        if let Some((host, port)) = join {
-            return with_join(a, host, *port);
+    p.is_file().then_some(p)
+}
+
+/// Argument `-javaagent` complet pour ce jar (options d'invité ou de test comprises).
+fn lan_agent_arg(jar: &std::path::Path, join: Option<&(String, u16)>) -> String {
+    let a = javaagent_arg(jar, None);
+    if let Some((host, port)) = join {
+        return with_join(a, host, *port);
+    }
+    let flag = std::env::var("CUBELINK_LAN_NOAUTH").ok();
+    with_test_noauth(a, noauth_enabled(crate::test_hooks::hooks().test_mode, flag.as_deref()))
+}
+
+/// Faut-il injecter l'agent LAN ? `Err(raison)` sinon (journalisée). Pure, testable.
+/// - `java_major` : Java qui lance le jeu (`None` si inconnu) ; `jar_min_java` : Java minimal du jar (`lan_map::jar_min_java`) ;
+/// - legacy (MC < 1.13) : hôte Forge avec table SRG uniquement (l'invité n'a pas besoin de l'agent : `--server/--port`) ;
+/// - moderne (≥ 1.13, version non reconnue comprise) : inchangé.
+pub(crate) fn agent_supported(
+    java_major: Option<u32>,
+    jar_min_java: u32,
+    mc_version: &str,
+    loader: Loader,
+    join: bool,
+    has_srg_table: bool,
+) -> Result<(), &'static str> {
+    let legacy = core_lib::lan_map::is_legacy(mc_version);
+    match java_major {
+        Some(j) if j < 8 => return Err("Java < 8"),
+        Some(j) if j < jar_min_java => return Err("le jar de l'agent exige une Java plus récente"),
+        None if legacy => return Err("version de Java inconnue (Minecraft legacy)"),
+        _ => {}
+    }
+    if legacy {
+        if join {
+            return Err("invité legacy : --server/--port suffit");
         }
-        let flag = std::env::var("CUBELINK_LAN_NOAUTH").ok();
-        with_test_noauth(a, noauth_enabled(crate::test_hooks::hooks().test_mode, flag.as_deref()))
-    })
+        if loader != Loader::Forge {
+            return Err("Minecraft < 1.13 : seul Forge est géré");
+        }
+        if !has_srg_table {
+            return Err("pas de table SRG pour cette version");
+        }
+    }
+    Ok(())
 }
 
 /// TEST UNIQUEMENT : l'option `noauth` de l'agent (serveur LAN sans verification de session) n'est possible
@@ -183,11 +219,22 @@ pub(crate) fn plain_windows_path(p: &std::path::Path) -> std::path::PathBuf {
 /// suffisent (NeoForge, Minecraft 26.x) ou ne sont pas gérés (Forge : non vérifié). Toute erreur est journalisée
 /// et rend `None` : l'agent signale alors lui-même dans `latest.log` qu'il ne trouve pas les noms.
 async fn lan_map_path(st: &AppState, inst: &Instance, version: &LaunchVersion, libs_dir: &std::path::Path) -> Option<std::path::PathBuf> {
-    use core_lib::lan_map::{ensure_lanmap, Runtime};
+    use core_lib::lan_map::{ensure_lanmap, ensure_srg_map, pick_runtime, Runtime};
     let (downloads, libs) = match version {
         LaunchVersion::Vanilla(v) => (&v.downloads, &v.libraries),
         LaunchVersion::Merged(m) => (&m.downloads, &m.libraries),
     };
+    let dir = st.paths.root.join("lanmap");
+    // Forge 1.7.10 → 1.12.2 : table SRG embarquée (aucun téléchargement).
+    if pick_runtime(inst.loader.loader, &inst.minecraft, downloads.client_mappings.is_some()) == Some(Runtime::Srg) {
+        return match ensure_srg_map(&dir, &inst.minecraft) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("[Cubelink] LAN: table SRG illisible ({e})");
+                None
+            }
+        };
+    }
     // Jeu non obfusqué (26.x) : pas de mappings Mojang, les noms Mojang directs suffisent, aucune traduction.
     downloads.client_mappings.as_ref()?;
     let (runtime, inter) = match inst.loader.loader {
@@ -207,7 +254,6 @@ async fn lan_map_path(st: &AppState, inst: &Instance, version: &LaunchVersion, l
         Loader::NeoForge | Loader::Forge => return None,
     };
     let mappings = downloads.client_mappings.as_ref()?; // absent : jeu non obfusqué (26.x)
-    let dir = st.paths.root.join("lanmap");
     match ensure_lanmap(&dir, &reqwest::Client::new(), &inst.minecraft, runtime, mappings, inter.as_deref()).await {
         Ok(p) => Some(p),
         Err(e) => {
@@ -237,6 +283,9 @@ fn is_failure(ev: &LaunchEvent) -> bool {
 struct GameGuard(Arc<AppState>);
 impl Drop for GameGuard {
     fn drop(&mut self) {
+        // Filet : quoi qu'il arrive a la tache de jeu (y compris une panique), le rideau de la zone integree ne reste pas ferme.
+        // Sans effet si la fin du jeu a deja ete annoncee.
+        self.0.stage.run_finished();
         *lock(&self.0.game_handle) = None;
         *lock(&self.0.game) = None;
     }
@@ -358,11 +407,29 @@ impl AppState {
 
     /// Vérifications synchrones puis tâche de fond ; la progression passe par `launch://state`.
     pub async fn instances_launch(self: &Arc<Self>, id: &str) -> Result<(), String> {
+        // Un jeu tourne dans la zone integree : lancer une autre instance = changement de modpack (fermeture propre puis lancement).
+        // Un jeu dans sa propre fenetre (reglage coupe, repli) garde le comportement habituel : refus, une partie est en cours.
+        if self.stage.staged() && lock(&self.game_handle).as_ref().is_some_and(|(g, _)| g != id) {
+            return self.game_switch(id).await;
+        }
         self.launch_with(id, None).await
     }
 
     /// Lance l'instance ; `join` : (hôte, port) à rejoindre automatiquement (tunnel invité, refermé à la fin du jeu).
     pub(crate) async fn launch_with(self: &Arc<Self>, id: &str, join: Option<(String, u16)>) -> Result<(), String> {
+        let r = self.launch_checked(id, join).await;
+        if let Err(e) = &r {
+            // Apres un changement de modpack le rideau attend ce lancement, ferme a mi-barre : s'il est refuse, le rideau se
+            // rouvre sur le launcher, ou l'interface affiche l'erreur rendue ici.
+            self.stage.abort_switch(&format!("lancement refuse : {e}"));
+        }
+        r
+    }
+
+    async fn launch_checked(self: &Arc<Self>, id: &str, join: Option<(String, u16)>) -> Result<(), String> {
+        if self.quit.quitting() {
+            return Err("Cubelink est en train de se fermer".into());
+        }
         if !valid_id(id) {
             return Err("identifiant d'instance invalide".into());
         }
@@ -379,12 +446,41 @@ impl AppState {
             }
             *g = Some(inst.id.clone());
         }
+        // Zone de jeu integree : les panneaux se ferment des le clic (sur le launcher, ou sur le jeu qui vient de se fermer).
+        let what = format!("{} ({}, {:?})", inst.id, inst.minecraft, inst.loader.loader);
+        if let Some(why) = self.stage.unavailable_reason() {
+            self.stage.note(&format!("lancement de {what} hors de la fenetre du launcher : {why}"));
+        } else {
+            self.stage.note(&format!("lancement de {what} dans la fenetre du launcher"));
+            if let Ok(dir) = self.instances.game_dir(&inst.id) {
+                // NeoForge (FML 4) : l'ecran precoce cree la fenetre cachee, la fait repondre toutes les 50 ms pendant le
+                // chargement des mods puis la rend au jeu (meme fenetre). Le couper (`false`) gele la fenetre ~20 s : on le garde.
+                // Forge : non verifie, on garde l'ancien choix (ecran precoce coupe).
+                let early = match inst.loader.loader {
+                    core_lib::types::Loader::NeoForge => Some(true),
+                    core_lib::types::Loader::Forge => Some(false),
+                    _ => None,
+                };
+                if let Some(on) = early {
+                    if let Err(e) = set_early_window(&dir.join("config").join("fml.toml"), on) {
+                        eprintln!("[Cubelink] fml.toml : {e}");
+                    }
+                }
+                self.stage.begin(&inst.name, &dir.join("mods"), &self.paths.logs.join(&inst.id).join("launch-profile.json"));
+            }
+        }
+        // Ce lancement n'est pas entre dans la zone integree (reglage coupe, session coupee, dossier illisible) : un rideau
+        // laisse ferme par un changement de modpack n'aurait plus personne pour le rouvrir.
+        if !self.stage.staged() {
+            self.stage.abort_switch("le jeu suivant s'ouvre hors de la fenetre du launcher");
+        }
         let me = self.clone();
         // Runtime de Tauri (et non `tokio::spawn`) : valable même appelée hors d'un runtime tokio.
         tauri::async_runtime::spawn(async move {
             let _guard = GameGuard(me.clone());
             let joined = join.is_some();
             me.run_game(inst, profile, token, join).await;
+            me.stage.run_finished();
             if joined {
                 me.join_close_tunnel().await;
             }
@@ -425,7 +521,18 @@ impl AppState {
         };
         // Partage / agent LAN : seulement pour nos propres instances, jamais en rejoignant un ami.
         let own = join_server.is_none() && self.instances.kind(&id).map(|k| k == core_lib::instance::InstanceKind::Own).unwrap_or(false);
-        let agent_on = lan_agent_args(self, own, join_server.as_ref()).is_some();
+        let agent_arg = lan_agent_jar(self, own, join_server.as_ref()).and_then(|jar| {
+            let java = core_lib::java::probe_with(&prepared.java, core_lib::java::run_java_version).map(|i| i.major);
+            let has_srg = core_lib::lan_map::srg_table(&inst.minecraft).is_some();
+            match agent_supported(java, core_lib::lan_map::jar_min_java(&jar), &inst.minecraft, inst.loader.loader, join_server.is_some(), has_srg) {
+                Ok(()) => Some(lan_agent_arg(&jar, join_server.as_ref())),
+                Err(why) => {
+                    eprintln!("[Cubelink] LAN: agent non injecté ({why}) : {} {:?}, Java {java:?}", inst.minecraft, inst.loader.loader);
+                    None
+                }
+            }
+        });
+        let agent_on = agent_arg.is_some();
         let lan_map = if agent_on && join_server.is_none() { lan_map_path(self, &inst, &prepared.version, &prepared.libs_dir).await } else { None };
         let spec = LaunchSpec {
             java_path: prepared.java,
@@ -445,7 +552,7 @@ impl AppState {
             launcher_version: env!("CARGO_PKG_VERSION").into(),
             extra_jvm_args: {
                 let mut a = core_lib::instance::split_jvm_args(&inst.jvm_args);
-                a.extend(lan_agent_args(self, own, join_server.as_ref()).map(|arg| match &lan_map {
+                a.extend(agent_arg.map(|arg| match &lan_map {
                     Some(m) => with_map(arg, m),
                     None => arg,
                 }));
@@ -455,17 +562,31 @@ impl AppState {
             // Outil de test réel (e2e/14) : jamais hors mode test.
             quick_play_world: if crate::test_hooks::hooks().test_mode { std::env::var("CUBELINK_QUICKPLAY_WORLD").ok().filter(|w| !w.trim().is_empty()) } else { None },
         };
-        let cmd = match build_command(&spec) {
+        let mut cmd = match build_command(&spec) {
             Ok(c) => c,
             Err(e) => return self.emit_state(&id, LaunchPhase::Failed, Some(user_msg(&e))),
         };
         drop(spec);
+        // Essai : fenetre du jeu cachee des sa creation (jamais hors de la zone integree, voir `Stage::hide_start`).
+        cmd.hide_first_window = self.stage.hide_start(crate::stage::hide_start_switch());
         let log_dir = self.paths.logs.join(&id);
+        // Le launcher se ferme (fenetre fermee pendant la preparation) : on ne demarre pas un jeu que plus rien ne suivrait.
+        // `pass` est garde jusqu'a ce que le jeu soit suivi : une fermeture qui arrive entre-temps attend (voir `QuitGate`).
+        let Some(pass) = self.quit.enter_spawn() else {
+            self.stage.note("fermeture du launcher pendant la preparation : le jeu n'est pas demarre");
+            return self.emit_state(&id, LaunchPhase::Failed, Some("Cubelink est en train de se fermer".into()));
+        };
         // Le jeu reste vivant (via `game_handle`) jusqu'à la fin de la boucle : le lâcher l'arrêterait.
         let mut game = match launch_run::spawn(&cmd, &log_dir).await {
             Ok(g) => g,
             Err(e) => return self.emit_state(&id, LaunchPhase::Failed, Some(user_msg(&e))),
         };
+        if self.quit.quitting() {
+            // La fermeture est arrivee pendant le demarrage du processus : il est arrete tout de suite, avant toute fenetre.
+            self.stage.note("fermeture du launcher pendant le demarrage du jeu : processus arrete");
+            let _ = game.kill().await;
+            return self.emit_state(&id, LaunchPhase::Failed, Some("Cubelink est en train de se fermer".into()));
+        }
         let Some(mut rx) = game.events() else {
             return self.emit_state(&id, LaunchPhase::Failed, Some("suivi du jeu indisponible".into()));
         };
@@ -475,6 +596,13 @@ impl AppState {
             crate::foreground::bring_game_to_front(game.pid);
         }
         *lock(&self.game_handle) = Some((id.clone(), game.clone()));
+        // `stage.staged()` est relu a chaque usage : un repli en cours de lancement rend sa fenetre au jeu, et tout le pilotage
+        // du rideau devient alors sans objet (les appels eux-memes sont inertes hors de la zone integree).
+        let mut revealed = false;
+        let profile_path = self.paths.logs.join(&id).join("launch-profile.json");
+        self.stage.watch(game.pid);
+        // A partir d'ici la fermeture du launcher sait quoi faire du jeu : rattache, elle le ferme proprement.
+        drop(pass);
         let mut batch = crate::commands_game::LogBatcher::default();
         let mut tick = tokio::time::interval(crate::commands_game::LOG_FLUSH_EVERY);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -488,6 +616,7 @@ impl AppState {
                     let Some(ev) = ev else { break };
                     if let LaunchEvent::Output(line) = &ev {
                         agent_marker |= agent_crash_marker(line);
+                        self.stage.feed_line(line);
                         if let Some(h) = host.as_mut() {
                             h.on_line(line);
                         }
@@ -495,6 +624,9 @@ impl AppState {
                         continue;
                     }
                     self.emit_logs(&id, &mut batch);
+                    if let LaunchEvent::Exited { code } = &ev {
+                        self.stage.game_exited(*code);
+                    }
                     if agent_on && agent_marker && started.elapsed() < AGENT_CRASH_WINDOW && is_failure(&ev) {
                         *crashed = true; // pas d'état d'échec visible : on relance sans agent
                         break;
@@ -507,7 +639,16 @@ impl AppState {
                         break;
                     }
                 }
-                _ = tick.tick() => self.emit_logs(&id, &mut batch),
+                _ = tick.tick() => {
+                    self.emit_logs(&id, &mut batch);
+                    if !revealed && self.stage.is_ready() {
+                        // le jeu est pret : la barre atteint 100 % puis les panneaux s'ecartent sur lui
+                        revealed = true;
+                        self.stage.mark_ready(&profile_path);
+                        tokio::time::sleep(std::time::Duration::from_millis(450)).await;
+                        self.stage.reveal();
+                    }
+                }
             }
         }
         self.emit_logs(&id, &mut batch);
@@ -563,6 +704,37 @@ pub async fn minecraft_versions(state: State<'_, Arc<AppState>>) -> Result<Vec<S
 mod tests {
     use super::*;
     use crate::state::test_support::test_state;
+
+    #[test]
+    fn agent_supporte_selon_version_java_et_loader() {
+        use Loader::*;
+        let ok = |j, jm, v, l, join, t| agent_supported(j, jm, v, l, join, t);
+        // moderne : inchangé (Java >= jar), table SRG sans effet
+        assert_eq!(ok(Some(21), 8, "1.21.1", Fabric, false, false), Ok(()));
+        assert_eq!(ok(Some(21), 17, "26.1", NeoForge, true, false), Ok(()));
+        assert_eq!(ok(Some(17), 17, "1.20.1", Forge, false, false), Ok(()));
+        assert_eq!(ok(None, 17, "1.21.1", Vanilla, false, false), Ok(()));
+        assert_eq!(ok(Some(21), 17, "snapshot-inconnu", Vanilla, false, false), Ok(()));
+        // 1.13 → 1.16 sous Java 8 : seulement si le jar est en classfile 52
+        assert_eq!(ok(Some(8), 8, "1.16.5", Fabric, false, false), Ok(()));
+        assert!(ok(Some(8), 17, "1.16.5", Fabric, false, false).is_err());
+        assert!(ok(Some(8), 17, "1.14.4", Forge, true, false).is_err());
+        // Java < 8 : jamais
+        assert!(ok(Some(7), 8, "1.7.10", Forge, false, true).is_err());
+        assert!(ok(Some(6), 8, "1.21.1", Fabric, false, false).is_err());
+        // legacy : Forge + hôte + table + Java 8 avec jar 52
+        for v in ["1.7.10", "1.8.9", "1.12.2"] {
+            assert_eq!(ok(Some(8), 8, v, Forge, false, true), Ok(()), "{v}");
+            assert!(ok(Some(8), 8, v, Forge, false, false).is_err(), "{v} sans table");
+            assert!(ok(Some(8), 8, v, Forge, true, true).is_err(), "{v} invité");
+            assert!(ok(Some(8), 8, v, Vanilla, false, true).is_err(), "{v} vanilla");
+            assert!(ok(Some(8), 8, v, Fabric, false, true).is_err(), "{v} fabric");
+            assert!(ok(Some(8), 17, v, Forge, false, true).is_err(), "{v} jar Java 17 sous Java 8");
+            assert!(ok(None, 8, v, Forge, false, true).is_err(), "{v} Java inconnue");
+        }
+        // Java 17 sur legacy avec jar 52 : accepté (Java plus récente)
+        assert_eq!(ok(Some(17), 8, "1.12.2", Forge, false, true), Ok(()));
+    }
 
     #[test]
     fn marqueurs_d_echec_d_agent() {
@@ -739,6 +911,91 @@ mod tests {
         assert!(st.instances_launch(&inst.id).await.unwrap_err().contains("connectez-vous"));
     }
 
+    /// Changement de modpack dont le lancement suivant est REFUSE (chaque refus de `launch_with`) : le rideau, reste ferme a
+    /// mi-barre apres la fin de l'ancien jeu, se rouvre sur le launcher, et l'erreur revient a l'interface.
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn changement_de_modpack_lancement_refuse_rouvre_le_rideau() {
+        use crate::stage::fake::{switch_pending, FakeHost};
+        use cubelink_host::flow::Flow;
+        let dir = tempfile::tempdir().unwrap();
+        let (st, _) = test_state(dir.path());
+        let fake = FakeHost::new();
+        fake.install(&st.stage);
+        let inst = st.instances.create("Neuf", "0.0-inexistante", vanilla(), 2048).unwrap();
+        let check = |what: &str, r: Result<(), String>| {
+            assert!(r.is_err(), "{what} : refus attendu");
+            assert!(!fake.curtain_stuck(), "{what} : rideau reste ferme ({:?})", fake.flow());
+            assert_eq!(fake.flow(), Flow::Launcher, "{what}");
+        };
+        switch_pending(&st.stage, &fake);
+        check("identifiant invalide", st.launch_with("../x", None).await);
+        switch_pending(&st.stage, &fake);
+        check("instance inconnue", st.launch_with("inconnue", None).await);
+        switch_pending(&st.stage, &fake);
+        check("pas de compte (jeton refuse)", st.launch_with(&inst.id, None).await);
+        *lock(&st.profile) = Some(Profile::Offline { name: "Steve".into(), uuid: "0".repeat(32) });
+        switch_pending(&st.stage, &fake);
+        *lock(&st.game) = Some("autre".into());
+        check("verrou de jeu deja pris", st.launch_with(&inst.id, None).await);
+        *lock(&st.game) = None;
+        switch_pending(&st.stage, &fake);
+        st.quit.begin_quit();
+        let r = st.launch_with(&inst.id, None).await;
+        assert!(r.as_ref().is_err_and(|e| e.contains("en train de se fermer")), "{r:?}");
+        check("launcher en cours de fermeture", r);
+        assert!(lock(&st.game).is_none(), "aucun lancement engage pendant la fermeture");
+    }
+
+    /// Lancement ACCEPTE apres un changement de modpack, mais qui echoue pendant la preparation (version introuvable) : la
+    /// tache de jeu s'arrete avant `watch`, le rideau se rouvre sur le launcher et l'echec est annonce a l'interface.
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn changement_de_modpack_echec_de_preparation_rouvre_le_rideau() {
+        use crate::stage::fake::{switch_pending, FakeHost};
+        use cubelink_host::flow::Flow;
+        let dir = tempfile::tempdir().unwrap();
+        let (st, events) = test_state(dir.path());
+        let fake = FakeHost::new();
+        fake.install(&st.stage);
+        let inst = st.instances.create("Neuf", "0.0-inexistante", vanilla(), 2048).unwrap();
+        *lock(&st.profile) = Some(Profile::Offline { name: "Steve".into(), uuid: "0".repeat(32) });
+        switch_pending(&st.stage, &fake);
+        st.launch_with(&inst.id, None).await.unwrap();
+        assert_eq!(fake.count("begin"), 2, "le lancement est entre dans la zone integree");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while lock(&st.game).is_some() {
+            assert!(std::time::Instant::now() < deadline, "la tache de jeu ne s'arrete pas");
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(!fake.curtain_stuck(), "{:?}", fake.flow());
+        assert_eq!(fake.flow(), Flow::Launcher);
+        assert_eq!(fake.count("watch"), 1, "le nouveau jeu n'a jamais demarre");
+        let failed = lock(&events).iter().any(|(n, v)| n == "launch://state" && v["id"] == inst.id.as_str() && v["state"] == "failed" && v["message"].is_string());
+        assert!(failed, "l'echec reste visible du joueur : {:?}", lock(&events));
+    }
+
+    /// Le jeu suivant s'ouvre HORS de la zone integree (reglage coupe entre la fermeture et le lancement) : plus personne ne
+    /// rouvrirait le rideau du changement de modpack.
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn changement_de_modpack_vers_un_jeu_hors_scene_rouvre_le_rideau() {
+        use crate::stage::fake::{switch_pending, FakeHost};
+        use cubelink_host::flow::Flow;
+        let dir = tempfile::tempdir().unwrap();
+        let (st, _) = test_state(dir.path());
+        let fake = FakeHost::new();
+        fake.install(&st.stage);
+        let inst = st.instances.create("Neuf", "0.0-inexistante", vanilla(), 2048).unwrap();
+        *lock(&st.profile) = Some(Profile::Offline { name: "Steve".into(), uuid: "0".repeat(32) });
+        switch_pending(&st.stage, &fake);
+        st.stage.set_wanted(false);
+        st.launch_with(&inst.id, None).await.unwrap();
+        assert_eq!(fake.count("begin"), 1, "ce lancement n'entre pas dans la zone integree");
+        assert!(!fake.curtain_stuck(), "{:?}", fake.flow());
+        assert_eq!(fake.flow(), Flow::Launcher);
+    }
+
     /// Régression : le lancement lançait `tokio::spawn` depuis une commande synchrone (« no reactor running »).
     /// Ici AUCUN runtime tokio n'est actif sur le thread de test : le chemin qui lance la tâche ne doit pas paniquer.
     #[test]
@@ -753,5 +1010,47 @@ mod tests {
         // Comme Tauri : le futur de la commande est piloté par le runtime de Tauri.
         let r = tauri::async_runtime::block_on(async move { st2.instances_launch(&id).await });
         assert!(r.is_ok(), "{r:?}");
+    }
+}
+
+/// Met `earlyWindowControl = <on>` dans le `fml.toml` de l'instance (cree le fichier au besoin). Sans effet s'il l'est deja.
+fn set_early_window(path: &std::path::Path, on: bool) -> std::io::Result<()> {
+    let cur = std::fs::read_to_string(path).unwrap_or_default();
+    let out = early_window(&cur, on);
+    if out != cur {
+        if let Some(d) = path.parent() {
+            std::fs::create_dir_all(d)?;
+        }
+        std::fs::write(path, out)?;
+    }
+    Ok(())
+}
+
+/// Pur : texte du `fml.toml` avec `earlyWindowControl = <on>` (ligne remplacee, ou ajoutee en tete du fichier).
+fn early_window(toml: &str, on: bool) -> String {
+    let line = format!("earlyWindowControl = {on}");
+    let is_key = |l: &str| l.trim_start().strip_prefix("earlyWindowControl").is_some_and(|r| r.trim_start().starts_with('='));
+    if toml.lines().any(is_key) {
+        let mut out: Vec<String> = toml.lines().map(|l| if is_key(l) { line.clone() } else { l.to_string() }).collect();
+        if toml.ends_with('\n') {
+            out.push(String::new());
+        }
+        return out.join("\n");
+    }
+    format!("{line}\n{toml}")
+}
+
+#[cfg(test)]
+mod early_window_tests {
+    use super::early_window;
+
+    #[test]
+    fn ajoute_remplace_et_est_idempotent() {
+        assert_eq!(early_window("", false), "earlyWindowControl = false\n");
+        assert_eq!(early_window("a = 1\n", false), "earlyWindowControl = false\na = 1\n");
+        let r = early_window("x = 2\n#c\nearlyWindowControl = true\ny = 3\n", false);
+        assert_eq!(r, "x = 2\n#c\nearlyWindowControl = false\ny = 3\n");
+        assert_eq!(early_window(&r, false), r);
+        assert_eq!(early_window(&r, true), "x = 2\n#c\nearlyWindowControl = true\ny = 3\n");
     }
 }

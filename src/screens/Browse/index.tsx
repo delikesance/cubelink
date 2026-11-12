@@ -178,7 +178,7 @@ export default function Browse() {
   const canMore = status === "ready" && hits.length < total && hits.length > 0;
 
   return (
-    <div className="browse page-fill">
+    <div className="browse screen">
       <header className="br-head">
         <h1>Parcourir</h1>
         <div className="br-source-sel" role="group" aria-label="Source">

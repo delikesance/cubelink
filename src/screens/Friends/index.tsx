@@ -1,12 +1,13 @@
-// Écran Amis (C4 à C6) : titre + pastille, deux cartes « Ajouter un ami » / « Mon code », puis onglets Tes amis / Demandes.
+// Écran Amis (C4 à C6) : titre + pastille + bouton « Ajouter un ami », onglets Tes amis / Demandes, puis les cartes « Ajouter un ami » / « Mon code ».
 import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent } from "react";
 import { useBack, useServices } from "../../app/context";
-import { Card } from "../../ui";
+import { Button, Card } from "../../ui";
 import "./friends.css";
 import MyCode from "./MyCode";
 import Requests, { RequestsBadge, useRequestsTotal } from "./Requests";
 import Add from "./Add";
 import FriendsList from "./FriendsList";
+import Invites from "./Invites";
 
 type Tab = "friends" | "requests";
 
@@ -48,6 +49,14 @@ export default function Friends() {
     return () => document.removeEventListener("keydown", onEsc);
   }, []);
 
+  // « Ajouter un ami » : descend jusqu'aux cartes et met le curseur dans le champ du code.
+  const goAdd = () => {
+    const box = document.getElementById("fr-add");
+    const calm = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    box?.scrollIntoView?.({ behavior: calm ? "auto" : "smooth", block: "start" });
+    box?.querySelector<HTMLInputElement>(".add-input")?.focus({ preventScroll: true });
+  };
+
   const tabs: { id: Tab; label: React.ReactNode }[] = [
     { id: "friends", label: "Tes amis" },
     { id: "requests", label: <>Demandes <RequestsBadge total={total} /></> },
@@ -67,20 +76,17 @@ export default function Friends() {
   };
 
   return (
-    <div className="fr">
+    <div className="fr screen">
       <div className="fr-page">
         <header className="fr-head enter">
-          <button type="button" className="fr-back" aria-label="Retour à l'accueil" onClick={back}>
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M15 5l-7 7 7 7" /></svg>
-            Retour
-          </button>
           <h1 className="fr-title" ref={h1} tabIndex={-1}>Amis</h1>
-          <span className="fr-pill"><span className={online ? "fr-dot on" : "fr-dot"} aria-hidden="true" />Amis · {online} en ligne</span>
+          <span className="fr-pill"><span className={online ? "fr-dot on" : "fr-dot"} aria-hidden="true" />{online} en ligne</span>
+          <Button className="fr-add-btn" onClick={goAdd}>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+            Ajouter un ami
+          </Button>
         </header>
-        <div className="fr-cards">
-          <Card as="div" className="fr-card enter" style={stagger(1)}><Add /></Card>
-          <Card as="div" className="fr-card enter" style={stagger(2)}><MyCode /></Card>
-        </div>
+        <Invites />
         <div role="tablist" aria-label="Amis" className="fr-tabs enter" style={stagger(3)}>
           {tabs.map((t, i) => (
             <button
@@ -103,6 +109,12 @@ export default function Friends() {
         <div role="tabpanel" id={`friends-panel-${tab}`} aria-labelledby={`friends-tab-${tab}`} className="fr-panel">
           {tab === "friends" ? <FriendsList /> : <Requests />}
         </div>
+        <section id="fr-add" className="fr-add" aria-label="Ajouter un ami et partager ton code">
+          <div className="fr-cards">
+            <Card as="div" className="fr-card enter" style={stagger(1)}><Add /></Card>
+            <Card as="div" className="fr-card enter" style={stagger(2)}><MyCode /></Card>
+          </div>
+        </section>
       </div>
     </div>
   );

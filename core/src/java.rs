@@ -16,7 +16,7 @@ pub struct JavaInstall {
 
 /// Analyse un numéro de version de Minecraft ("1.20.4", "1.21", "1.16.5-rc1").
 /// Retourne (minor, patch) pour une version "1.x[.y]", sinon None (snapshot, inconnu).
-fn parse_mc_version(v: &str) -> Option<(u32, u32)> {
+pub(crate) fn parse_mc_version(v: &str) -> Option<(u32, u32)> {
     let v = v.trim();
     let mut parts = v.split('.');
     if parts.next()?.trim().parse::<u32>().ok()? != 1 {

@@ -1,0 +1,10 @@
+# ns srg
+C minecraft net.minecraft.client.Minecraft
+C integrated net.minecraft.server.integrated.IntegratedServer
+M mc.getInstance func_71410_x 0 net.minecraft.client.Minecraft
+M mc.getSingleplayerServer func_71401_C 0 net.minecraft.server.integrated.IntegratedServer
+F mc.player field_71439_g
+M mc.schedule func_152343_a 1 java.lang.Object
+M is.shareToLan func_71206_a 2 java.lang.String
+M is.isPublished func_71344_c 0 boolean
+M server.getDefaultGameType func_71265_f 0 net.minecraft.world.GameType

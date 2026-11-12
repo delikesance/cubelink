@@ -1,9 +1,10 @@
 /* Coquille : cadre sans decoration, barre de titre 36 px. Tokens dans src/styles/tokens.css. */
 .app{display:flex;flex-direction:column;height:100%;background:var(--bg)}
-.titlebar{height:var(--titlebar-h);flex:none;display:flex;align-items:stretch;background:var(--bg);border-bottom:1px solid var(--line);user-select:none}
+.titlebar{position:relative;height:var(--titlebar-h);flex:none;display:flex;align-items:stretch;background:var(--bg);border-bottom:1px solid var(--line);user-select:none}
 .titlebar-spacer{width:138px;flex:none;display:flex}
 .tb-back{width:46px}
 .tb-back[disabled]{visibility:hidden}
+.tb-stage{width:auto;flex:1;padding:0 8px;font:600 11px/var(--titlebar-h) var(--font-display);letter-spacing:.04em;color:var(--accent-hover);white-space:nowrap}
 .titlebar-title{flex:1;margin:0;display:flex;align-items:center;justify-content:center;font:600 12px/var(--titlebar-h) var(--font-display);letter-spacing:.04em;color:var(--muted)}
 .titlebar-buttons{display:flex;width:138px;flex:none}
 .tb-btn{width:46px;height:var(--titlebar-h);border:0;padding:0;background:transparent;color:var(--text);display:flex;align-items:center;justify-content:center;cursor:default;transition:background var(--dur-feedback) var(--ease)}
@@ -12,10 +13,49 @@
 .tb-btn:focus-visible{outline-offset:-2px}
 .skip-link{position:absolute;left:8px;top:-48px;z-index:10;padding:6px 12px;background:var(--surface-2);color:var(--accent-hover);border:1px solid var(--focus);border-radius:var(--r-md)}
 .skip-link:focus{top:calc(var(--titlebar-h) + 4px)}
+/* Zone de jeu : emplacement réservé sous la barre de titre, seulement mesuré (publié à Rust) ; ni peint ni cliquable. */
+.stage-slot{position:fixed;top:var(--titlebar-h);left:0;right:0;bottom:0;pointer-events:none;visibility:hidden}
 .content{flex:1;min-height:0;overflow:auto;outline:none}
 /* Conteneurs de page : .page plafonne la largeur, .page-fill remplit tout (grilles). Blocs de texte : ~68ch. */
 .page{width:100%;max-width:var(--page-max);margin-inline:auto;padding-inline:var(--page-pad);box-sizing:border-box}
 .page-fill{width:100%;padding-inline:var(--page-pad);box-sizing:border-box}
-/* Bannière de mise à jour prête (sous la barre de titre, hors du contenu défilant). */
-.update-banner{flex:none;display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;padding:8px var(--page-pad);background:var(--surface-2);border-bottom:1px solid var(--line)}
-.update-banner-txt{flex:1 1 240px;min-width:0;color:var(--text)}
+/* Écran standard : même bord gauche (--page-pad) et mêmes marges verticales partout (Parcourir, Amis, Paramètres, Créer). */
+.screen{box-sizing:border-box;width:100%;min-height:100%;padding:var(--sp-5) var(--page-pad) var(--sp-7)}
+/* Mise à jour prête : carte flottante en bas à droite, au-dessus du crédit modpack, superposée au contenu (ne le pousse pas). */
+.update-banner{position:fixed;right:20px;bottom:64px;z-index:30;display:flex;align-items:center;gap:14px;width:max-content;max-width:calc(100vw - 2 * var(--page-pad));padding:12px 14px 12px 16px;background:var(--surface);border:1px solid var(--line-strong);border-radius:var(--r-lg);box-shadow:var(--shadow-soft);animation:update-in var(--dur-enter) var(--ease)}
+.update-banner-ico{flex:none;width:36px;height:36px;display:grid;place-items:center;border-radius:var(--r-pill);background:var(--accent);color:var(--accent-ink)}
+.update-banner-body{display:flex;flex-direction:column;gap:2px;min-width:0}
+.update-banner-title{font:600 14px var(--font-ui);color:var(--text)}
+.update-banner-txt{font-size:12px;color:var(--muted)}
+.update-banner-txt.is-error{color:var(--danger)}
+.update-banner-actions{display:flex;flex:none;gap:8px;margin-left:6px}
+@keyframes update-in{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
+@media (prefers-reduced-motion:reduce){.update-banner{animation:none}}
+@media (max-width:640px){.update-banner{flex-wrap:wrap;width:auto;left:var(--page-pad);right:var(--page-pad);bottom:20px}.update-banner-actions{width:100%;margin:0;justify-content:flex-end}}
+/* Jeu ouvert dans sa propre fenêtre (repli de la zone de jeu) : message discret en bas à gauche, superposé au contenu. */
+.stage-notice{position:fixed;left:20px;bottom:20px;z-index:30;display:flex;align-items:center;gap:12px;max-width:min(440px,calc(100vw - 2 * var(--page-pad)));padding:10px 10px 10px 16px;background:var(--surface);border:1px solid var(--line-strong);border-radius:var(--r-lg);box-shadow:var(--shadow-soft);font-size:13px;line-height:1.4;color:var(--text);animation:update-in var(--dur-enter) var(--ease)}
+.stage-notice-txt{min-width:0}
+.stage-notice .cl-btn{flex:none}
+@media (prefers-reduced-motion:reduce){.stage-notice{animation:none}}
+
+/* Démarrage : contrôle de la session avant d'afficher l'écran Connexion */
+.boot{height:100%;display:grid;place-items:center;color:var(--muted);font-size:14px}
+
+/* Sélecteur de compte (barre de titre) : à gauche des boutons de fenêtre */
+.acc-sw{position:absolute;top:0;right:138px;height:var(--titlebar-h);display:flex;align-items:stretch;z-index:20}
+.acc-trigger{display:flex;align-items:center;gap:8px;padding:0 12px;border:0;background:transparent;color:var(--text);font:500 12px var(--font-ui);cursor:default;max-width:200px;transition:background var(--dur-feedback) var(--ease)}
+.acc-trigger:hover,.acc-trigger[aria-expanded="true"]{background:var(--surface-2)}
+.acc-trigger:focus-visible{outline-offset:-2px}
+.acc-av{width:18px;height:18px;flex:none;border-radius:4px;background:var(--surface-2);color:var(--accent);display:grid;place-items:center;font:700 11px var(--font-display)}
+.acc-trigger .acc-av{background:var(--surface)}
+.acc-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.acc-menu{position:absolute;top:100%;right:0;min-width:220px;padding:6px;display:flex;flex-direction:column;gap:2px;background:var(--surface);border:1px solid var(--line);border-radius:var(--r-md)}
+.acc-item{display:flex;align-items:center;gap:10px;min-height:36px;padding:0 10px;border:0;border-radius:4px;background:transparent;color:var(--text);font:500 13px var(--font-ui);text-align:left;cursor:pointer}
+.acc-item:hover{background:var(--surface-2)}
+.acc-item .acc-name{flex:1}
+.acc-tag{color:var(--muted);font-size:11px}
+.acc-ok{color:var(--accent);flex:none}
+.acc-manage{color:var(--muted);margin-top:4px;border-top:1px solid var(--line);border-radius:0 0 4px 4px}
+.acc-err{margin:4px 10px;color:var(--danger);font-size:12px}
+
+/* Panneau en jeu (#/overlay) : fenêtre sans cadre et transparente ; l'écran dessine sa propre carte. */

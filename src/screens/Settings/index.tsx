@@ -4,7 +4,10 @@ import { useScreenTitle, useServices, useShell } from "../../app/context";
 import { useBack } from "../../app/context";
 import { Button, Card, Field, Input } from "../../ui";
 import { UpdateSection } from "./UpdateSection";
-import type { Profile, Settings as BaseSettings } from "../../services/types";
+import { Logo } from "../Login/Logo";
+import { Accounts } from "./Accounts";
+import { useStageSupported } from "../../app/stage";
+import type { Settings as BaseSettings } from "../../services/types";
 
 export type SettingsData = BaseSettings;
 
@@ -15,6 +18,24 @@ export const RAM_MAX_MB = 65536;
 export function validateRam(mb: number): string | null {
   if (!Number.isInteger(mb) || mb < RAM_MIN_MB || mb > RAM_MAX_MB) {
     return `La mémoire doit être comprise entre ${RAM_MIN_MB} et ${RAM_MAX_MB} Mo.`;
+  }
+  return null;
+}
+
+export const DEFAULT_HOTKEY = "Ctrl+Shift+C";
+const HOTKEY_MODS = ["ctrl", "control", "alt", "shift", "super", "cmd", "command", "meta", "win", "cmdorctrl", "commandorcontrol"];
+
+/** Raccourci global du type « Ctrl+Shift+C » : au moins un modificateur et une seule touche. Message en français ou null. */
+export function validateHotkey(value: string): string | null {
+  const parts = value.split("+").map((p) => p.trim());
+  if (value.trim() === "") return "Indique un raccourci, par exemple Ctrl+Shift+C.";
+  if (parts.some((p) => p === "")) return "Raccourci invalide : écris les touches séparées par « + », par exemple Ctrl+Shift+C.";
+  const mods = parts.filter((p) => HOTKEY_MODS.includes(p.toLowerCase()));
+  const keys = parts.filter((p) => !HOTKEY_MODS.includes(p.toLowerCase()));
+  if (keys.length !== 1) return "Le raccourci doit contenir exactement une touche (lettre, chiffre, F1 à F24…).";
+  if (mods.length === 0) return "Ajoute au moins un modificateur (Ctrl, Alt ou Maj) pour ne pas gêner la frappe.";
+  if (!/^([a-z0-9]|f([1-9]|1\d|2[0-4])|space|tab|enter|escape|esc|backspace|delete|insert|home|end|pageup|pagedown|up|down|left|right|arrow(up|down|left|right))$/i.test(keys[0])) {
+    return `Touche « ${keys[0]} » non reconnue.`;
   }
   return null;
 }
@@ -52,7 +73,7 @@ export interface SettingsProps {
 export default function Settings({ testConnection, clearCache }: SettingsProps = {}) {
   useScreenTitle(null);
   const services = useServices();
-  const { params, navigate } = useShell();
+  const { params } = useShell();
   const uid = useId();
   const alive = useRef(true);
   const cancelClearRef = useRef<HTMLButtonElement>(null);
@@ -66,7 +87,6 @@ export default function Settings({ testConnection, clearCache }: SettingsProps =
   const initial = SECTIONS.find((s) => s.id === params.tab)?.id ?? "compte";
   const [section, setSection] = useState<SectionId>(initial);
   const [settings, setSettings] = useState<SettingsData | null>(null);
-  const [profile, setProfile] = useState<Profile | null>(null);
   const [saved, setSaved] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [code, setCode] = useState<string | null>(null);
@@ -76,7 +96,11 @@ export default function Settings({ testConnection, clearCache }: SettingsProps =
   const [cacheMsg, setCacheMsg] = useState("");
   const [javaPath, setJavaPath] = useState("");
   const [ram, setRam] = useState("");
-  const [loggingOut, setLoggingOut] = useState(false);
+  const [hotkey, setHotkey] = useState(DEFAULT_HOTKEY);
+  // Le jeu intégré n'existe que sous Windows : ailleurs le réglage n'aurait aucun effet, il n'est pas montré.
+  const stageSupported = useStageSupported();
+  // Sans jeu intégré il n'y a pas de panneau « en jeu » : son raccourci ne sert à rien, on le dit plutôt que de le laisser modifiable.
+  const embeddedOff = stageSupported && settings?.embedded_game === false;
 
   useEffect(() => {
     alive.current = true;
@@ -86,10 +110,10 @@ export default function Settings({ testConnection, clearCache }: SettingsProps =
         setSettings(s);
         setJavaPath(s.java_path ?? "");
         setRam(String(s.default_ram_mb));
+        setHotkey(s.overlay_hotkey || DEFAULT_HOTKEY);
       },
       (e) => { if (alive.current) setError(messageOf(e)); },
     );
-    services.authStatus().then((p) => { if (alive.current) setProfile(p); }, () => {});
     services.friendMyCode().then(
       (c) => { if (alive.current) setCode(c); },
       () => { /* code indisponible : affiché comme tel */ },
@@ -158,17 +182,6 @@ export default function Settings({ testConnection, clearCache }: SettingsProps =
     setConfirmClear(false);
   };
 
-  const logout = async () => {
-    setLoggingOut(true);
-    setError(null);
-    try {
-      await services.authLogout();
-      navigate("login");
-    } catch (e) {
-      if (alive.current) { setError(messageOf(e)); setLoggingOut(false); }
-    }
-  };
-
   // Réglages Java : enregistrés à la sortie du champ, seulement s'ils sont valides et modifiés.
   const javaError = validateJavaPath(javaPath) ?? undefined;
   const ramNum = Number(ram);
@@ -177,6 +190,12 @@ export default function Settings({ testConnection, clearCache }: SettingsProps =
     if (!settings || javaError) return;
     const next = javaPath.trim() === "" ? null : javaPath.trim();
     if (next !== (settings.java_path ?? null)) void update({ java_path: next });
+  };
+  const hotkeyError = validateHotkey(hotkey) ?? undefined;
+  const commitHotkey = () => {
+    if (!settings || hotkeyError) return;
+    const next = hotkey.trim();
+    if (next !== (settings.overlay_hotkey || DEFAULT_HOTKEY)) void update({ overlay_hotkey: next });
   };
   const commitRam = () => {
     if (!settings || ramError) return;
@@ -212,8 +231,8 @@ export default function Settings({ testConnection, clearCache }: SettingsProps =
   });
 
   return (
-    <div className="set">
-      <h1 ref={h1} tabIndex={-1} className="enter">Réglages</h1>
+    <div className="set screen">
+      <h1 ref={h1} tabIndex={-1} className="enter">Paramètres</h1>
       <div role="tablist" aria-label="Sections des réglages" className="set-tabs enter" style={{ "--i": 1 } as CSSProperties}>
         {SECTIONS.map((s, i) => (
           <button
@@ -236,20 +255,7 @@ export default function Settings({ testConnection, clearCache }: SettingsProps =
       {error && <p className="set-error" role="alert">{error}</p>}
 
       <div {...panel("compte")}>
-        <Card as="section" aria-label="Compte Microsoft" className="set-profile">
-          <span className="set-badge" aria-hidden="true">{(profile?.name ?? "?").slice(0, 1).toUpperCase()}</span>
-          <div>
-            {profile ? (
-              <>
-                <div className="name">{profile.name} · {profile.kind === "online" ? "Microsoft" : "Hors ligne"}</div>
-                <div className={profile.kind === "online" ? "set-ok" : "set-warn"}>{profile.kind === "online" ? "Connecté" : "Profil hors ligne"}</div>
-              </>
-            ) : (
-              <div className="set-warn">Aucun compte connecté</div>
-            )}
-          </div>
-          <Button variant="secondary" loading={loggingOut} onClick={() => { void logout(); }}>Se déconnecter</Button>
-        </Card>
+        <Accounts onError={setError} />
         <Card as="section" aria-label="Code ami" className="set-field">
           <b id={`${uid}-fc`}>Mon code ami</b>
           <div className="set-cr">
@@ -280,6 +286,31 @@ export default function Settings({ testConnection, clearCache }: SettingsProps =
             <div className="set-txt"><b>Ouvrir mon monde au réseau local automatiquement</b><span>Quand tu entres dans un monde solo, Cubelink l'ouvre pour que tes amis puissent te rejoindre. Appliqué au prochain lancement du jeu.</span></div>
             <input type="checkbox" className="set-check" disabled={dis} checked={settings?.lan_auto !== false} onChange={(e) => void update({ lan_auto: e.target.checked })} />
           </label>
+        </Card>
+        <Card as="section" aria-label="Raccourci jeu et launcher" className="set-field">
+          {stageSupported && (
+            <label className="set-row" style={{ cursor: "pointer" }}>
+              <div className="set-txt"><b>Jeu intégré</b><span>Le jeu s'affiche dans la fenêtre de Cubelink. Désactive si le jeu ne s'affiche pas correctement. Appliqué au prochain lancement du jeu.</span></div>
+              <input type="checkbox" className="set-check" disabled={dis} checked={settings?.embedded_game !== false} onChange={(e) => void update({ embedded_game: e.target.checked })} />
+            </label>
+          )}
+          <label className="set-row" style={{ cursor: "pointer" }}>
+            <div className="set-txt"><b>Raccourci jeu et launcher</b><span>Pendant une partie, un raccourci bascule entre le jeu et le launcher (écran Amis : invitations, rejoindre un ami), même quand le jeu a le clavier.</span></div>
+            <input type="checkbox" className="set-check" disabled={dis} checked={settings?.overlay_enabled !== false} onChange={(e) => void update({ overlay_enabled: e.target.checked })} />
+          </label>
+          <Field
+            label="Raccourci du panneau"
+            hint={embeddedOff
+              ? "Indisponible : le panneau s'ouvre par-dessus le jeu intégré. Active « Jeu intégré » pour t'en servir."
+              : "Exemple : Ctrl+Shift+C. Windows uniquement : le jeu est affiché dans la fenêtre du launcher."}
+            error={embeddedOff ? undefined : hotkeyError}
+          >
+            {(p) => (
+              <Input {...p} type="text" autoComplete="off" spellCheck={false} disabled={dis || embeddedOff || settings?.overlay_enabled === false}
+                value={hotkey} onChange={(e) => setHotkey(e.target.value)} onBlur={commitHotkey}
+                onKeyDown={(e) => { if (e.key === "Enter") commitHotkey(); }} />
+            )}
+          </Field>
         </Card>
         <details className="set-more">
           <summary>En savoir plus</summary>
@@ -337,9 +368,7 @@ export default function Settings({ testConnection, clearCache }: SettingsProps =
 
       <div {...panel("apropos")}>
         <Card className="set-about">
-          <svg width="40" height="35" viewBox="0 0 160 140" aria-hidden="true">
-            <polygon points="80,6 135.43,38 80,70 24.57,38" fill="var(--accent-hover)" /><polygon points="24.57,38 80,70 80,134 24.57,102" fill="var(--accent)" /><polygon points="80,70 135.43,38 135.43,102 80,134" fill="var(--accent-edge)" />
-          </svg>
+          <Logo width={40} />
           <div><b>Cubelink</b><span>Launcher Minecraft pour jouer avec tes amis</span></div>
           <a className="cl-btn cl-btn-secondary set-linkbtn" href="#/legal">Mentions légales</a>
         </Card>

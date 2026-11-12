@@ -1,0 +1,10 @@
+# cubelink-lanmap srg  (MC 1.11.2 ; genere par tools/srg/gen.py depuis mcp-1.11.2-srg, verifie sur client.jar)
+C minecraft net.minecraft.client.Minecraft
+C integrated net.minecraft.server.integrated.IntegratedServer
+M mc.getInstance func_71410_x 0 net.minecraft.client.Minecraft
+M mc.getSingleplayerServer func_71401_C 0 net.minecraft.server.integrated.IntegratedServer
+F mc.player field_71439_g
+M is.shareToLan func_71206_a 2 java.lang.String
+M is.isPublished func_71344_c 0 boolean
+M server.getDefaultGameType func_71265_f 0 net.minecraft.world.GameType
+M mc.schedule func_152344_a 1 com.google.common.util.concurrent.ListenableFuture

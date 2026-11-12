@@ -24,8 +24,10 @@ export function createTauriServices(): Services {
     authPollLogin: () => invoke("auth_poll_login"),
     authLogout: () => invoke("auth_logout"),
     authOfflineLogin: (name) => invoke("auth_offline_login", { name }),
-    // `test_state` n'est enregistrée qu'en mode test : son absence = pas de connexion hors ligne.
-    offlineAvailable: () => invoke("test_state").then(() => true, () => false),
+    offlineAvailable: async () => true,
+    authAccounts: () => invoke("auth_accounts"),
+    authSwitch: (id) => invoke("auth_switch", { id }),
+    authRemove: (id) => invoke("auth_remove", { id }),
 
     instancesList: () => invoke("instances_list"),
     instancesCreate: (input) => invoke("instances_create", { ...input }),
@@ -49,6 +51,11 @@ export function createTauriServices(): Services {
     friendAccept: (public_key) => invoke("friend_accept", { public_key }),
     friendRefuse: (public_key) => invoke("friend_refuse", { public_key }),
     friendRefuseAll: () => invoke("friend_refuse_all"),
+    friendInvite: (public_key) => invoke("friend_invite", { public_key }),
+    friendInvites: () => invoke("friend_invites"),
+    friendInviteDismiss: (id) => invoke("friend_invite_dismiss", { id }),
+    gameSwitch: (instance_id) => invoke("game_switch", { instance_id }),
+    gameJoinFriend: (public_key, instance_id) => invoke("game_join_friend", { public_key, instance_id }),
 
     joinPlan: (friend_public_key) => invoke("join_plan", { friend_public_key }),
     joinStart: (friend_public_key) => invoke("join_start", { friend_public_key }),
@@ -75,6 +82,7 @@ export function createTauriServices(): Services {
     },
 
     onAuthState: (cb) => on("auth://state", cb),
+    onAccountsState: (cb) => on("auth://accounts", cb),
     onLaunchState: (cb) => on("launch://state", cb),
     onLaunchLog: (cb) => on("launch://log", cb),
     onImportWarning: (cb) => on("import://warning", cb),
@@ -83,6 +91,8 @@ export function createTauriServices(): Services {
     onTransferProgress: (cb) => on("transfer://progress", cb),
     onFriendPresence: (cb) => on("friend://presence", cb),
     onFriendRequest: (cb) => on("friend://request", cb),
+    onFriendInvite: (cb) => on("friend://invite", cb),
+    onFriendInvites: (cb) => on("friend://invites", cb),
     onUnknownMods: (cb) => on("transfer://unknown_mods", cb),
     onTransferErrorDetails: (cb) => on("transfer://error_details", cb),
     updateState: () => invoke("update_state"),

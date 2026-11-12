@@ -26,8 +26,8 @@ export default function Legal() {
   }, []);
 
   return (
-    <div className="legal">
-      <h1 className="enter" ref={title} tabIndex={-1}>Réglages</h1>
+    <div className="legal screen">
+      <h1 className="enter" ref={title} tabIndex={-1}>Paramètres</h1>
       <nav className="legal-nav enter" aria-label="Sections des réglages" style={{ "--i": 1 } as React.CSSProperties}>
         {TABS.map((t) => (
           <a key={t.id} className="legal-tab" href={`#/settings?tab=${t.id}`} aria-current={t.id === "apropos" ? "page" : undefined}>{t.label}</a>

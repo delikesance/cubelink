@@ -6,8 +6,8 @@ import { test, expect, waitForRoute } from './harness/fixtures';
 import { SCREENS, prepare, gotoScreen, tabThrough, smallTargets, contrastIssues, unnamedControls, type Screen } from './helpers/e2e4-lib';
 
 const byId = (id: string) => SCREENS.find((s) => s.id === id)!;
-/** Boutons du bandeau de fenetre (46x36, taille native Windows) et lien d'evitement (visible au focus seulement). */
-const CHROME = /^(button\.tb-btn|a\.skip-link)/;
+/** Boutons du bandeau de fenetre (46x36, taille native Windows), selecteur de compte du bandeau (36 px de haut comme lui) et lien d'evitement (visible au focus seulement). */
+const CHROME = /^(button\.tb-btn|button\.acc-trigger|a\.skip-link)/;
 
 test.describe('T8 accessibilite clavier', () => {
   test('parcours Tab de chaque ecran : ordre logique, focus visible #6FD3F0, aucun piege', async ({ appA }) => {

@@ -12,6 +12,7 @@ use core_lib::unknown_mods::UnknownReport;
 use core_lib::types::{Error, Friend, Manifest, ManifestFile, Presence, TransferProgress, VerifyCode};
 use p2p_lib::transfer::plan::Plan;
 use p2p_lib::friend_code::FriendCodePayload;
+use p2p_lib::invite::InviteMessage;
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 pub type ProgressFn = Arc<dyn Fn(TransferProgress) + Send + Sync>;
@@ -105,6 +106,10 @@ pub trait P2pBackend: Send + Sync {
     }
     /// Prévient l'autre côté qu'on a accepté sa demande (repli local).
     fn notify_accepted(&self, friend: Friend) -> BoxFuture<'_, Result<(), String>>;
+    /// Envoie une invitation à rejoindre notre monde à un ami (clé hex). Par défaut : sans effet.
+    fn send_invite(&self, _public_key: String, _msg: InviteMessage) -> BoxFuture<'_, Result<(), String>> {
+        Box::pin(async { Ok(()) })
+    }
     /// Récupère le manifeste du monde de l'ami.
     fn fetch_manifest(&self, friend_public_key: String) -> BoxFuture<'_, Result<HostManifest, String>>;
     /// Invité, APRÈS réception : mods (chemins) hors Modrinth, calculés sur les sha1 locaux des jars reçus.

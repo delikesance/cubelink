@@ -191,7 +191,7 @@ export default function Create({ pickMrpack }: CreateProps = {}) {
   const idx = Math.max(0, LOADERS.findIndex((l) => l.value === loader));
 
   return (
-    <div className="create" ref={rootRef}>
+    <div className="create screen" ref={rootRef}>
       {view === "choose" ? (
         <div className="create-wrap" aria-busy={busy}>
           <header className="create-head enter">

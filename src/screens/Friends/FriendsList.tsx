@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import "./friendslist.css";
 import { useServices, useShell } from "../../app/context";
-import { IconButton, Tooltip } from "../../ui";
+import { canInviteFrom, hostingKeys, useHostState, useInvites } from "../../app/useInvites";
+import { Badge, Button, IconButton, Tooltip } from "../../ui";
 import { Avatar } from "./Avatar";
 import type { FriendWithPresence } from "../../services/types";
 
@@ -15,6 +16,16 @@ export default function FriendsList() {
   const { navigate } = useShell();
   const [list, setList] = useState<FriendWithPresence[] | null>(null);
   const [error, setError] = useState(false);
+  const canInvite = canInviteFrom(useHostState(services));
+  const hosting = hostingKeys(useInvites(services));
+  const [inviteMsg, setInviteMsg] = useState("");
+  const invite = (name: string, publicKey: string) => {
+    setInviteMsg("");
+    services.friendInvite(publicKey).then(
+      () => setInviteMsg(`Invitation envoyée à ${name}.`),
+      (e: unknown) => setInviteMsg(e instanceof Error && e.message ? e.message : `Impossible d'inviter ${name}.`),
+    );
+  };
 
   useEffect(() => {
     let alive = true;
@@ -32,6 +43,7 @@ export default function FriendsList() {
   return (
     <section aria-labelledby="fl-title" className="fl">
       <h2 id="fl-title" className="fl-title">Tes amis · {list.length}</h2>
+      <div className="fl-state" role="status" aria-live="polite">{inviteMsg}</div>
       <ul className="fl-list">
         {list.map(({ friend, presence }, i) => {
           const online = presence === "online";
@@ -40,9 +52,12 @@ export default function FriendsList() {
               <Avatar name={friend.name} size={44} presence={online ? "online" : "offline"} />
               <div className="fl-who">
                 <Tooltip text={friend.name}><span className="fl-name" tabIndex={0}>{friend.name}</span></Tooltip>
-                <span className={online ? "fl-state is-on" : "fl-state"}>{online ? "En ligne" : "Hors ligne"}</span>
+                <span className={online ? "fl-state is-on" : "fl-state"}>{online ? "En ligne" : "Hors ligne"}{hosting.has(friend.public_key) && online ? <> <Badge tone="accent">Héberge</Badge></> : null}</span>
                 {!online && <span id={`fl-why-${i}`} className="fl-state">Demande-lui d'ouvrir Cubelink pour le rejoindre.</span>}
               </div>
+              {online && canInvite && (
+                <Button variant="secondary" aria-label={`Inviter ${friend.name}`} onClick={() => invite(friend.name, friend.public_key)}>Inviter</Button>
+              )}
               <IconButton variant="secondary" aria-label={`Rejoindre ${friend.name}`} icon={<Play />} disabled={!online} aria-describedby={online ? undefined : `fl-why-${i}`}
                 onClick={() => navigate("join", { friend: friend.public_key })} />
             </li>

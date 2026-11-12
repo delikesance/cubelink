@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Shell } from "../../app/shell";
 import { createFakeServices } from "../../services/fake";
@@ -24,7 +24,7 @@ describe("validation", () => {
 describe("écran Paramètres", () => {
   it("titre, 5 onglets, flèches du clavier, lien Mentions légales", () => {
     render(<Shell services={createFakeServices({ tickMs: 0 })} />);
-    expect(screen.getByRole("heading", { name: "Réglages", level: 1 })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Paramètres", level: 1 })).toBeTruthy();
     const tabs = screen.getAllByRole("tab");
     expect(tabs.map((t) => t.textContent)).toEqual(["Compte", "Réseau", "Java", "Stockage", "À propos"]);
     expect(tabs[0].getAttribute("aria-selected")).toBe("true");
@@ -44,13 +44,17 @@ describe("écran Paramètres", () => {
     expect(screen.getByRole("tab", { name: "Java" }).getAttribute("aria-selected")).toBe("true");
   });
 
-  it("Compte : profil connecté et déconnexion vers l'écran de connexion", async () => {
+  it("Compte : un compte hors ligne est listé comme actif ; retirer le dernier ramène à la connexion", async () => {
     const svc = createFakeServices({ tickMs: 0 });
     await svc.authOfflineLogin("Alex");
-    const out = vi.spyOn(svc, "authLogout");
+    const out = vi.spyOn(svc, "authRemove");
     render(<Shell services={svc} />);
-    expect(await screen.findByText(/Alex · Hors ligne/)).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Se déconnecter" }));
+    const list = await screen.findByRole("list");
+    expect(within(list).getByText("Alex")).toBeTruthy();
+    expect(within(list).getByText("Hors ligne")).toBeTruthy();
+    expect(within(list).getByText("Actif")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Retirer Alex" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirmer le retrait de Alex" }));
     await waitFor(() => expect(out).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(window.location.hash).toBe("#/login"));
   });

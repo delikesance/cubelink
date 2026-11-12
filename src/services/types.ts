@@ -8,6 +8,11 @@ export type Profile =
   | { kind: "online"; name: string; uuid: string }
   | { kind: "offline"; name: string; uuid: string };
 
+/** Un compte enregistré (Microsoft ou hors ligne). */
+export interface AccountInfo { id: string; kind: "online" | "offline"; name: string; uuid: string }
+/** Comptes enregistrés et identifiant du compte actif (null si aucun n'est actif). */
+export interface AccountsState { accounts: AccountInfo[]; active: string | null }
+
 export interface Instance {
   id: string;
   name: string;
@@ -42,6 +47,16 @@ export type VerifyCode = string;
 
 export type TrustLevel = "ask" | "always";
 export interface Friend { public_key: string; name: string; trust: TrustLevel; added_at: number }
+/** Invitation reçue à rejoindre le monde d'un ami (timestamps en secondes Unix). */
+export interface Invite {
+  id: string;
+  public_key: string;
+  name: string;
+  world_name: string;
+  minecraft: string;
+  received_at: number;
+  expires_at: number;
+}
 export interface FriendRequest {
   public_key: string;
   name: string;
@@ -78,6 +93,12 @@ export interface Settings {
   discovery: boolean;
   /** Ouvrir mon monde solo au réseau local automatiquement (agent Java, instances perso). Défaut true. */
   lan_auto: boolean;
+  /** Panneau en jeu (fenêtre superposée au jeu) activé. Défaut true. */
+  overlay_enabled: boolean;
+  /** Raccourci global du panneau en jeu, ex. « Ctrl+Shift+C ». */
+  overlay_hotkey: string;
+  /** Jeu intégré (Windows) : le jeu s'affiche dans la fenêtre de Cubelink. Pris en compte au prochain lancement. Défaut true. */
+  embedded_game: boolean;
 }
 
 // Entrées / sorties de commandes
@@ -152,8 +173,14 @@ export interface Services {
   authPollLogin(): Promise<Profile>;
   authLogout(): Promise<void>;
   authOfflineLogin(name: string): Promise<Profile>;
-  /** La connexion hors ligne n'existe qu'en mode test (`CUBELINK_TEST_MODE=1`) : faux dans l'application normale. */
+  /** Les comptes hors ligne sont libres : toujours vrai (méthode conservée pour compatibilité). */
   offlineAvailable(): Promise<boolean>;
+  /** Comptes enregistrés et compte actif. */
+  authAccounts(): Promise<AccountsState>;
+  /** Rend le compte actif ; renvoie son profil. */
+  authSwitch(id: string): Promise<Profile>;
+  /** Retire un compte. */
+  authRemove(id: string): Promise<void>;
 
   instancesList(): Promise<Instance[]>;
   instancesCreate(input: CreateInstanceInput): Promise<Instance>;
@@ -180,6 +207,15 @@ export interface Services {
   friendAccept(publicKey: string): Promise<void>;
   friendRefuse(publicKey: string): Promise<void>;
   friendRefuseAll(): Promise<number>;
+  /** Invite un ami dans mon monde ouvert (rejette en français si aucun monde n'est ouvert). */
+  friendInvite(publicKey: string): Promise<void>;
+  /** Invitations reçues en attente. */
+  friendInvites(): Promise<Invite[]>;
+  friendInviteDismiss(id: string): Promise<void>;
+  /** Ferme le jeu en cours puis lance l'instance. */
+  gameSwitch(instanceId: string): Promise<void>;
+  /** Ferme le jeu si besoin puis rejoint l'ami (plan, transfert, jeu). */
+  gameJoinFriend(publicKey: string, instanceId?: string): Promise<void>;
 
   joinPlan(friendPublicKey: string): Promise<JoinPlan>;
   joinStart(friendPublicKey: string): Promise<void>;
@@ -203,6 +239,8 @@ export interface Services {
   pickFiles(opts: PickFilesOptions): Promise<string[]>;
 
   onAuthState(cb: (p: Profile | null) => void): Unsubscribe;
+  /** Changements de la liste des comptes ou du compte actif. */
+  onAccountsState(cb: (s: AccountsState) => void): Unsubscribe;
   onLaunchState(cb: (s: LaunchState) => void): Unsubscribe;
   onLaunchLog(cb: (e: LaunchLogEvent) => void): Unsubscribe;
   onImportWarning(cb: (e: ImportWarningEvent) => void): Unsubscribe;
@@ -213,6 +251,9 @@ export interface Services {
   onTransferProgress(cb: (p: TransferProgress) => void): Unsubscribe;
   onFriendPresence(cb: (e: PresenceEvent) => void): Unsubscribe;
   onFriendRequest(cb: (r: FriendRequest) => void): Unsubscribe;
+  onFriendInvite(cb: (i: Invite) => void): Unsubscribe;
+  /** Liste complète des invitations à chaque changement. */
+  onFriendInvites(cb: (l: Invite[]) => void): Unsubscribe;
   onUnknownMods(cb: (e: UnknownModsEvent) => void): Unsubscribe;
   onTransferErrorDetails(cb: (e: TransferErrorDetails) => void): Unsubscribe;
   onBrowseProgress(cb: (e: BrowseProgressEvent) => void): Unsubscribe;

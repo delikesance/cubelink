@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["core", "p2p", "src-tauri"]
+members = ["core", "p2p", "src-tauri", "host"]
 exclude = ["spike/p2p-tunnel"]
 
 [workspace.package]
@@ -33,3 +33,19 @@ tracing = "0.1"
 tempfile = "3"
 wiremock = "0.6"
 proptest = "1"
+
+# Le rideau de chargement dessine ~30 images/s : ses dependances de rendu restent optimisees meme en debug.
+[profile.dev.package.tiny-skia]
+opt-level = 3
+[profile.dev.package.ab_glyph_rasterizer]
+opt-level = 3
+[profile.dev.package.ab_glyph]
+opt-level = 3
+[profile.dev.package.cubelink-host]
+opt-level = 3
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = true
+opt-level = 3

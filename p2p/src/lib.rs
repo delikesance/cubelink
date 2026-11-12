@@ -6,6 +6,7 @@ pub mod friends_db;
 pub mod requests;
 pub mod friend_proto;
 pub mod presence;
+pub mod invite;
 pub mod tunnel;
 pub mod relay;
 pub mod transfer;

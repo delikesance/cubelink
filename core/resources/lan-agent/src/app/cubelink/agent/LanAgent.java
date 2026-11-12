@@ -11,7 +11,7 @@ import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.HashMap;
 import java.util.Map;
-import java.util.Set;
+import java.util.concurrent.Callable;
 
 /**
  * Agent Java de Cubelink : ouvre automatiquement le monde solo au reseau local.
@@ -51,6 +51,9 @@ public final class LanAgent {
         MOJANG_MEMBER.put("is.isPublished", "isPublished");
         MOJANG_MEMBER.put("server.getDefaultGameType", "getDefaultGameType");
         MOJANG_MEMBER.put("loop.execute", "execute");
+        // Branche legacy (Forge 1.7.10-1.12.2) : noms SRG fournis uniquement par le fichier map=.
+        MOJANG_MEMBER.put("is.shareToLan", "shareToLAN");
+        MOJANG_MEMBER.put("mc.schedule", "addScheduledTask");
     }
 
     /** Correspondance fournie par Cubelink (vide : noms Mojang). */
@@ -105,6 +108,10 @@ public final class LanAgent {
                 if (jm.find()) join = jm.group(1);
             }
             final String target = join;
+            if (target != null && isLegacy()) {
+                log("join legacy : gere par --server/--port");
+                return;
+            }
             Thread t = new Thread(() -> {
                 if (target != null) joinLoop(inst, target);
                 else loop(inst);
@@ -119,6 +126,11 @@ public final class LanAgent {
 
     public static void agentmain(String args, Instrumentation inst) {
         premain(args, inst);
+    }
+
+    /** Mode legacy (Forge 1.7.10-1.12.2, noms SRG) : la table fournit `is.shareToLan` mais pas `is.publishServer`. */
+    static boolean isLegacy() {
+        return MAP_MEMBER.containsKey("is.shareToLan") && !MAP_MEMBER.containsKey("is.publishServer");
     }
 
     static void loadMap(String file) throws Exception {
@@ -204,18 +216,36 @@ public final class LanAgent {
         return null;
     }
 
-    /** Ouvre le paquet a l'agent si le module le protege (sans effet sinon). */
-    static void open(Instrumentation inst, Class<?> c) {
+    /** Java 9+ (modules) ? Sur Java 8, tout le code modules (classe Modules9) est ignore. */
+    static final boolean JAVA9 = javaMajor() >= 9;
+
+    static int javaMajor() {
         try {
-            Module m = c.getModule();
-            if (!m.isNamed()) return;
-            Module me = LanAgent.class.getModule();
-            if (m.isOpen(c.getPackageName(), me)) return;
-            if (inst.isModifiableModule(m)) {
-                inst.redefineModule(m, Set.of(), Map.of(), Map.of(c.getPackageName(), Set.of(me)), Set.of(), Map.of());
-            }
+            String v = System.getProperty("java.specification.version", "8");
+            if (v.startsWith("1.")) v = v.substring(2);
+            int dot = v.indexOf('.');
+            return Integer.parseInt(dot > 0 ? v.substring(0, dot) : v);
+        } catch (Throwable t) {
+            return 8;
+        }
+    }
+
+    /** Ouvre le paquet a l'agent si le module le protege (sans effet sinon, et sans effet sur Java 8). */
+    static void open(Instrumentation inst, Class<?> c) {
+        if (!JAVA9) return;
+        try {
+            Modules9.open(inst, c);
         } catch (Throwable ignored) {
             // tente quand meme
+        }
+    }
+
+    static String moduleOf(Class<?> c) {
+        if (!JAVA9) return "(Java 8, sans modules)";
+        try {
+            return Modules9.describe(c);
+        } catch (Throwable t) {
+            return "?";
         }
     }
 
@@ -370,7 +400,7 @@ public final class LanAgent {
                         }
                         continue;
                     }
-                    log("classe Minecraft trouvee : " + mcClass.getName() + " (module " + mcClass.getModule() + ", chargeur " + mcClass.getClassLoader() + ")");
+                    log("classe Minecraft trouvee : " + mcClass.getName() + " (module " + moduleOf(mcClass) + ", chargeur " + mcClass.getClassLoader() + ")");
                     loggedClass = true;
                     open(inst, mcClass);
                     getInstance = findMethod(mcClass, "mc.getInstance", 0, Boolean.TRUE);
@@ -404,7 +434,7 @@ public final class LanAgent {
                 if (++settled < SETTLE_POLLS) continue;
                 lastServer = server;
                 settled = 0;
-                publishLater(inst, server);
+                publishLater(inst, mc, server);
             } catch (InterruptedException e) {
                 return;
             } catch (Throwable t) {
@@ -418,9 +448,81 @@ public final class LanAgent {
         }
     }
 
-    private static void publishLater(Instrumentation inst, Object server) throws Exception {
+    /**
+     * Branche legacy (Forge 1.7.10-1.12.2) : `IntegratedServer.shareToLAN(GameType, boolean)` renvoie le port (String).
+     * Appel sur le thread client via le planificateur de Minecraft (addScheduledTask / func_152343_a), sinon direct.
+     */
+    private static void publishLegacy(Instrumentation inst, Object mc, Object server) throws Exception {
+        Class<?> sc = server.getClass();
+        final Method share = findMethod(sc, "is.shareToLan", 2, Boolean.FALSE);
+        final Method isPublished = findMethod(sc, "is.isPublished", 0, Boolean.FALSE);
+        Method getGameType = findMethod(sc, "server.getDefaultGameType", 0, Boolean.FALSE);
+        if (share == null || getGameType == null) {
+            log("methodes legacy introuvables (shareToLAN=" + (share != null) + ", getGameType=" + (getGameType != null)
+                + ") : version non geree, partage a ouvrir a la main");
+            return;
+        }
+        open(inst, share.getDeclaringClass());
+        open(inst, getGameType.getDeclaringClass());
+        log("signature de shareToLAN : " + share.toGenericString());
+        if (isPublished != null && Boolean.TRUE.equals(isPublished.invoke(server))) {
+            log("monde deja ouvert au reseau local, rien a faire");
+            return;
+        }
+        final Method sched = findScheduler(mc.getClass());
+        final boolean callable = sched != null && sched.getParameterTypes()[0] == Callable.class;
+        final Object gameType = getGameType.invoke(server);
+        log("ouverture du monde au reseau local (legacy, planificateur " + (sched == null ? "aucun, appel direct" : sched.getName()) + ")");
+        final Runnable job = () -> {
+            try {
+                if (isPublished != null && Boolean.TRUE.equals(isPublished.invoke(server))) return;
+                Object r = share.invoke(server, gameType, false);
+                String port = r == null ? "" : r.toString().trim();
+                if (port.matches("[0-9]{1,5}")) log("Published LAN server on port " + Integer.parseInt(port));
+                else log("shareToLAN n'a pas renvoye de port (" + r + ") : partage non confirme");
+            } catch (Throwable t) {
+                log("echec de shareToLAN : " + cause(t));
+            }
+        };
+        if (sched == null) {
+            job.run();
+        } else {
+            open(inst, sched.getDeclaringClass());
+            Object arg;
+            if (callable) {
+                arg = (Callable<Object>) () -> {
+                    job.run();
+                    return null;
+                };
+            } else {
+                arg = job;
+            }
+            sched.invoke(mc, arg);
+        }
+    }
+
+    /** Planificateur du thread client : methode `mc.schedule` a 1 parametre Runnable (1.8+) ou Callable (1.7.10). */
+    static Method findScheduler(Class<?> mcClass) {
+        for (String[] n : memberNames("mc.schedule")) {
+            Method callableM = null;
+            for (Method m : mcClass.getMethods()) {
+                if (!m.getName().equals(n[0]) || m.getParameterCount() != 1 || Modifier.isStatic(m.getModifiers())) continue;
+                Class<?> p = m.getParameterTypes()[0];
+                if (p == Runnable.class) return m;
+                if (p == Callable.class) callableM = m;
+            }
+            if (callableM != null) return callableM;
+        }
+        return null;
+    }
+
+    private static void publishLater(Instrumentation inst, Object mc, Object server) throws Exception {
         Class<?> sc = server.getClass();
         open(inst, sc);
+        if (isLegacy()) {
+            publishLegacy(inst, mc, server);
+            return;
+        }
         Method isPublished = findMethod(sc, "is.isPublished", 0, Boolean.FALSE);
         Method getGameType = findMethod(sc, "server.getDefaultGameType", 0, Boolean.FALSE);
         Method publish = findMethod(sc, "is.publishServer", 3, Boolean.FALSE);
@@ -505,7 +607,12 @@ public final class LanAgent {
             sb.append(f == null ? "  MANQUE mc.player\n" : "  OK mc.player : " + f + "\n");
             if (f == null) missing++;
         }
-        if (is != null) {
+        if (is != null && isLegacy()) {
+            missing += probeMember(sb, "is.shareToLan", findMethod(is, "is.shareToLan", 2, Boolean.FALSE));
+            missing += probeMember(sb, "is.isPublished", findMethod(is, "is.isPublished", 0, Boolean.FALSE));
+            missing += probeMember(sb, "server.getDefaultGameType", findMethod(is, "server.getDefaultGameType", 0, Boolean.FALSE));
+            missing += probeMember(sb, "mc.schedule", mc == null ? null : findScheduler(mc));
+        } else if (is != null) {
             missing += probeMember(sb, "is.publishServer", findMethod(is, "is.publishServer", 3, Boolean.FALSE));
             missing += probeMember(sb, "is.isPublished", findMethod(is, "is.isPublished", 0, Boolean.FALSE));
             missing += probeMember(sb, "server.getDefaultGameType", findMethod(is, "server.getDefaultGameType", 0, Boolean.FALSE));

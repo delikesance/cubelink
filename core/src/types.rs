@@ -150,6 +150,19 @@ pub struct FriendRequest {
     pub received_at: i64,
 }
 
+/// Invitation reçue d'un ami à rejoindre son monde (file en mémoire, jamais persistée).
+/// Dates en secondes depuis l'epoch Unix.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Invite {
+    pub id: String,
+    pub public_key: String,
+    pub name: String,
+    pub world_name: String,
+    pub minecraft: String,
+    pub received_at: i64,
+    pub expires_at: i64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Presence {
@@ -207,6 +220,26 @@ pub struct Settings {
     /// amis puissent le rejoindre sans manipulation. `true` par défaut (fichiers de réglages anciens : `true`).
     #[serde(default = "default_lan_auto")]
     pub lan_auto: bool,
+    /// Panneau superposé au jeu (amis, invitations) ouvert par un raccourci global. `true` par défaut.
+    #[serde(default = "default_overlay_enabled")]
+    pub overlay_enabled: bool,
+    /// Raccourci global du panneau (format du plugin global-shortcut, p. ex. `Ctrl+Shift+C`).
+    #[serde(default = "default_overlay_hotkey")]
+    pub overlay_hotkey: String,
+    /// Jeu intégré (Windows) : le jeu s'affiche dans la fenêtre du launcher. Lu au lancement du jeu : un jeu déjà
+    /// ouvert n'est pas touché. `true` par défaut (fichiers de réglages anciens : `true`).
+    #[serde(default = "default_embedded_game")]
+    pub embedded_game: bool,
+}
+
+pub const DEFAULT_OVERLAY_HOTKEY: &str = "Ctrl+Shift+C";
+
+fn default_overlay_enabled() -> bool {
+    true
+}
+
+fn default_overlay_hotkey() -> String {
+    DEFAULT_OVERLAY_HOTKEY.to_string()
 }
 
 fn default_discovery() -> bool {
@@ -217,9 +250,23 @@ fn default_lan_auto() -> bool {
     true
 }
 
+fn default_embedded_game() -> bool {
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn anciens_reglages_sans_overlay_prennent_les_defauts() {
+        let old = r#"{"language":"fr","default_ram_mb":4096,"java_path":null,"trust_default":"ask","allow_relay":true,"close_on_launch":false,"relay_only":false,"share_mods":true}"#;
+        let s: Settings = serde_json::from_str(old).unwrap();
+        assert!(s.overlay_enabled);
+        assert_eq!(s.overlay_hotkey, "Ctrl+Shift+C");
+        assert!(s.discovery && s.lan_auto);
+        assert!(s.embedded_game);
+    }
 
     #[test]
     fn manifest_roundtrip() {

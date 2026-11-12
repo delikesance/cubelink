@@ -1,5 +1,5 @@
 /* Parcourir (C1-C3) : tokens uniquement, panneaux opaques, pas de scintillement. */
-.browse{box-sizing:border-box;padding-block:var(--sp-5) var(--sp-6);color:var(--text);font-family:var(--font-ui);display:flex;flex-direction:column;gap:var(--sp-4)}
+.browse{color:var(--text);font-family:var(--font-ui);display:flex;flex-direction:column;gap:var(--sp-4)}
 .br-head{display:flex;align-items:center;justify-content:space-between;gap:var(--sp-4);flex-wrap:wrap}
 .br-head h1{margin:0;font:700 28px/1.2 var(--font-display)}
 .br-source-sel{display:inline-flex;padding:4px;gap:4px;border:1px solid var(--line);border-radius:var(--r-pill);background:var(--surface)}

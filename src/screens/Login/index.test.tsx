@@ -4,7 +4,8 @@ import { Shell } from "../../app/shell";
 import { createFakeServices } from "../../services/fake";
 import type { Services } from "../../services/types";
 
-beforeEach(() => { window.location.hash = ""; });
+// Arrivée volontaire sur Connexion (déconnexion) : pas de contrôle de session au démarrage.
+beforeEach(() => { window.location.hash = "#/login"; });
 afterEach(() => { cleanup(); vi.useRealTimers(); });
 
 const btn = () => screen.getByRole("button", { name: /Se connecter avec Microsoft/ });
@@ -99,11 +100,32 @@ describe("écran Connexion", () => {
     await waitFor(() => expect(window.location.hash).toBe("#/main"));
   });
 
-  it("hors ligne indisponible (application normale) : le bouton n'est pas proposé", async () => {
+  it("hors ligne : toujours proposé, même si offlineAvailable répond faux", async () => {
     const base = createFakeServices({ tickMs: 0 });
     render(<Shell services={{ ...base, offlineAvailable: async () => false }} />);
-    await screen.findByRole("button", { name: "Se connecter avec Microsoft" });
-    await new Promise((r) => setTimeout(r, 20));
-    expect(screen.queryByRole("button", { name: "Jouer hors ligne" })).toBeNull();
+    expect(await screen.findByRole("button", { name: "Jouer hors ligne" })).toBeTruthy();
+  });
+
+  it("hors ligne : pseudo invalide refusé avec un message, valide accepté", async () => {
+    const base = createFakeServices({ tickMs: 0 });
+    const offline = vi.fn(base.authOfflineLogin);
+    render(<Shell services={{ ...base, authOfflineLogin: offline }} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Jouer hors ligne" }));
+    const field = screen.getByLabelText("Pseudo hors ligne");
+    for (const bad of ["ab", "pseudo avec espace", "x".repeat(17), "é€"]) {
+      fireEvent.change(field, { target: { value: bad } });
+      fireEvent.click(screen.getByRole("button", { name: "Jouer" }));
+      expect((await screen.findByRole("alert")).textContent).toMatch(/3 à 16/);
+    }
+    expect(offline).not.toHaveBeenCalled();
+    fireEvent.change(field, { target: { value: "Bob_42" } });
+    fireEvent.click(screen.getByRole("button", { name: "Jouer" }));
+    await waitFor(() => expect(offline).toHaveBeenCalledWith("Bob_42"));
+  });
+
+  it("session expirée : message discret sous le bouton Microsoft", async () => {
+    window.location.hash = "#/login?notice=expired";
+    render(<Shell services={createFakeServices({ tickMs: 0 })} />);
+    expect((await screen.findByRole("status")).textContent).toBe("Session expirée, reconnecte-toi.");
   });
 });

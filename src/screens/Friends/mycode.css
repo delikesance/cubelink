@@ -1,5 +1,5 @@
 .mycode{color:var(--text);font-family:var(--font-ui);font-size:14px}
-.mycode-head h2{margin:0;font:600 28px/1.2 var(--font-display)}
+.mycode-head h2{margin:0;font:600 20px/1.2 var(--font-display)}
 .mycode-sub{margin:8px 0 0;color:var(--muted);line-height:1.5}
 .mycode-tools{display:flex}
 .mycode-link{min-height:44px;padding:0;border:0;background:transparent;color:var(--accent-hover);font:inherit;text-decoration:underline;text-underline-offset:3px;cursor:pointer}

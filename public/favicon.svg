@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256"><title>Cubelink - icone 16-48 px</title>
+<rect width="256" height="256" rx="58" fill="#131116"/>
+<g transform="translate(128 128) scale(0.72) translate(-132 -133)"><path d="M24 128Q24 108 44 108L104 108Q118 108 118 122L118 142Q118 164 140 164L160 164Q174 164 174 178L174 238Q174 258 154 258L44 258Q24 258 24 238Z" fill="#2B9CC4" stroke="#2B9CC4" stroke-width="10" stroke-linejoin="round" transform="translate(6 -12)"/>
+<path d="M168 72Q168 52 188 52L212 52Q232 52 232 72L232 96Q232 116 212 116L188 116Q168 116 168 96Z" fill="#2B9CC4" stroke="#2B9CC4" stroke-width="10" stroke-linejoin="round" transform="translate(6 -12)"/>
+<path d="M24 104Q24 84 44 84L104 84Q118 84 118 98L118 118Q118 140 140 140L160 140Q174 140 174 154L174 214Q174 234 154 234L44 234Q24 234 24 214Z" fill="#4FC3E8" stroke="#4FC3E8" stroke-width="10" stroke-linejoin="round" transform="translate(6 -12)"/>
+<path d="M168 48Q168 28 188 28L212 28Q232 28 232 48L232 72Q232 92 212 92L188 92Q168 92 168 72Z" fill="#6FD3F0" stroke="#6FD3F0" stroke-width="10" stroke-linejoin="round" transform="translate(6 -12)"/></g>
+</svg>

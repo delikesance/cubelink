@@ -88,6 +88,8 @@ impl AppState {
     pub fn host_stop_sharing(&self) {
         self.backend().host_stop_sharing();
         set_tunnel_port(0);
+        // Les invitations envoyées ne valent plus rien : on prévient les amis invités (au mieux).
+        self.invites_revoke_sent();
         let prev = lock(&self.host).take();
         if let Some(p) = prev.filter(|p| p.sharing) {
             self.emit_event("host://state", &HostState { instance_id: p.instance_id, sharing: false, world_port: None });

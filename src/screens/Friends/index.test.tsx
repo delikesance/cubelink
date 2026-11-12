@@ -24,13 +24,12 @@ describe("Amis : onglets", () => {
     expect(document.activeElement).toBe(t2);
   });
 
-  it("bouton Retour accessible : revient à l'accueil", () => {
+  it("pas de bouton Retour en double (la barre de titre porte le retour) ; « Ajouter un ami » met le focus sur le champ", () => {
     window.location.hash = "#/friends";
     render(<Shell services={createFakeServices({ tickMs: 0 })} />);
-    const b = screen.getByRole("button", { name: "Retour à l'accueil" });
-    expect(b.className).toContain("fr-back");
-    fireEvent.click(b);
-    expect(window.location.hash).toContain("#/main");
+    expect(screen.queryByRole("button", { name: "Retour à l'accueil" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Ajouter un ami" }));
+    expect(document.activeElement).toBe(screen.getByLabelText("Code ami de ton ami"));
   });
 
   it("Échap revient à l'accueil, sauf dans un champ", () => {

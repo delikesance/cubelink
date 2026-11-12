@@ -1,5 +1,5 @@
 # Vérifications à chaque push sur `development` et à chaque pull request vers `main` (aucune release ici).
-# Quatre jobs indépendants qui tournent EN PARALLÈLE (le front est rapide, le Rust est la partie longue).
+# Cinq jobs indépendants qui tournent EN PARALLÈLE (le front est rapide, le Rust est la partie longue).
 name: ci
 
 on:
@@ -31,6 +31,29 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - run: npm run test:front
+
+  agent-lan-java8:
+    # L'agent LAN est compilé --release 8 avec un JDK 17 (build.sh) puis exécuté sur de vrais JVM 8 et 17 (stubs legacy
+    # SRG 1.7.10 / 1.12.2 et stubs modernes) : un UnsupportedClassVersionError ou une régression Java 8 casse la CI.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        id: jdk8
+        with: { distribution: temurin, java-version: 8 }
+      - uses: actions/setup-java@v4
+        id: jdk17
+        with: { distribution: temurin, java-version: 17 }
+      - name: Construit l'agent (JDK 17, --release 8)
+        run: JAVA_HOME="${{ steps.jdk17.outputs.path }}" bash core/resources/lan-agent/build.sh
+      - name: Teste l'agent sous Java 8 et Java 17
+        run: |
+          out=$(JAVA_HOME="${{ steps.jdk17.outputs.path }}" bash core/resources/lan-agent/run-legacy-test.sh \
+            "${{ steps.jdk8.outputs.path }}/bin/java" "${{ steps.jdk17.outputs.path }}/bin/java") || { echo "$out"; exit 1; }
+          echo "$out"
+          # Garde-fou : le test doit avoir tourné sur un vrai Java 8, pas seulement 17.
+          echo "$out" | grep -q 'Java 8 reel : TESTE'
 
   clippy-windows:
     runs-on: windows-latest

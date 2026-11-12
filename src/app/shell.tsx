@@ -1,10 +1,14 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ComponentType } from "react";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentType } from "react";
 import "./shell.css";
 import { createServices, type Services } from "../services";
 import { ShellContext, type ShellContextValue } from "./context";
-import { navigate, goBack, takePendingFocus, useCanGoBack, useLocation, type RouteName } from "./router";
+import { navigate, goBack, parseHash, takePendingFocus, useCanGoBack, useLocation, type RouteName } from "./router";
 import { TitleBar } from "./TitleBar";
 import { UpdateBanner } from "./UpdateBanner";
+import { StageNotice } from "./StageNotice";
+import { setStagePanel, useStage, useStageLayout } from "./stage";
+import InGamePanel from "../screens/Overlay";
+import "../screens/Overlay/overlay.css";
 
 export { useShell, useServices, useScreenTitle, useBack } from "./context";
 export { navigate, goBack, canGoBack, useCanGoBack, ROUTES, parseHash, type RouteName } from "./router";
@@ -20,11 +24,43 @@ const SCREEN_DIRS: Record<RouteName, string> = {
   friends: "Friends", settings: "Settings", error: "Error", legal: "Legal", browse: "Browse",
 };
 type ScreenModule = { default?: ComponentType };
-const screenModules = import.meta.glob<ScreenModule>("../screens/*/index.tsx", { eager: true });
+// Accueil et connexion : chargés tout de suite ; les autres écrans le sont à la demande (code splitting).
+const eagerModules = import.meta.glob<ScreenModule>("../screens/{Main,Login}/index.tsx", { eager: true });
+const lazyModules = import.meta.glob<ScreenModule>(["../screens/*/index.tsx", "!../screens/Main/index.tsx", "!../screens/Login/index.tsx", "!../screens/Overlay/index.tsx"]);
+const lazyCache = new Map<RouteName, ComponentType>();
+const loaded = new Map<RouteName, ComponentType>();
+
+/** Précharge tous les écrans (utilisé par les tests pour un rendu synchrone). */
+export async function preloadScreens(): Promise<void> {
+  await Promise.all((Object.keys(SCREEN_DIRS) as RouteName[]).map(async (route) => {
+    const loader = lazyModules[`../screens/${SCREEN_DIRS[route]}/index.tsx`];
+    if (!loader) return;
+    const m = await loader();
+    if (typeof m.default === "function") loaded.set(route, m.default);
+  }));
+}
 
 export function screenFor(route: RouteName): ComponentType | null {
-  const mod = screenModules[`../screens/${SCREEN_DIRS[route]}/index.tsx`];
-  return typeof mod?.default === "function" ? mod.default : null;
+  const key = `../screens/${SCREEN_DIRS[route]}/index.tsx`;
+  const mod = eagerModules[key];
+  if (mod) return typeof mod.default === "function" ? mod.default : null;
+  const loader = lazyModules[key];
+  if (!loader) return null;
+  const ready = loaded.get(route);
+  if (ready) return ready;
+  let Comp = lazyCache.get(route);
+  if (!Comp) {
+    const Lazy = lazy(async () => {
+      const m = await loader();
+      if (typeof m.default === "function") loaded.set(route, m.default);
+      return { default: typeof m.default === "function" ? m.default : () => <Fallback route={route} /> };
+    });
+    Comp = function LazyScreen() {
+      return <Suspense fallback={<div role="status" aria-busy="true" style={{ padding: 24, color: "var(--muted)" }}>Chargement…</div>}><Lazy /></Suspense>;
+    };
+    lazyCache.set(route, Comp);
+  }
+  return Comp;
 }
 
 function Fallback({ route }: { route: RouteName }) {
@@ -41,6 +77,28 @@ export function Shell({ services }: { services?: Services } = {}) {
   const [title, setTitle] = useState<string | null>(null);
   const mainRef = useRef<HTMLElement>(null);
   const first = useRef(true);
+
+  // Démarrage : arrivé sur « login » sans l'avoir demandé (hash vide ou par défaut), on regarde
+  // d'abord si une session est conservée. Une arrivée volontaire (#/login, déconnexion) n'est pas contrôlée.
+  const [booting, setBooting] = useState(
+    () => parseHash(window.location.hash).route === "login" && !/^#\/?login/i.test(window.location.hash),
+  );
+  useEffect(() => {
+    if (!booting) return;
+    let on = true;
+    void (async () => {
+      let profile = null;
+      try { profile = await svc.authStatus(); } catch { /* traité comme l'absence de session */ }
+      if (!on) return;
+      if (profile) { navigate("main"); setBooting(false); return; }
+      let existed = false;
+      try { existed = (await svc.authAccounts()).accounts.length > 0; } catch { /* sans liste : pas de message */ }
+      if (!on) return;
+      if (existed) navigate("login", { notice: "expired" });
+      setBooting(false);
+    })();
+    return () => { on = false; };
+  }, [booting, svc]);
 
   // Focus sur le contenu à chaque changement de route (pas au premier rendu).
   useEffect(() => {
@@ -92,6 +150,18 @@ export function Shell({ services }: { services?: Services } = {}) {
     [svc, route, params, canBack, set],
   );
   const Screen = screenFor(route);
+  const stage = useStage();
+  // Zone de jeu : l'élément réservé est mesuré et son rectangle publié à Rust.
+  const slotRef = useRef<HTMLDivElement>(null);
+  useStageLayout(slotRef);
+
+  // Échap : ferme le panneau « en jeu » et rend le clavier au jeu (la confirmation du panneau gère sa propre touche Échap avant).
+  useEffect(() => {
+    if (!stage.panel) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape" && !e.defaultPrevented) { e.preventDefault(); void setStagePanel(false).catch(() => {}); } };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [stage.panel]);
 
   return (
     <ShellContext.Provider value={value}>
@@ -104,10 +174,15 @@ export function Shell({ services }: { services?: Services } = {}) {
           Aller au contenu
         </a>
         <TitleBar context={title ?? ROUTE_LABELS[route]} />
-        <UpdateBanner services={svc} />
         <main id="contenu" className="content" ref={mainRef} tabIndex={-1} data-route={route}>
-          {Screen ? <Screen /> : <Fallback route={route} />}
+          {route === "login" && booting
+            ? <div className="boot" role="status">Chargement…</div>
+            : Screen ? <Screen /> : <Fallback route={route} />}
         </main>
+        <UpdateBanner services={svc} />
+        <StageNotice />
+        <div className="stage-slot" ref={slotRef} aria-hidden="true" />
+        {stage.panel && <div className="ov-dock"><InGamePanel /></div>}
       </div>
     </ShellContext.Provider>
   );

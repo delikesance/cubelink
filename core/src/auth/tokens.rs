@@ -141,25 +141,10 @@ impl<K: KeyProvider> TokenStore<K> {
         Self { path: path.into(), keys: key_provider }
     }
 
-    fn cipher(&self) -> Result<Aes256Gcm> {
-        let key = self.keys.key()?;
-        Ok(Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key)))
-    }
-
     pub fn save(&self, tokens: &StoredTokens) -> Result<()> {
-        let cipher = self.cipher()?;
         let plain = serde_json::to_vec(tokens)
             .map_err(|_| Error::Auth("sérialisation des jetons impossible".into()))?;
-        let mut nonce = [0u8; NONCE_LEN];
-        OsRng.fill_bytes(&mut nonce);
-        let ct = cipher
-            .encrypt(Nonce::from_slice(&nonce), Payload { msg: &plain, aad: MAGIC })
-            .map_err(|_| Error::Auth("chiffrement des jetons impossible".into()))?;
-        let mut out = Vec::with_capacity(MAGIC.len() + NONCE_LEN + ct.len());
-        out.extend_from_slice(MAGIC);
-        out.extend_from_slice(&nonce);
-        out.extend_from_slice(&ct);
-        write_atomic(&self.path, &out)
+        write_atomic(&self.path, &encrypt_blob(&self.keys, &plain)?)
     }
 
     /// `Ok(None)` si le fichier n'existe pas ; `Error::Auth` s'il est altéré, tronqué ou chiffré avec une autre clé.
@@ -169,16 +154,7 @@ impl<K: KeyProvider> TokenStore<K> {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e.into()),
         };
-        if data.len() < MAGIC.len() + NONCE_LEN + TAG_LEN || &data[..MAGIC.len()] != MAGIC {
-            return Err(Error::Auth("fichier de jetons invalide ou tronqué".into()));
-        }
-        let cipher = self.cipher()?;
-        let (nonce, ct) = data[MAGIC.len()..].split_at(NONCE_LEN);
-        let plain = cipher
-            .decrypt(Nonce::from_slice(nonce), Payload { msg: ct, aad: MAGIC })
-            .map_err(|_| {
-                Error::Auth("déchiffrement impossible : fichier altéré ou clé incorrecte".into())
-            })?;
+        let plain = decrypt_blob(&self.keys, &data)?;
         serde_json::from_slice(&plain)
             .map(Some)
             .map_err(|_| Error::Auth("contenu du fichier de jetons illisible".into()))
@@ -199,7 +175,36 @@ impl<K: KeyProvider> TokenStore<K> {
     }
 }
 
-fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
+/// Chiffre `plain` au format `MAGIC || nonce || chiffré+tag` (partagé avec le stockage des comptes).
+pub(crate) fn encrypt_blob<K: KeyProvider>(keys: &K, plain: &[u8]) -> Result<Vec<u8>> {
+    let key = keys.key()?;
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key));
+    let mut nonce = [0u8; NONCE_LEN];
+    OsRng.fill_bytes(&mut nonce);
+    let ct = cipher
+        .encrypt(Nonce::from_slice(&nonce), Payload { msg: plain, aad: MAGIC })
+        .map_err(|_| Error::Auth("chiffrement des jetons impossible".into()))?;
+    let mut out = Vec::with_capacity(MAGIC.len() + NONCE_LEN + ct.len());
+    out.extend_from_slice(MAGIC);
+    out.extend_from_slice(&nonce);
+    out.extend_from_slice(&ct);
+    Ok(out)
+}
+
+/// Inverse de `encrypt_blob`.
+pub(crate) fn decrypt_blob<K: KeyProvider>(keys: &K, data: &[u8]) -> Result<Vec<u8>> {
+    if data.len() < MAGIC.len() + NONCE_LEN + TAG_LEN || &data[..MAGIC.len()] != MAGIC {
+        return Err(Error::Auth("fichier de jetons invalide ou tronqué".into()));
+    }
+    let key = keys.key()?;
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key));
+    let (nonce, ct) = data[MAGIC.len()..].split_at(NONCE_LEN);
+    cipher
+        .decrypt(Nonce::from_slice(nonce), Payload { msg: ct, aad: MAGIC })
+        .map_err(|_| Error::Auth("déchiffrement impossible : fichier altéré ou clé incorrecte".into()))
+}
+
+pub(crate) fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
     if let Some(dir) = path.parent() {
         if !dir.as_os_str().is_empty() {
             fs::create_dir_all(dir)?;

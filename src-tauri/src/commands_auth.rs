@@ -373,6 +373,30 @@ pub async fn auth_skin_head(uuid: String) -> Result<Option<String>, String> {
     Ok(head)
 }
 
+/// Tête du skin (data URL PNG 8×8) du joueur au pseudo `name`, pour la liste d'amis. `None` si le pseudo est inconnu
+/// de Mojang (compte hors ligne) ou le réseau indisponible. Mise en cache pour la session.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn skin_head_by_name(name: String) -> Result<Option<String>, String> {
+    use base64::Engine;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    static CACHE: Mutex<Option<HashMap<String, Option<String>>>> = Mutex::new(None);
+    if !core_lib::skin::valid_name(&name) {
+        return Ok(None);
+    }
+    let key = name.to_ascii_lowercase();
+    if let Some(hit) = lock(&CACHE).as_ref().and_then(|m| m.get(&key).cloned()) {
+        return Ok(hit);
+    }
+    let head = match core_lib::skin::head_png_by_name(&name).await {
+        Ok(png) => Some(format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(png))),
+        Err(Error::Network(_)) => return Ok(None),
+        Err(_) => None,
+    };
+    lock(&CACHE).get_or_insert_with(HashMap::new).insert(key, head.clone());
+    Ok(head)
+}
+
 #[tauri::command(rename_all = "snake_case")]
 pub fn auth_switch(state: State<'_, Arc<AppState>>, id: String) -> Result<Profile, String> {
     state.auth_switch(&id)

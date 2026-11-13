@@ -13,6 +13,7 @@ use serde::Deserialize;
 use crate::types::{Error, Result};
 
 const SESSION_URL: &str = "https://sessionserver.mojang.com/session/minecraft/profile/";
+const PROFILE_URL: &str = "https://api.mojang.com/users/profiles/minecraft/";
 const MAX_SKIN_BYTES: usize = 256 * 1024;
 
 #[derive(Deserialize)]
@@ -96,6 +97,30 @@ pub fn head_from_skin(bytes: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// Pseudo Minecraft valide : 3 à 16 caractères `[A-Za-z0-9_]` (évite d'injecter autre chose dans l'URL).
+pub fn valid_name(name: &str) -> bool {
+    (3..=16).contains(&name.len()) && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
+/// Tête du skin du joueur au pseudo `name` (les amis n'ont pas d'UUID : on le résout par l'API publique de profils).
+/// Pseudo inconnu (compte hors ligne, inexistant) : `Err(NotFound)`.
+pub async fn head_png_by_name(name: &str) -> Result<Vec<u8>> {
+    if !valid_name(name) {
+        return Err(Error::Invalid("pseudo invalide".into()));
+    }
+    let net = |e: reqwest::Error| Error::Network(e.to_string());
+    let resp = client().get(format!("{PROFILE_URL}{name}")).send().await.map_err(net)?;
+    if !resp.status().is_success() {
+        return Err(Error::NotFound("profil Minecraft".into()));
+    }
+    #[derive(Deserialize)]
+    struct Id {
+        id: String,
+    }
+    let id: Id = resp.json().await.map_err(net)?;
+    head_png(&id.id).await
+}
+
 /// Tête du skin du compte `uuid` (PNG 8×8). Erreur réseau ou profil sans skin : `Err`.
 pub async fn head_png(uuid: &str) -> Result<Vec<u8>> {
     let id = normalize_uuid(uuid).ok_or_else(|| Error::Invalid("identifiant de compte invalide".into()))?;
@@ -130,6 +155,12 @@ mod tests {
     fn uuid_is_normalized() {
         assert_eq!(normalize_uuid("069A79F4-44E9-4726-A5BE-FCA90E38AAF5").as_deref(), Some("069a79f444e94726a5befca90e38aaf5"));
         assert_eq!(normalize_uuid("../etc"), None);
+    }
+
+    #[test]
+    fn names_are_validated() {
+        assert!(valid_name("Moiragh") && valid_name("garder_500"));
+        assert!(!valid_name("ab") && !valid_name("../x") && !valid_name("a b c") && !valid_name("12345678901234567"));
     }
 
     #[test]

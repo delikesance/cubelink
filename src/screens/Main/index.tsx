@@ -8,10 +8,10 @@ import { Button, IconButton } from "../../ui";
 import { Avatar } from "./ArtParts";
 import { clearArtCache } from "./artImage";
 import { ICONS, Icon } from "./Panel";
-import { PixelHead, WorldIcon } from "./Pixel";
+import { WorldIcon } from "./Pixel";
 import { lastSeenText } from "../Friends/lastSeen";
 import { canInviteFrom, useInvites } from "../../app/useInvites";
-import { AccountSwitcher } from "../../app/AccountSwitcher";
+import { AccountSwitcher, NameHead } from "../../app/AccountSwitcher";
 import { useContextMenu, type MenuItem } from "../../app/useContextMenu";
 import { useModCheckGate } from "../../app/useModCheck";
 import { Modal } from "./Modal";
@@ -361,7 +361,7 @@ export default function Main() {
               return (
                 <li key={f.friend.public_key} className={`side-row${on ? "" : " is-off"}`} onContextMenu={ctx.bind(`Actions pour ${f.friend.name}`, () => friendMenu(f))}>
                   <span className="side-head">
-                    <PixelHead seed={f.friend.public_key} size={32} />
+                    <NameHead services={services} name={f.friend.name} seed={f.friend.public_key} size={32} />
                     <span className={`side-dot${g ? " is-play" : on ? " is-on" : ""}`} aria-hidden="true" />
                   </span>
                   <span className="side-txt">

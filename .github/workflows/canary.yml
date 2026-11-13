@@ -45,11 +45,9 @@ jobs:
           # Gains connus sur les runners : pas de réindexation des pages de manuel, pas de doc installée,
           # pas de fsync à chaque fichier (machine jetable).
           sudo rm -f /var/lib/man-db/auto-update
-          printf 'force-unsafe-io
-path-exclude /usr/share/doc/*
-path-exclude /usr/share/man/*
-path-exclude /usr/share/locale/*
-' | sudo tee /etc/dpkg/dpkg.cfg.d/99-ci >/dev/null
+          for l in force-unsafe-io 'path-exclude /usr/share/doc/*' 'path-exclude /usr/share/man/*' 'path-exclude /usr/share/locale/*'; do
+            echo "$l"
+          done | sudo tee /etc/dpkg/dpkg.cfg.d/99-ci >/dev/null
           sudo tee /etc/apt/sources.list >/dev/null <<'LIST'
           deb http://mirrors.edge.kernel.org/ubuntu jammy main restricted universe multiverse
           deb http://mirrors.edge.kernel.org/ubuntu jammy-updates main restricted universe multiverse

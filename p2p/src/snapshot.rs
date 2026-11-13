@@ -63,7 +63,7 @@ mod tests {
     use core_lib::types::{Loader, LoaderSpec, ManifestFile};
 
     fn mf(path: &str, data: &[u8]) -> ManifestFile {
-        ManifestFile { path: path.into(), size: data.len() as u64, sha256: hex::encode(Sha256::digest(data)), sha1: None }
+        ManifestFile { path: path.into(), size: data.len() as u64, sha256: hex::encode(Sha256::digest(data)), sha1: None, cf_fingerprint: None }
     }
 
     #[test]

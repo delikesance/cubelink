@@ -15,6 +15,7 @@ pub mod error;
 pub mod foreground;
 pub mod iroh_backend;
 pub mod last_seen;
+pub mod trusted_mods;
 pub mod install;
 pub mod invites;
 pub mod hotkey;
@@ -172,6 +173,7 @@ pub fn run() {
             commands_auth::auth_status,
             commands_auth::auth_accounts,
             commands_auth::auth_skin_head,
+            commands_auth::skin_head_by_name,
             commands_auth::auth_switch,
             commands_auth::auth_remove,
             commands_auth::auth_begin_login,
@@ -246,6 +248,7 @@ pub fn run() {
             commands_auth::auth_status,
             commands_auth::auth_accounts,
             commands_auth::auth_skin_head,
+            commands_auth::skin_head_by_name,
             commands_auth::auth_switch,
             commands_auth::auth_remove,
             commands_auth::auth_begin_login,

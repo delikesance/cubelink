@@ -106,6 +106,10 @@ pub struct ManifestFile {
     /// par l'invité à la réception ; sert à interroger Modrinth avant téléchargement.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sha1: Option<String>,
+    /// Empreinte CurseForge (murmur2) des jars de `mods/`. REVENDICATION de l'hôte, vérifiée à la réception ;
+    /// sert à reconnaître avant téléchargement les mods publiés sur CurseForge et absents de Modrinth.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cf_fingerprint: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -281,7 +285,7 @@ mod tests {
             minecraft: "1.21.1".into(),
             loader: LoaderSpec { loader: Loader::NeoForge, version: "21.1.77".into() },
             java_major: 21,
-            files: vec![ManifestFile { path: "mods/a.jar".into(), size: 1, sha256: "0".repeat(64), sha1: None }],
+            files: vec![ManifestFile { path: "mods/a.jar".into(), size: 1, sha256: "0".repeat(64), sha1: None, cf_fingerprint: None }],
         };
         let s = serde_json::to_string(&m).unwrap();
         assert_eq!(serde_json::from_str::<Manifest>(&s).unwrap(), m);

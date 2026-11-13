@@ -138,6 +138,8 @@ export interface JoinPlan {
   unknown_mods: string[];
   /** Jars non vérifiés (sha1 absent, réseau) : ni reconnus ni signalés inconnus. */
   unknown_unchecked?: string[];
+  /** Mods inconnus déjà acceptés lors d'un précédent « Rejoindre » (même contenu) : la confiance n'est pas redemandée. */
+  unknown_trusted?: string[];
 }
 
 // Événements
@@ -236,6 +238,8 @@ export interface Services {
   authRemove(id: string): Promise<void>;
   /** Tête du skin (data URL PNG 8×8) d'un compte Microsoft, null si indisponible. */
   authSkinHead(uuid: string): Promise<string | null>;
+  /** Tête du skin (data URL PNG 8×8) du joueur au pseudo donné (amis), null si inconnu ou hors réseau. */
+  skinHeadByName(name: string): Promise<string | null>;
 
   instancesList(): Promise<Instance[]>;
   instancesCreate(input: CreateInstanceInput): Promise<Instance>;

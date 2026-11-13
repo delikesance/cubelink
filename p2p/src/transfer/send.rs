@@ -56,7 +56,9 @@ impl Default for ServeLimits {
         Self {
             max_file_bytes: 2 * 1024 * 1024 * 1024,
             max_total_bytes_per_peer: 20 * 1024 * 1024 * 1024,
-            max_concurrent_per_peer: 4,
+            // L'invité en demande 4 à la fois ; marge pour une requête arrivée juste avant la fin de la précédente
+            // (connexion réutilisée, pas de poignée de main entre deux fichiers).
+            max_concurrent_per_peer: 8,
         }
     }
 }
@@ -417,6 +419,14 @@ mod iroh_impl {
         peers: Mutex<HashMap<PeerId, EndpointAddr>>,
         relayed: Mutex<HashMap<PeerId, bool>>,
         router: Mutex<Option<Router>>,
+        /// Connexions QUIC réutilisées d'un fichier à l'autre, par pair et par ALPN (contrôle, blobs) : une
+        /// poignée de main par transfert au lieu de deux par fichier, et UN contrôle de congestion partagé par
+        /// tous les fichiers en vol (débit équitable pour l'hôte, pas de rafale de connexions).
+        conns: Mutex<HashMap<(PeerId, &'static [u8]), Connection>>,
+        /// Sérialise l'ouverture des connexions : les fetchs simultanés du début attendent la même connexion.
+        connecting: tokio::sync::Mutex<()>,
+        /// Connexions ouvertes depuis la création (diagnostic, tests).
+        opened: AtomicU64,
     }
 
     impl IrohTransport {
@@ -428,7 +438,154 @@ mod iroh_impl {
                 peers: Mutex::new(HashMap::new()),
                 relayed: Mutex::new(HashMap::new()),
                 router: Mutex::new(None),
+                conns: Mutex::new(HashMap::new()),
+                connecting: tokio::sync::Mutex::new(()),
+                opened: AtomicU64::new(0),
             })
+        }
+
+        fn cached(&self, peer: &str, alpn: &'static [u8]) -> Option<Connection> {
+            let conns = self.conns.lock().unwrap_or_else(|p| p.into_inner());
+            conns.get(&(peer.to_string(), alpn)).filter(|c| c.close_reason().is_none()).cloned()
+        }
+
+        /// Connexion vivante vers `peer` pour `alpn`, réutilisée si possible.
+        async fn conn(&self, peer: &str, addr: &EndpointAddr, alpn: &'static [u8]) -> Result<Connection> {
+            if let Some(c) = self.cached(peer, alpn) {
+                return Ok(c);
+            }
+            let _g = self.connecting.lock().await;
+            if let Some(c) = self.cached(peer, alpn) {
+                return Ok(c);
+            }
+            let c = self.endpoint.connect(addr.clone(), alpn).await.map_err(net)?;
+            self.opened.fetch_add(1, Ordering::Relaxed);
+            self.conns.lock().unwrap_or_else(|p| p.into_inner()).insert((peer.to_string(), alpn), c.clone());
+            Ok(c)
+        }
+
+        /// Oublie une connexion en échec (la suivante sera rouverte), si c'est bien celle en cache.
+        fn forget(&self, peer: &str, alpn: &'static [u8], c: &Connection) {
+            let mut conns = self.conns.lock().unwrap_or_else(|p| p.into_inner());
+            let key = (peer.to_string(), alpn);
+            if conns.get(&key).is_some_and(|x| x.stable_id() == c.stable_id()) {
+                conns.remove(&key);
+            }
+        }
+
+        /// Un fichier sur les connexions partagées : contrôle (sha256 -> BLAKE3) puis blobs.
+        async fn fetch_on(
+            &self,
+            peer: &str,
+            addr: &EndpointAddr,
+            ctl: &Connection,
+            req: &FetchRequest,
+            on_bytes: &(dyn Fn(u64) + Send + Sync),
+            cancel: &AtomicBool,
+        ) -> Result<()> {
+            let (mut send, mut recv) = ctl.open_bi().await.map_err(net)?;
+            send.write_all(req.sha256.as_bytes()).await.map_err(net)?;
+            let mut status = [0u8; 1];
+            recv.read_exact(&mut status).await.map_err(net)?;
+            if status[0] == STATUS_CHANGED {
+                // Pas `Network` : inutile de réessayer automatiquement avec le même manifeste périmé ; l'invité
+                // relance « Réessayer » et obtient un manifeste frais.
+                return Err(Error::Other(
+                    "Un fichier a changé chez ton ami pendant le transfert : réessaie dans un instant".into(),
+                ));
+            }
+            if status[0] != 0 {
+                return Err(Error::Auth("requête refusée par l'hôte".into()));
+            }
+            let mut h = [0u8; 32];
+            recv.read_exact(&mut h).await.map_err(net)?;
+            let hash = Hash::from_bytes(h);
+
+            // 2) transfert iroh-blobs (BLAKE3 vérifié par le protocole) sur la connexion blobs partagée, puis
+            // export vers `dest`. Le flux de contrôle `send` reste ouvert jusqu'à la fin : l'hôte tient le créneau
+            // de concurrence de ce fichier jusque-là (lâché sur erreur, le flux se termine tout seul).
+            let conn = self.conn(peer, addr, iroh_blobs::ALPN).await?;
+            let relayed = conn.paths().iter().any(|p| p.is_selected() && p.is_relay());
+            self.relayed.lock().unwrap_or_else(|p| p.into_inner()).insert(peer.to_string(), relayed);
+            let r = self.get_blob(&conn, hash, req, on_bytes, cancel).await;
+            if matches!(r, Err(Error::Network(_))) || conn.close_reason().is_some() {
+                self.forget(peer, iroh_blobs::ALPN, &conn);
+            }
+            r?;
+            let _ = send.finish();
+            Ok(())
+        }
+
+        async fn get_blob(
+            &self,
+            conn: &Connection,
+            hash: Hash,
+            req: &FetchRequest,
+            on_bytes: &(dyn Fn(u64) + Send + Sync),
+            cancel: &AtomicBool,
+        ) -> Result<()> {
+            let mut stream = self.store.remote().fetch(conn.clone(), HashAndFormat::raw(hash)).stream();
+            // Reprise : iroh-blobs rapatrie le blob entier dans le store (pas de plage exposée ici) ;
+            // `dest` est réécrit en entier par l'export. On ne compte en progression que le reste
+            // (taille - resume_from) ; le gain réseau n'est pas réalisé côté iroh.
+            let skip = req.resume_from;
+            let mut last = 0u64;
+            let mut reported = 0u64;
+            let mut done = false;
+            while let Some(item) = stream.next().await {
+                if cancel.load(Ordering::Relaxed) {
+                    // Connexion partagée : on abandonne seulement cette requête (flux lâché), sans fermer.
+                    return Err(Error::Cancelled);
+                }
+                match item {
+                    iroh_blobs::api::remote::GetProgressItem::Progress(n) => {
+                        if n > last {
+                            last = n;
+                            let eff = last.saturating_sub(skip);
+                            if eff > reported {
+                                on_bytes(eff - reported);
+                                reported = eff;
+                            }
+                        }
+                    }
+                    iroh_blobs::api::remote::GetProgressItem::Done(_) => {
+                        done = true;
+                        break;
+                    }
+                    iroh_blobs::api::remote::GetProgressItem::Error(e) => return Err(net(e)),
+                }
+            }
+            if !done {
+                return Err(Error::Network("transfert interrompu".into()));
+            }
+            let want = req.size.saturating_sub(skip);
+            if reported < want {
+                on_bytes(want - reported);
+            }
+            self.store.blobs().export(hash, &req.dest).await.map_err(net)?;
+            Ok(())
+        }
+
+        /// Oublie (sans les fermer) les connexions en cache vers `peer` : les prochains fichiers en rouvrent de
+        /// neuves, ceux en vol finissent sur les anciennes. Après un silence, la connexion est peut-être morte.
+        pub fn forget_peer(&self, peer: &str) {
+            self.conns.lock().unwrap_or_else(|p| p.into_inner()).retain(|(p, _), _| p != peer);
+        }
+
+        /// Nombre de connexions sortantes ouvertes pour des transferts depuis la création.
+        pub fn connections_opened(&self) -> u64 {
+            self.opened.load(Ordering::Relaxed)
+        }
+
+        /// Fin d'un transfert : ferme les connexions réutilisées vers `peer`.
+        pub fn close_peer(&self, peer: &str) {
+            let mut conns = self.conns.lock().unwrap_or_else(|p| p.into_inner());
+            conns.retain(|(p, _), c| {
+                if p == peer {
+                    c.close(0u32.into(), b"done");
+                }
+                p != peer
+            });
         }
 
         /// Adresse à communiquer aux pairs.
@@ -444,7 +601,12 @@ mod iroh_impl {
         /// Enregistre comment joindre un pair ; renvoie son `PeerId`.
         pub fn add_peer(&self, addr: EndpointAddr) -> PeerId {
             let id = addr.id.to_string();
-            self.peers.lock().unwrap_or_else(|p| p.into_inner()).insert(id.clone(), addr);
+            let old = self.peers.lock().unwrap_or_else(|p| p.into_inner()).insert(id.clone(), addr.clone());
+            // Adresse changée (hôte redémarré, re-résolution après un silence) : les connexions en cache sont
+            // peut-être mortes sans le savoir ; les suivantes seront rouvertes vers la nouvelle adresse.
+            if old.is_some_and(|o| o != addr) {
+                self.conns.lock().unwrap_or_else(|p| p.into_inner()).retain(|(p, _), _| *p != id);
+            }
             id
         }
 
@@ -651,73 +813,14 @@ mod iroh_impl {
             if req.resume_from > req.size {
                 return Err(Error::Invalid("reprise hors bornes".into()));
             }
-            // 1) contrôle : sha256 -> BLAKE3
-            let ctl = self.endpoint.connect(addr.clone(), CONTROL_ALPN).await.map_err(net)?;
-            let (mut send, mut recv) = ctl.open_bi().await.map_err(net)?;
-            send.write_all(req.sha256.as_bytes()).await.map_err(net)?;
-            let mut status = [0u8; 1];
-            recv.read_exact(&mut status).await.map_err(net)?;
-            if status[0] == STATUS_CHANGED {
-                // Pas `Network` : inutile de réessayer automatiquement avec le même manifeste périmé ; l'invité
-                // relance « Réessayer » et obtient un manifeste frais.
-                return Err(Error::Other(
-                    "Un fichier a changé chez ton ami pendant le transfert : réessaie dans un instant".into(),
-                ));
+            // 1) contrôle : un flux par fichier sur la connexion partagée.
+            let ctl = self.conn(peer, &addr, CONTROL_ALPN).await?;
+            let r = self.fetch_on(peer, &addr, &ctl, req, on_bytes, cancel).await;
+            if matches!(r, Err(Error::Network(_))) || ctl.close_reason().is_some() {
+                // La prochaine tentative rouvre une connexion neuve.
+                self.forget(peer, CONTROL_ALPN, &ctl);
             }
-            if status[0] != 0 {
-                return Err(Error::Auth("requête refusée par l'hôte".into()));
-            }
-            let mut h = [0u8; 32];
-            recv.read_exact(&mut h).await.map_err(net)?;
-            let hash = Hash::from_bytes(h);
-
-            // 2) transfert iroh-blobs (BLAKE3 vérifié par le protocole), puis export vers `dest`.
-            let conn = self.endpoint.connect(addr, iroh_blobs::ALPN).await.map_err(net)?;
-            let relayed = conn.paths().iter().any(|p| p.is_selected() && p.is_relay());
-            self.relayed.lock().unwrap_or_else(|p| p.into_inner()).insert(peer.to_string(), relayed);
-            let mut stream = self.store.remote().fetch(conn.clone(), HashAndFormat::raw(hash)).stream();
-            // Reprise : iroh-blobs rapatrie le blob entier dans le store (pas de plage exposée ici) ;
-            // `dest` est réécrit en entier par l'export. On ne compte en progression que le reste
-            // (taille - resume_from) ; le gain réseau n'est pas réalisé côté iroh.
-            let skip = req.resume_from;
-            let mut last = 0u64;
-            let mut reported = 0u64;
-            let mut done = false;
-            while let Some(item) = stream.next().await {
-                if cancel.load(Ordering::Relaxed) {
-                    conn.close(0u32.into(), b"cancelled");
-                    return Err(Error::Cancelled);
-                }
-                match item {
-                    iroh_blobs::api::remote::GetProgressItem::Progress(n) => {
-                        if n > last {
-                            last = n;
-                            let eff = last.saturating_sub(skip);
-                            if eff > reported {
-                                on_bytes(eff - reported);
-                                reported = eff;
-                            }
-                        }
-                    }
-                    iroh_blobs::api::remote::GetProgressItem::Done(_) => {
-                        done = true;
-                        break;
-                    }
-                    iroh_blobs::api::remote::GetProgressItem::Error(e) => return Err(net(e)),
-                }
-            }
-            if !done {
-                return Err(Error::Network("transfert interrompu".into()));
-            }
-            let want = req.size.saturating_sub(skip);
-            if reported < want {
-                on_bytes(want - reported);
-            }
-            self.store.blobs().export(hash, &req.dest).await.map_err(net)?;
-            let _ = send.finish();
-            conn.close(0u32.into(), b"done");
-            ctl.close(0u32.into(), b"done");
-            Ok(())
+            r
         }
 
         fn via_relay(&self, peer: &str) -> bool {
@@ -748,7 +851,7 @@ mod iroh_impl {
                 minecraft: "1.21.1".into(),
                 loader: LoaderSpec { loader: Loader::Fabric, version: "0.16.0".into() },
                 java_major: 21,
-                files: vec![ManifestFile { path: "mods/a.jar".into(), size: good.len() as u64, sha256: sha.clone(), sha1: None }],
+                files: vec![ManifestFile { path: "mods/a.jar".into(), size: good.len() as u64, sha256: sha.clone(), sha1: None, cf_fingerprint: None }],
             };
             let host = Host::new(
                 ServeIndex::from_manifest(&m, dir.path()).unwrap(),
@@ -806,11 +909,11 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("mods")).unwrap();
         std::fs::write(dir.path().join("mods/a.jar"), b"aaa").unwrap();
         std::fs::write(dir.path().join("secret.txt"), b"secret").unwrap();
-        let m = manifest(vec![ManifestFile { path: "mods/a.jar".into(), size: 3, sha256: sha(b"aaa"), sha1: None }]);
+        let m = manifest(vec![ManifestFile { path: "mods/a.jar".into(), size: 3, sha256: sha(b"aaa"), sha1: None, cf_fingerprint: None }]);
         let idx = ServeIndex::from_manifest(&m, dir.path()).unwrap();
         assert!(idx.get(&sha(b"aaa")).is_some());
         assert!(idx.get(&sha(b"secret")).is_none());
-        let bad = manifest(vec![ManifestFile { path: "../x".into(), size: 1, sha256: sha(b"x"), sha1: None }]);
+        let bad = manifest(vec![ManifestFile { path: "../x".into(), size: 1, sha256: sha(b"x"), sha1: None, cf_fingerprint: None }]);
         assert!(ServeIndex::from_manifest(&bad, dir.path()).is_err());
     }
 
@@ -818,8 +921,8 @@ mod tests {
     fn concurrency_and_total_limits() {
         let dir = tempfile::tempdir().unwrap();
         let m = manifest(vec![
-            ManifestFile { path: "mods/a.jar".into(), size: 10, sha256: sha(b"a"), sha1: None },
-            ManifestFile { path: "mods/b.jar".into(), size: 10, sha256: sha(b"b"), sha1: None },
+            ManifestFile { path: "mods/a.jar".into(), size: 10, sha256: sha(b"a"), sha1: None, cf_fingerprint: None },
+            ManifestFile { path: "mods/b.jar".into(), size: 10, sha256: sha(b"b"), sha1: None, cf_fingerprint: None },
         ]);
         let idx = ServeIndex::from_manifest(&m, dir.path()).unwrap();
         let limits = ServeLimits { max_file_bytes: 100, max_total_bytes_per_peer: 15, max_concurrent_per_peer: 1 };
@@ -836,7 +939,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("mods")).unwrap();
         std::fs::write(dir.path().join("mods/a.jar"), data).unwrap();
-        let m = manifest(vec![ManifestFile { path: "mods/a.jar".into(), size: data.len() as u64, sha256: sha(data), sha1: None }]);
+        let m = manifest(vec![ManifestFile { path: "mods/a.jar".into(), size: data.len() as u64, sha256: sha(data), sha1: None, cf_fingerprint: None }]);
         let idx = ServeIndex::from_manifest(&m, dir.path()).unwrap();
         let host = Host::new(idx, Arc::new(AllowList(vec!["guest".into()])), ServeLimits::default());
         (dir, host, MemNetwork::new())

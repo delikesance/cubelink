@@ -100,6 +100,10 @@ pub struct AppState {
     pub friends: Arc<FriendsDb>,
     /// Dernière fois que chaque ami a été vu en ligne.
     pub last_seen: Arc<crate::last_seen::LastSeen>,
+    /// Mods inconnus déjà acceptés (par sha256) : la case de confiance ne les redemande pas.
+    pub trusted_mods: Arc<crate::trusted_mods::TrustedMods>,
+    /// Par ami : sha256 des mods inconnus montrés par le dernier `join_plan`, acceptés au `join_start`.
+    pub pending_trust: Mutex<std::collections::HashMap<String, Vec<String>>>,
     pub settings: Arc<Mutex<Settings>>,
     pub profile: Mutex<Option<Profile>>,
     pub pending_login: Mutex<Option<DeviceCode>>,
@@ -360,8 +364,11 @@ impl AppState {
         let stage = crate::stage::Stage::default();
         stage.set_wanted(settings.embedded_game);
         let last_seen = Arc::new(crate::last_seen::LastSeen::open(paths.p2p.join("last_seen.json")));
+        let trusted_mods = Arc::new(crate::trusted_mods::TrustedMods::open(paths.p2p.join("trusted_mods.json")));
         Ok(Self {
             last_seen,
+            trusted_mods,
+            pending_trust: Mutex::new(std::collections::HashMap::new()),
             instances: Arc::new(InstanceStore::new(paths.instances.clone())),
             store: Arc::new(store),
             identity: Arc::new(identity),

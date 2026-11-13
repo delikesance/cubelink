@@ -20,7 +20,6 @@ use std::time::Duration;
 
 use core_lib::instance::InstanceKind;
 use core_lib::manifest::{build_manifest, ManifestOptions};
-use core_lib::providers::modrinth_api::ModrinthClient;
 use core_lib::unknown_mods::UnknownReport;
 use core_lib::types::{Error, Friend, ManifestFile, Presence, Result as CoreResult, Settings, TransferProgress, VerifyCode};
 use iroh::endpoint::Connection;
@@ -54,18 +53,14 @@ pub const DEFAULT_STALL_RETRY: Duration = Duration::from_secs(15);
 /// Délai laissé au transfert pour s'arrêter proprement après l'annulation d'inactivité.
 const WATCHDOG_GRACE: Duration = Duration::from_secs(5);
 
-/// Calcule les mods hors Modrinth d'un dossier de jeu (injectable pour les tests).
+/// Calcule les mods hors catalogues (Modrinth, CurseForge) d'un dossier de jeu (injectable pour les tests).
 pub type UnknownFn = Arc<dyn Fn(Vec<ManifestFile>, PathBuf) -> BoxFuture<'static, Vec<String>> + Send + Sync>;
 
 fn default_unknown() -> UnknownFn {
     Arc::new(|files, dir| {
         Box::pin(async move {
-            let ua = concat!("Cubelink/", env!("CARGO_PKG_VERSION"));
-            let client = match crate::test_hooks::hooks().modrinth_base() {
-                Some(u) => ModrinthClient::with_base_url(u, ua),
-                None => ModrinthClient::new(ua),
-            };
-            core_lib::unknown_mods::find_unknown(&files, &dir, &client).await.map(|r| r.unknown).unwrap_or_default()
+            let p = crate::commands_browse::providers();
+            core_lib::unknown_mods::find_unknown(&files, &dir, &p.modrinth, &p.cf).await.map(|r| r.unknown).unwrap_or_default()
         })
     })
 }
@@ -73,17 +68,12 @@ fn default_unknown() -> UnknownFn {
 /// Analyse avant téléchargement sur les sha1 du manifeste (injectable pour les tests).
 pub type ManifestUnknownFn = Arc<dyn Fn(Vec<ManifestFile>) -> BoxFuture<'static, UnknownReport> + Send + Sync>;
 
-fn modrinth_client() -> ModrinthClient {
-    let ua = concat!("Cubelink/", env!("CARGO_PKG_VERSION"));
-    match crate::test_hooks::hooks().modrinth_base() {
-        Some(u) => ModrinthClient::with_base_url(u, ua),
-        None => ModrinthClient::new(ua),
-    }
-}
-
 fn default_manifest_unknown() -> ManifestUnknownFn {
     Arc::new(|files| {
-        Box::pin(async move { core_lib::unknown_mods::find_unknown_from_manifest(&files, &modrinth_client()).await })
+        Box::pin(async move {
+            let p = crate::commands_browse::providers();
+            core_lib::unknown_mods::find_unknown_from_manifest(&files, &p.modrinth, &p.cf).await
+        })
     })
 }
 
@@ -278,7 +268,9 @@ impl BlobTransport for Fetcher {
                 r = &mut fut => break r,
                 _ = tokio::time::sleep(Duration::from_millis(250).min(self.stall_retry)) => {
                     if local.idle() >= self.stall_retry {
-                        // Muet : on abandonne ce fichier ; la reprise (backoff p2p) re-résout l'hôte.
+                        // Muet : on abandonne ce fichier ; la reprise (backoff p2p) re-résout l'hôte et rouvre
+                        // des connexions neuves (celles en cache sont peut-être mortes : hôte redémarré).
+                        self.inner.forget_peer(peer);
                         break Err(Error::Network("l'ami ne répond plus".into()));
                     }
                 }
@@ -941,6 +933,7 @@ impl P2pBackend for IrohBackend {
             if let Some(c) = keep {
                 c.close(0u32.into(), b"done");
             }
+            self.transport.close_peer(&peer);
             res
         })
     }

@@ -491,7 +491,9 @@ impl<T: BlobTransport> ResumableReceive<T> {
         let mut retries = 0u32;
         loop {
             self.wait_if_paused(sh, progress).await?;
-            let remaining = self.remaining();
+            let mut remaining = self.remaining();
+            // Les plus gros d'abord : un gros mod parti en dernier finirait seul et laisserait le lien sous-utilisé.
+            remaining.sort_by_key(|f| std::cmp::Reverse(f.size));
             if remaining.is_empty() {
                 return Ok(summary);
             }
@@ -606,9 +608,9 @@ impl<T: BlobTransport> ResumableReceive<T> {
             });
         }
         self.emit(sh, progress, TransferPhase::Verifying, None);
-        let (vp, vs, v1) = (part.clone(), f.sha256.clone(), f.sha1.clone());
+        let (vp, vf) = (part.clone(), f.clone());
         let v = tokio::task::spawn_blocking(move || {
-            verify_file(&vp, &vs).and_then(|()| super::recv::verify_claimed_sha1(&vp, v1.as_deref()))
+            verify_file(&vp, &vf.sha256).and_then(|()| super::recv::verify_claims(&vp, &vf))
         })
             .await
             .map_err(|e| Error::Other(format!("vérification : {e}")))?;
@@ -747,7 +749,7 @@ mod tests {
         let mut to_receive = Vec::new();
         for (i, len) in [6000usize, 3000, 2000].iter().enumerate() {
             let d: Vec<u8> = (0..*len).map(|j| (j * 7 + i * 13) as u8).collect();
-            to_receive.push(ManifestFile { path: format!("mods/m{i}.jar"), size: d.len() as u64, sha256: sha(&d), sha1: None });
+            to_receive.push(ManifestFile { path: format!("mods/m{i}.jar"), size: d.len() as u64, sha256: sha(&d), sha1: None, cf_fingerprint: None });
             contents.push(d);
         }
         let bytes = to_receive.iter().map(|f| f.size).sum();

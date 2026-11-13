@@ -1,14 +1,15 @@
-//! N16 : repérage des mods absents des catalogues (Modrinth), par sha1 des jars de `mods/`.
+//! N16 : repérage des mods absents des catalogues (Modrinth par sha1, puis CurseForge par empreinte murmur2).
 //!
-//! Le manifeste ne contient que des sha256 : les sha1 sont calculés en flux sur le disque.
-//! « Inconnu » = Modrinth ne reconnaît pas le fichier ; « non vérifié » = on n'a pas pu savoir.
+//! « Inconnu » = ni Modrinth ni CurseForge ne reconnaissent le fichier ; « non vérifié » = on n'a pas pu savoir.
+//! CurseForge n'est interrogé que pour ce que Modrinth ne reconnaît pas, et seulement avec la clé de Cubelink.
 //! Aucune analyse de sécurité n'est faite ici.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::Path;
 use std::time::Duration;
 
+use crate::providers::curseforge_api::{murmur2_fingerprint, CfApi};
 use crate::providers::modrinth_api::{ModrinthClient, Version};
 use crate::types::{Error, ManifestFile, Result};
 
@@ -18,6 +19,10 @@ const MAX_BATCHES: usize = 50;
 const MAX_RETRIES_429: u32 = 2;
 const MAX_PAUSE_SECS: u64 = 30;
 const DEFAULT_PAUSE_SECS: u64 = 2;
+/// Empreintes CurseForge par requête.
+const CF_BATCH: usize = 1000;
+/// Au-delà, pas d'empreinte CurseForge (le calcul lit le fichier en mémoire).
+pub const MAX_CF_FINGERPRINT_BYTES: u64 = 256 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnownMod {
@@ -68,26 +73,103 @@ pub async fn find_unknown(
     manifest_files: &[ManifestFile],
     game_dir: &Path,
     client: &ModrinthClient,
+    cf: &CfApi,
 ) -> Result<UnknownReport> {
     let mut report = UnknownReport::default();
     let mut hashed: Vec<(String, String)> = Vec::new();
+    let mut fps: Vec<CfCandidate> = Vec::new();
     for f in manifest_files.iter().filter(|f| is_mod_jar(&f.path)) {
         let full = game_dir.join(&f.path);
-        match tokio::task::spawn_blocking(move || sha1_file(&full)).await {
-            Ok(Ok(h)) => hashed.push((f.path.clone(), h)),
+        match tokio::task::spawn_blocking(move || jar_hashes(&full)).await {
+            Ok(Ok((h, fp))) => {
+                fps.extend(fp.map(|fp| (f.path.clone(), fp, h.clone())));
+                hashed.push((f.path.clone(), h));
+            }
             _ => report.unchecked.push(f.path.clone()),
         }
     }
     query_hashed(&hashed, client, &mut report).await;
+    query_curseforge(&fps, cf, &mut report).await;
     Ok(report)
+}
+
+/// SHA-1 et empreinte CurseForge (si la taille le permet) d'un jar sur le disque.
+fn jar_hashes(path: &Path) -> std::io::Result<(String, Option<u32>)> {
+    if std::fs::metadata(path)?.len() > MAX_CF_FINGERPRINT_BYTES {
+        return Ok((sha1_file(path)?, None));
+    }
+    let bytes = std::fs::read(path)?;
+    Ok((sha1_hex(&bytes), Some(murmur2_fingerprint(&bytes))))
+}
+
+/// (chemin, empreinte CurseForge, sha1 du jar).
+type CfCandidate = (String, u32, String);
+
+/// Second catalogue : ce que Modrinth ne reconnaît pas (ou n'a pas pu vérifier) est cherché sur CurseForge.
+///
+/// L'empreinte murmur2 (32 bits, non cryptographique, forgeable) ne sert qu'à TROUVER le fichier : il n'est
+/// reconnu que si le sha1 que CurseForge publie pour ce fichier est celui du jar (sha1 calculé sur le disque, ou
+/// annoncé par le manifeste et revérifié à la réception). Sans clé, ou si CurseForge ne répond pas, rien ne
+/// change : un inconnu reste inconnu (jamais rétrogradé en « non vérifié », qui ne demande pas de confiance).
+async fn query_curseforge(fps: &[CfCandidate], cf: &CfApi, report: &mut UnknownReport) {
+    if !cf.has_key() {
+        return;
+    }
+    let pending: HashSet<&str> = report.unknown.iter().chain(&report.unchecked).map(String::as_str).collect();
+    let cand: Vec<&CfCandidate> = fps.iter().filter(|(p, _, _)| pending.contains(p.as_str())).collect();
+    let mut list: Vec<u32> = cand.iter().map(|(_, fp, _)| *fp).collect();
+    list.sort_unstable();
+    list.dedup();
+    // Empreinte -> fichiers CurseForge (projet, fichier, sha1 publié).
+    let mut matched: HashMap<u32, Vec<(u64, u64, String)>> = HashMap::new();
+    for chunk in list.chunks(CF_BATCH) {
+        match cf.fingerprints(chunk).await {
+            Ok(ms) => {
+                for m in ms {
+                    let sha1 = m.file.sha1();
+                    matched.entry(m.file.file_fingerprint as u32).or_default().push((m.id, m.file.id, sha1));
+                }
+            }
+            Err(e) => tracing::warn!("reconnaissance CurseForge impossible : {e}"),
+        }
+    }
+    let mut found: HashSet<String> = HashSet::new();
+    for (path, fp, sha1) in cand {
+        let hit = matched
+            .get(fp)
+            .into_iter()
+            .flatten()
+            .find(|(_, _, s)| s.len() == 40 && s.eq_ignore_ascii_case(sha1));
+        if let Some((project, file, _)) = hit {
+            found.insert(path.clone());
+            report.known.push(KnownMod {
+                path: path.clone(),
+                project_id: format!("curseforge:{project}"),
+                version_id: file.to_string(),
+            });
+        }
+    }
+    report.unknown.retain(|p| !found.contains(p));
+    report.unchecked.retain(|p| !found.contains(p));
 }
 
 /// Analyse AVANT téléchargement à partir des sha1 annoncés par le manifeste (aucun accès disque).
 /// Les jars sans sha1 valide sont `unchecked` : jamais présumés connus ni sûrs. Le sha1 est une
 /// revendication de l'hôte, vérifiée à la réception (cf. `verify_sha1_file`).
-pub async fn find_unknown_from_manifest(manifest_files: &[ManifestFile], client: &ModrinthClient) -> UnknownReport {
+pub async fn find_unknown_from_manifest(
+    manifest_files: &[ManifestFile],
+    client: &ModrinthClient,
+    cf: &CfApi,
+) -> UnknownReport {
     let mut report = UnknownReport::default();
     let mut hashed: Vec<(String, String)> = Vec::new();
+    // Empreinte CurseForge : simple clé de recherche (un mensonge de l'hôte ne trouve rien) ; la reconnaissance
+    // repose sur le sha1 annoncé, revérifié à la réception.
+    let fps: Vec<CfCandidate> = manifest_files
+        .iter()
+        .filter(|f| is_mod_jar(&f.path))
+        .filter_map(|f| Some((f.path.clone(), f.cf_fingerprint?, f.sha1.clone()?)))
+        .collect();
     for f in manifest_files.iter().filter(|f| is_mod_jar(&f.path)) {
         match f.sha1.as_deref() {
             Some(h) if h.len() == 40 && h.bytes().all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f')) => {
@@ -97,6 +179,7 @@ pub async fn find_unknown_from_manifest(manifest_files: &[ManifestFile], client:
         }
     }
     query_hashed(&hashed, client, &mut report).await;
+    query_curseforge(&fps, cf, &mut report).await;
     report
 }
 
@@ -146,7 +229,7 @@ pub fn describe(report: &UnknownReport) -> String {
     let mut out = String::new();
     if !report.unknown.is_empty() {
         out.push_str(&format!(
-            "Modrinth ne reconnaît pas ces fichiers ({}) : intégrité vérifiée ≠ sécurité garantie.\n",
+            "Ni Modrinth ni CurseForge ne reconnaissent ces fichiers ({}) : intégrité vérifiée ≠ sécurité garantie.\n",
             report.unknown.len()
         ));
         for p in &report.unknown {
@@ -167,7 +250,7 @@ pub fn describe(report: &UnknownReport) -> String {
     }
     if out.is_empty() {
         out.push_str(&format!(
-            "Modrinth reconnaît tous les mods vérifiés ({}). Intégrité vérifiée ≠ sécurité garantie.\n",
+            "Les catalogues reconnaissent tous les mods vérifiés ({}). Intégrité vérifiée ≠ sécurité garantie.\n",
             report.known.len()
         ));
     }
@@ -286,7 +369,79 @@ mod tests {
     }
 
     fn mf(p: &str) -> ManifestFile {
-        ManifestFile { path: p.into(), size: 1, sha256: "0".repeat(64), sha1: None }
+        ManifestFile { path: p.into(), size: 1, sha256: "0".repeat(64), sha1: None, cf_fingerprint: None }
+    }
+
+    /// CurseForge sans clé : jamais interrogé.
+    fn nocf() -> CfApi {
+        CfApi::with_base("http://127.0.0.1:1", "")
+    }
+
+    /// Faux CurseForge : (empreinte, sha1 publié).
+    fn cf_mock(known: &[(u32, String)]) -> Mock {
+        let matches: Vec<_> = known
+            .iter()
+            .enumerate()
+            .map(|(i, (fp, sha1))| {
+                json!({"id": 100 + i, "file": {"id": 500 + i, "fileFingerprint": fp, "hashes": [{"value": sha1, "algo": 1}]}})
+            })
+            .collect();
+        Mock::given(method("POST"))
+            .and(path("/v1/fingerprints/432"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {"exactMatches": matches}})))
+    }
+
+    #[tokio::test]
+    async fn curseforge_recognizes_what_modrinth_does_not() {
+        let mr = MockServer::start().await;
+        let cfs = MockServer::start().await;
+        let d = tempfile::tempdir().unwrap();
+        let (files, hashes) = make_jars(d.path(), 3);
+        // Modrinth : m0 seulement. CurseForge : m1. m2 : maison.
+        Mock::given(method("POST"))
+            .and(path("/version_files"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body_for(&hashes[..1])))
+            .mount(&mr)
+            .await;
+        let fp1 = murmur2_fingerprint(&std::fs::read(d.path().join("mods/m1.jar")).unwrap());
+        // m2 : empreinte forgée identique à celle d'un fichier CurseForge, mais sha1 différent -> reste inconnu.
+        let fp2 = murmur2_fingerprint(&std::fs::read(d.path().join("mods/m2.jar")).unwrap());
+        cf_mock(&[(fp1, hashes[1].to_uppercase()), (fp2, "f".repeat(40))]).expect(2).mount(&cfs).await;
+        let cf = CfApi::with_base(cfs.uri(), "k");
+        let r = find_unknown(&files, d.path(), &client(&mr), &cf).await.unwrap();
+        assert_eq!(r.unknown, vec!["mods/m2.jar".to_string()]);
+        assert!(r.known.iter().any(|k| k.path == "mods/m1.jar" && k.project_id == "curseforge:100"));
+        assert_eq!(r.known.len(), 2);
+
+        // Avant téléchargement : l'empreinte vient du manifeste ; Modrinth en panne -> CurseForge rattrape m1.
+        let mr2 = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/version_files")).respond_with(ResponseTemplate::new(500)).mount(&mr2).await;
+        let mfiles: Vec<ManifestFile> = (0..3)
+            .map(|i| {
+                let b = std::fs::read(d.path().join(format!("mods/m{i}.jar"))).unwrap();
+                ManifestFile { sha1: Some(sha1_hex(&b)), cf_fingerprint: Some(murmur2_fingerprint(&b)), ..mf(&format!("mods/m{i}.jar")) }
+            })
+            .collect();
+        let r = find_unknown_from_manifest(&mfiles, &client(&mr2), &cf).await;
+        assert_eq!(r.known.len(), 1);
+        assert_eq!(r.unchecked, vec!["mods/m0.jar".to_string(), "mods/m2.jar".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn curseforge_down_keeps_unknown_unknown() {
+        let mr = MockServer::start().await;
+        let cfs = MockServer::start().await;
+        let d = tempfile::tempdir().unwrap();
+        let (files, _) = make_jars(d.path(), 1);
+        Mock::given(method("POST"))
+            .and(path("/version_files"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&mr)
+            .await;
+        Mock::given(method("POST")).and(path("/v1/fingerprints/432")).respond_with(ResponseTemplate::new(503)).mount(&cfs).await;
+        let r = find_unknown(&files, d.path(), &client(&mr), &CfApi::with_base(cfs.uri(), "k")).await.unwrap();
+        assert_eq!(r.unknown, vec!["mods/m0.jar".to_string()]);
+        assert!(r.unchecked.is_empty());
     }
 
     #[tokio::test]
@@ -305,7 +460,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(body_for(&hashes[..90])))
             .mount(&s)
             .await;
-        let r = find_unknown_from_manifest(&files, &client(&s)).await;
+        let r = find_unknown_from_manifest(&files, &client(&s), &nocf()).await;
         assert_eq!(r.known.len(), 90);
         assert_eq!(r.unknown, vec!["mods/m90.jar".to_string()]);
         assert_eq!(r.unchecked, vec!["mods/nosha1.jar".to_string()]);
@@ -316,7 +471,7 @@ mod tests {
         let s = MockServer::start().await;
         Mock::given(method("POST")).and(path("/version_files")).respond_with(ResponseTemplate::new(500)).mount(&s).await;
         let f = ManifestFile { sha1: Some("a".repeat(40)), ..mf("mods/a.jar") };
-        let r = find_unknown_from_manifest(&[f], &client(&s)).await;
+        let r = find_unknown_from_manifest(&[f], &client(&s), &nocf()).await;
         assert_eq!(r.unchecked, vec!["mods/a.jar".to_string()]);
         assert!(r.unknown.is_empty());
     }
@@ -385,7 +540,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(body_for(&hashes[..90])))
             .mount(&s)
             .await;
-        let r = find_unknown(&files, d.path(), &client(&s)).await.unwrap();
+        let r = find_unknown(&files, d.path(), &client(&s), &nocf()).await.unwrap();
         assert_eq!(r.known.len(), 90);
         assert_eq!(r.unknown, vec!["mods/m90.jar".to_string()]);
         assert!(r.unchecked.is_empty());
@@ -404,7 +559,7 @@ mod tests {
             .mount(&s)
             .await;
         Mock::given(method("POST")).and(path("/version_files")).respond_with(ResponseTemplate::new(500)).mount(&s).await;
-        let r = find_unknown(&files, d.path(), &client(&s)).await.unwrap();
+        let r = find_unknown(&files, d.path(), &client(&s), &nocf()).await.unwrap();
         assert_eq!(r.known.len(), 100);
         assert_eq!(r.unchecked.len(), 50);
         assert!(r.unknown.is_empty());
@@ -426,7 +581,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(body_for(&hashes)))
             .mount(&s)
             .await;
-        let r = find_unknown(&files, d.path(), &client(&s)).await.unwrap();
+        let r = find_unknown(&files, d.path(), &client(&s), &nocf()).await.unwrap();
         assert_eq!(r.known.len(), 1);
     }
 
@@ -440,7 +595,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "0"))
             .mount(&s)
             .await;
-        let r = find_unknown(&files, d.path(), &client(&s)).await.unwrap();
+        let r = find_unknown(&files, d.path(), &client(&s), &nocf()).await.unwrap();
         assert_eq!(r.unchecked.len(), 2);
         assert!(r.unknown.is_empty() && r.known.is_empty());
     }
@@ -450,7 +605,7 @@ mod tests {
         let s = MockServer::start().await;
         let d = tempfile::tempdir().unwrap();
         let files = vec![mf("mods/absent.jar"), mf("config/x.toml"), mf("resourcepacks/p.zip"), mf("mods/readme.txt")];
-        let r = find_unknown(&files, d.path(), &client(&s)).await.unwrap();
+        let r = find_unknown(&files, d.path(), &client(&s), &nocf()).await.unwrap();
         assert_eq!(r.unchecked, vec!["mods/absent.jar".to_string()]);
         assert!(r.known.is_empty() && r.unknown.is_empty());
     }
@@ -459,7 +614,7 @@ mod tests {
     async fn empty_manifest() {
         let s = MockServer::start().await;
         let d = tempfile::tempdir().unwrap();
-        let r = find_unknown(&[], d.path(), &client(&s)).await.unwrap();
+        let r = find_unknown(&[], d.path(), &client(&s), &nocf()).await.unwrap();
         assert_eq!(r, UnknownReport::default());
     }
 
@@ -474,7 +629,7 @@ mod tests {
             .expect(3)
             .mount(&s)
             .await;
-        let r = find_unknown(&files, d.path(), &client(&s)).await.unwrap();
+        let r = find_unknown(&files, d.path(), &client(&s), &nocf()).await.unwrap();
         assert_eq!(r.known.len(), 205);
     }
 

@@ -165,6 +165,11 @@ async fn amis_presence_partage_join_coupure_et_refus() {
     let um = a.events("transfer://unknown_mods");
     assert_eq!(um.len(), 1);
     assert_eq!(um[0]["unknown_mods"], serde_json::json!(["mods/homemade.jar"]));
+    // Mod maison accepté au premier « Rejoindre » : le plan suivant ne redemande pas la confiance.
+    let again = a.st.join_plan(&b.key()).await.unwrap();
+    assert!(again.unknown_mods.is_empty(), "déjà accepté : {:?}", again.unknown_mods);
+    assert_eq!(again.unknown_trusted, vec!["mods/homemade.jar".to_string()]);
+    assert_eq!(again.to_receive, 0, "tout est déjà en cache");
 
     // 5. Instance invitée créée, fichiers identiques (hash vérifiés à la réception), hôte intact.
     let guests = a.st.instances.list();

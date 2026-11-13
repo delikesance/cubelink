@@ -45,7 +45,7 @@ test('T5 : mod inconnu signale avant telechargement, confiance requise, sha256 i
 
   // Telechargement.
   await join.click();
-  await expect(page.getByRole('heading', { name: 'Installation en cours' })).toBeVisible();
+  // Le transfert se deroule sur place (ecran Rejoindre), puis le jeu se lance : on suit les evenements.
   await expect.poll(async () => (await events(appB, 'transfer://unknown_mods')).length, { timeout: 90_000 }).toBeGreaterThan(0);
   await expect.poll(async () => ((await events(appB, 'transfer://progress')) as any[]).some((p) => p.phase === 'done'), { timeout: 90_000 }).toBe(true);
 
@@ -70,6 +70,20 @@ test('T5 : mod inconnu signale avant telechargement, confiance requise, sha256 i
   }
   // Les fichiers exclus de l'hote ne sont pas copies.
   for (const ex of ['options.txt', 'servers.dat', 'saves']) expect(fs.existsSync(path.join(guestDir, ex)), ex).toBe(false);
+
+  // Deuxieme « Rejoindre » : le mod maison deja accepte (meme sha256) n'est plus redemande, tout vient du cache.
+  const again = await invoke<Plan & { unknown_trusted: string[] }>(appB.page, 'join_plan', { friend_public_key: keyA });
+  expect(again.unknown_mods).toEqual([]);
+  expect(again.unknown_trusted).toEqual([HOME_MOD]);
+  expect(again.to_receive).toBe(0);
+  const homeSha = plan.manifest.files.find((f) => f.path === HOME_MOD)!.sha256;
+  expect(JSON.parse(fs.readFileSync(path.join(st.paths.p2p, 'trusted_mods.json'), 'utf8'))).toContain(homeSha);
+  await gotoHash(appB, '#/main', 'main');
+  await gotoHash(appB, `#/join?friend=${keyA}`, 'join');
+  await expect(page.getByTestId('already-trusted')).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByRole('button', { name: 'Rejoindre et jouer' })).toBeEnabled();
+  await expect(page.getByLabel(/^Je fais confiance à/)).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: /mod inconnu va s'exécuter/ })).toHaveCount(0);
 });
 
 test('T5 fichier altere cote hote (meme taille) : refuse par l hote, rien chez l invite (ni cache, ni instance)', async ({ appA, appB, servers, binary }) => {

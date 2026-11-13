@@ -19,6 +19,20 @@ export function SkinHead({ services, account, size }: { services: Services; acco
     : <PixelHead className="acc-head" seed={account.uuid || account.name} size={size} />;
 }
 
+/** Tête du skin d'un ami, retrouvée par son pseudo ; tête générée (`seed`) si le pseudo est inconnu de Mojang ou hors réseau. */
+export function NameHead({ services, name, seed, size }: { services: Services; name: string; seed: string; size: number }) {
+  const [src, setSrc] = useState<string | null>(null);
+  useEffect(() => {
+    setSrc(null);
+    let alive = true;
+    services.skinHeadByName(name).then((s) => { if (alive) setSrc(s); }, () => {});
+    return () => { alive = false; };
+  }, [services, name]);
+  return src
+    ? <img className="px-img" src={src} width={size} height={size} alt="" />
+    : <PixelHead seed={seed} size={size} />;
+}
+
 /** Carte de profil (bas du panneau de l'accueil) : compte actif, changer de compte en deux clics, menu ouvert vers le haut. */
 export function AccountSwitcher() {
   const { services, route, navigate } = useShell();

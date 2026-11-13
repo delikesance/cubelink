@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 380" width="1280" height="380" font-family="Inter,'Segoe UI',system-ui,sans-serif">
+<title>Cubelink : connexion directe entre amis, relais en secours</title>
+<defs><radialGradient id="glow" cx="50%" cy="60%" r="50%"><stop offset="0" stop-color="#4FC3E8" stop-opacity=".18"/><stop offset="1" stop-color="#4FC3E8" stop-opacity="0"/></radialGradient></defs>
+<rect width="1280" height="380" rx="28" fill="#131116"/><rect width="1280" height="380" rx="28" fill="url(#glow)"/>
+<!-- relais -->
+<g transform="translate(540 36)"><rect width="200" height="64" rx="18" fill="#1B181F" stroke="#332E3A" stroke-dasharray="6 6"/><text x="100" y="31" text-anchor="middle" font-size="16" font-weight="700" fill="#B0A8B4">Relais sans état</text><text x="100" y="50" text-anchor="middle" font-size="12" fill="#7d7582">secours uniquement</text></g>
+<g stroke="#7d7582" stroke-width="2" stroke-dasharray="4 8" fill="none"><path d="M200 190C230 120 420 80 540 70"/><path d="M1080 190C1050 120 860 80 740 70"/></g>
+<!-- lien direct -->
+<path d="M300 250H980" stroke="#4FC3E8" stroke-width="6" stroke-linecap="round" stroke-dasharray="1 16" />
+<path d="M300 250H980" stroke="#4FC3E8" stroke-width="2" opacity=".45"/>
+<g transform="translate(640 250)"><rect x="-130" y="-22" width="260" height="44" rx="22" fill="#0e3442" stroke="#4FC3E8"/><text y="6" text-anchor="middle" font-size="16" font-weight="700" fill="#6FD3F0">QUIC direct · hole punching</text></g>
+<!-- mods qui circulent -->
+<g><rect x="400" y="190" width="30" height="30" rx="8" fill="#6FD3F0"/><rect x="470" y="190" width="30" height="30" rx="8" fill="#4FC3E8"/><rect x="540" y="190" width="30" height="30" rx="8" fill="#2B9CC4"/><rect x="710" y="190" width="30" height="30" rx="8" fill="#6FD3F0"/><rect x="780" y="190" width="30" height="30" rx="8" fill="#4FC3E8"/><rect x="850" y="190" width="30" height="30" rx="8" fill="#2B9CC4"/></g>
+<text x="640" y="206" text-anchor="middle" font-size="13" fill="#B0A8B4">SHA-256 ✓</text>
+<!-- hôte -->
+<g transform="translate(60 150)"><rect width="240" height="200" rx="26" fill="#1B181F" stroke="#332E3A"/><rect x="20" y="20" width="200" height="104" rx="14" fill="#242029"/><rect x="34" y="34" width="60" height="10" rx="5" fill="#4FC3E8"/><rect x="34" y="56" width="172" height="8" rx="4" fill="#332E3A"/><rect x="34" y="74" width="140" height="8" rx="4" fill="#332E3A"/><rect x="34" y="92" width="100" height="14" rx="7" fill="#4FC3E8" opacity=".5"/>
+<text x="120" y="156" text-anchor="middle" font-size="19" font-weight="700" fill="#F4F1EC">Hôte</text><text x="120" y="180" text-anchor="middle" font-size="13" fill="#B0A8B4">la source de vérité</text></g>
+<!-- invité -->
+<g transform="translate(980 150)"><rect width="240" height="200" rx="26" fill="#1B181F" stroke="#4FC3E8"/><rect x="20" y="20" width="200" height="104" rx="14" fill="#242029"/><rect x="34" y="34" width="60" height="10" rx="5" fill="#5BD58A"/><rect x="34" y="56" width="172" height="8" rx="4" fill="#332E3A"/><rect x="34" y="74" width="140" height="8" rx="4" fill="#332E3A"/><rect x="34" y="92" width="100" height="14" rx="7" fill="#5BD58A" opacity=".5"/>
+<text x="120" y="156" text-anchor="middle" font-size="19" font-weight="700" fill="#F4F1EC">Invité</text><text x="120" y="180" text-anchor="middle" font-size="13" fill="#B0A8B4">profil isolé, mêmes mods</text></g>
+</svg>

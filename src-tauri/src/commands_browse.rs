@@ -45,6 +45,8 @@ pub(crate) fn providers() -> Providers {
     };
     let cf = match &h.cf_api {
         Some(b) => CfApi::with_base(b.clone(), TEST_CF_KEY),
+        // Mode test sans faux CurseForge : pas de clé, donc jamais d'appel au vrai service.
+        None if h.test_mode => CfApi::with_base("http://127.0.0.1:1", ""),
         None => CfApi::new(),
     };
     Providers { modrinth, cf, allow_loopback: h.test_mode }

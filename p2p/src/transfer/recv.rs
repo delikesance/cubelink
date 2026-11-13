@@ -91,10 +91,11 @@ impl Shared<'_> {
     }
 }
 
-/// Le sha1 annoncé par l'hôte est une revendication : si présent, il doit correspondre au contenu
-/// reçu (sinon un hôte pourrait faire passer un jar quelconque pour un mod connu du catalogue).
-pub(crate) fn verify_claimed_sha1(path: &Path, claimed: Option<&str>) -> Result<()> {
-    match claimed {
+/// Le sha1 annoncé par l'hôte est une revendication : si présent, il doit correspondre au contenu reçu (sinon un
+/// hôte pourrait faire passer un jar quelconque pour un mod connu de Modrinth ou de CurseForge). L'empreinte
+/// CurseForge n'est qu'une clé de recherche : la reconnaissance exige aussi ce sha1 (`unknown_mods`).
+pub(crate) fn verify_claims(path: &Path, f: &ManifestFile) -> Result<()> {
+    match f.sha1.as_deref() {
         Some(h) => core_lib::unknown_mods::verify_sha1_file(path, h),
         None => Ok(()),
     }
@@ -214,8 +215,8 @@ async fn receive_one<T: BlobTransport>(
         }));
     }
     shared.emit(TransferPhase::Verifying, None);
-    let (vtmp, vsha, vsha1) = (tmp.clone(), f.sha256.clone(), f.sha1.clone());
-    tokio::task::spawn_blocking(move || verify_file(&vtmp, &vsha).and_then(|()| verify_claimed_sha1(&vtmp, vsha1.as_deref())))
+    let (vtmp, vf) = (tmp.clone(), f.clone());
+    tokio::task::spawn_blocking(move || verify_file(&vtmp, &vf.sha256).and_then(|()| verify_claims(&vtmp, &vf)))
         .await
         .map_err(|e| Error::Other(format!("vérification : {e}")))?
         .map_err(reject)?;
@@ -266,7 +267,7 @@ mod tests {
             let data: Vec<u8> = (0..(1000 + i as usize * 300)).map(|j| (j as u8).wrapping_mul(i + 3)).collect();
             let path = format!("mods/m{i}.jar");
             std::fs::write(game.path().join(&path), &data).unwrap();
-            files.push(ManifestFile { path, size: data.len() as u64, sha256: sha(&data), sha1: Some(core_lib::unknown_mods::sha1_hex(&data)) });
+            files.push(ManifestFile { path, size: data.len() as u64, sha256: sha(&data), sha1: Some(core_lib::unknown_mods::sha1_hex(&data)), cf_fingerprint: None });
             contents.push(data);
         }
         let manifest = Manifest {
@@ -380,7 +381,7 @@ mod tests {
         let (_a, b) = nodes(&fx, &["invite"]).await;
         let evil = b"pas dans le manifeste";
         let plan = Plan {
-            to_receive: vec![ManifestFile { path: "mods/x.jar".into(), size: evil.len() as u64, sha256: sha(evil), sha1: None }],
+            to_receive: vec![ManifestFile { path: "mods/x.jar".into(), size: evil.len() as u64, sha256: sha(evil), sha1: None, cf_fingerprint: None }],
             ..Plan::default()
         };
         let cancel = AtomicBool::new(false);
@@ -514,6 +515,78 @@ mod tests {
         }
         assert_eq!(std::fs::read_dir(fx.store.path().join(".tmp")).unwrap().count(), 0);
         let _ = router.shutdown().await;
+    }
+
+    /// Pack de `n` mods de `size` octets servi par un vrai hôte iroh local ; renvoie (durée, invité).
+    async fn iroh_pack(n: usize, size: usize) -> (std::time::Duration, IrohTransport, tempfile::TempDir) {
+        use iroh::endpoint::presets;
+        use iroh::{Endpoint, RelayMode};
+
+        let game = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(game.path().join("mods")).unwrap();
+        let mut files = Vec::new();
+        for i in 0..n {
+            let data: Vec<u8> = (0..size).map(|j| (j as u32).wrapping_mul(i as u32 + 7) as u8).collect();
+            let path = format!("mods/m{i}.jar");
+            std::fs::write(game.path().join(&path), &data).unwrap();
+            files.push(ManifestFile { path, size: data.len() as u64, sha256: sha(&data), sha1: None, cf_fingerprint: None });
+        }
+        let manifest = Manifest {
+            name: "M".into(),
+            minecraft: "1.21.1".into(),
+            loader: LoaderSpec { loader: Loader::Fabric, version: "0.16.0".into() },
+            java_major: 21,
+            files,
+        };
+        let index = StoreIndex::open(store.path().join("index.db")).unwrap();
+        let plan = crate::transfer::plan::compute_plan(&manifest, &crate::transfer::plan::StoreCache(&index)).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let ep_a = Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Disabled)
+            .alpns(vec![crate::transfer::send::CONTROL_ALPN.to_vec(), iroh_blobs::ALPN.to_vec()])
+            .bind()
+            .await
+            .unwrap();
+        let ep_b = Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled).bind().await.unwrap();
+        let guest_id = ep_b.id().to_string();
+        let a = IrohTransport::new(ep_a, dir.path().join("a")).await.unwrap();
+        let b = IrohTransport::new(ep_b, dir.path().join("b")).await.unwrap();
+        let idx = ServeIndex::from_manifest(&manifest, game.path()).unwrap();
+        a.serve(Host::new(idx, Arc::new(AllowList(vec![guest_id])), ServeLimits::default())).await.unwrap();
+        let peer = b.add_peer(a.addr());
+        let cancel = AtomicBool::new(false);
+        let t0 = std::time::Instant::now();
+        let s = tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            receive_plan(&plan, &peer, &b, store.path(), &index, &RecvOptions::default(), &quiet, &cancel),
+        )
+        .await
+        .expect("délai dépassé")
+        .unwrap();
+        let took = t0.elapsed();
+        assert_eq!(s.files as usize, n);
+        a.shutdown().await;
+        drop((game, store));
+        (took, b, dir)
+    }
+
+    /// Mesure : `cargo test -p cubelink-p2p --lib iroh_pack_bench -- --ignored --nocapture`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "mesure de débit (vrais sockets UDP locaux) ; lancer avec --ignored --nocapture"]
+    async fn iroh_pack_bench() {
+        for (n, size) in [(200usize, 30_000usize), (8, 8_000_000)] {
+            let (took, _b, _d) = iroh_pack(n, size).await;
+            let mb = (n * size) as f64 / 1e6;
+            println!("BENCH {n} fichiers x {size} o : {:.0} ms, {:.1} Mo/s", took.as_secs_f64() * 1e3, mb / took.as_secs_f64());
+        }
+    }
+
+    /// Un pack de nombreux mods ne coûte qu'une connexion de contrôle et une connexion blobs.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn iroh_many_files_reuse_two_connections() {
+        let (_took, b, _d) = iroh_pack(40, 5_000).await;
+        assert_eq!(b.connections_opened(), 2);
     }
 
     /// Intégration iroh locale : deux endpoints, relais désactivé, adresses IP locales (comme le spike N1).

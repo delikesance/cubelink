@@ -3,7 +3,8 @@ node_modules/
 dist/
 *.log
 e2e/artifacts/
-.claude/
+.claude/*
+!.claude/agents/
 .vite/
 *.tsbuildinfo
 .DS_Store

@@ -527,6 +527,12 @@ impl AppState {
             Ok(d) => d,
             Err(e) => return self.emit_state(&id, LaunchPhase::Failed, Some(user_msg(&e))),
         };
+        // Rejoindre : l'écran d'accueil « accessibilité » d'un dossier neuf bloquerait la connexion directe.
+        if join_server.is_some() {
+            if let Err(e) = core_lib::instance::skip_accessibility_onboarding(&game_dir) {
+                eprintln!("[Cubelink] options.txt : accueil accessibilité non désactivé ({e})");
+            }
+        }
         // Partage / agent LAN : seulement pour nos propres instances, jamais en rejoignant un ami.
         let own = join_server.is_none() && self.instances.kind(&id).map(|k| k == core_lib::instance::InstanceKind::Own).unwrap_or(false);
         let agent_arg = lan_agent_jar(self, own, join_server.as_ref()).and_then(|jar| {

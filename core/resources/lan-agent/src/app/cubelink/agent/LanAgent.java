@@ -314,7 +314,9 @@ public final class LanAgent {
                 }
                 boolean title = false;
                 for (Class<?> k = screen == null ? null : screen.getClass(); k != null; k = k.getSuperclass()) {
-                    if (k.getName().equals("net.minecraft.client.gui.screens.TitleScreen")) title = true;
+                    // Ecran d'accueil accessibilite (dossier neuf) : il retient le quickPlay comme l'ecran-titre.
+                    if (k.getName().equals("net.minecraft.client.gui.screens.TitleScreen")
+                            || k.getName().equals("net.minecraft.client.gui.screens.AccessibilityOnboardingScreen")) title = true;
                 }
                 if (!title) {
                     idleSince = 0;

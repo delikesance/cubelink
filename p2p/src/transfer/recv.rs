@@ -516,7 +516,6 @@ mod tests {
         let _ = router.shutdown().await;
     }
 
-    /// Intégration iroh locale : deux endpoints, relais désactivé, adresses IP locales (comme le spike N1).
     /// Pack de `n` mods de `size` octets servi par un vrai hôte iroh local ; renvoie (durée, invité).
     async fn iroh_pack(n: usize, size: usize) -> (std::time::Duration, IrohTransport, tempfile::TempDir) {
         use iroh::endpoint::presets;
@@ -589,6 +588,7 @@ mod tests {
         assert_eq!(b.connections_opened(), 2);
     }
 
+    /// Intégration iroh locale : deux endpoints, relais désactivé, adresses IP locales (comme le spike N1).
     #[tokio::test]
     #[ignore = "ouvre de vrais sockets UDP locaux ; lancer avec --ignored"]
     async fn iroh_local_transfer() {

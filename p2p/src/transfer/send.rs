@@ -56,7 +56,9 @@ impl Default for ServeLimits {
         Self {
             max_file_bytes: 2 * 1024 * 1024 * 1024,
             max_total_bytes_per_peer: 20 * 1024 * 1024 * 1024,
-            max_concurrent_per_peer: 4,
+            // L'invité en demande 4 à la fois ; marge pour une requête arrivée juste avant la fin de la précédente
+            // (connexion réutilisée, pas de poignée de main entre deux fichiers).
+            max_concurrent_per_peer: 8,
         }
     }
 }
@@ -562,6 +564,12 @@ mod iroh_impl {
             }
             self.store.blobs().export(hash, &req.dest).await.map_err(net)?;
             Ok(())
+        }
+
+        /// Oublie (sans les fermer) les connexions en cache vers `peer` : les prochains fichiers en rouvrent de
+        /// neuves, ceux en vol finissent sur les anciennes. Après un silence, la connexion est peut-être morte.
+        pub fn forget_peer(&self, peer: &str) {
+            self.conns.lock().unwrap_or_else(|p| p.into_inner()).retain(|(p, _), _| p != peer);
         }
 
         /// Nombre de connexions sortantes ouvertes pour des transferts depuis la création.

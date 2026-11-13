@@ -174,6 +174,8 @@ impl AppState {
         *lock(&self.last_join_instance) = None;
         // Les mods inconnus montrés par le plan (case de confiance cochée) sont acceptés pour la suite,
         // seulement s'ils font toujours partie du manifeste reçu maintenant.
+        let trusted_before: std::collections::HashSet<String> =
+            hm.manifest.files.iter().filter(|f| self.trusted_mods.contains(&f.sha256)).map(|f| f.sha256.clone()).collect();
         if let Some(shas) = lock(&self.pending_trust).remove(friend_public_key) {
             self.trusted_mods.add_all(shas.iter().map(String::as_str).filter(|h| hm.manifest.files.iter().any(|f| f.sha256 == *h)));
         }
@@ -192,7 +194,7 @@ impl AppState {
         });
         tokio::spawn(async move {
             me.emit_event("transfer://progress", &progress(TransferPhase::Preparing));
-            let outcome = me.run_join(&key, hm, plan, cb, control, &last).await;
+            let outcome = me.run_join(&key, hm, plan, cb, control, &last, &trusted_before).await;
             // RAM choisie avant de rejoindre (aussi pour une instance invitée réutilisée : même ami, même pack).
             if outcome.is_ok() {
                 if let Some(id) = lock(&me.last_join_instance).clone() {
@@ -213,6 +215,7 @@ impl AppState {
     }
 
     /// Réception, instance invitée, installation du loader/Java. Erreur = message d'échec affichable.
+    #[allow(clippy::too_many_arguments)]
     async fn run_join(
         &self,
         key: &str,
@@ -221,6 +224,7 @@ impl AppState {
         cb: ProgressFn,
         control: Arc<TransferControl>,
         last: &Arc<Mutex<Option<TransferProgress>>>,
+        trusted_before: &std::collections::HashSet<String>,
     ) -> Result<(), String> {
         let manifest = hm.manifest;
         let mh = core_lib::manifest::manifest_hash(&manifest);
@@ -257,6 +261,11 @@ impl AppState {
         // Avertissement fiable : sha1 locaux des jars reçus, côté invité.
         if let Ok(gd) = self.instances.game_dir(&inst.id) {
             let unknown = self.backend().find_unknown_mods(manifest.files.clone(), gd).await;
+            // Les mods acceptés lors d'un « Rejoindre » précédent ne sont plus signalés (ceux de celui-ci, si).
+            let unknown: Vec<String> = unknown
+                .into_iter()
+                .filter(|p| !manifest.files.iter().any(|f| &f.path == p && trusted_before.contains(&f.sha256)))
+                .collect();
             self.emit_event("transfer://unknown_mods", &serde_json::json!({ "instance_id": inst.id, "unknown_mods": unknown }));
         }
         if !self.skip_game_install.load(Ordering::SeqCst) {

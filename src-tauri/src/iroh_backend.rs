@@ -278,7 +278,9 @@ impl BlobTransport for Fetcher {
                 r = &mut fut => break r,
                 _ = tokio::time::sleep(Duration::from_millis(250).min(self.stall_retry)) => {
                     if local.idle() >= self.stall_retry {
-                        // Muet : on abandonne ce fichier ; la reprise (backoff p2p) re-résout l'hôte.
+                        // Muet : on abandonne ce fichier ; la reprise (backoff p2p) re-résout l'hôte et rouvre
+                        // des connexions neuves (celles en cache sont peut-être mortes : hôte redémarré).
+                        self.inner.forget_peer(peer);
                         break Err(Error::Network("l'ami ne répond plus".into()));
                     }
                 }

@@ -170,7 +170,7 @@ mod tests {
             minecraft: "1.21.1".into(),
             loader: LoaderSpec { loader: Loader::Fabric, version: "0.16.0".into() },
             java_major: 21,
-            files: vec![ManifestFile { path: "mods/a.jar".into(), size: 3, sha256: "a".repeat(64), sha1: None }],
+            files: vec![ManifestFile { path: "mods/a.jar".into(), size: 3, sha256: "a".repeat(64), sha1: None, cf_fingerprint: None }],
         }
     }
 

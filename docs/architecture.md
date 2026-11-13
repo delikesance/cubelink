@@ -29,7 +29,7 @@ Les catalogues ne servent qu'à **construire sa propre instance** avant de jouer
 4. Le manifeste inclut aussi configs, resource packs et shaders (certains mods exigent des configs identiques).
 
 ### Risques à gérer
-- **Sécurité** : rejoindre un ami = exécuter son code. Prévoir : écran de confirmation listant ce qui sera installé ; niveau de confiance par ami (« toujours accepter » ou « demander ») ; marquage des mods dont le hash est inconnu de Modrinth (lookup par hash) comme « custom, non vérifié ».
+- **Sécurité** : rejoindre un ami = exécuter son code. Prévoir : écran de confirmation listant ce qui sera installé ; niveau de confiance par ami (« toujours accepter » ou « demander ») ; marquage des mods dont le hash est inconnu de Modrinth et de CurseForge (lookup par hash / empreinte) comme « custom, non vérifié ».
 - **Licences** : transfert privé entre amis, sans hébergement central, risque faible, mais pas une garantie juridique. Ne pas passer par l'API CurseForge pour ce transfert.
 - **Cas à part** : mods client-only vs serveur ; compatibilité de versions MC/loader.
 

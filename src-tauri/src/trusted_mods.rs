@@ -72,7 +72,7 @@ mod tests {
     use super::*;
 
     fn file(path: &str, sha: &str) -> ManifestFile {
-        ManifestFile { path: path.into(), sha256: sha.into(), size: 1, sha1: None }
+        ManifestFile { path: path.into(), sha256: sha.into(), size: 1, sha1: None, cf_fingerprint: None }
     }
 
     #[test]

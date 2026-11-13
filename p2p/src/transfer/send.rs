@@ -851,7 +851,7 @@ mod iroh_impl {
                 minecraft: "1.21.1".into(),
                 loader: LoaderSpec { loader: Loader::Fabric, version: "0.16.0".into() },
                 java_major: 21,
-                files: vec![ManifestFile { path: "mods/a.jar".into(), size: good.len() as u64, sha256: sha.clone(), sha1: None }],
+                files: vec![ManifestFile { path: "mods/a.jar".into(), size: good.len() as u64, sha256: sha.clone(), sha1: None, cf_fingerprint: None }],
             };
             let host = Host::new(
                 ServeIndex::from_manifest(&m, dir.path()).unwrap(),
@@ -909,11 +909,11 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("mods")).unwrap();
         std::fs::write(dir.path().join("mods/a.jar"), b"aaa").unwrap();
         std::fs::write(dir.path().join("secret.txt"), b"secret").unwrap();
-        let m = manifest(vec![ManifestFile { path: "mods/a.jar".into(), size: 3, sha256: sha(b"aaa"), sha1: None }]);
+        let m = manifest(vec![ManifestFile { path: "mods/a.jar".into(), size: 3, sha256: sha(b"aaa"), sha1: None, cf_fingerprint: None }]);
         let idx = ServeIndex::from_manifest(&m, dir.path()).unwrap();
         assert!(idx.get(&sha(b"aaa")).is_some());
         assert!(idx.get(&sha(b"secret")).is_none());
-        let bad = manifest(vec![ManifestFile { path: "../x".into(), size: 1, sha256: sha(b"x"), sha1: None }]);
+        let bad = manifest(vec![ManifestFile { path: "../x".into(), size: 1, sha256: sha(b"x"), sha1: None, cf_fingerprint: None }]);
         assert!(ServeIndex::from_manifest(&bad, dir.path()).is_err());
     }
 
@@ -921,8 +921,8 @@ mod tests {
     fn concurrency_and_total_limits() {
         let dir = tempfile::tempdir().unwrap();
         let m = manifest(vec![
-            ManifestFile { path: "mods/a.jar".into(), size: 10, sha256: sha(b"a"), sha1: None },
-            ManifestFile { path: "mods/b.jar".into(), size: 10, sha256: sha(b"b"), sha1: None },
+            ManifestFile { path: "mods/a.jar".into(), size: 10, sha256: sha(b"a"), sha1: None, cf_fingerprint: None },
+            ManifestFile { path: "mods/b.jar".into(), size: 10, sha256: sha(b"b"), sha1: None, cf_fingerprint: None },
         ]);
         let idx = ServeIndex::from_manifest(&m, dir.path()).unwrap();
         let limits = ServeLimits { max_file_bytes: 100, max_total_bytes_per_peer: 15, max_concurrent_per_peer: 1 };
@@ -939,7 +939,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("mods")).unwrap();
         std::fs::write(dir.path().join("mods/a.jar"), data).unwrap();
-        let m = manifest(vec![ManifestFile { path: "mods/a.jar".into(), size: data.len() as u64, sha256: sha(data), sha1: None }]);
+        let m = manifest(vec![ManifestFile { path: "mods/a.jar".into(), size: data.len() as u64, sha256: sha(data), sha1: None, cf_fingerprint: None }]);
         let idx = ServeIndex::from_manifest(&m, dir.path()).unwrap();
         let host = Host::new(idx, Arc::new(AllowList(vec!["guest".into()])), ServeLimits::default());
         (dir, host, MemNetwork::new())

@@ -91,10 +91,11 @@ impl Shared<'_> {
     }
 }
 
-/// Le sha1 annoncé par l'hôte est une revendication : si présent, il doit correspondre au contenu
-/// reçu (sinon un hôte pourrait faire passer un jar quelconque pour un mod connu du catalogue).
-pub(crate) fn verify_claimed_sha1(path: &Path, claimed: Option<&str>) -> Result<()> {
-    match claimed {
+/// Le sha1 annoncé par l'hôte est une revendication : si présent, il doit correspondre au contenu reçu (sinon un
+/// hôte pourrait faire passer un jar quelconque pour un mod connu de Modrinth ou de CurseForge). L'empreinte
+/// CurseForge n'est qu'une clé de recherche : la reconnaissance exige aussi ce sha1 (`unknown_mods`).
+pub(crate) fn verify_claims(path: &Path, f: &ManifestFile) -> Result<()> {
+    match f.sha1.as_deref() {
         Some(h) => core_lib::unknown_mods::verify_sha1_file(path, h),
         None => Ok(()),
     }
@@ -214,8 +215,8 @@ async fn receive_one<T: BlobTransport>(
         }));
     }
     shared.emit(TransferPhase::Verifying, None);
-    let (vtmp, vsha, vsha1) = (tmp.clone(), f.sha256.clone(), f.sha1.clone());
-    tokio::task::spawn_blocking(move || verify_file(&vtmp, &vsha).and_then(|()| verify_claimed_sha1(&vtmp, vsha1.as_deref())))
+    let (vtmp, vf) = (tmp.clone(), f.clone());
+    tokio::task::spawn_blocking(move || verify_file(&vtmp, &vf.sha256).and_then(|()| verify_claims(&vtmp, &vf)))
         .await
         .map_err(|e| Error::Other(format!("vérification : {e}")))?
         .map_err(reject)?;
@@ -266,7 +267,7 @@ mod tests {
             let data: Vec<u8> = (0..(1000 + i as usize * 300)).map(|j| (j as u8).wrapping_mul(i + 3)).collect();
             let path = format!("mods/m{i}.jar");
             std::fs::write(game.path().join(&path), &data).unwrap();
-            files.push(ManifestFile { path, size: data.len() as u64, sha256: sha(&data), sha1: Some(core_lib::unknown_mods::sha1_hex(&data)) });
+            files.push(ManifestFile { path, size: data.len() as u64, sha256: sha(&data), sha1: Some(core_lib::unknown_mods::sha1_hex(&data)), cf_fingerprint: None });
             contents.push(data);
         }
         let manifest = Manifest {
@@ -380,7 +381,7 @@ mod tests {
         let (_a, b) = nodes(&fx, &["invite"]).await;
         let evil = b"pas dans le manifeste";
         let plan = Plan {
-            to_receive: vec![ManifestFile { path: "mods/x.jar".into(), size: evil.len() as u64, sha256: sha(evil), sha1: None }],
+            to_receive: vec![ManifestFile { path: "mods/x.jar".into(), size: evil.len() as u64, sha256: sha(evil), sha1: None, cf_fingerprint: None }],
             ..Plan::default()
         };
         let cancel = AtomicBool::new(false);
@@ -529,7 +530,7 @@ mod tests {
             let data: Vec<u8> = (0..size).map(|j| (j as u32).wrapping_mul(i as u32 + 7) as u8).collect();
             let path = format!("mods/m{i}.jar");
             std::fs::write(game.path().join(&path), &data).unwrap();
-            files.push(ManifestFile { path, size: data.len() as u64, sha256: sha(&data), sha1: None });
+            files.push(ManifestFile { path, size: data.len() as u64, sha256: sha(&data), sha1: None, cf_fingerprint: None });
         }
         let manifest = Manifest {
             name: "M".into(),

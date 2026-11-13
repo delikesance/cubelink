@@ -38,7 +38,7 @@ Toute commande renvoie `Result<T, String>` (message d'erreur affichable, en fran
 | friends | `friend_requests` | `{ offset, limit, query? }` | `{ items: FriendRequest[], total: number }` |
 | friends | `friend_accept` / `friend_refuse` | `{ public_key }` | — |
 | friends | `friend_refuse_all` | — | `number` (nombre refusé) |
-| join | `join_plan` | `{ friend_public_key }` | `{ manifest: Manifest, cached: number, to_receive: number, to_receive_bytes: number, unknown_mods: string[], unknown_unchecked: string[], unknown_trusted: string[] }` ; `unknown_mods` ne contient que les mods inconnus pas encore acceptés : ceux acceptés lors d'un `join_start` précédent (même sha256, mémorisés dans `p2p/trusted_mods.json`) passent dans `unknown_trusted` |
+| join | `join_plan` | `{ friend_public_key }` | `{ manifest: Manifest, cached: number, to_receive: number, to_receive_bytes: number, unknown_mods: string[], unknown_unchecked: string[], unknown_trusted: string[] }` ; `unknown_mods` ne contient que les mods inconnus pas encore acceptés : ceux acceptés lors d'un `join_start` précédent (même sha256, mémorisés dans `p2p/trusted_mods.json`) passent dans `unknown_trusted`. « Inconnu » = ni Modrinth (sha1) ni CurseForge (empreinte murmur2 `cf_fingerprint` du manifeste, avec la clé de Cubelink) ne reconnaissent le jar ; `sha1` et `cf_fingerprint` sont des revendications de l'hôte, revérifiées à la réception |
 | join | `join_start` | `{ friend_public_key }` | — (progression par événement) |
 | join | `join_pause` / `join_resume` / `join_cancel` | — | — |
 | settings | `settings_get` / `settings_set` | `Settings` | `Settings` |
@@ -55,7 +55,7 @@ Toute commande renvoie `Result<T, String>` (message d'erreur affichable, en fran
 | `launch://log` | lignes de log du jeu en cours |
 | `browse://progress` | progression d'une installation depuis le catalogue (`done`, `total`, libellé) |
 | `import://warning` | avertissement pendant l'import d'un modpack |
-| `transfer://unknown_mods` | liste des mods inconnus des catalogues, pendant un join (sans ceux déjà acceptés lors d'un « Rejoindre » précédent) |
+| `transfer://unknown_mods` | liste des mods inconnus des catalogues (Modrinth et CurseForge, recalculés sur les octets reçus), pendant un join (sans ceux déjà acceptés lors d'un « Rejoindre » précédent) |
 | `transfer://error_details` | échec d'une étape d'installation invitée, émis juste avant la phase `failed` : `{ step, message, details, log_file }`. `message` = `TransferProgress.error` (« Étape : cause » quand la cause est générique) ; `details` = texte multi-ligne copiable (étape, détail, erreur, debug) pour un bloc « Détails » ; `log_file` = `join-errors.log` dans `<data>/logs/` (toujours écrit, horodaté UTC) |
 
 ## Règles

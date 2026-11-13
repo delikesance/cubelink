@@ -131,6 +131,8 @@ struct State {
     curtain_rect: Option<(i32, i32, i32, i32)>,
     stage_rect: Option<(i32, i32, i32, i32)>,
     game_rect: Option<(u32, i32, i32)>,
+    /// Largeur de la bande rognee a droite du jeu transitoire (panneau ouvert), deja appliquee par XShape.
+    game_clip: Option<(u32, i32)>,
     stage_mapped: bool,
     /// Dernier `ConfigureNotify` synthetique envoye au jeu (fenetre, rectangle absolu en coordonnees racine).
     notified: Option<(u32, (i32, i32, i32, i32))>,

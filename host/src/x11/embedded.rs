@@ -125,11 +125,13 @@ pub(super) fn sync(s: &Shared) {
     let Some(g) = cur.filter(|_| placed).filter(|g| util::exists(&s.conn, *g)) else { return };
     let inner = (w - pw).max(1);
     if transient {
-        let want = Some((g, inner, h));
+        // le jeu garde la taille de la zone entiere (son contenu ne bouge pas) ; la bande du panneau est rognee par XShape
+        let want = Some((g, w, h));
         if std::mem::replace(&mut s.lock().game_rect, want) != want {
-            place(s, g, (x, y, inner, h));
+            place(s, g, (x, y, w, h));
             let _ = s.conn.map_window(g);
         }
+        clip_game(s, g, pw, w, h);
         return;
     }
     let (restage, remap, regame) = {
@@ -158,6 +160,21 @@ pub(super) fn sync(s: &Shared) {
     if moved || restage || regame {
         notify_game(s, g, false);
     }
+}
+
+/// Rogne la bande de droite (`pw` px) de la fenetre transitoire du jeu : forme et zone d'entree, pour que le panneau du launcher,
+/// dessous, reste visible et cliquable. `pw` = 0 : forme d'origine rendue.
+fn clip_game(s: &Shared, g: u32, pw: i32, w: i32, h: i32) {
+    let key = Some((g, pw.min(w - 1).max(0)));
+    if std::mem::replace(&mut s.lock().game_clip, key) == key {
+        return;
+    }
+    let c = &s.conn;
+    let rect = [Rectangle { x: 0, y: 0, width: clamp_u16((w - pw).max(1)), height: clamp_u16(h) }];
+    for kind in [shape::SK::BOUNDING, shape::SK::INPUT] {
+        let _ = if pw > 0 { shape::rectangles(c, shape::SO::SET, kind, ClipOrdering::UNSORTED, g, 0, 0, &rect).map(drop) } else { shape::mask(c, shape::SO::SET, kind, g, 0, 0, x11rb::NONE).map(drop) };
+    }
+    s.flush();
 }
 
 /// Envoie au jeu le `ConfigureNotify` SYNTHETIQUE de l'ICCCM 4.1.5 : sa geometrie reelle (taille du serveur) en coordonnees

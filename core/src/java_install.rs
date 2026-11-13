@@ -1,8 +1,7 @@
 //! Tâche J2 : téléchargement et installation d'un JRE Adoptium (sha256 + taille vérifiés,
 //! extraction zip sécurisée, renommage atomique vers `<java_root>/jre-<major>`).
 //!
-//! Limite connue : seule l'archive `.zip` (Windows) est gérée ; aucune dépendance tar/gzip
-//! n'existe dans Cargo.toml, donc un `.tar.gz` (Linux/macOS) renvoie `Error::Invalid`.
+//! Archives : `.zip` (Windows) et `.tar.gz` (Linux), mêmes garde-fous (chemins, tailles, liens).
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -206,12 +205,8 @@ where
         return Err(Error::Invalid(format!("version Java {major} non supportée")));
     }
     let lower = package.filename.to_ascii_lowercase();
-    if lower.ends_with(".tar.gz") || lower.ends_with(".tgz") {
-        return Err(Error::Invalid(
-            "archive tar.gz non gérée (dépendance tar/gzip absente) : seul le zip Windows est supporté".into(),
-        ));
-    }
-    if !lower.ends_with(".zip") {
+    let targz = lower.ends_with(".tar.gz") || lower.ends_with(".tgz");
+    if !targz && !lower.ends_with(".zip") {
         return Err(Error::Invalid(format!("format d'archive inconnu : {}", package.filename)));
     }
     check(&cancel)?;
@@ -237,7 +232,7 @@ where
     download(package, &part, &progress, &cancel).await?;
 
     let (zip_path, stage, c2) = (part.clone(), staging.clone(), cancel.clone());
-    let home_in_stage = tokio::task::spawn_blocking(move || extract_zip(&zip_path, &stage, &c2))
+    let home_in_stage = tokio::task::spawn_blocking(move || if targz { extract_tar_gz(&zip_path, &stage, &c2) } else { extract_zip(&zip_path, &stage, &c2) })
         .await
         .map_err(|e| Error::Other(e.to_string()))??;
     check(&cancel)?;
@@ -353,6 +348,48 @@ fn extract_zip(archive: &Path, dest: &Path, cancel: &AtomicBool) -> Result<PathB
             f.write_all(&buf[..n])?;
         }
     }
+    find_home(dest)
+}
+
+/// Extrait un `.tar.gz` (JRE Linux) : droits d'exécution conservés, chemins confinés à `dest`,
+/// liens ignorés (Adoptium n'en met que dans `legal/`), mêmes plafonds de taille que le zip.
+fn extract_tar_gz(archive: &Path, dest: &Path, cancel: &AtomicBool) -> Result<PathBuf> {
+    let file = std::fs::File::open(archive)?;
+    let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(std::io::BufReader::new(file)));
+    tar.set_preserve_permissions(true);
+    tar.set_overwrite(true);
+    std::fs::create_dir_all(dest)?;
+    let bad = |e: std::io::Error| Error::Invalid(format!("tar.gz invalide : {e}"));
+    let mut total: u64 = 0;
+    for (n, entry) in tar.entries().map_err(bad)?.enumerate() {
+        check(cancel)?;
+        if n >= MAX_ENTRIES {
+            return Err(Error::Invalid("trop d'entrées dans l'archive".into()));
+        }
+        let mut entry = entry.map_err(bad)?;
+        let kind = entry.header().entry_type();
+        if !(kind.is_file() || kind.is_dir()) {
+            continue;
+        }
+        let rel = entry.path().map_err(bad)?.into_owned();
+        if rel.is_absolute() || rel.has_root() || rel.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+            return Err(Error::Invalid(format!("chemin dangereux dans l'archive : {}", rel.display())));
+        }
+        let size = entry.header().size().map_err(bad)?;
+        total += size;
+        if size > MAX_FILE_BYTES || total > MAX_TOTAL_BYTES {
+            return Err(Error::Invalid("taille décompressée excessive".into()));
+        }
+        // `unpack_in` refuse aussi tout chemin qui sortirait de `dest`.
+        if !entry.unpack_in(dest).map_err(bad)? {
+            return Err(Error::Invalid(format!("chemin dangereux dans l'archive : {}", rel.display())));
+        }
+    }
+    find_home(dest)
+}
+
+/// Dossier « home » du JRE : `dest` ou son unique sous-dossier contenant `bin/java`.
+fn find_home(dest: &Path) -> Result<PathBuf> {
     if dest.join(java_exe_rel()).is_file() {
         return Ok(dest.to_path_buf());
     }
@@ -530,15 +567,83 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn version_non_supportee_et_tar_gz() {
+    async fn version_non_supportee_et_format_inconnu() {
         let root = tempfile::tempdir().unwrap();
         let mut p = JrePackage { url: "http://127.0.0.1:1/x".into(), size: 1, sha256: "0".repeat(64), filename: "jre.zip".into(), major: 11 };
         let r = install_with(&p, root.path(), |_, _| {}, Arc::new(AtomicBool::new(false)), Arc::new(FakeProbe(Some(11)))).await;
         assert!(matches!(r, Err(Error::Invalid(_))));
         p.major = 21;
-        p.filename = "jre.tar.gz".into();
+        p.filename = "jre.7z".into();
         let r = install_with(&p, root.path(), |_, _| {}, Arc::new(AtomicBool::new(false)), Arc::new(FakeProbe(Some(21)))).await;
         assert!(matches!(r, Err(Error::Invalid(_))));
+    }
+
+    /// `.tar.gz` à la Adoptium Linux : un dossier racine, `bin/java` exécutable, un lien dans `legal/`.
+    fn jre_tar_gz(extra: Option<(&str, &[u8])>) -> Vec<u8> {
+        let mut b = tar::Builder::new(flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast()));
+        let mut add = |name: &str, data: &[u8], mode: u32| {
+            let mut h = tar::Header::new_gnu();
+            h.set_size(data.len() as u64);
+            h.set_mode(mode);
+            h.set_cksum();
+            b.append_data(&mut h, name, data).unwrap();
+        };
+        add(&format!("jdk-21.0.5+11-jre/{}", java_exe_rel()), b"fake java", 0o755);
+        add("jdk-21.0.5+11-jre/release", b"JAVA_VERSION=\"21\"", 0o644);
+        if let Some((n, d)) = extra {
+            add(n, d, 0o644);
+        }
+        let mut h = tar::Header::new_gnu();
+        h.set_entry_type(tar::EntryType::Symlink);
+        h.set_size(0);
+        h.set_cksum();
+        b.append_link(&mut h, "jdk-21.0.5+11-jre/legal/LICENSE", "../release").unwrap();
+        b.into_inner().unwrap().finish().unwrap()
+    }
+
+    #[tokio::test]
+    async fn installe_un_tar_gz_linux() {
+        let server = MockServer::start().await;
+        let data = jre_tar_gz(None);
+        Mock::given(method("GET")).and(path("/dl/jre.tar.gz")).respond_with(ResponseTemplate::new(200).set_body_bytes(data.clone())).mount(&server).await;
+        let root = tempfile::tempdir().unwrap();
+        let p = JrePackage {
+            url: format!("{}/dl/jre.tar.gz", server.uri()),
+            size: data.len() as u64,
+            sha256: hex::encode(Sha256::digest(&data)),
+            filename: "OpenJDK21U-jre_x64_linux_hotspot_21.0.5_11.tar.gz".into(),
+            major: 21,
+        };
+        let j = install_with(&p, root.path(), |_, _| {}, Arc::new(AtomicBool::new(false)), Arc::new(FakeProbe(Some(21)))).await.unwrap();
+        assert_eq!(j.home, root.path().join("jre-21"));
+        assert_eq!(std::fs::read(&j.java_exe).unwrap(), b"fake java");
+        // Lien ignoré, pas suivi.
+        assert!(!j.home.join("legal/LICENSE").exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&j.java_exe).unwrap().permissions().mode() & 0o111, 0o111);
+        }
+        assert_eq!(leftovers(root.path()), vec!["jre-21".to_string()]);
+    }
+
+    #[test]
+    fn tar_gz_chemin_dangereux_refuse() {
+        let dir = tempfile::tempdir().unwrap();
+        // `tar::Builder` refuse d'écrire « .. » : on forge l'en-tête à la main.
+        let mut raw = tar::Builder::new(flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast()));
+        let mut h = tar::Header::new_old();
+        h.as_old_mut().name[..9].copy_from_slice(b"../evil.t");
+        h.set_size(1);
+        h.set_cksum();
+        raw.append(&h, &b"x"[..]).unwrap();
+        let data = raw.into_inner().unwrap().finish().unwrap();
+        let a = dir.path().join("a.tar.gz");
+        std::fs::write(&a, data).unwrap();
+        let r = extract_tar_gz(&a, &dir.path().join("out"), &AtomicBool::new(false));
+        assert!(matches!(r, Err(Error::Invalid(_))), "{r:?}");
+        assert!(!dir.path().join("evil.t").exists());
+        let _ = jre_tar_gz(Some(("x", b"")));
     }
 
     #[tokio::test]

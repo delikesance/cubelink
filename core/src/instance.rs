@@ -38,6 +38,9 @@ struct StoredInstance {
     created_at: i64,
     #[serde(default)]
     kind: InstanceKind,
+    /// Créée à la main dans Cubelink (pas importée d'un modpack) : jamais d'illustration automatique.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    custom: bool,
 }
 
 /// Dossier ignoré par `list_with_issues`.
@@ -101,7 +104,7 @@ impl InstanceStore {
             jvm_args: String::new(),
             art: None,
         };
-        let stored = StoredInstance { instance: instance.clone(), created_at: now_secs(), kind };
+        let stored = StoredInstance { instance: instance.clone(), created_at: now_secs(), kind, custom: false };
         let res = fs::create_dir_all(self.root.join(&id).join(GAME_DIR))
             .map_err(Error::from)
             .and_then(|_| self.write_meta(&id, &stored));
@@ -149,6 +152,18 @@ impl InstanceStore {
 
     pub fn kind(&self, id: &str) -> Result<InstanceKind> {
         Ok(self.read_meta(id)?.kind)
+    }
+
+    /// Instance créée à la main (voir [`Self::mark_custom`]).
+    pub fn is_custom(&self, id: &str) -> bool {
+        self.read_meta(id).is_ok_and(|m| m.custom)
+    }
+
+    /// Marque l'instance comme créée à la main : la recherche automatique d'illustration l'ignore.
+    pub fn mark_custom(&self, id: &str) -> Result<()> {
+        let mut m = self.read_meta(id)?;
+        m.custom = true;
+        self.write_meta(id, &m)
     }
 
     pub fn created_at(&self, id: &str) -> Result<i64> {

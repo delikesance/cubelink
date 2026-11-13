@@ -25,7 +25,8 @@ serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 reqwest.workspace = true
-iroh = "=1.4.1"
+base64 = "0.22"
+iroh = { version = "=1.4.1", features = ["unstable-net-report"] }
 iroh-blobs = "=0.104.1"
 hex.workspace = true
 anyhow.workspace = true

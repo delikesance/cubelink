@@ -140,6 +140,55 @@ pub struct CfFile {
     pub game_versions: Vec<String>,
     #[serde(default)]
     pub dependencies: Vec<CfDependency>,
+    /// Empreinte CurseForge (murmur2) du fichier ; 0 si absente.
+    #[serde(default)]
+    pub file_fingerprint: u64,
+}
+
+/// Correspondance exacte d'une empreinte (`POST /v1/fingerprints/432`).
+#[derive(Debug, Clone, Deserialize)]
+pub struct CfFingerprintMatch {
+    /// Identifiant du projet.
+    pub id: u64,
+    pub file: CfFile,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CfFingerprints {
+    #[serde(default)]
+    exact_matches: Vec<CfFingerprintMatch>,
+}
+
+/// Empreinte CurseForge d'un fichier : MurmurHash2 32 bits, graine 1, calculé après suppression des octets
+/// blancs (tabulation, LF, CR, espace) ; la longueur utilisée est celle du contenu filtré.
+pub fn murmur2_fingerprint(bytes: &[u8]) -> u32 {
+    const M: u32 = 0x5bd1e995;
+    let data: Vec<u8> = bytes.iter().copied().filter(|b| !matches!(b, 9 | 10 | 13 | 32)).collect();
+    let mut h: u32 = 1 ^ (data.len() as u32);
+    let (chunks, tail) = data.as_chunks::<4>();
+    for c in chunks {
+        let mut k = u32::from_le_bytes(*c);
+        k = k.wrapping_mul(M);
+        k ^= k >> 24;
+        k = k.wrapping_mul(M);
+        h = h.wrapping_mul(M);
+        h ^= k;
+    }
+    if !tail.is_empty() {
+        if tail.len() >= 3 {
+            h ^= u32::from(tail[2]) << 16;
+        }
+        if tail.len() >= 2 {
+            h ^= u32::from(tail[1]) << 8;
+        }
+        h ^= u32::from(tail[0]);
+        h = h.wrapping_mul(M);
+    }
+    h ^= h >> 13;
+    h = h.wrapping_mul(M);
+    h ^= h >> 15;
+    h
 }
 
 impl CfFile {
@@ -233,6 +282,39 @@ impl CfApi {
         serde_json::from_slice(&bytes).map_err(|e| Error::Network(format!("réponse CurseForge invalide : {e}")))
     }
 
+    async fn post<T: DeserializeOwned>(&self, path: &str, body: &serde_json::Value) -> Result<T> {
+        let Some(key) = &self.key else {
+            return Err(Error::Invalid("CurseForge n'est pas disponible : clé API de Cubelink absente".into()));
+        };
+        let resp = self
+            .http
+            .post(format!("{}{path}", self.base))
+            .header("x-api-key", key)
+            .header("Accept", "application/json")
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| Error::Network(e.without_url().to_string()))?;
+        match resp.status().as_u16() {
+            200..=299 => {}
+            404 => return Err(Error::NotFound("projet ou fichier CurseForge introuvable".into())),
+            401 | 403 => return Err(Error::Network("CurseForge a refusé la clé API (HTTP 403)".into())),
+            429 => return Err(Error::Network("CurseForge limite le débit (HTTP 429), réessaie dans un instant".into())),
+            c => return Err(Error::Network(format!("API CurseForge : HTTP {c}"))),
+        }
+        let bytes = resp.bytes().await.map_err(|e| Error::Network(e.without_url().to_string()))?;
+        serde_json::from_slice(&bytes).map_err(|e| Error::Network(format!("réponse CurseForge invalide : {e}")))
+    }
+
+    /// Reconnaissance par lot d'empreintes (`murmur2_fingerprint`) : seules les empreintes connues sont renvoyées.
+    pub async fn fingerprints(&self, fps: &[u32]) -> Result<Vec<CfFingerprintMatch>> {
+        if fps.is_empty() {
+            return Ok(Vec::new());
+        }
+        let r: Data<CfFingerprints> = self.post(&format!("/v1/fingerprints/{GAME_ID}"), &serde_json::json!({ "fingerprints": fps })).await?;
+        Ok(r.data.exact_matches)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn search(
         &self,
@@ -279,6 +361,11 @@ impl CfApi {
     /// Fiche complète d'un projet (logo, captures, résumé, auteurs).
     pub async fn mod_info(&self, mod_id: u64) -> Result<CfMod> {
         Ok(self.get::<Data<CfMod>>(&format!("/v1/mods/{mod_id}"), &[]).await?.data)
+    }
+
+    /// Description longue d'un projet (HTML).
+    pub async fn mod_description(&self, mod_id: u64) -> Result<String> {
+        Ok(self.get::<Data<String>>(&format!("/v1/mods/{mod_id}/description"), &[]).await?.data)
     }
 
     pub async fn file(&self, mod_id: u64, file_id: u64) -> Result<CfFile> {
@@ -366,6 +453,35 @@ mod tests {
         let c = CfApi::with_base(s.uri(), "k");
         assert!(matches!(c.file(1, 2).await, Err(Error::NotFound(_))));
         assert!(matches!(c.search(CLASS_MOD, "", None, None, 1, 0, 5).await, Err(Error::Network(_))));
+    }
+
+    #[test]
+    fn murmur2_ignores_whitespace_and_is_stable() {
+        let a = murmur2_fingerprint(b"abc def\r\n\tghi");
+        assert_eq!(a, murmur2_fingerprint(b"abcdefghi"));
+        assert_ne!(a, murmur2_fingerprint(b"abcdefghj"));
+        // Toutes les longueurs de queue (0 à 3) fonctionnent.
+        let hs: std::collections::HashSet<u32> = (0..9).map(|n| murmur2_fingerprint(&vec![b'x'; n])).collect();
+        assert_eq!(hs.len(), 9);
+    }
+
+    #[tokio::test]
+    async fn fingerprints_post_and_parse() {
+        let s = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/fingerprints/432"))
+            .and(header("x-api-key", "k"))
+            .and(wiremock::matchers::body_json(json!({"fingerprints": [1, 2]})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {"exactMatches": [
+                {"id": 306612, "file": {"id": 9, "modId": 306612, "fileName": "a.jar", "fileFingerprint": 2}}
+            ], "exactFingerprints": [2]}})))
+            .expect(1)
+            .mount(&s)
+            .await;
+        let c = CfApi::with_base(s.uri(), "k");
+        let m = c.fingerprints(&[1, 2]).await.unwrap();
+        assert_eq!((m[0].id, m[0].file.file_fingerprint), (306612, 2));
+        assert!(c.fingerprints(&[]).await.unwrap().is_empty());
     }
 
     #[test]

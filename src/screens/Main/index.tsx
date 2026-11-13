@@ -1,74 +1,66 @@
-import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type MouseEvent } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import "./main.css";
 import { useScreenTitle, useShell } from "../../app/context";
 import { peekImportWarning, setImportWarning } from "../../app/importWarning";
-import type { FriendWithPresence, HostState, Instance, InstancePatch, LaunchState } from "../../services";
-import { Button, Drawer, IconButton, StatusDot } from "../../ui";
-import { Avatar, Backdrop, safeUrl, sourceLabel } from "./ArtParts";
+import type { FriendWithPresence, HostState, Instance, Invite } from "../../services";
+import { errMsg, useLaunch } from "../../app/useLaunch";
+import { Button, IconButton } from "../../ui";
+import { Avatar } from "./ArtParts";
 import { clearArtCache } from "./artImage";
-import { ContextMenu, type MenuItem } from "./ContextMenu";
-import { LogsPanel } from "./LogsPanel";
-import { ModsPanel } from "./ModsPanel";
+import { ICONS, Icon } from "./Panel";
+import { PixelHead, WorldIcon } from "./Pixel";
+import { lastSeenText } from "../Friends/lastSeen";
+import { canInviteFrom, useInvites } from "../../app/useInvites";
+import { AccountSwitcher } from "../../app/AccountSwitcher";
+import { useContextMenu, type MenuItem } from "../../app/useContextMenu";
+import { useModCheckGate } from "../../app/useModCheck";
 import { Modal } from "./Modal";
-import { ICONS, Icon, Panel } from "./Panel";
-import { SettingsDialog } from "./SettingsDialog";
-import { Viewer } from "./Viewer";
-import { canInviteFrom } from "../../app/useInvites";
-import Invites from "../Friends/Invites";
 
 const LOADERS: Record<string, string> = {
   vanilla: "Vanilla", neoforge: "NeoForge", fabric: "Fabric", quilt: "Quilt", forge: "Forge",
 };
 const loaderLabel = (i: Instance) => LOADERS[i.loader.loader] ?? i.loader.loader;
-const modsLabel = (n: number) => `${n} mod${n > 1 ? "s" : ""}`;
-/** « Minecraft 1.21.1 · NeoForge 21.1.250 · 329 mods ». */
-const metaLine = (i: Instance) =>
-  [`Minecraft ${i.minecraft}`, `${loaderLabel(i)}${i.loader.loader !== "vanilla" && i.loader.version ? ` ${i.loader.version}` : ""}`, modsLabel(i.mod_count)].join(" · ");
 
 export function badgeText(total: number): string {
   return total > 99 ? "99+" : String(total);
 }
 
-const clock = (ms: number) => {
-  const s = Math.max(0, Math.floor(ms / 1000));
-  const p = (n: number) => String(n).padStart(2, "0");
-  return `${p(Math.floor(s / 3600))}:${p(Math.floor((s % 3600) / 60))}:${p(s % 60)}`;
-};
+/** Parties en cours : une par ami qui héberge (invitation non expirée la plus récente). */
+export function sessionsFrom(invites: Invite[], nowSec = Math.floor(Date.now() / 1000)): Invite[] {
+  const byFriend = new Map<string, Invite>();
+  for (const i of invites) {
+    if (i.expires_at <= nowSec) continue;
+    const cur = byFriend.get(i.public_key);
+    if (!cur || i.received_at > cur.received_at) byFriend.set(i.public_key, i);
+  }
+  return [...byFriend.values()].sort((a, b) => b.received_at - a.received_at);
+}
 
-interface MenuState { id: string; x: number; y: number; trigger: HTMLElement }
-type DialogKind = "settings" | "logs" | "delete" | "mods" | "friends";
-type DialogState = { kind: DialogKind; id: string } | null;
-
-type ArtBusy = { id: string; kind: "lookup" | "banner" | "icon" } | null;
-type ArtMsg = { id: string; kind: "ok" | "error"; text: string } | null;
-
-// Retire le préfixe technique du backend (« introuvable : », « entrée invalide : »…).
-const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e)).replace(/^[a-zéèêàçùîô' -]{3,24}\s:\s+/, "");
+const shortMeta = (i: Instance) => `${i.minecraft} · ${loaderLabel(i)}`;
+const friendsHere = (n: number) => (n === 1 ? "1 ami y joue" : `${badgeText(n)} amis y jouent`);
+const TABS = ["En partie", "En ligne", "Tous"] as const;
 
 export default function Main() {
   const { services, navigate } = useShell();
   const [instances, setInstances] = useState<Instance[] | null>(null);
-  const [selected, setSelected] = useState<string | null>(null);
-  const [launch, setLaunch] = useState<LaunchState | null>(null);
-  const [launchError, setLaunchError] = useState<string | null>(null);
+  const { launch, error: launchError, play: startGame, kill: stopGame, clearError } = useLaunch(services);
+  /** Dernier modpack lancé depuis l'accueil : nomme l'échec quand l'appel de lancement lui-même est rejeté. */
+  const [lastPlayed, setLastPlayed] = useState<string | null>(null);
+  /** Événement d'échec que l'utilisateur a fermé (comparé par identité). */
+  const [dismissed, setDismissed] = useState<unknown>(null);
   const [requests, setRequests] = useState<number | null>(null);
   const [friends, setFriends] = useState<FriendWithPresence[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [host, setHost] = useState<HostState | null>(null);
-
-  const [menu, setMenu] = useState<MenuState | null>(null);
-  const [dialog, setDialog] = useState<DialogState>(null);
   const [actionError, setActionError] = useState<string | null>(null);
-  const [artBusy, setArtBusy] = useState<ArtBusy>(null);
-  const [artMsg, setArtMsg] = useState<ArtMsg>(null);
-  const [viewer, setViewer] = useState<number | null>(null);
-  const [modsTotal, setModsTotal] = useState<number | null>(null);
+  /** Onglet de la colonne d'amis : 0 En partie, 1 En ligne, 2 Tous. */
+  const [tab, setTab] = useState(2);
+  const [query, setQuery] = useState("");
+  const invites = useInvites(services);
+  const ctx = useContextMenu();
+  /** Modpack dont la suppression attend confirmation (clic droit > Supprimer). */
+  const [toDelete, setToDelete] = useState<Instance | null>(null);
   const [warning, setWarning] = useState<string[] | null>(() => peekImportWarning());
-  const [now, setNow] = useState(() => Date.now());
-  const runningSince = useRef(new Map<string, number>());
-  /** Dernier tiroir ouvert : son contenu reste affiché pendant l'animation de sortie (280 ms). */
-  const lastDialog = useRef<DialogState>(null);
-  if (dialog) lastDialog.current = dialog;
 
   useScreenTitle(null);
 
@@ -78,11 +70,7 @@ export default function Main() {
   useEffect(() => {
     let alive = true;
     services.instancesList().then(
-      (list) => {
-        if (!alive) return;
-        setInstances(list);
-        setSelected((cur) => cur ?? list[0]?.id ?? null);
-      },
+      (list) => { if (alive) setInstances(list); },
       (e: unknown) => { if (alive) { setInstances([]); setLoadError(e instanceof Error ? e.message : String(e)); } },
     );
     services.friendRequests({ offset: 0, limit: 1 }).then(
@@ -93,13 +81,9 @@ export default function Main() {
     return () => { alive = false; };
   }, [services]);
 
-  const track = useCallback((s: LaunchState) => {
-    if (s.state === "running") { if (!runningSince.current.has(s.id)) runningSince.current.set(s.id, Date.now()); }
-    else runningSince.current.delete(s.id);
-  }, []);
-  useEffect(() => services.onLaunchState((s) => { track(s); setLaunch(s); setLaunchError(null); }), [services, track]);
   useEffect(() => services.onFriendPresence((e) => {
-    setFriends((l) => l.map((f) => (f.friend.public_key === e.public_key ? { ...f, presence: e.presence } : f)));
+    const now = Math.floor(Date.now() / 1000);
+    setFriends((l) => l.map((f) => (f.friend.public_key === e.public_key ? { ...f, presence: e.presence, last_seen: now } : f)));
   }), [services]);
   useEffect(() => {
     let alive = true;
@@ -110,88 +94,44 @@ export default function Main() {
   useEffect(() => services.onFriendRequest(() => setRequests((n) => (n ?? 0) + 1)), [services]);
 
   const homeRef = useRef<HTMLDivElement>(null);
-  // Focus cohérent au retour sur l'accueil : bouton Jouer une fois chargé, sauf si le focus est déjà ailleurs.
+  // Focus cohérent au retour sur l'accueil : première tuile une fois chargé, sauf si le focus est déjà ailleurs.
   const ready = instances !== null;
   useEffect(() => {
     if (!ready) return;
     const a = document.activeElement;
     if (a && a !== document.body && homeRef.current?.contains(a)) return;
-    (homeRef.current?.querySelector<HTMLElement>(".home-play") ?? homeRef.current?.querySelector<HTMLElement>(".home-rail-btn"))?.focus();
+    homeRef.current?.querySelector<HTMLElement>(".home-tile")?.focus();
   }, [ready]);
 
-  /** Flèches haut/bas, Home et Fin dans la barre latérale des instances. */
-  const onRailKey = (e: KeyboardEvent<HTMLElement>) => {
-    if (!["ArrowUp", "ArrowDown", "Home", "End"].includes(e.key)) return;
-    const items = Array.from(e.currentTarget.querySelectorAll<HTMLElement>(".home-rail-btn"));
+  /** Flèches (grille de deux colonnes), Home et Fin dans la grille des modpacks. */
+  const onGridKey = (e: KeyboardEvent<HTMLElement>) => {
+    const step: Record<string, number> = { ArrowLeft: -1, ArrowRight: 1, ArrowUp: -2, ArrowDown: 2 };
+    if (!(e.key in step) && e.key !== "Home" && e.key !== "End") return;
+    const items = Array.from(e.currentTarget.querySelectorAll<HTMLElement>(".home-tile"));
     const i = items.indexOf(document.activeElement as HTMLElement);
     if (i < 0) return;
     e.preventDefault();
-    const n = e.key === "Home" ? 0 : e.key === "End" ? items.length - 1
-      : (i + (e.key === "ArrowDown" ? 1 : items.length - 1)) % items.length;
+    const n = e.key === "Home" ? 0 : e.key === "End" ? items.length - 1 : Math.min(items.length - 1, Math.max(0, i + step[e.key]));
     items[n].focus();
   };
 
-  const current = instances?.find((i) => i.id === selected) ?? null;
-  const state = launch && launch.id === selected ? launch : null;
-  const busy = state?.state === "preparing" || state?.state === "running";
-  const running = state?.state === "running";
-
-  // Chronomètre de session : une seconde de précision, uniquement pendant le jeu.
-  useEffect(() => {
-    if (!running) return;
-    setNow(Date.now());
-    const t = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(t);
-  }, [running]);
-
-  const play = useCallback(async (id: string) => {
-    setSelected(id);
-    setLaunchError(null);
+  const gate = useModCheckGate(services);
+  const play = (id: string) => {
     setActionError(null);
-    setLaunch({ id, state: "preparing" });
-    try {
-      await services.instancesLaunch(id);
-    } catch (e) {
-      setLaunch(null);
-      setLaunchError(errMsg(e));
-    }
-  }, [services]);
-
-  const run = useCallback(async (fn: () => Promise<unknown>) => {
+    const inst = instances?.find((x) => x.id === id);
+    gate.guard(inst ?? { id, name: id }, () => { setLastPlayed(id); void startGame(id); }, () => navigate("instance", { id, tab: "mods" }), () => navigate("instance", { id, tab: "mods", fix: "1" }));
+  };
+  const kill = async (id: string) => {
     setActionError(null);
-    try { await fn(); } catch (e) { setActionError(errMsg(e)); }
-  }, []);
-
-  /** Remplace l'instance mise à jour (illustration) dans la liste : décor, rail et titre suivent. */
-  const applyInstance = (u: Instance) => setInstances((l) => (l ?? []).map((i) => (i.id === u.id ? u : i)));
-
-  const artRun = async (id: string, kind: "lookup" | "banner" | "icon") => {
-    if (artBusy) return;
-    setArtMsg(null);
-    setArtBusy({ id, kind });
-    try {
-      if (kind === "lookup") {
-        const u = await services.instancesArtLookup(id);
-        clearArtCache();
-        applyInstance(u);
-        setArtMsg(u.art ? null : { id, kind: "ok", text: "Aucune illustration trouvée." });
-      } else {
-        const files = await services.pickFiles({ extensions: ["png", "jpg", "jpeg", "webp"] });
-        if (!files.length) return;
-        const u = await services.instancesArtSet(id, files[0], kind);
-        clearArtCache();
-        applyInstance(u);
-        setArtMsg({ id, kind: "ok", text: kind === "icon" ? "Icône définie." : "Illustration définie." });
-      }
-    } catch (e) {
-      setArtMsg({ id, kind: "error", text: errMsg(e) });
-    } finally {
-      setArtBusy(null);
-    }
+    const msg = await stopGame(id);
+    if (msg) setActionError(msg);
   };
 
+  /** Remplace l'instance mise à jour (illustration) dans la liste : les tuiles suivent. */
+  const applyInstance = (u: Instance) => setInstances((l) => (l ?? []).map((i) => (i.id === u.id ? u : i)));
+
   // Illustration par défaut : une recherche silencieuse par instance et par session pour celles qui n'en ont pas.
-  // Sans résultat, l'image par défaut (blocs) reste en place ; l'utilisateur peut toujours choisir une image.
+  // Sans résultat, l'image par défaut (blocs) reste en place ; la page du modpack permet de choisir une image.
   const autoTried = useRef(new Set<string>());
   useEffect(() => {
     if (!instances) return;
@@ -201,124 +141,100 @@ export default function Main() {
     void (async () => {
       for (const i of todo) {
         try {
-          const u = await services.instancesArtLookup(i.id);
+          const u = await services.instancesArtLookup(i.id, true);
           if (u.art) { clearArtCache(); applyInstance(u); }
         } catch { /* silencieux : pas de correspondance ou hors ligne */ }
       }
     })();
   }, [instances, services]);
 
-  const kill = (id: string) => run(() => services.instancesKill(id));
-
-  const closeDialog = () => setDialog(null);
-
-  const remove = async (id: string) => {
-    setDialog(null);
-    await run(async () => {
-      await services.instancesDelete(id);
-      const next = (instances ?? []).filter((i) => i.id !== id);
-      setInstances(next);
-      setSelected((cur) => (cur === id ? next[0]?.id ?? null : cur));
-      setLaunch((l) => (l?.id === id ? null : l));
-    });
-  };
-
-  const save = async (id: string, patch: InstancePatch) => {
-    const updated = await services.instancesUpdate(id, patch);
-    setInstances((l) => (l ?? []).map((i) => (i.id === id ? updated : i)));
-    setDialog(null);
-  };
-
   const isBusy = (id: string) => launch?.id === id && (launch.state === "preparing" || launch.state === "running");
 
-  const openMenuAt = (id: string, trigger: HTMLElement, x: number, y: number) => setMenu({ id, x, y, trigger });
-  /** Clic droit, touche Menu et Maj+F10 sur une instance. */
-  const menuProps = (id: string) => ({
-    onContextMenu: (e: MouseEvent<HTMLElement>) => {
-      e.preventDefault();
-      openMenuAt(id, e.currentTarget, e.clientX, e.clientY);
-    },
-    onKeyDown: (e: KeyboardEvent<HTMLElement>) => {
-      if (e.key === "ContextMenu" || (e.shiftKey && e.key === "F10")) {
-        e.preventDefault();
-        const r = e.currentTarget.getBoundingClientRect();
-        openMenuAt(id, e.currentTarget, r.left + 8, r.bottom);
-      }
-    },
-  });
+  const onlineList = friends.filter((f) => f.presence === "online");
+  const sessions = sessionsFrom(invites);
+  const playingKeys = new Set(sessions.map((g) => g.public_key));
+  const sessionOf = (key: string) => sessions.find((g) => g.public_key === key);
+  const onPack = (inst: Instance) => sessions.filter((g) => g.pack === inst.name);
+  const join = (key: string) => navigate("join", { friend: key });
+  const inviteOk = canInviteFrom(host);
+  const showSessions = sessions.length > 4 ? sessions.slice(0, 3) : sessions;
+  const openFriendTab = (k: number) => { setQuery(""); setTab(k); };
+  const copy = (text: string) => { void navigator.clipboard?.writeText(text).catch(() => {}); };
+  const invite = (key: string) => { setActionError(null); services.friendInvite(key).catch((e: unknown) => setActionError(errMsg(e))); };
 
-  const menuItems = (id: string): MenuItem[] => {
-    const act = (fn: () => void) => () => { menu?.trigger.focus(); fn(); };
-    const inst = instances?.find((i) => i.id === id);
-    const shots = inst?.art?.screenshots.length ?? 0;
+  // Clic droit : mêmes actions que les boutons et la page du modpack, au plus près.
+  const tileMenu = (i: Instance): MenuItem[] => {
+    const st = launch?.id === i.id ? launch.state : null;
+    const busy = st === "running" || st === "preparing";
+    const blocked = !!launch && launch.id !== i.id && isBusy(launch.id);
+    const open = (tab?: string) => navigate("instance", tab ? { id: i.id, tab } : { id: i.id });
     return [
-      isBusy(id)
-        ? { key: "stop", label: "Arrêter", icon: <Icon d={ICONS.stop} />, onSelect: act(() => { void kill(id); }) }
-        : { key: "play", label: "Jouer", icon: <Icon d={ICONS.play} />, onSelect: act(() => { void play(id); }) },
-      { key: "settings", label: "Paramètres", icon: <Icon d={ICONS.gear} />, onSelect: act(() => setDialog({ kind: "settings", id })) },
-      { key: "logs", label: "Logs", icon: <Icon d={ICONS.logs} />, onSelect: act(() => setDialog({ kind: "logs", id })) },
-      { key: "mods", label: "Mods", icon: <Icon d={ICONS.mods} />, onSelect: act(() => setDialog({ kind: "mods", id })) },
-      { key: "browse", label: "Parcourir des mods", icon: <Icon d={ICONS.search} />, onSelect: act(() => navigate("browse", { kind: "mod", instance: id })) },
-      ...(shots > 0 ? [{ key: "shots", label: `Voir les captures (${shots})`, icon: <Icon d={ICONS.film} />, separator: true, onSelect: act(() => { setSelected(id); setViewer(0); }) }] : []),
-      { key: "art", label: inst?.art ? "Changer l'illustration" : "Choisir une illustration", icon: <Icon d={ICONS.image} />, separator: shots === 0, onSelect: act(() => { void artRun(id, "banner"); }) },
-      { key: "icon", label: "Définir l'icône", icon: <Icon d={ICONS.image} />, onSelect: act(() => { void artRun(id, "icon"); }) },
-      { key: "lookup", label: "Chercher automatiquement", icon: <Icon d={ICONS.wand} />, onSelect: act(() => { void artRun(id, "lookup"); }) },
-      { key: "folder", label: "Ouvrir le dossier", icon: <Icon d={ICONS.folder} />, separator: true, onSelect: act(() => { void run(() => services.instancesOpenFolder(id)); }) },
-      { key: "delete", label: "Supprimer", icon: <Icon d={ICONS.trash} />, danger: true, onSelect: act(() => setDialog({ kind: "delete", id })) },
+      busy
+        ? { key: "stop", label: st === "preparing" ? "Annuler le lancement" : "Arrêter", icon: <Icon d={ICONS.stop} />, onSelect: () => { void kill(i.id); } }
+        : { key: "play", label: "Jouer", icon: <Icon d={ICONS.play} />, disabled: blocked || gate.checking, onSelect: () => play(i.id) },
+      { key: "open", label: "Ouvrir", icon: <Icon d={ICONS.image} />, separator: true, onSelect: () => open() },
+      { key: "mods", label: "Mods", icon: <Icon d={ICONS.mods} />, onSelect: () => open("mods") },
+      { key: "settings", label: "Réglages", icon: <Icon d={ICONS.gear} />, onSelect: () => open("reglages") },
+      { key: "logs", label: "Logs", icon: <Icon d={ICONS.logs} />, onSelect: () => open("logs") },
+      { key: "folder", label: "Ouvrir le dossier", icon: <Icon d={ICONS.folder} />, separator: true, onSelect: () => { services.instancesOpenFolder(i.id).catch((e: unknown) => setActionError(errMsg(e))); } },
+      { key: "delete", label: "Supprimer", icon: <Icon d={ICONS.trash} />, danger: true, separator: true, disabled: busy, onSelect: () => setToDelete(i) },
     ];
   };
+  const friendMenu = (f: FriendWithPresence): MenuItem[] => {
+    const key = f.friend.public_key;
+    const g = sessionOf(key);
+    const on = f.presence === "online" || !!g;
+    const items: MenuItem[] = [];
+    if (on) items.push({ key: "join", label: g ? `Rejoindre ${g.world_name}` : "Rejoindre", icon: <Icon d={ICONS.play} />, onSelect: () => join(key) });
+    if (on && inviteOk && !g) items.push({ key: "invite", label: "Inviter dans ma partie", icon: <Icon d={ICONS.userPlus} />, onSelect: () => invite(key) });
+    items.push({ key: "copy", label: "Copier le pseudo", icon: <Icon d={ICONS.copy} />, separator: items.length > 0, onSelect: () => copy(f.friend.name) });
+    items.push({ key: "manage", label: "Gérer mes amis", icon: <Icon d={ICONS.friends} />, onSelect: () => navigate("settings", { tab: "amis" }) });
+    return items;
+  };
+  const sessionMenu = (g: Invite): MenuItem[] => [
+    { key: "join", label: `Rejoindre ${g.name}`, icon: <Icon d={ICONS.play} />, onSelect: () => join(g.public_key) },
+    { key: "copy", label: "Copier le pseudo", icon: <Icon d={ICONS.copy} />, separator: true, onSelect: () => copy(g.name) },
+  ];
+  const removeInstance = async (i: Instance) => {
+    setToDelete(null);
+    setActionError(null);
+    try {
+      await services.instancesDelete(i.id);
+      setInstances((l) => (l ?? []).filter((x) => x.id !== i.id));
+    } catch (e) { setActionError(errMsg(e)); }
+  };
 
-  const reqLabel = requests ? ` (${badgeText(requests)} demande${requests > 1 ? "s" : ""})` : "";
-  const online = friends.filter((f) => f.presence === "online").length;
+  // Échec de lancement rapide : bandeau en haut, avec accès aux logs du modpack concerné.
+  const failedId = launch?.state === "failed" && launch !== dismissed ? launch.id : launchError !== null ? lastPlayed : null;
+  const failMsg = launchError ?? (launch?.state === "failed" ? launch.message ?? "" : "");
+  const failInst = failedId ? instances?.find((i) => i.id === failedId) : undefined;
 
-  const dr = dialog ?? lastDialog.current;
-  const target = dr ? instances?.find((i) => i.id === dr.id) ?? null : null;
-  const delTarget = dialog?.kind === "delete" ? instances?.find((i) => i.id === dialog.id) ?? null : null;
-  const since = current ? runningSince.current.get(current.id) : undefined;
-
-  const failTitle = "Échec du lancement";
-  const failMsg = launchError ?? (state?.state === "failed" ? state.message ?? "" : null);
-  const failed = launchError !== null || state?.state === "failed";
+  // Colonne d'amis : en partie, en ligne, tous ; filtre par pseudo.
+  const tabLists = [
+    friends.filter((f) => playingKeys.has(f.friend.public_key)),
+    friends.filter((f) => f.presence === "online" || playingKeys.has(f.friend.public_key)),
+    friends,
+  ];
+  const q = query.trim().toLowerCase();
+  const rows = tabLists[tab].filter((f) => !q || f.friend.name.toLowerCase().includes(q));
+  const nowSec = Math.floor(Date.now() / 1000);
 
   return (
     <div className="home" ref={homeRef}>
-      <Backdrop services={services} inst={current} />
-
-      <nav className="home-rail" aria-label="Instances" onKeyDown={onRailKey}>
-        {(instances ?? []).map((i) => (
-          <div key={i.id} className="home-rail-item">
-            {i.id === selected && <span className="home-rail-mark" aria-hidden="true" />}
-            <button
-              type="button" className="home-rail-btn" title={i.name}
-              aria-label={i.name} aria-pressed={i.id === selected} onClick={() => setSelected(i.id)}
-              {...menuProps(i.id)}
-            >
-              <Avatar services={services} inst={i} className="home-av" />
-            </button>
+      <main className="home-main">
+        {failedId && (
+          <div className="home-fail enter" role="alert">
+            <span className="home-fail-ic" aria-hidden="true"><Icon d={ICONS.alert} size={20} /></span>
+            <div className="home-fail-txt">
+              <div className="t">Échec du lancement{failInst ? ` de ${failInst.name}` : ""}</div>
+              {failMsg && <div className="m">{failMsg}</div>}
+            </div>
+            <Button variant="secondary" onClick={() => navigate("instance", { id: failedId, tab: "logs" })}>Voir les logs</Button>
+            <Button variant="secondary" onClick={() => { clearError(); setDismissed(launch); }}>Ignorer</Button>
           </div>
-        ))}
-        <button type="button" className="home-rail-btn home-rail-add" aria-label="Nouvelle instance" title="Nouvelle instance" onClick={() => navigate("create")}>
-          <Icon d={ICONS.plus} size={20} />
-        </button>
-        <div className="home-rail-end">
-          <button type="button" className="home-rail-btn home-rail-set" aria-label="Paramètres de Cubelink" title="Paramètres de Cubelink" onClick={() => navigate("settings")}>
-            <Icon d={ICONS.gear} size={22} />
-          </button>
-        </div>
-      </nav>
-
-      <button
-        type="button" className="home-pill" aria-haspopup="dialog" aria-expanded={dialog?.kind === "friends"}
-        aria-label={`Amis${reqLabel}, ${online} en ligne`}
-        onClick={() => setDialog({ kind: "friends", id: "" })}
-      >
-        <span className={`home-pill-dot${online ? " on" : ""}`} aria-hidden="true" />
-        Amis · {online} en ligne
-        {requests ? <span className="home-badge" aria-hidden="true">{badgeText(requests)}</span> : null}
-      </button>
-
-      <div className="home-stack">
-        {warning && current && (
+        )}
+        {actionError && <p className="home-err" role="alert">{actionError}</p>}
+        {warning && instances && instances.length > 0 && (
           <div className="home-warn enter" role="status">
             <span>
               Import terminé, mais {warning.length} mod{warning.length > 1 ? "s" : ""} introuvable{warning.length > 1 ? "s" : ""} :{" "}
@@ -328,176 +244,166 @@ export default function Main() {
           </div>
         )}
 
-        {instances === null ? (
-          <div className="home-card" aria-label="Accueil" role="region">
-            <p role="status" className="home-loading">Chargement des instances…</p>
+        <section className="home-friends" aria-label="Parties">
+          <div className="home-head">
+            <div className="home-head-txt">
+              <h1>Jouer avec tes amis</h1>
+              <p className="home-stats">
+                <span className="dot is-play" aria-hidden="true">●</span> {badgeText(sessions.length)} en partie ·{" "}
+                <span className="dot is-on" aria-hidden="true">●</span> {badgeText(onlineList.length)} en ligne
+                {requests ? <> · <button type="button" className="home-link" onClick={() => navigate("settings", { tab: "amis" })}>{badgeText(requests)} demande{requests > 1 ? "s" : ""}</button></> : null}
+              </p>
+            </div>
           </div>
-        ) : current ? (
-          <section className="home-card" aria-label={current.name} key={current.id}>
-            <h1 className="enter" style={{ "--i": 0 } as React.CSSProperties}>{current.name}</h1>
-            <p className="home-meta enter" style={{ "--i": 1 } as React.CSSProperties}>{metaLine(current)}</p>
-
-            <div className="home-play-zone enter" style={{ "--i": 3 } as React.CSSProperties}>
-              {state?.state === "preparing" ? (
-                <>
-                  <div className="home-prep" role="progressbar" aria-label="Préparation du jeu" aria-busy="true">
-                    <span className="home-prep-fill" aria-hidden="true" />
-                    <span className="home-prep-label" role="status">Préparation du jeu…</span>
-                  </div>
-                  <IconButton variant="secondary" aria-label="Annuler le lancement" icon={<Icon d={ICONS.close} />} onClick={() => { void kill(current.id); }} />
-                </>
-              ) : running ? (
-                <Button variant="danger" size="lg" className="home-play is-danger" icon={<Icon d={ICONS.stop} size={20} fill />} onClick={() => { void kill(current.id); }}>
-                  Arrêter
-                </Button>
-              ) : (
-                <Button size="lg" className="home-play" icon={<Icon d={ICONS.play} size={20} fill />} onClick={() => { void play(current.id); }}>
-                  Jouer
-                </Button>
-              )}
-            </div>
-
-            {running && (
-              <p className="home-state enter">
-                <StatusDot tone="ok" label="En jeu" />
-                {since !== undefined && <span className="home-session"> · session <time>{clock(now - since)}</time></span>}
-              </p>
-            )}
-            {running && (
-              <p className="home-hint" role="status">
-                {host && host.instance_id === current.id && host.sharing && host.world_port
-                  ? "Tes amis peuvent te rejoindre"
-                  : "Ouvre ton monde au réseau local pour que tes amis te rejoignent"}
-              </p>
-            )}
-            {failed && (
-              <div className="home-fail enter" role="alert">
-                <span className="home-fail-ic" aria-hidden="true"><Icon d={ICONS.alert} size={20} /></span>
-                <div className="home-fail-txt">
-                  <div className="t">{failTitle}</div>
-                  {failMsg && <div className="m">{failMsg}</div>}
-                </div>
-                <Button variant="secondary" onClick={() => setDialog({ kind: "logs", id: current.id })}>Voir les logs</Button>
-              </div>
-            )}
-            {actionError && <p className="home-err" role="alert">{actionError}</p>}
-            {artBusy?.id === current.id && <p className="home-artmsg" role="status">{artBusy.kind === "lookup" ? "Recherche du modpack en cours…" : "Enregistrement de l'image…"}</p>}
-            {!artBusy && artMsg?.id === current.id && (artMsg.kind === "error"
-              ? <p className="home-artmsg is-error" role="alert">{artMsg.text}</p>
-              : <p className="home-artmsg" role="status">{artMsg.text}</p>)}
-
-            <div className="home-row enter" style={{ "--i": 4 } as React.CSSProperties}>
-              <Button variant="secondary" icon={<Icon d={ICONS.mods} />} onClick={() => setDialog({ kind: "mods", id: current.id })}>Mods</Button>
-              <Button variant="secondary" icon={<Icon d={ICONS.gear} />} onClick={() => setDialog({ kind: "settings", id: current.id })}>Paramètres</Button>
-              <Button variant="secondary" icon={<Icon d={ICONS.logs} />} onClick={() => setDialog({ kind: "logs", id: current.id })}>Logs</Button>
-              <IconButton
-                variant="secondary" aria-label={`Actions de ${current.name}`} aria-haspopup="menu" aria-expanded={menu?.id === current.id}
-                icon={<Icon d={ICONS.dots} size={20} />}
-                onClick={(e) => { const r = e.currentTarget.getBoundingClientRect(); openMenuAt(current.id, e.currentTarget, r.left, r.bottom + 6); }}
-                onKeyDown={menuProps(current.id).onKeyDown}
-              />
-            </div>
-          </section>
-        ) : (
-          <section className="home-card" aria-label="Accueil">
-            <h1 className="enter">Aucune instance</h1>
-            <p className="home-meta enter" style={{ "--i": 1 } as React.CSSProperties}>Crée ta première instance pour commencer à jouer, seul ou avec tes amis.</p>
-            {loadError && <p className="home-err" role="alert">{loadError}</p>}
-            <div className="home-play-zone enter" style={{ "--i": 2 } as React.CSSProperties}>
-              <Button icon={<Icon d={ICONS.plus} />} onClick={() => navigate("create")}>Créer une instance</Button>
-            </div>
-          </section>
-        )}
-      </div>
-
-      {current?.art && (
-        <p className="home-credit">
-          <span>{current.art.author ? `par ${current.art.author}` : "Illustration du modpack"}</span>
-          <span>{sourceLabel(current.art.source) ? `Source : ${sourceLabel(current.art.source)}` : "Illustration personnalisée"}</span>
-          {safeUrl(current.art.page_url) && (
-            <a href={safeUrl(current.art.page_url)!} target="_blank" rel="noopener noreferrer">Page du modpack</a>
-          )}
-        </p>
-      )}
-
-      {menu && instances?.some((i) => i.id === menu.id) && (
-        <ContextMenu
-          label={`Actions de ${instances.find((i) => i.id === menu.id)!.name}`}
-          x={menu.x} y={menu.y} items={menuItems(menu.id)}
-          onClose={(restore) => { if (restore) menu.trigger.focus(); setMenu(null); }}
-        />
-      )}
-
-      <Drawer open={dialog?.kind === "mods"} onClose={closeDialog} title={modsTotal === null ? "Mods" : `Mods · ${modsTotal}`} width={520}>
-        {dr?.kind === "mods" && target && (
-          <ModsPanel
-            services={services} instanceId={target.id} onClose={closeDialog} onTotal={setModsTotal}
-            onCount={(n) => setInstances((l) => (l ?? []).map((i) => (i.id === target.id && i.mod_count !== n ? { ...i, mod_count: n } : i)))}
-            onBrowse={() => navigate("browse", { kind: "mod", instance: target.id })}
-          />
-        )}
-      </Drawer>
-      <Drawer open={dialog?.kind === "settings"} onClose={closeDialog} title={`Paramètres de ${target?.name ?? ""}`} width={520}>
-        {dr?.kind === "settings" && target && (
-          <SettingsDialog
-            key={target.id} instance={target} onSave={(patch) => save(target.id, patch)} onClose={closeDialog}
-            onOpenFolder={() => { void run(() => services.instancesOpenFolder(target.id)); }}
-            onDelete={() => { void remove(target.id); }}
-          />
-        )}
-      </Drawer>
-      <Drawer open={dialog?.kind === "logs"} onClose={closeDialog} title="Logs" width={860}>
-        {dr?.kind === "logs" && target && <LogsPanel services={services} instanceId={target.id} onClose={closeDialog} />}
-      </Drawer>
-      <Drawer open={dialog?.kind === "friends"} onClose={closeDialog} title={`Amis · ${friends.length}`} width={360}>
-        <Panel onClose={closeDialog}>
-          <div className="dr-body">
-            <Invites compact />
-            {friends.length === 0 ? <p className="dr-empty">Aucun ami pour l'instant.</p> : (
-              <ul className="dr-list dr-friends" aria-label="Amis">
-                {friends.map((f) => (
-                  <li key={f.friend.public_key} className="dr-row">
-                    <span className="dr-nm">
-                      <span className="n">{f.friend.name}</span>
-                      <StatusDot tone={f.presence === "online" ? "ok" : "neutral"} label={f.presence === "online" ? "En ligne" : "Hors ligne"} />
+          {sessions.length === 0 ? (
+            <p className="home-nosession">Aucune partie en cours. Les mondes de tes amis apparaissent ici dès qu'ils jouent.</p>
+          ) : (
+            <div className="home-sessions">
+              <span className="home-sessions-t">Parties en cours · {badgeText(sessions.length)}</span>
+              <ul className="home-sessions-grid" aria-label="Parties en cours">
+                {showSessions.map((g) => (
+                  <li key={g.id} className="home-session-card" onContextMenu={ctx.bind(`Partie de ${g.name}`, () => sessionMenu(g))} title={g.pack ? `${g.pack} · Minecraft ${g.minecraft}` : `Minecraft ${g.minecraft}`}>
+                    <WorldIcon className="home-wicon" src={g.world_icon} size={40} />
+                    <span className="home-session-txt">
+                      <span className="w">{g.world_name}</span>
+                      <span className="who">{g.name}</span>
                     </span>
-                    {f.presence === "online" && canInviteFrom(host) && (
-                      <Button variant="secondary" aria-label={`Inviter ${f.friend.name}`} onClick={() => { void run(() => services.friendInvite(f.friend.public_key)); }}>
-                        Inviter
-                      </Button>
-                    )}
-                    {f.presence === "online" && (
-                      <Button variant="secondary" aria-label={`Rejoindre ${f.friend.name}`} onClick={() => navigate("join", { friend: f.friend.public_key })}>
-                        Rejoindre
-                      </Button>
-                    )}
+                    <button type="button" className="home-join" aria-label={`Rejoindre ${g.name}`} onClick={() => join(g.public_key)}>
+                      <Icon d={ICONS.play} fill />
+                    </button>
                   </li>
                 ))}
+                {sessions.length > 4 && (
+                  <li className="home-session-more">
+                    <button type="button" onClick={() => openFriendTab(0)}>+{badgeText(sessions.length - 3)} autres parties</button>
+                  </li>
+                )}
               </ul>
-            )}
-          </div>
-          <footer className="dr-foot">
-            <Button icon={<Icon d={ICONS.friends} />} aria-label={`Amis${reqLabel}`} onClick={() => navigate("friends")}>
-              Amis{requests ? <span className="home-badge" aria-hidden="true">{badgeText(requests)}</span> : null}
-            </Button>
-          </footer>
-        </Panel>
-      </Drawer>
+            </div>
+          )}
+        </section>
 
-      {viewer !== null && current?.art && current.art.screenshots.length > 0 && (
-        <Viewer
-          services={services} instanceId={current.id} title={current.name}
-          files={current.art.screenshots} start={viewer} onClose={() => setViewer(null)}
-        />
-      )}
-      {delTarget && (
-        <Modal title="Supprimer l'instance ?" role="alertdialog" onClose={closeDialog}>
-          <p className="home-modal-text">
-            L'instance « {delTarget.name} » et ses fichiers (mondes, configuration) seront supprimés définitivement.
-          </p>
+        <section className="home-packs" aria-label="Mes modpacks">
+          <div className="home-head is-small">
+            <h2>Mes modpacks {instances && <span className="home-count">{instances.length}</span>}</h2>
+            <div className="home-head-act">
+              <Button variant="secondary" icon={<Icon d={ICONS.plus} />} onClick={() => navigate("create")}>Ajouter un modpack</Button>
+            </div>
+          </div>
+          {instances === null ? (
+            <p role="status" className="home-loading">Chargement des instances…</p>
+          ) : instances.length === 0 ? (
+            <div className="home-empty">
+              <h2>Aucune instance</h2>
+              <p className="home-meta">Crée ta première instance pour commencer à jouer, seul ou avec tes amis.</p>
+              {loadError && <p className="home-err" role="alert">{loadError}</p>}
+              <Button icon={<Icon d={ICONS.plus} />} onClick={() => navigate("create")}>Créer une instance</Button>
+            </div>
+          ) : (
+            <div className="home-grid" role="group" aria-label="Instances" onKeyDown={onGridKey}>
+              {instances.map((i) => {
+                const n = onPack(i).length;
+                const st = launch?.id === i.id ? launch.state : null;
+                return (
+                  <div key={i.id} className="home-tile-wrap" onContextMenu={ctx.bind(`Actions de ${i.name}`, () => tileMenu(i))}>
+                    <button type="button" className="home-tile" aria-label={i.name} onClick={() => navigate("instance", { id: i.id })}>
+                      <Avatar services={services} inst={i} className="home-av home-tile-av" />
+                      <span className="home-tile-txt">
+                        <span className="n">{i.name}</span>
+                        <span className="m">{shortMeta(i)}{n > 0 && <span className="there"> · {friendsHere(n)}</span>}</span>
+                      </span>
+                    </button>
+                    {st === "running" || st === "preparing" ? (
+                      <button
+                        type="button" className="home-quick is-stop" aria-label={`Arrêter ${i.name}`}
+                        title={st === "preparing" ? "Annuler le lancement" : "Arrêter"} onClick={() => { void kill(i.id); }}
+                      >
+                        <Icon d={ICONS.stop} size={18} fill />
+                      </button>
+                    ) : (
+                      <button
+                        type="button" className="home-quick" aria-label={`Jouer à ${i.name}`} title="Jouer"
+                        disabled={gate.checking || (!!launch && launch.id !== i.id && isBusy(launch.id))} onClick={() => play(i.id)}
+                      >
+                        <Icon d={ICONS.play} size={18} fill />
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </section>
+      </main>
+
+      <aside className="home-side" aria-label="Amis">
+        <div className="side-friends">
+          <div className="side-friends-head">
+            <h2>Amis <span className="home-count">{badgeText(friends.length)}</span></h2>
+          </div>
+          <label className="side-search">
+            <Icon d={ICONS.search} size={16} />
+            <span className="home-sr">Chercher un ami</span>
+            <input type="search" placeholder="Pseudo…" value={query} onChange={(e) => setQuery(e.target.value)} />
+          </label>
+          <div className="side-tabs" role="tablist" aria-label="Filtrer les amis">
+            {TABS.map((t, k) => (
+              <button key={t} type="button" role="tab" aria-selected={k === tab} onClick={() => setTab(k)}>
+                {t} · {badgeText(tabLists[k].length)}
+              </button>
+            ))}
+          </div>
+          <ul className="side-list" aria-label="Amis">
+            {rows.map((f) => {
+              const g = sessionOf(f.friend.public_key);
+              const on = f.presence === "online" || !!g;
+              const seen = on ? null : lastSeenText(f.last_seen, nowSec);
+              return (
+                <li key={f.friend.public_key} className={`side-row${on ? "" : " is-off"}`} onContextMenu={ctx.bind(`Actions pour ${f.friend.name}`, () => friendMenu(f))}>
+                  <span className="side-head">
+                    <PixelHead seed={f.friend.public_key} size={32} />
+                    <span className={`side-dot${g ? " is-play" : on ? " is-on" : ""}`} aria-hidden="true" />
+                  </span>
+                  <span className="side-txt">
+                    <span className="n">{f.friend.name}</span>
+                    <span className={`s${g ? " is-play" : on ? " is-on" : ""}`}>
+                      {g ? `Joue à ${g.pack ?? g.world_name}` : on ? "En ligne" : "Hors ligne"}
+                    </span>
+                    {seen && <span className="s">{seen}</span>}
+                  </span>
+                  {on && inviteOk && !g && (
+                    <Button
+                      variant="secondary" aria-label={`Inviter ${f.friend.name}`}
+                      onClick={() => invite(f.friend.public_key)}
+                    >Inviter</Button>
+                  )}
+                  {on && (
+                    <Button variant={g ? "primary" : "secondary"} aria-label={`Rejoindre ${f.friend.name}`} onClick={() => join(f.friend.public_key)}>Rejoindre</Button>
+                  )}
+                </li>
+              );
+            })}
+            {rows.length === 0 && <li className="side-none">{friends.length ? "Aucun ami ne correspond." : "Aucun ami pour l'instant."}</li>}
+          </ul>
+          <Button className="side-add" icon={<Icon d={ICONS.userPlus} />} onClick={() => navigate("settings", { tab: "amis" })}>Ajouter un ami</Button>
+        </div>
+
+        <div className="side-profile" onContextMenu={ctx.bind("Compte et paramètres", [
+          { key: "account", label: "Gérer les comptes", icon: <Icon d={ICONS.friends} />, onSelect: () => navigate("settings", { tab: "compte" }) },
+          { key: "settings", label: "Paramètres de Cubelink", icon: <Icon d={ICONS.gear} />, onSelect: () => navigate("settings") },
+        ])}>
+          <AccountSwitcher />
+          <IconButton variant="secondary" aria-label="Paramètres de Cubelink" title="Paramètres de Cubelink" icon={<Icon d={ICONS.gear} size={18} />} onClick={() => navigate("settings")} />
+        </div>
+      </aside>
+      {ctx.menu}
+      {gate.modal}
+      {toDelete && (
+        <Modal title="Supprimer l'instance ?" role="alertdialog" onClose={() => setToDelete(null)}>
+          <p className="home-modal-text">L'instance « {toDelete.name} » et ses fichiers (mondes, configuration) seront supprimés définitivement.</p>
           <div className="home-modal-foot">
-            <Button variant="secondary" data-autofocus onClick={closeDialog}>Annuler</Button>
-            <Button variant="danger" onClick={() => { void remove(delTarget.id); }}>Supprimer</Button>
+            <Button variant="secondary" data-autofocus onClick={() => setToDelete(null)}>Annuler</Button>
+            <Button variant="danger" onClick={() => { void removeInstance(toDelete); }}>Supprimer</Button>
           </div>
         </Modal>
       )}

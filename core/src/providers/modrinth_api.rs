@@ -96,7 +96,11 @@ pub struct Version {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct GalleryImage {
+    /// Version réduite (environ 350 px de large) : seulement en secours de `raw_url`.
     pub url: String,
+    /// Image d'origine, en pleine résolution.
+    #[serde(default)]
+    pub raw_url: Option<String>,
     #[serde(default)]
     pub featured: bool,
     #[serde(default)]
@@ -114,6 +118,9 @@ pub struct Project {
     pub title: String,
     #[serde(default)]
     pub description: String,
+    /// Description longue (Markdown, avec parfois du HTML).
+    #[serde(default)]
+    pub body: String,
     #[serde(default)]
     pub icon_url: Option<String>,
     /// Couleur 0xRRGGBB ou absente.

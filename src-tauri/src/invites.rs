@@ -17,6 +17,8 @@ use core_lib::types::Invite;
 use p2p_lib::invite::InviteMessage;
 use tauri::State;
 
+use base64::Engine;
+
 use crate::error::user_msg;
 use crate::state::{lock, now_secs, AppState};
 
@@ -48,6 +50,7 @@ impl AppState {
         if msg.validate().is_err() || expires_at <= now {
             return;
         }
+        let world_icon = msg.icon.as_deref().and_then(icon_data_url);
         let inv = Invite {
             id: format!("inv-{now}-{}", SEQ.fetch_add(1, Ordering::Relaxed)),
             public_key: key.to_string(),
@@ -56,6 +59,8 @@ impl AppState {
             minecraft: msg.minecraft,
             received_at: now,
             expires_at,
+            pack: msg.pack,
+            world_icon,
         };
         {
             let mut q = lock(&self.invites);
@@ -119,11 +124,19 @@ impl AppState {
             }
             sent.insert(public_key.to_string(), Instant::now());
         }
+        // Monde réellement ouvert (dernier `session.lock`) et son icône ; à défaut, le nom de l'instance.
+        let world = self.instances.game_dir(&host.instance_id).ok().and_then(|d| core_lib::world::current_world(&d));
+        let (world_name, icon) = match world {
+            Some(w) => (clip(&w.name), w.icon_png.map(|b| B64.encode(b))),
+            None => (clip(&inst.name), None),
+        };
         let msg = InviteMessage {
-            world_name: inst.name,
+            world_name,
             minecraft: inst.minecraft,
             expires_at: now_secs() + INVITE_TTL.as_secs() as i64,
             revoke: false,
+            pack: Some(clip(&inst.name)),
+            icon,
         };
         let res = self.backend().send_invite(public_key.to_string(), msg).await.map_err(|e| crate::error::sanitize(&e));
         if res.is_err() {
@@ -149,6 +162,20 @@ impl AppState {
             }
         });
     }
+}
+
+const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
+
+/// Texte d'invitation : sans caractère de contrôle, au plus 64 caractères.
+fn clip(s: &str) -> String {
+    let t: String = s.chars().filter(|c| !c.is_control()).take(64).collect();
+    if t.trim().is_empty() { "Monde".into() } else { t }
+}
+
+/// Icône reçue (base64) → data URL, seulement si c'est un PNG d'au plus 64 px de côté.
+fn icon_data_url(b64: &str) -> Option<String> {
+    let bytes = B64.decode(b64).ok()?;
+    core_lib::world::is_valid_icon(&bytes).then(|| format!("data:image/png;base64,{}", B64.encode(&bytes)))
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -187,11 +214,27 @@ mod tests {
     }
 
     fn msg(world: &str, ttl: i64) -> InviteMessage {
-        InviteMessage { world_name: world.into(), minecraft: "1.21.1".into(), expires_at: now_secs() + ttl, revoke: false }
+        InviteMessage { world_name: world.into(), minecraft: "1.21.1".into(), expires_at: now_secs() + ttl, revoke: false, pack: None, icon: None }
     }
 
     fn names(events: &crate::state::test_support::Events, ev: &str) -> usize {
         lock(events).iter().filter(|(n, _)| n == ev).count()
+    }
+
+    #[tokio::test]
+    async fn modpack_et_icone_controlee_a_la_reception() {
+        let dir = tempfile::tempdir().unwrap();
+        let (st, _events) = test_state(dir.path());
+        add_friend(&st, 1, "Alice");
+        add_friend(&st, 2, "Bob");
+        // PNG 1×1 valide.
+        let png = B64.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==").unwrap();
+        st.invite_received(&key(1), InviteMessage { pack: Some("ATM10 Sky".into()), icon: Some(B64.encode(&png)), ..msg("Îles", 60) });
+        st.invite_received(&key(2), InviteMessage { icon: Some(B64.encode(b"pas un png")), ..msg("Base", 60) });
+        let q = st.friend_invites();
+        assert_eq!(q[0].pack.as_deref(), Some("ATM10 Sky"));
+        assert!(q[0].world_icon.as_deref().is_some_and(|u| u.starts_with("data:image/png;base64,")));
+        assert_eq!((q[1].pack.as_deref(), q[1].world_icon.as_deref()), (None, None));
     }
 
     #[tokio::test]

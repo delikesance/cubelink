@@ -20,7 +20,7 @@ use crate::types::{Error, Instance, InstanceArt, Result};
 pub const ART_HOSTS: &[&str] =
     &["cdn.modrinth.com", "media.forgecdn.net", "edge.forgecdn.net", "mediafilez.forgecdn.net", "cdn.forgecdn.net"];
 /// Taille maximale d'une image téléchargée.
-pub const MAX_IMAGE_BYTES: u64 = 4 * 1024 * 1024;
+pub const MAX_IMAGE_BYTES: u64 = 12 * 1024 * 1024;
 /// Taille maximale d'une image choisie par l'utilisateur.
 pub const MAX_LOCAL_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
 pub const MAX_SCREENSHOTS: usize = 6;
@@ -117,7 +117,8 @@ struct Remote {
     summary: String,
     color: Option<String>,
     icon_url: Option<String>,
-    shot_urls: Vec<String>,
+    /// Par capture : l'URL à essayer d'abord (pleine résolution), puis celle de secours.
+    shot_urls: Vec<(String, Option<String>)>,
     page_url: Option<String>,
 }
 
@@ -150,7 +151,13 @@ async fn remote_modrinth(p: &Providers, id: &str) -> Result<Remote> {
         summary: proj.description,
         color: proj.color.map(hex_color),
         icon_url: proj.icon_url.filter(|u| !u.is_empty()),
-        shot_urls: gallery.into_iter().map(|g| g.url).collect(),
+        shot_urls: gallery
+            .into_iter()
+            .map(|g| match g.raw_url.filter(|r| !r.is_empty() && *r != g.url) {
+                Some(raw) => (raw, Some(g.url)),
+                None => (g.url, None),
+            })
+            .collect(),
         page_url: Some(format!("https://modrinth.com/modpack/{slug}")),
     })
 }
@@ -164,7 +171,7 @@ async fn remote_curseforge(p: &Providers, id: &str) -> Result<Remote> {
         summary: m.summary,
         color: None,
         icon_url: m.logo.and_then(|l| l.url.filter(|u| !u.is_empty()).or(l.thumbnail_url)).filter(|u| !u.is_empty()),
-        shot_urls: m.screenshots.into_iter().map(|s| s.url).filter(|u| !u.is_empty()).collect(),
+        shot_urls: m.screenshots.into_iter().map(|s| s.url).filter(|u| !u.is_empty()).map(|u| (u, None)).collect(),
         page_url: m.links.and_then(|l| l.website_url).filter(|u| u.starts_with("https://")),
     })
 }
@@ -187,12 +194,17 @@ pub async fn fetch_art(p: &Providers, source: BrowseSource, project_id: &str, st
         None => None,
     };
     let mut screenshots = Vec::new();
-    for url in &r.shot_urls {
+    for (url, fallback) in &r.shot_urls {
         if screenshots.len() >= MAX_SCREENSHOTS {
             break;
         }
         let stem = format!("shot-{}", screenshots.len() + 1);
-        match download_image(url, p.allow_loopback, stage, &stem).await {
+        let mut got = download_image(url, p.allow_loopback, stage, &stem).await;
+        if let (Err(e), Some(small)) = (&got, fallback) {
+            tracing::warn!("art : capture pleine résolution ignorée ({e}), version réduite à la place");
+            got = download_image(small, p.allow_loopback, stage, &stem).await;
+        }
+        match got {
             Ok(n) => screenshots.push(n),
             Err(e) => tracing::warn!("art : capture ignorée : {e}"),
         }
@@ -256,7 +268,8 @@ fn normalize(s: &str) -> String {
 
 /// Meilleure correspondance : nom normalisé identique, sinon premier titre (ordre de pertinence) qui COMMENCE par le nom,
 /// sinon titre contenant le nom, sinon nom contenant le titre (≥ 3 caractères).
-fn pick_best(name: &str, candidates: &[(String, String)]) -> Option<String> {
+/// `exact` : seulement un nom normalisé identique (recherche automatique, sans demande de l'utilisateur).
+fn pick_best(name: &str, candidates: &[(String, String)], exact: bool) -> Option<String> {
     let n = normalize(name);
     if n.chars().count() < 3 {
         return None;
@@ -264,6 +277,9 @@ fn pick_best(name: &str, candidates: &[(String, String)]) -> Option<String> {
     let norm: Vec<(String, &String)> = candidates.iter().map(|(t, id)| (normalize(t), id)).collect();
     if let Some((_, id)) = norm.iter().find(|(t, _)| *t == n) {
         return Some((*id).clone());
+    }
+    if exact {
+        return None;
     }
     if let Some((_, id)) = norm.iter().find(|(t, _)| t.starts_with(&n)) {
         return Some((*id).clone());
@@ -275,13 +291,13 @@ fn pick_best(name: &str, candidates: &[(String, String)]) -> Option<String> {
 }
 
 /// Cherche un modpack par nom (Modrinth, puis CurseForge) : `(source, id du projet)`.
-pub async fn lookup_modpack(p: &Providers, name: &str) -> Result<(BrowseSource, String)> {
+pub async fn lookup_modpack(p: &Providers, name: &str, exact: bool) -> Result<(BrowseSource, String)> {
     let mut first_err: Option<Error> = None;
     let f = SearchFilters { project_type: Some("modpack".into()), limit: Some(20), ..Default::default() };
     match p.modrinth.search(name, &f).await {
         Ok(r) => {
             let c: Vec<_> = r.hits.into_iter().map(|h| (h.title, h.project_id)).collect();
-            if let Some(id) = pick_best(name, &c) {
+            if let Some(id) = pick_best(name, &c, exact) {
                 return Ok((BrowseSource::Modrinth, id));
             }
         }
@@ -291,7 +307,7 @@ pub async fn lookup_modpack(p: &Providers, name: &str) -> Result<(BrowseSource, 
         match p.cf.search(cfapi::CLASS_MODPACK, name, None, None, cfapi::sort_field(None), 0, 20).await {
             Ok(r) => {
                 let c: Vec<_> = r.data.into_iter().map(|m| (m.name, m.id.to_string())).collect();
-                if let Some(id) = pick_best(name, &c) {
+                if let Some(id) = pick_best(name, &c, exact) {
                     return Ok((BrowseSource::Curseforge, id));
                 }
             }
@@ -306,10 +322,14 @@ pub async fn lookup_modpack(p: &Providers, name: &str) -> Result<(BrowseSource, 
     }
 }
 
-/// Recherche automatique par le nom de l'instance, puis récupération de l'art.
-pub async fn lookup_and_apply(p: &Providers, store: &InstanceStore, instance_id: &str) -> Result<Instance> {
+/// Recherche par le nom de l'instance, puis récupération de l'art. `auto` (sans demande de l'utilisateur) : jamais
+/// pour une instance créée à la main, et seulement sur un nom identique (« Test » ne doit pas devenir « Testro's… »).
+pub async fn lookup_and_apply(p: &Providers, store: &InstanceStore, instance_id: &str, auto: bool) -> Result<Instance> {
     let inst = store.get(instance_id)?;
-    let (source, id) = lookup_modpack(p, &inst.name).await?;
+    if auto && store.is_custom(instance_id) {
+        return Err(Error::NotFound("instance créée à la main : pas d'illustration automatique".into()));
+    }
+    let (source, id) = lookup_modpack(p, &inst.name, auto).await?;
     apply_art(p, store, instance_id, source, &id).await
 }
 
@@ -330,7 +350,7 @@ const MAX_DECODE_PIXELS: u64 = 40_000_000;
 const THUMB_DIR: &str = ".thumbs";
 const THUMB_JPEG_QUALITY: u8 = 82;
 
-fn data_url(mime: &str, bytes: &[u8]) -> String {
+pub fn data_url(mime: &str, bytes: &[u8]) -> String {
     format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes))
 }
 
@@ -507,6 +527,139 @@ pub fn set_custom_image(store: &InstanceStore, instance_id: &str, path: &str, ro
             let _ = std::fs::remove_file(dir.join(&name));
             Err(e)
         }
+    }
+}
+
+/// Cache de la description longue, dans `art/` (supprimé avec les illustrations).
+/// Le suffixe change quand le nettoyage change, pour ne pas resservir un ancien cache.
+const DESCRIPTION_FILE: &str = "description-v3.html";
+/// Au-delà, la description en cache est redemandée (en cas d'échec réseau, l'ancienne reste servie).
+const DESCRIPTION_TTL: Duration = Duration::from_secs(24 * 3600);
+const MAX_DESCRIPTION_BYTES: usize = 512 * 1024;
+
+/// Nettoie du HTML venu d'un hébergeur : balises de mise en forme, liens et images en http(s) seulement ;
+/// pas de script, de style, d'iframe ni d'attribut d'événement. Les liens s'ouvrent dans le navigateur.
+pub fn sanitize_description(html: &str) -> String {
+    let clean = ammonia::Builder::default()
+        .url_schemes(["http", "https"].into_iter().collect())
+        .link_rel(Some("noopener noreferrer"))
+        .set_tag_attribute_value("a", "target", "_blank")
+        // Centrage d'origine (boutons, bannières) : seul `text-align` survit dans `style`.
+        .add_generic_attributes(["style", "align"])
+        .filter_style_properties(["text-align"].into_iter().collect())
+        .clean(html)
+        .to_string();
+    drop_empty_blocks(&clean)
+}
+
+/// Retire les blocs vides servant d'espacement (`<p>&nbsp;</p>`, `<h2><br></h2>`…), qui creusent des trous.
+fn drop_empty_blocks(html: &str) -> String {
+    let mut out = html.replace(r#" style="""#, "");
+    // Plusieurs passes : vider un `<span>` peut laisser son `<h2>` parent vide.
+    loop {
+        let before = out.len();
+        for tag in ["span", "strong", "em", "b", "i", "p", "h1", "h2", "h3", "h4", "h5", "h6", "div"] {
+            for inner in ["", "&nbsp;", "<br>", " ", "&nbsp;<br>", "<br>&nbsp;"] {
+                out = out.replace(&format!("<{tag}>{inner}</{tag}>"), "");
+            }
+        }
+        if out.len() == before { return out; }
+    }
+}
+
+/// Markdown (Modrinth, HTML intégré accepté) vers HTML, avant nettoyage.
+fn markdown_to_html(md: &str) -> String {
+    use pulldown_cmark::{Options, Parser};
+    let mut out = String::new();
+    pulldown_cmark::html::push_html(&mut out, Parser::new_ext(md, Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH));
+    out
+}
+
+/// Description longue d'un projet, en HTML nettoyé.
+pub async fn fetch_description(p: &Providers, source: BrowseSource, project_id: &str) -> Result<String> {
+    let raw = match source {
+        BrowseSource::Modrinth => markdown_to_html(&p.modrinth.project(project_id).await?.body),
+        BrowseSource::Curseforge => {
+            let n: u64 = project_id.trim().parse().map_err(|_| invalid("identifiant CurseForge invalide"))?;
+            p.cf.mod_description(n).await?
+        }
+    };
+    let mut html = sanitize_description(&raw);
+    if html.len() > MAX_DESCRIPTION_BYTES {
+        let mut cut = MAX_DESCRIPTION_BYTES;
+        while !html.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        html = sanitize_description(&html[..cut]);
+    }
+    Ok(html)
+}
+
+/// Description longue de l'instance (HTML nettoyé), depuis le cache de `art/` ou l'hébergeur d'origine.
+/// `None` pour une instance sans projet d'origine (illustration « custom » ou absente).
+pub async fn instance_description(p: &Providers, store: &InstanceStore, instance_id: &str) -> Result<Option<String>> {
+    let inst = store.get(instance_id)?;
+    let Some(art) = inst.art else { return Ok(None) };
+    let source = match art.source.as_str() {
+        "modrinth" => BrowseSource::Modrinth,
+        "curseforge" => BrowseSource::Curseforge,
+        _ => return Ok(None),
+    };
+    let dir = store.art_dir(instance_id)?;
+    let path = dir.join(DESCRIPTION_FILE);
+    let cached = std::fs::read_to_string(&path).ok();
+    let fresh = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok()).and_then(|t| t.elapsed().ok()).is_some_and(|age| age < DESCRIPTION_TTL);
+    if let (Some(c), true) = (&cached, fresh) {
+        return Ok(Some(c.clone()));
+    }
+    match fetch_description(p, source, &art.project_id).await {
+        Ok(html) => {
+            if std::fs::create_dir_all(&dir).is_ok() {
+                let _ = write_atomic(&dir, DESCRIPTION_FILE, html.as_bytes());
+            }
+            Ok(Some(html))
+        }
+        Err(e) => match cached {
+            Some(c) => {
+                tracing::warn!("description : hébergeur indisponible, cache servi : {e}");
+                Ok(Some(c))
+            }
+            None => Err(e),
+        },
+    }
+}
+
+#[cfg(test)]
+mod description_tests {
+    use super::*;
+
+    #[test]
+    fn nettoyage_garde_le_centrage_et_rien_d_autre_dans_style() {
+        let h = sanitize_description(r#"<p style="text-align: center; background: url(https://e.vil/x)">a</p><div align="center">b</div>"#);
+        assert!(h.contains("text-align"), "{h}");
+        assert!(!h.contains("background") && !h.contains("e.vil"), "{h}");
+        assert!(h.contains(r#"align="center""#), "{h}");
+    }
+
+    #[test]
+    fn nettoyage_retire_les_blocs_vides() {
+        let h = sanitize_description(r#"<p>a</p><p>&nbsp;</p><h2><span style="color:red">&nbsp;</span></h2><p><br></p><p>b</p>"#);
+        assert_eq!(h, "<p>a</p><p>b</p>");
+    }
+
+    #[test]
+    fn nettoyage_retire_le_dangereux_et_garde_la_mise_en_forme() {
+        let h = sanitize_description(r#"<h2>Titre</h2><p onclick="x()">Texte <b>gras</b></p><script>alert(1)</script><iframe src="https://e.vil"></iframe><a href="javascript:alert(1)">j</a><a href="https://modrinth.com">ok</a><img src="https://cdn.modrinth.com/a.png" onerror="x()">"#);
+        assert!(h.contains("<h2>Titre</h2>") && h.contains("<b>gras</b>"));
+        assert!(!h.contains("script") && !h.contains("iframe") && !h.contains("onclick") && !h.contains("onerror") && !h.contains("javascript"));
+        assert!(h.contains(r#"href="https://modrinth.com""#) && h.contains(r#"target="_blank""#));
+        assert!(h.contains(r#"src="https://cdn.modrinth.com/a.png""#));
+    }
+
+    #[test]
+    fn markdown_devient_html() {
+        let h = sanitize_description(&markdown_to_html("# Pack\n\n**Fort** et [lien](https://x.org)\n\n<center>ok</center>"));
+        assert!(h.contains("<h1>Pack</h1>") && h.contains("<strong>Fort</strong>") && h.contains("https://x.org"));
     }
 }
 
@@ -698,6 +851,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn modrinth_prefers_full_resolution_and_falls_back_to_reduced() {
+        let (mr, cf) = (MockServer::start().await, MockServer::start().await);
+        let u = mr.uri();
+        modrinth_project(
+            &mr,
+            "P5",
+            json!({"id": "P5", "title": "T", "gallery": [
+                {"url": format!("{u}/img/a_350"), "raw_url": format!("{u}/img/a"), "ordering": 0},
+                {"url": format!("{u}/img/b_350"), "raw_url": format!("{u}/img/b-absente"), "ordering": 1}]}),
+        )
+        .await;
+        serve(&mr, "/img/a", JPG).await; // original de la 1re : jpeg
+        serve(&mr, "/img/a_350", PNG).await;
+        serve(&mr, "/img/b_350", PNG).await; // original de la 2e introuvable : version réduite
+        let (_t, s, i) = store();
+        let a = apply_art(&providers(&mr, &cf, true), &s, &i.id, BrowseSource::Modrinth, "P5").await.unwrap().art.unwrap();
+        assert_eq!(a.screenshots, vec!["shot-1.jpg", "shot-2.png"]);
+    }
+
+    #[tokio::test]
     async fn network_failure_never_fails_install() {
         let (mr, cf) = (MockServer::start().await, MockServer::start().await);
         Mock::given(method("GET")).respond_with(ResponseTemplate::new(500)).mount(&mr).await;
@@ -734,10 +907,10 @@ mod tests {
             .await;
         Mock::given(method("GET")).and(path("/v1/mods/search")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": []}))).mount(&cf).await;
         let p = providers(&mr, &cf, true);
-        assert_eq!(lookup_modpack(&p, "Mon Pack").await.unwrap(), (BrowseSource::Modrinth, "B".to_string()));
+        assert_eq!(lookup_modpack(&p, "Mon Pack", false).await.unwrap(), (BrowseSource::Modrinth, "B".to_string()));
         // Contenant : « Mon Pack Deluxe Edition » contient « Mon Pack Deluxe ».
-        assert_eq!(lookup_modpack(&p, "Mon Pack Deluxe").await.unwrap(), (BrowseSource::Modrinth, "A".to_string()));
-        match lookup_modpack(&p, "Totalement Autre").await.unwrap_err() {
+        assert_eq!(lookup_modpack(&p, "Mon Pack Deluxe", false).await.unwrap(), (BrowseSource::Modrinth, "A".to_string()));
+        match lookup_modpack(&p, "Totalement Autre", false).await.unwrap_err() {
             Error::NotFound(m) => assert_eq!(m, "Aucun modpack correspondant à « Totalement Autre » trouvé. Choisis une image à la main."),
             e => panic!("{e:?}"),
         }
@@ -758,7 +931,7 @@ mod tests {
             .mount(&cf)
             .await;
         let (_t, s, i) = store();
-        let u = lookup_and_apply(&providers(&mr, &cf, true), &s, &i.id).await.unwrap();
+        let u = lookup_and_apply(&providers(&mr, &cf, true), &s, &i.id, false).await.unwrap();
         let a = u.art.unwrap();
         assert_eq!((a.source.as_str(), a.project_id.as_str()), ("curseforge", "7"));
     }
@@ -929,8 +1102,13 @@ mod tests {
         .iter()
         .map(|(t, i)| (t.to_string(), i.to_string()))
         .collect();
-        assert_eq!(pick_best("All the Mods 11", &c).as_deref(), Some("4"));
-        assert_eq!(pick_best("All the Mods 12", &c), None);
-        assert_eq!(pick_best("ab", &c), None);
+        assert_eq!(pick_best("All the Mods 11", &c, false).as_deref(), Some("4"));
+        assert_eq!(pick_best("All the Mods 12", &c, false), None);
+        assert_eq!(pick_best("ab", &c, false), None);
+        // Recherche automatique : nom identique seulement (« Test » ≠ « Testro's Minecraft Overhaul »).
+        let t = vec![("Testro's Minecraft Overhaul".to_string(), "T".to_string())];
+        assert_eq!(pick_best("Test", &t, false).as_deref(), Some("T"));
+        assert_eq!(pick_best("Test", &t, true), None);
+        assert_eq!(pick_best("testro's minecraft overhaul", &t, true).as_deref(), Some("T"));
     }
 }

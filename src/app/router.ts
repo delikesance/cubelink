@@ -1,7 +1,7 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
 
 export const ROUTES = [
-  "login", "main", "create", "install", "join", "friends", "settings", "error", "legal", "browse",
+  "login", "main", "instance", "create", "install", "join", "settings", "error", "legal", "browse",
 ] as const;
 export type RouteName = (typeof ROUTES)[number];
 export const DEFAULT_ROUTE: RouteName = "login";
@@ -16,9 +16,11 @@ export function parseHash(hash: string): Location {
   const raw = hash.replace(/^#\/?/, "");
   const [path, query = ""] = raw.split("?");
   const name = path.split("/")[0].toLowerCase();
-  const route = (ROUTES as readonly string[]).includes(name) ? (name as RouteName) : DEFAULT_ROUTE;
   const params: Record<string, string> = {};
   new URLSearchParams(query).forEach((v, k) => { params[k] = v; });
+  // Ancien écran Amis : ses réglages vivent maintenant dans Paramètres > Amis.
+  if (name === "friends") return { route: "settings", params: { ...params, tab: "amis" } };
+  const route = (ROUTES as readonly string[]).includes(name) ? (name as RouteName) : DEFAULT_ROUTE;
   return { route, params };
 }
 

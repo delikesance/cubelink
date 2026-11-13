@@ -364,6 +364,38 @@ impl AppState {
     }
 }
 
+impl AppState {
+    /// Instance du jeu en cours (en préparation ou lancé), sinon `None`.
+    pub fn game_current(&self) -> Option<String> {
+        lock(&self.game).clone()
+    }
+
+    /// Ferme le jeu en cours sans rien relancer (bouton « Fermer » du panneau en jeu). Dans la zone intégrée, le jeu reçoit
+    /// une demande de fermeture et enregistre son monde, jamais forcé ; la fin du jeu ramène le launcher par le rideau.
+    /// Hors de la zone : arrêt propre puis forcé après le délai habituel. Rend la main sans attendre la fin du jeu.
+    pub async fn game_close(&self) -> Result<(), String> {
+        let Some(id) = self.game_current() else { return Ok(()) };
+        if self.stage.staged() && lock(&self.game_handle).is_some() {
+            if self.kill_loading_game("fermeture depuis le panneau pendant le chargement").await {
+                return Ok(());
+            }
+            self.stage.request_close();
+            return Ok(());
+        }
+        self.instances_kill(&id).await
+    }
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn game_current(state: State<'_, Arc<AppState>>) -> Option<String> {
+    state.game_current()
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn game_close(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    state.inner().game_close().await
+}
+
 #[tauri::command(rename_all = "snake_case")]
 pub async fn game_switch(state: State<'_, Arc<AppState>>, instance_id: String) -> Result<(), String> {
     state.inner().game_switch(&instance_id).await

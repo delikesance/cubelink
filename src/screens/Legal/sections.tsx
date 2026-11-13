@@ -2,18 +2,16 @@ import type { ReactNode } from "react";
 
 export interface LegalSection { id: string; label: string; content: ReactNode }
 
-const Todo = () => <span className="legal-todo">à compléter</span>;
 const Ext = ({ href, children }: { href: string; children: ReactNode }) => (
   <a className="legal-lnk" href={href} target="_blank" rel="noopener noreferrer">{children}</a>
 );
 
 export const SECTIONS: LegalSection[] = [
   {
-    id: "editeur", label: "Éditeur", content: (
+    id: "projet", label: "Le projet", content: (
       <>
-        <h3>Éditeur</h3>
-        <p>Nom ou raison sociale&nbsp;: <Todo /></p>
-        <p>Adresse et statut juridique&nbsp;: <Todo /></p>
+        <h3>Le projet</h3>
+        <p>Cubelink est un projet personnel, gratuit et sans but commercial&nbsp;: pas de publicité, pas d'abonnement, aucune donnée revendue.</p>
       </>
     ),
   },
@@ -40,7 +38,7 @@ export const SECTIONS: LegalSection[] = [
           <summary>En savoir plus</summary>
           <p>Ta liste d'amis reste sur ton ordinateur, et aucune donnée de compte n'est conservée sur un serveur du projet. La connexion à ton compte Microsoft se fait directement entre ton ordinateur et Microsoft.</p>
         </details>
-        <p>Durée de conservation et base légale du traitement&nbsp;: <Todo /></p>
+        <p>Ces données restent sur ton ordinateur tant que Cubelink y est installé&nbsp;; les désinstaller avec ses données les efface.</p>
       </>
     ),
   },
@@ -66,14 +64,6 @@ export const SECTIONS: LegalSection[] = [
           <summary>Polices (SIL Open Font License&nbsp;1.1)</summary>
           <p>Polices Inter (The Inter Project Authors) et Montserrat (The Montserrat Project Authors), sous licence <Ext href="https://openfontlicense.org/">SIL Open Font License&nbsp;1.1</Ext>.</p>
         </details>
-      </>
-    ),
-  },
-  {
-    id: "contact", label: "Contact", content: (
-      <>
-        <h3>Contact</h3>
-        <p>Pour toute question sur tes données ou sur ces mentions&nbsp;: <Todo /> (adresse e-mail de contact).</p>
       </>
     ),
   },

@@ -2,7 +2,8 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Shell } from "../../app/shell";
 import { createFakeServices } from "../../services/fake";
-import { validateJavaPath, validateRam } from "./index";
+import { netVerdict, validateJavaPath, validateRam } from "./index";
+import type { NetTest } from "../../services/types";
 
 beforeEach(() => { window.location.hash = "#/settings"; });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
@@ -21,12 +22,57 @@ describe("validation", () => {
   });
 });
 
+describe("test de connexion", () => {
+  const base: NetTest = { relay_connected: true, relay: "euc1-1.relay.n0.iroh.link", relay_ms: 28, udp: true, ipv6: false, direct: true, relay_only: false, partial: false };
+  it("verdicts", () => {
+    const v = netVerdict(base);
+    expect([v.tone, v.label]).toEqual(["ok", "Excellente"]);
+    expect(v.checks).toEqual([
+      { label: "Connexion directe", ok: true, detail: "possible" },
+      { label: "Relais de secours", ok: true, detail: "joignable · Europe · 28 ms" },
+    ]);
+    const lbl = (t: Partial<NetTest>) => { const r = netVerdict({ ...base, ...t }); return `${r.tone}:${r.label}`; };
+    expect(lbl({ direct: false })).toBe("warn:Correcte");
+    expect(lbl({ udp: false, direct: false })).toBe("warn:Limitée");
+    expect(lbl({ relay_connected: false, udp: false })).toBe("danger:Hors ligne");
+    expect(lbl({ relay_connected: false })).toBe("warn:Bonne");
+    expect(lbl({ relay_connected: false, direct: false })).toBe("danger:Fragile");
+    expect(lbl({ relay_only: true })).toBe("ok:Relais uniquement");
+    expect(lbl({ relay_only: true, relay_connected: false })).toBe("danger:Hors ligne");
+    expect(lbl({ partial: true })).toBe("neutral:Test incomplet");
+  });
+
+  it("le bouton lance le vrai test et affiche le verdict", async () => {
+    const services = createFakeServices({ tickMs: 0 });
+    const spy = vi.spyOn(services, "netTest").mockResolvedValue({ ...base, direct: false });
+    window.location.hash = "#/settings";
+    render(<Shell services={services} />);
+    goTab("Réseau");
+    fireEvent.click(await screen.findByRole("button", { name: "Tester ma connexion" }));
+    expect(await screen.findByText("Correcte")).toBeTruthy();
+    expect(screen.getByText(/certaines parties passeront par le relais/)).toBeTruthy();
+    expect(screen.getByText("gênée par ton routeur")).toBeTruthy();
+    expect(screen.getByText("joignable · Europe · 28 ms")).toBeTruthy();
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it("une erreur est affichée telle quelle", async () => {
+    const services = createFakeServices({ tickMs: 0 });
+    vi.spyOn(services, "netTest").mockRejectedValue(new Error("Le réseau entre amis n'est pas démarré."));
+    window.location.hash = "#/settings";
+    render(<Shell services={services} />);
+    goTab("Réseau");
+    fireEvent.click(await screen.findByRole("button", { name: "Tester ma connexion" }));
+    expect(await screen.findByText("Le réseau entre amis n'est pas démarré.")).toBeTruthy();
+  });
+});
+
 describe("écran Paramètres", () => {
-  it("titre, 5 onglets, flèches du clavier, lien Mentions légales", () => {
+  it("titre, 6 onglets, flèches du clavier, lien Mentions légales", () => {
     render(<Shell services={createFakeServices({ tickMs: 0 })} />);
     expect(screen.getByRole("heading", { name: "Paramètres", level: 1 })).toBeTruthy();
     const tabs = screen.getAllByRole("tab");
-    expect(tabs.map((t) => t.textContent)).toEqual(["Compte", "Réseau", "Java", "Stockage", "À propos"]);
+    expect(tabs.map((t) => t.textContent)).toEqual(["Compte", "Amis", "Réseau", "Java", "Stockage", "À propos"]);
     expect(tabs[0].getAttribute("aria-selected")).toBe("true");
     tabs[0].focus();
     fireEvent.keyDown(tabs[0], { key: "ArrowRight" });
@@ -34,7 +80,7 @@ describe("écran Paramètres", () => {
     expect(document.activeElement).toBe(tabs[1]);
     expect(screen.getAllByRole("tabpanel")).toHaveLength(1);
     fireEvent.keyDown(tabs[1], { key: "End" });
-    expect(tabs[4].getAttribute("aria-selected")).toBe("true");
+    expect(tabs[5].getAttribute("aria-selected")).toBe("true");
     expect(screen.getByRole("link", { name: "Mentions légales" }).getAttribute("href")).toBe("#/legal");
   });
 

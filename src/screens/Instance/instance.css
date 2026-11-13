@@ -1,0 +1,131 @@
+/* Page d'un modpack : colonne centrée (max 1100 px), en-tête, amis sur le pack, onglets horizontaux, panneau. */
+/* Pleine largeur (barre de défilement au bord de la fenêtre, halo non coupé) ; le contenu reste centré sur 1100 px par le padding. */
+.ipg{--inst-pad:max(var(--sp-5),calc((100% - 1100px) / 2 + var(--sp-5)));box-sizing:border-box;width:100%;padding:var(--sp-5) var(--inst-pad);display:flex;flex-direction:column;gap:var(--sp-4);overflow:auto;overflow-x:hidden;min-height:0;height:100%;position:relative;isolation:isolate}
+/* Bannière d'ambiance : image du pack en pleine largeur, floutée, estompée vers le fond (comme le décor de l'installation). */
+/* Fondu « ease-out » en plusieurs paliers : une rampe linéaire laisse voir sa fin comme une ligne. */
+.ipg-hero{--hero-fade:#000 0%,rgba(0,0,0,.82) 18%,rgba(0,0,0,.6) 34%,rgba(0,0,0,.4) 48%,rgba(0,0,0,.24) 61%,rgba(0,0,0,.13) 73%,rgba(0,0,0,.06) 84%,rgba(0,0,0,.02) 93%,transparent 100%;
+  position:absolute;z-index:-1;top:0;left:0;right:0;height:520px;overflow:hidden;pointer-events:none;
+  -webkit-mask-image:linear-gradient(to bottom,var(--hero-fade));
+  mask-image:linear-gradient(to bottom,var(--hero-fade))}
+.ipg-hero img{position:absolute;inset:-48px;width:calc(100% + 96px);height:calc(100% + 96px);object-fit:cover;filter:blur(24px) saturate(1.15);opacity:.16;animation:ipg-hero-in 400ms var(--ease) both}
+.ipg-hero.is-icon img{filter:blur(48px) saturate(1.3);opacity:.14}
+@keyframes ipg-hero-in{from{opacity:0}}
+@media (prefers-reduced-motion:reduce){.ipg-hero img{animation:none}}
+@media (prefers-reduced-transparency:reduce){.ipg-hero{display:none}}
+.ipg-loading{margin:0;color:var(--muted)}
+.ipg-meta{margin:0;color:var(--muted);font:500 14px/1.4 var(--font-ui)}
+.ipg-missing{display:flex;flex-direction:column;align-items:flex-start;gap:var(--sp-3)}
+.ipg-missing h1{margin:0;font:700 28px/1.2 var(--font-display)}
+
+.ipg-head{display:flex;align-items:center;gap:var(--sp-4);flex-wrap:wrap}
+.ipg-av{width:72px;height:72px;border-radius:20px;font-size:28px}
+.ipg-id{flex:1;min-width:200px;display:flex;flex-direction:column;gap:6px}
+.ipg-id h1{margin:0;font:700 28px/1.2 var(--font-display);overflow-wrap:anywhere;outline:none}
+.ipg-act{display:flex;align-items:center;gap:var(--sp-3)}
+.ipg-prep{flex:none;width:260px;height:48px;position:relative;border-radius:var(--r-lg);overflow:hidden;background:var(--surface-2);border:1px solid var(--line);display:flex;align-items:center;justify-content:center}
+.home-prep-fill{position:absolute;inset:0;background:repeating-linear-gradient(135deg,var(--accent) 0 14px,var(--accent-hover) 14px 28px);background-size:40px 40px;opacity:.9;animation:inst-stripes 900ms linear infinite}
+.home-prep-label{position:relative;font:700 16px/1 var(--font-display);color:var(--accent-ink)}
+@keyframes inst-stripes{to{background-position:40px 0}}
+@media (prefers-reduced-motion:reduce){.home-prep-fill{animation:none}}
+
+.ipg-state{margin:0;color:var(--muted);font:500 14px/1.4 var(--font-ui)}
+.ipg-state time{font-variant-numeric:tabular-nums;color:var(--text)}
+.ipg-note{margin:0;color:var(--muted);font:500 13px/1.4 var(--font-ui)}
+.ipg-note.is-error{color:var(--danger);font-weight:600}
+.ipg-fail{display:flex;align-items:center;gap:var(--sp-3);padding:var(--sp-3) var(--sp-4);border-radius:var(--r-md);background:#2A1A1E;border:1px solid var(--danger)}
+.ipg-fail-ic{color:var(--danger);display:flex}
+.ipg-fail-txt{flex:1;min-width:0}
+.ipg-fail-txt .t{font:700 14px/1.3 var(--font-ui)}
+.ipg-fail-txt .m{color:var(--muted);font:500 13px/1.4 var(--font-ui);overflow-wrap:anywhere}
+
+/* Carte commune de la page (amis, captures, à propos) : même cadre, même en-tête. */
+.ipg-card{padding:var(--sp-4) var(--sp-5);border-radius:var(--r-lg);background:var(--surface);border:1px solid var(--line);display:flex;flex-direction:column;gap:var(--sp-3);min-width:0}
+.ipg-card-h{display:flex;align-items:center;justify-content:space-between;gap:var(--sp-3);font:700 13px/1 var(--font-ui);color:var(--muted)}
+.ipg-card-h span:first-child{display:inline-flex;align-items:center;gap:var(--sp-2)}
+.ipg-card-h .c{color:var(--accent);font-weight:600;text-align:right}
+.ipg-friends-empty{margin:0;color:var(--muted);font:500 14px/1.4 var(--font-ui)}
+.ipg-friends-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:var(--sp-2)}
+.ipg-friend{display:flex;align-items:center;gap:var(--sp-3)}
+.ipg-friend-txt{flex:1;min-width:0;display:flex;flex-direction:column;gap:4px}
+.ipg-friend-txt .n{font:700 14px/1.2 var(--font-ui);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ipg-friend-txt .s{font:500 12px/1.2 var(--font-ui);color:var(--accent)}
+
+.ipg-tabs{position:sticky;top:calc(-1 * var(--sp-5));z-index:2;margin-top:calc(-1 * var(--sp-2));padding-top:var(--sp-2);background:transparent;display:flex;gap:var(--sp-1);border-bottom:1px solid var(--line);overflow-x:auto;flex:none}
+/* Transparents au repos (le halo passe derrière), fond plein une fois collés en haut pendant le défilement. */
+@supports (animation-timeline:scroll()){
+  .ipg-tabs{animation:inst-tabs-bg linear both;animation-timeline:scroll(nearest block);animation-range:160px 240px}
+}
+@supports not (animation-timeline:scroll()){.ipg-tabs{background:var(--bg)}}
+@keyframes inst-tabs-bg{from{background-color:transparent}to{background-color:var(--bg)}}
+.ipg-tabs [role="tab"]{min-height:44px;padding:0 var(--sp-4);border:0;border-bottom:2px solid transparent;background:transparent;color:var(--muted);font:600 14px/1 var(--font-ui);cursor:pointer;white-space:nowrap}
+.ipg-tabs [role="tab"]:hover{color:var(--text)}
+.ipg-tabs [role="tab"][aria-selected="true"]{color:var(--text);border-bottom-color:var(--accent)}
+.ipg-tabs [role="tab"]:focus-visible{outline:2px solid var(--focus);outline-offset:-2px;border-radius:var(--r-sm,8px)}
+
+.ipg-panel{min-width:0}
+/* Les panneaux Mods / Réglages / Logs viennent des tiroirs : ici ils prennent la forme d'une carte en pleine page. */
+.ipg-panel .dr-panel{border-radius:var(--r-lg);background:var(--surface);border:1px solid var(--line);overflow:hidden;min-height:360px}
+.ipg-panel .dr-body{max-height:none;overflow:visible}
+/* Réglages en pleine largeur : une ligne par réglage, libellé et aide à gauche, contrôle à droite (comme les Paramètres). */
+.ipg-panel .dr-form{gap:0;padding-block:var(--sp-2)}
+.ipg-panel .dr-form>.cl-field,.ipg-panel .dr-mem,.ipg-panel .dr-folder,.ipg-panel .dr-danger{display:grid;grid-template-columns:minmax(200px,1fr) minmax(0,1.6fr);column-gap:var(--sp-6);row-gap:6px;align-items:center;padding-block:var(--sp-4);border-top:1px solid var(--line)}
+.ipg-panel .dr-form>.cl-field:first-child{border-top:0}
+.ipg-panel .dr-form>.cl-field>.cl-label{grid-column:1;grid-row:1;align-self:end;margin:0}
+.ipg-panel .dr-form>.cl-field:not(:has(>.cl-hint))>.cl-label{grid-row:1 / span 2;align-self:center}
+.ipg-panel .dr-form>.cl-field>:nth-child(2){grid-column:2;grid-row:1 / span 2}
+.ipg-panel .dr-form>.cl-field>.cl-hint{grid-column:1;grid-row:2;align-self:start;margin:0}
+.ipg-panel .dr-form>.cl-field>.cl-error{grid-column:2;grid-row:3;margin:0}
+.ipg-panel .dr-mem-head{grid-column:1;grid-row:1 / span 2;justify-content:flex-start;gap:var(--sp-3)}
+.ipg-panel .dr-mem .dr-range{grid-column:2;grid-row:1}
+.ipg-panel .dr-mem-scale{grid-column:2;grid-row:2}
+.ipg-panel .dr-folder>.cl-btn,.ipg-panel .dr-folder>button{grid-column:2;justify-self:start}
+.ipg-panel .dr-danger>.dr-danger-t{grid-column:1}
+.ipg-panel .dr-danger>.dr-danger-btn{grid-column:2;justify-self:start;align-self:center}
+.ipg-panel .dr-danger>.dr-confirm{grid-column:2}
+.ipg-panel .dr-form>.home-err,.ipg-panel .dr-form>.dr-notice{margin-block:var(--sp-3) 0}
+@media (max-width:760px){
+  .ipg-panel .dr-form>.cl-field,.ipg-panel .dr-mem,.ipg-panel .dr-folder,.ipg-panel .dr-danger{grid-template-columns:minmax(0,1fr)}
+  .ipg-panel .dr-form>.cl-field>*,.ipg-panel .dr-mem>*,.ipg-panel .dr-folder>*,.ipg-panel .dr-danger>*{grid-column:1 !important;grid-row:auto !important}
+}
+/* Onglets Mods et Logs : la carte remplit le reste de la page, seule la liste défile ; barres d'outils fixes. */
+.ipg-panel:has(.dr-mods,.dr-logs){flex:1 0 420px;min-height:420px;display:flex;flex-direction:column}
+.ipg-panel .dr-panel:has(.dr-mods,.dr-logs){flex:1;min-height:0}
+.ipg-panel .dr-logs{flex:1;min-height:0}
+.ipg-panel .dr-mods{flex:1;min-height:0;overflow:hidden}
+.ipg-panel .dr-mods>.dr-search,.ipg-panel .dr-mods>.dr-live,.ipg-panel .dr-mods>.dr-issues{flex:none}
+.ipg-panel .dr-mods>.dr-list{flex:1;min-height:0;overflow-y:auto;margin-right:calc(-1 * var(--sp-3));padding-right:var(--sp-3)}
+
+.ipg-overview{display:flex;flex-direction:column;gap:var(--sp-4)}
+.ipg-lead{margin:0;font:500 16px/1.55 var(--font-ui);color:var(--text)}
+.ipg-lead+.ipg-prose,.ipg-lead+.ipg-meta{padding-top:var(--sp-4);border-top:1px solid var(--line)}
+/* Description complète : HTML de l'hébergeur (nettoyé), mis en forme sobrement, images bornées à la colonne. */
+.ipg-prose{font:400 15px/1.65 var(--font-ui);color:var(--text);overflow-wrap:anywhere}
+/* Texte limité pour rester lisible ; les images et tableaux gardent toute la largeur. */
+.ipg-prose :is(p,li,h1,h2,h3,h4,blockquote):not(:has(img)){max-width:78ch}
+.ipg-prose a:has(>img){display:inline-block;text-decoration:none;margin:0 6px 6px 0}
+.ipg-prose>:first-child{margin-top:0}
+.ipg-prose>:last-child{margin-bottom:0}
+.ipg-prose :is(h1,h2,h3,h4){margin:1.4em 0 .5em;font-family:var(--font-display);line-height:1.25}
+.ipg-prose h1{font-size:24px}.ipg-prose h2{font-size:20px}.ipg-prose h3{font-size:17px}.ipg-prose h4{font-size:15px}
+.ipg-prose p,.ipg-prose ul,.ipg-prose ol,.ipg-prose blockquote,.ipg-prose table{margin:0 0 .9em}
+.ipg-prose ul,.ipg-prose ol{padding-left:1.4em}
+.ipg-prose li+li{margin-top:.25em}
+.ipg-prose a{color:var(--accent);text-decoration:underline;text-underline-offset:2px}
+.ipg-prose a:hover{color:var(--accent-hover)}
+.ipg-prose img{max-width:100%;height:auto;border-radius:var(--r-md);vertical-align:middle}
+.ipg-prose hr{border:0;border-top:1px solid var(--line);margin:1.5em 0}
+.ipg-prose blockquote{padding-left:var(--sp-3);border-left:3px solid var(--line-strong);color:var(--muted)}
+.ipg-prose code{font:13px/1.4 ui-monospace,Consolas,monospace;padding:1px 5px;border-radius:6px;background:var(--surface-2)}
+.ipg-prose pre{overflow:auto;padding:var(--sp-3);border-radius:var(--r-md);background:var(--surface-2)}
+.ipg-prose pre code{padding:0;background:none}
+.ipg-prose table{border-collapse:collapse;display:block;overflow-x:auto}
+.ipg-prose :is(th,td){padding:6px 10px;border:1px solid var(--line);text-align:left}
+.ipg-prose [align="center"],.ipg-prose center{text-align:center}
+.ipg-shots .home-thumbs{justify-content:flex-start;padding-bottom:var(--sp-1)}
+.ipg-shots .home-thumb{width:160px}
+
+@media (max-width:700px){
+  .ipg{padding:var(--sp-4)}
+  .ipg-prep{width:100%}
+}
+.home-session time{font-variant-numeric:tabular-nums;color:var(--text)}

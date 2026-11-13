@@ -65,9 +65,9 @@ fn jeu_adopte_pose_bascule_et_ferme() {
     // ---- panneau « en jeu » : bande decoupee a droite, puis rendue
     assert!(host.set_panel(true, 150));
     assert!(host.panel());
-    wait_until("decoupe du panneau appliquee", T, || has_region(win));
+    wait_until("decoupe du panneau appliquee", T, || panel_cut(win));
     assert!(host.set_panel(false, 0));
-    wait_until("decoupe retiree", T, || !has_region(win));
+    wait_until("decoupe retiree (region pleine)", T, || has_region(win) && !panel_cut(win));
 
     // ---- retour au launcher sans arreter le jeu, puis retour au jeu
     host.set_view(false);

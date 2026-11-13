@@ -9,7 +9,7 @@ export interface ShellContextValue {
   navigate: typeof navigate;
   goBack: typeof goBack;
   canGoBack: boolean;
-  /** Définit le contexte affiché après « Cubelink · » ; null revient au libellé de la route. */
+  /** Définit le contexte affiché au centre de la barre de titre ; null revient au libellé de la route. */
   setTitle: (title: string | null) => void;
 }
 

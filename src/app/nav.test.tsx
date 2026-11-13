@@ -21,7 +21,7 @@ describe("historique", () => {
   });
 
   it("pas de boucle A→B→A→B : revenir à la précédente fait un pop", () => {
-    nav("main"); nav("friends"); nav("main"); nav("friends");
+    nav("main"); nav("browse"); nav("main"); nav("browse");
     back();
     expect(hash()).toBe("#/main");
     back("settings");
@@ -29,7 +29,7 @@ describe("historique", () => {
   });
 
   it("fallback par défaut : main", () => {
-    window.location.hash = "#/friends"; resetHistory();
+    window.location.hash = "#/browse"; resetHistory();
     back();
     expect(hash()).toBe("#/main");
   });
@@ -46,7 +46,7 @@ describe("TitleBar", () => {
     render(<Shell services={createFakeServices({ tickMs: 0 })} />);
     const b = screen.getByRole("button", { name: "Retour" }) as HTMLButtonElement;
     expect(b.disabled).toBe(true);
-    nav("main"); nav("friends");
+    nav("main"); nav("browse");
     expect(b.disabled).toBe(false);
     fireEvent.click(b);
     expect(hash()).toBe("#/main");
@@ -57,26 +57,26 @@ describe("TitleBar", () => {
 describe("raccourcis globaux", () => {
   it("Alt+← et souris 3 reviennent en arrière", () => {
     render(<Shell services={createFakeServices({ tickMs: 0 })} />);
-    nav("main"); nav("friends"); nav("legal");
+    nav("main"); nav("browse"); nav("legal");
     fireEvent.keyDown(window, { key: "ArrowLeft", altKey: true });
-    expect(hash()).toBe("#/friends");
+    expect(hash()).toBe("#/browse");
     fireEvent.mouseUp(window, { button: 3 });
     expect(hash()).toBe("#/main");
   });
 
   it("ignorés si dialogue modal ouvert ; Alt+← ignoré dans un champ", () => {
     render(<Shell services={createFakeServices({ tickMs: 0 })} />);
-    nav("main"); nav("friends");
+    nav("main"); nav("browse");
     const input = document.createElement("input");
     document.body.appendChild(input); input.focus();
     fireEvent.keyDown(input, { key: "ArrowLeft", altKey: true });
-    expect(hash()).toBe("#/friends");
+    expect(hash()).toBe("#/browse");
     input.remove();
     const dlg = document.createElement("div");
     dlg.setAttribute("aria-modal", "true"); document.body.appendChild(dlg);
     fireEvent.mouseUp(window, { button: 3 });
     fireEvent.keyDown(window, { key: "ArrowLeft", altKey: true });
-    expect(hash()).toBe("#/friends");
+    expect(hash()).toBe("#/browse");
     dlg.remove();
   });
 });

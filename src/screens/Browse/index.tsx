@@ -4,6 +4,9 @@ import { useBack, useScreenTitle, useShell } from "../../app/context";
 import type { BrowseHit, BrowseKind, BrowseQuery, BrowseSource, Instance } from "../../services/types";
 import { Detail, SOURCE_LABEL, CF_UNAVAILABLE, isCurseForgeDown, messageOf } from "./Detail";
 import { Button } from "../../ui";
+import { useContextMenu, type MenuItem } from "../../app/useContextMenu";
+import { openExternal } from "../../app/externalLinks";
+import { ICONS, Icon } from "../Main/Panel";
 
 export const KINDS: { value: BrowseKind; label: string }[] = [
   { value: "modpack", label: "Modpacks" },
@@ -41,7 +44,7 @@ type Status = "loading" | "ready" | "error";
 
 export default function Browse() {
   useScreenTitle("Parcourir");
-  const { services, params } = useShell();
+  const { services, params, navigate: go, goBack } = useShell();
   const uid = useId();
   const searchRef = useRef<HTMLInputElement>(null);
   const tabRefs = useRef<(HTMLButtonElement | null)[]>([]);
@@ -64,9 +67,10 @@ export default function Browse() {
   const [more, setMore] = useState(false);
   const [moreError, setMoreError] = useState<string | null>(null);
   const [retry, setRetry] = useState(0);
-  const [detail, setDetail] = useState<BrowseHit | null>(null);
-  const detailOpen = useRef(false);
-  detailOpen.current = detail !== null;
+  // La fiche est une page : son état vit dans l'URL (`detail=<source>:<id>`).
+  const detailKey = params.detail ?? "";
+  const [opened, setOpened] = useState<BrowseHit | null>(null);
+  const [instancesReady, setInstancesReady] = useState(false);
 
   const instance = useMemo(() => instances.find((i) => i.id === instanceId) ?? null, [instances, instanceId]);
   const needsInstance = kind !== "modpack";
@@ -75,7 +79,7 @@ export default function Browse() {
   useEffect(() => {
     let off = false;
     services.minecraftVersions().then((l) => { if (!off) setMcVersions(l); }, () => {});
-    services.instancesList().then((l) => { if (!off) setInstances(l); }, () => {});
+    services.instancesList().then((l) => { if (!off) { setInstances(l); setInstancesReady(true); } }, () => { if (!off) setInstancesReady(true); });
     return () => { off = true; };
   }, [services]);
 
@@ -141,13 +145,13 @@ export default function Browse() {
   // Focus initial : champ de recherche.
   useEffect(() => { searchRef.current?.focus(); }, []);
 
-  // Échap : la fiche gère elle-même sa fermeture, sinon retour.
+  // Échap : retour (de la fiche vers la liste, ou de la liste vers l'écran précédent).
   const back = useBack("main");
   const backRef = useRef(back);
   backRef.current = back;
   useEffect(() => {
     const onEsc = (e: globalThis.KeyboardEvent) => {
-      if (e.key === "Escape" && !e.defaultPrevented && !detailOpen.current) { e.preventDefault(); backRef.current(); }
+      if (e.key === "Escape" && !e.defaultPrevented) { e.preventDefault(); backRef.current(); }
     };
     document.addEventListener("keydown", onEsc);
     return () => document.removeEventListener("keydown", onEsc);
@@ -174,8 +178,74 @@ export default function Browse() {
     applyInstance(instances.find((i) => i.id === id) ?? null);
   };
 
+  const openHit = (h: BrowseHit) => {
+    setOpened(h);
+    go("browse", { ...params, detail: `${h.source}:${h.id}` });
+  };
+  // Retour à la liste : on dépile l'historique ; sans historique (ouverture directe), on retire `detail` de l'URL.
+  const closeDetail = () => goBack("browse");
+
+  // Résolution de la fiche demandée par l'URL : résultat connu, sinon repli sur l'illustration d'une instance installée.
+  const detailHit = useMemo<BrowseHit | null>(() => {
+    if (!detailKey) return null;
+    const cut = detailKey.indexOf(":");
+    const src = detailKey.slice(0, cut);
+    const id = detailKey.slice(cut + 1);
+    if (cut < 0 || (src !== "modrinth" && src !== "curseforge") || !id) return null;
+    const known = [opened, ...hits].find((h) => h && h.source === src && h.id === id);
+    if (known) return known;
+    const art = instances.find((i) => i.art && i.art.source === src && i.art.project_id === id)?.art;
+    if (!art || art.source === "custom") return null;
+    return {
+      source: src, id, kind: "modpack", name: art.title, summary: art.summary, author: art.author,
+      icon_url: art.icon && /^https?:/.test(art.icon) ? art.icon : null, downloads: 0,
+      page_url: art.page_url ?? "", downloadable: true,
+    };
+  }, [detailKey, opened, hits, instances]);
+
+  const installedFor = (h: BrowseHit): Instance | null =>
+    h.kind !== "modpack" ? null
+      : instances.find((i) => i.art && i.art.source === h.source && i.art.project_id === h.id) ?? null;
+  const ctx = useContextMenu();
+  const hitMenu = (h: BrowseHit): MenuItem[] => {
+    const inst = installedFor(h);
+    const items: MenuItem[] = [{ key: "detail", label: "Voir la fiche", icon: <Icon d={ICONS.search} />, onSelect: () => openHit(h) }];
+    if (inst) items.push({ key: "open", label: "Ouvrir le modpack", icon: <Icon d={ICONS.play} />, onSelect: () => go("instance", { id: inst.id }) });
+    if (h.page_url) {
+      items.push({ key: "site", label: `Ouvrir sur ${SOURCE_LABEL[h.source]}`, icon: <Icon d={ICONS.folder} />, separator: true, onSelect: () => openExternal(h.page_url) });
+      items.push({ key: "copy", label: "Copier le lien", icon: <Icon d={ICONS.copy} />, onSelect: () => { void navigator.clipboard?.writeText(h.page_url).catch(() => {}); } });
+    }
+    return items;
+  };
+
   const panelId = `${uid}-panel`;
   const canMore = status === "ready" && hits.length < total && hits.length > 0;
+
+  if (detailKey) {
+    return (
+      <div className="browse screen">
+        {detailHit ? (
+          <Detail
+            key={detailKey}
+            hit={detailHit}
+            services={services}
+            minecraft={minecraft}
+            loader={effLoader}
+            instance={instance}
+            installed={installedFor(detailHit)}
+            onBack={closeDetail}
+          />
+        ) : status === "loading" || !instancesReady ? (
+          <p className="br-muted" role="status">Chargement de la fiche…</p>
+        ) : (
+          <div className="br-state" role="alert">
+            <p className="br-error">Cette fiche est introuvable.</p>
+            <Button variant="secondary" onClick={closeDetail}>Retour aux résultats</Button>
+          </div>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className="browse screen">
@@ -279,8 +349,8 @@ export default function Browse() {
         {status === "ready" && hits.length > 0 && (
           <ul className="br-grid">
             {hits.map((h) => (
-              <li key={`${h.source}:${h.id}`} className="br-card">
-                <button type="button" className="br-card-btn" onClick={() => setDetail(h)} aria-label={`${h.name}, par ${h.author}. Ouvrir la fiche`}>
+              <li key={`${h.source}:${h.id}`} className="br-card" onContextMenu={ctx.bind(h.name, () => hitMenu(h))}>
+                <button type="button" className="br-card-btn" onClick={() => openHit(h)} aria-label={`${h.name}, par ${h.author}. Ouvrir la fiche`}>
                   <span className="br-card-top">
                     {h.icon_url ? <img className="br-icon" src={h.icon_url} alt="" loading="lazy" /> : <span className="br-icon br-icon-ph" aria-hidden="true" />}
                     <span className="br-card-titles">
@@ -299,6 +369,7 @@ export default function Browse() {
           </ul>
         )}
 
+        {ctx.menu}
         {canMore && (
           <div className="br-more">
             {moreError && <p className="br-error" role="alert">{moreError}</p>}
@@ -309,16 +380,6 @@ export default function Browse() {
         )}
       </div>
 
-      {detail && (
-        <Detail
-          hit={detail}
-          services={services}
-          minecraft={minecraft}
-          loader={effLoader}
-          instance={instance}
-          onClose={() => setDetail(null)}
-        />
-      )}
     </div>
   );
 }

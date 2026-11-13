@@ -25,9 +25,11 @@ describe("section Mise à jour", () => {
     act(() => fake.emitUpdateState({ phase: "downloading", version: "0.2.0", downloaded: 50, total: 100 }));
     expect(screen.getByText("Version 0.2.0 trouvée, téléchargement…")).toBeTruthy();
     expect(screen.getByRole("progressbar").getAttribute("aria-valuenow")).toBe("50");
-    expect((screen.getByRole("button", { name: "Chercher une mise à jour" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.queryByRole("button", { name: "Chercher une mise à jour" })).toBeNull();
     act(() => fake.emitUpdateState({ phase: "ready" }));
     expect(screen.getByText("Version 0.2.0 prête à installer.")).toBeTruthy();
+    // Version prête : un seul bouton, celui qui installe.
+    expect(screen.queryByRole("button", { name: "Chercher une mise à jour" })).toBeNull();
     const spy = vi.spyOn(fake, "updateInstall");
     fireEvent.click(screen.getAllByRole("button", { name: "Redémarrer et installer" })[0]);
     expect(spy).toHaveBeenCalled();

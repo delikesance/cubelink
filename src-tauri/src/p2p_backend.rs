@@ -85,7 +85,31 @@ pub struct HostManifest {
     pub unknown_mods: Vec<String>,
 }
 
+/// Résultat du test « Ta connexion avec tes amis » (Paramètres).
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct NetTest {
+    /// Connecté à un relais (secours quand la connexion directe échoue).
+    pub relay_connected: bool,
+    /// Nom d'hôte du relais (« euc1-1.relay.n0.iroh.link »).
+    pub relay: Option<String>,
+    /// Latence vers ce relais, en millisecondes.
+    pub relay_ms: Option<u32>,
+    /// L'UDP passe (indispensable à la connexion directe).
+    pub udp: bool,
+    pub ipv6: bool,
+    /// Connexion directe : `Some(true)` facile, `Some(false)` routeur strict (adresse publique changeante), `None` inconnu.
+    pub direct: Option<bool>,
+    /// Réglage « Passer toujours par le relais ».
+    pub relay_only: bool,
+    /// Le rapport réseau n'est pas arrivé à temps : `udp` et `direct` ne sont pas fiables.
+    pub partial: bool,
+}
+
 pub trait P2pBackend: Send + Sync {
+    /// Test de la connexion réseau entre amis (relais, UDP, type de routeur).
+    fn net_test(&self) -> BoxFuture<'_, Result<NetTest, String>> {
+        Box::pin(async { Err("Le réseau entre amis n'est pas démarré.".to_string()) })
+    }
     /// Présence d'un ami.
     fn presence(&self, public_key: &str) -> Presence;
     /// Pseudo déclaré aux amis (demandes et acceptations).

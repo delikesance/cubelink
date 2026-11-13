@@ -29,6 +29,9 @@ hex.workspace = true
 futures-util.workspace = true
 tracing.workspace = true
 base64 = "0.22"
+ammonia = "4"
+pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
+toml = { version = "0.8", default-features = false, features = ["parse"] }
 
 [target.'cfg(windows)'.dependencies]
 # Seulement pour `hidden_spawn` (essai « fenêtre du jeu cachée au départ ») ; `Win32_UI_Shell` : ses tests.

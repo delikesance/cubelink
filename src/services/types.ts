@@ -13,6 +13,22 @@ export interface AccountInfo { id: string; kind: "online" | "offline"; name: str
 /** Comptes enregistrés et identifiant du compte actif (null si aucun n'est actif). */
 export interface AccountsState { accounts: AccountInfo[]; active: string | null }
 
+/** Test « Ta connexion avec tes amis » (Paramètres → Réseau). */
+export interface NetTest {
+  relay_connected: boolean;
+  /** Nom d'hôte du relais. */
+  relay: string | null;
+  relay_ms: number | null;
+  /** L'UDP passe (nécessaire à la connexion directe). */
+  udp: boolean;
+  ipv6: boolean;
+  /** true : connexion directe facile ; false : routeur strict ; null : inconnu. */
+  direct: boolean | null;
+  relay_only: boolean;
+  /** Rapport réseau pas encore arrivé : udp/direct pas fiables. */
+  partial: boolean;
+}
+
 export interface Instance {
   id: string;
   name: string;
@@ -54,6 +70,10 @@ export interface Invite {
   name: string;
   world_name: string;
   minecraft: string;
+  /** Nom du modpack de l'hôte (absent pour une ancienne version de Cubelink). */
+  pack?: string | null;
+  /** Icône du monde (data URL PNG, au plus 64 px), si l'hôte en a envoyé une. */
+  world_icon?: string | null;
   received_at: number;
   expires_at: number;
 }
@@ -105,7 +125,8 @@ export interface Settings {
 export interface DeviceCode { user_code: string; verification_uri: string; expires_in: number }
 export interface ImportTarget { name?: string; minecraft?: string; loader?: LoaderSpec }
 export interface CreateInstanceInput { name: string; minecraft: string; loader: LoaderSpec; ram_mb: number }
-export interface FriendWithPresence { friend: Friend; presence: Presence }
+/** `last_seen` : dernière fois vu en ligne (secondes Unix), absent si jamais vu. */
+export interface FriendWithPresence { friend: Friend; presence: Presence; last_seen?: number | null }
 export interface FriendRequestsQuery { offset: number; limit: number; query?: string }
 export interface FriendRequestsPage { items: FriendRequest[]; total: number }
 export interface JoinPlan {
@@ -145,7 +166,37 @@ export interface BrowsePage { hits: BrowseHit[]; total: number }
 export interface BrowseVersion { id: string; name: string; minecraft: string[]; loaders: string[]; published: string; downloadable: boolean }
 export interface BrowseInstallInput { source: BrowseSource; id: string; kind: BrowseKind; version_id?: string; instance_id?: string }
 export interface BrowseInstallResult { instance: Instance; installed: string[]; missing: string[] }
+/** Verdict d'une version d'un mod dans une instance (simulation dans le pack). */
+export interface VersionVerdict { version_id: string; ok: boolean; problems: string[] }
+/** Compatibilité d'un mod avec une instance : fichiers déjà présents, version recommandée, blocages. */
+export interface ContentCheck { installed: string[]; recommended: string | null; verdicts: VersionVerdict[]; blockers: string[] }
 export interface ModEntry { file: string; enabled: boolean; size: number; custom: boolean }
+export interface ModIssue {
+  /** Nom du jar concerné, identique à ModEntry.file (version activée, sans .disabled). */
+  file: string;
+  mod_name: string;
+  kind: "missing_dep" | "incompatible" | "wrong_minecraft" | "wrong_loader" | "duplicate";
+  severity: "error" | "warning";
+  /** Phrase prête à afficher. */
+  message: string;
+  /** Fichier de l'autre mod impliqué, s'il est installé. */
+  related?: string;
+}
+export interface ModCheck { issues: ModIssue[]; checked: number }
+export interface FixAction {
+  id: string;
+  kind: "install" | "update" | "enable" | "disable";
+  title: string;
+  detail?: string;
+  source?: "modrinth" | "curseforge";
+  file?: string;
+  /** Fichiers (ModIssue.file) des problèmes que cette action règle. */
+  issue_files: string[];
+}
+export interface FixUnresolved { file: string; mod_name: string; message: string; reason: string; page_url?: string }
+export interface FixPlan { plan_id: string; actions: FixAction[]; unresolved: FixUnresolved[] }
+export interface FixResult { applied: string[]; failed: { title: string; error: string }[]; backup_id: string | null; check: ModCheck }
+export interface FixProgressEvent { done: number; total: number; label: string }
 export interface BrowseProgressEvent { done: number; total: number; label: string }
 export interface PickFilesOptions { extensions: string[]; multiple?: boolean }
 
@@ -181,6 +232,8 @@ export interface Services {
   authSwitch(id: string): Promise<Profile>;
   /** Retire un compte. */
   authRemove(id: string): Promise<void>;
+  /** Tête du skin (data URL PNG 8×8) d'un compte Microsoft, null si indisponible. */
+  authSkinHead(uuid: string): Promise<string | null>;
 
   instancesList(): Promise<Instance[]>;
   instancesCreate(input: CreateInstanceInput): Promise<Instance>;
@@ -196,9 +249,14 @@ export interface Services {
   /** `maxPx` : côté maximal de la miniature (64..2048, 512 par défaut) ; grand pour un fond ou une visionneuse. */
   instancesArtImage(instanceId: string, file: string, maxPx?: number): Promise<string>;
   instancesArtSet(instanceId: string, path: string, role: "icon" | "banner"): Promise<Instance>;
-  instancesArtLookup(instanceId: string): Promise<Instance>;
+  /** `auto` : recherche silencieuse de l'accueil (nom identique seulement, jamais pour une instance créée à la main). */
+  instancesArtLookup(instanceId: string, auto?: boolean): Promise<Instance>;
+  /** Description longue du modpack (HTML déjà nettoyé côté Rust), null sans projet d'origine. */
+  instancesDescription(instanceId: string): Promise<string | null>;
   minecraftVersions(): Promise<string[]>;
 
+  /** Teste la connexion réseau entre amis (relais, UDP, routeur). */
+  netTest(): Promise<NetTest>;
   friendMyCode(): Promise<FriendCode>;
   friendRegenerateCode(): Promise<FriendCode>;
   friendList(): Promise<FriendWithPresence[]>;
@@ -214,6 +272,10 @@ export interface Services {
   friendInviteDismiss(id: string): Promise<void>;
   /** Ferme le jeu en cours puis lance l'instance. */
   gameSwitch(instanceId: string): Promise<void>;
+  /** Instance du jeu en cours (en préparation ou lancé), `null` sinon. */
+  gameCurrent(): Promise<string | null>;
+  /** Ferme le jeu en cours sans rien relancer (dans la zone intégrée : fermeture propre, le monde est enregistré). */
+  gameClose(): Promise<void>;
   /** Ferme le jeu si besoin puis rejoint l'ami (plan, transfert, jeu). */
   gameJoinFriend(publicKey: string, instanceId?: string): Promise<void>;
 
@@ -231,8 +293,19 @@ export interface Services {
   browseSearch(q: BrowseQuery): Promise<BrowsePage>;
   browseVersions(source: BrowseSource, id: string, kind: BrowseKind, minecraft?: string, loader?: string): Promise<BrowseVersion[]>;
   browseInstall(input: BrowseInstallInput): Promise<BrowseInstallResult>;
+  /** Mods seulement (autres types : résultat vide). `versionId` : juger cette version précise. */
+  browseCheck(source: BrowseSource, id: string, kind: BrowseKind, instanceId: string, versionId?: string): Promise<ContentCheck>;
   modsList(instanceId: string): Promise<ModEntry[]>;
+  /** Icône d'un mod lue dans son .jar (data URL 64 px), null s'il n'en a pas. */
+  modsIcon(instanceId: string, file: string): Promise<string | null>;
+  /** Vérifie la compatibilité des mods installés (dépendances, incompatibilités, version, loader, doublons). */
+  modsCheck(instanceId: string): Promise<ModCheck>;
   modsToggle(instanceId: string, file: string, enabled: boolean): Promise<void>;
+  /** Calcule les corrections possibles (sans rien modifier). */
+  modsFixPlan(instanceId: string): Promise<FixPlan>;
+  /** Applique les actions choisies du plan ; sauvegarde les fichiers remplacés (annulable). */
+  modsFixApply(instanceId: string, planId: string, actionIds: string[]): Promise<FixResult>;
+  modsFixUndo(instanceId: string, backupId: string): Promise<ModCheck>;
   modsRemove(instanceId: string, file: string): Promise<void>;
   modsAdd(instanceId: string, path: string): Promise<ModEntry>;
   /** Sélecteur de fichiers natif ; renvoie les chemins choisis ([] si annulé). */
@@ -257,6 +330,7 @@ export interface Services {
   onUnknownMods(cb: (e: UnknownModsEvent) => void): Unsubscribe;
   onTransferErrorDetails(cb: (e: TransferErrorDetails) => void): Unsubscribe;
   onBrowseProgress(cb: (e: BrowseProgressEvent) => void): Unsubscribe;
+  onModsFixProgress(cb: (e: FixProgressEvent) => void): Unsubscribe;
   /** Fichiers déposés sur la fenêtre (glisser-déposer natif). */
   onFilesDropped(cb: (paths: string[]) => void): Unsubscribe;
   updateState(): Promise<UpdateState>;

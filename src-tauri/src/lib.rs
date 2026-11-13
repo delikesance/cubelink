@@ -14,6 +14,7 @@ pub mod commands_update;
 pub mod error;
 pub mod foreground;
 pub mod iroh_backend;
+pub mod last_seen;
 pub mod install;
 pub mod invites;
 pub mod hotkey;
@@ -130,7 +131,8 @@ pub fn run() {
                                 st2.stage.flush_log();
                             }
                         }
-                        if matches!(e, tauri::WindowEvent::Resized(_) | tauri::WindowEvent::Moved(_) | tauri::WindowEvent::ScaleFactorChanged { .. }) {
+                        // Focus retrouve (retour par Alt+Tab) : l'hote rouvre un jeu en plein ecran que GLFW a reduit en perdant le focus.
+                        if matches!(e, tauri::WindowEvent::Resized(_) | tauri::WindowEvent::Moved(_) | tauri::WindowEvent::ScaleFactorChanged { .. } | tauri::WindowEvent::Focused(true)) {
                             if let Some(w) = h2.get_webview_window("main") {
                                 st2.stage.relayout(&w);
                             }
@@ -169,6 +171,7 @@ pub fn run() {
         .invoke_handler(select_handler(test_mode, tauri::generate_handler![
             commands_auth::auth_status,
             commands_auth::auth_accounts,
+            commands_auth::auth_skin_head,
             commands_auth::auth_switch,
             commands_auth::auth_remove,
             commands_auth::auth_begin_login,
@@ -188,6 +191,8 @@ pub fn run() {
             commands_art::instances_art_image,
             commands_art::instances_art_set,
             commands_art::instances_art_lookup,
+            commands_art::instances_description,
+            commands_friends::net_test,
             commands_friends::friend_my_code,
             commands_friends::friend_regenerate_code,
             commands_friends::friend_list,
@@ -213,6 +218,12 @@ pub fn run() {
             commands_browse::browse_versions,
             commands_browse::browse_install,
             commands_browse::mods_list,
+            commands_browse::mods_icon,
+            commands_browse::mods_check,
+            commands_browse::browse_check,
+            commands_browse::mods_fix_plan,
+            commands_browse::mods_fix_apply,
+            commands_browse::mods_fix_undo,
             commands_browse::mods_toggle,
             commands_browse::mods_remove,
             commands_browse::mods_add,
@@ -223,6 +234,8 @@ pub fn run() {
             invites::friend_invites,
             invites::friend_invite_dismiss,
             commands_game::game_switch,
+            commands_game::game_current,
+            commands_game::game_close,
             commands_game::game_join_friend,
             stage::stage_view,
             stage::stage_state,
@@ -232,6 +245,7 @@ pub fn run() {
         ], tauri::generate_handler![
             commands_auth::auth_status,
             commands_auth::auth_accounts,
+            commands_auth::auth_skin_head,
             commands_auth::auth_switch,
             commands_auth::auth_remove,
             commands_auth::auth_begin_login,
@@ -251,6 +265,8 @@ pub fn run() {
             commands_art::instances_art_image,
             commands_art::instances_art_set,
             commands_art::instances_art_lookup,
+            commands_art::instances_description,
+            commands_friends::net_test,
             commands_friends::friend_my_code,
             commands_friends::friend_regenerate_code,
             commands_friends::friend_list,
@@ -273,6 +289,12 @@ pub fn run() {
             commands_browse::browse_versions,
             commands_browse::browse_install,
             commands_browse::mods_list,
+            commands_browse::mods_icon,
+            commands_browse::mods_check,
+            commands_browse::browse_check,
+            commands_browse::mods_fix_plan,
+            commands_browse::mods_fix_apply,
+            commands_browse::mods_fix_undo,
             commands_browse::mods_toggle,
             commands_browse::mods_remove,
             commands_browse::mods_add,
@@ -283,6 +305,8 @@ pub fn run() {
             invites::friend_invites,
             invites::friend_invite_dismiss,
             commands_game::game_switch,
+            commands_game::game_current,
+            commands_game::game_close,
             commands_game::game_join_friend,
             stage::stage_view,
             stage::stage_state,

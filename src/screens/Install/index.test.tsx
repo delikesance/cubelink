@@ -13,7 +13,7 @@ const P = (o: Partial<TransferProgress> & { error?: string } = {}): TransferProg
   speed_bps: 8_000_000, via_relay: false, ...o,
 });
 
-function setup(over: Partial<Services> = {}, params: Record<string, string> = { friend: "pk-alex", instance: "i1" }) {
+function setup(over: Partial<Services> = {}, params: Record<string, string> = { instance: "i1" }) {
   const services = { ...createFakeServices({ tickMs: 0 }), ...over };
   let cb: (p: TransferProgress) => void = () => {};
   services.onTransferProgress = (c) => { cb = c; return () => {}; };
@@ -119,36 +119,31 @@ describe("Install", () => {
   it("échec identifiable : écran d'erreur", () => {
     const { emit, navigate } = setup();
     emit(P({ phase: "failed", error: "no space left on device" }));
-    expect(navigate).toHaveBeenCalledWith("error", { state: "disk-full", friend: "pk-alex" });
+    expect(navigate).toHaveBeenCalledWith("error", { state: "disk-full" });
   });
 
-  it("échec inconnu : Réessayer", async () => {
+  it("échec inconnu : message sur place et retour à l'accueil, sans relance de transfert", () => {
     const start = vi.fn(async () => {});
     const { emit, navigate } = setup({ joinStart: start });
     emit(P({ phase: "failed" }));
     expect(navigate).not.toHaveBeenCalled();
     expect(screen.getByRole("alert").textContent).toMatch(/échoué/);
-    fireEvent.click(screen.getByRole("button", { name: "Réessayer" }));
-    await waitFor(() => expect(start).toHaveBeenCalledWith("pk-alex"));
+    expect(screen.queryByRole("button", { name: "Réessayer" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Retour à l'accueil" }));
+    expect(navigate).toHaveBeenCalledWith("main");
+    expect(start).not.toHaveBeenCalled();
   });
 
-  it("done : joinPlay se lance automatiquement puis retour à l'accueil", async () => {
+  it("done sans ami : Jouer lance l'instance, aucun joinPlay automatique", async () => {
     const play = vi.fn(async () => {});
-    const { emit, navigate } = setup({ joinPlay: play });
+    const launch = vi.fn(async () => {});
+    const { emit, navigate } = setup({ joinPlay: play, instancesLaunch: launch });
     emit(P({ phase: "done", files_done: 40, bytes_done: 1_200_000_000, speed_bps: 0 }));
     expect(screen.getByRole("progressbar").getAttribute("aria-valuenow")).toBe("100");
+    fireEvent.click(screen.getByRole("button", { name: "Jouer" }));
     await waitFor(() => expect(navigate).toHaveBeenCalledWith("main"));
-    expect(play).toHaveBeenCalledWith("pk-alex", "i1");
-  });
-
-  it("échec de la connexion : message de l'ami et Réessayer", async () => {
-    const play = vi.fn().mockRejectedValueOnce(new Error("Ton ami est hors ligne.")).mockResolvedValue(undefined);
-    const { emit, navigate } = setup({ joinPlay: play, friendList: async () => [{ friend: { public_key: "pk-alex", name: "Alex", trust: "trusted", added_at: 0 }, presence: "online" }] } as never);
-    emit(P({ phase: "done" }));
-    expect((await screen.findByRole("alert")).textContent).toBe("Alex est hors ligne.");
-    expect(navigate).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "Réessayer" }));
-    await waitFor(() => expect(navigate).toHaveBeenCalledWith("main"));
+    expect(launch).toHaveBeenCalledWith("i1");
+    expect(play).not.toHaveBeenCalled();
   });
 
   it("pas de <main> imbriqué et titre focalisé", () => {
@@ -167,6 +162,6 @@ describe("Install", () => {
   it("échec avec jar : l'écran Erreur reçoit le fichier", () => {
     const { emit, navigate } = setup();
     emit(P({ phase: "failed", error: "intégrité : aero.jar corrompu" }));
-    expect(navigate).toHaveBeenCalledWith("error", { state: "bad-hash", friend: "pk-alex", file: "aero.jar" });
+    expect(navigate).toHaveBeenCalledWith("error", { state: "bad-hash", file: "aero.jar" });
   });
 });

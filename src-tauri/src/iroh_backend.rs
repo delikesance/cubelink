@@ -42,7 +42,7 @@ use p2p_lib::tunnel::{GuestTunnel, HostTunnel, TunnelAuthorizer, TunnelConfig, T
 
 use crate::authz::FriendsAuthz;
 use crate::error::{sanitize, user_msg};
-use crate::p2p_backend::{BoxFuture, Cmd, HostManifest, P2pBackend, ProgressFn, TransferControl};
+use crate::p2p_backend::{BoxFuture, Cmd, HostManifest, NetTest, P2pBackend, ProgressFn, TransferControl};
 use crate::state::{lock, AppState, EventSink};
 
 pub use p2p_lib::manifest_channel::MANIFEST_ALPN;
@@ -484,7 +484,10 @@ impl IrohBackend {
 
         // Présence.
         let emit = st.emit.clone();
+        let seen = st.last_seen.clone();
         let psink: p2p_lib::presence::EventSink = Arc::new(move |e| {
+            // En ligne ou qui vient de partir : l'ami était là à cet instant.
+            seen.touch(&hex::encode(e.public_key), crate::state::now_secs());
             emit("friend://presence", serde_json::json!({ "public_key": hex::encode(e.public_key), "presence": e.presence }));
         });
         // Adresses mémorisées lors d'une session précédente : disponibles dès la première sonde.
@@ -742,7 +745,42 @@ impl IrohBackend {
     }
 }
 
+/// Durée maximale d'attente du premier rapport réseau et du relais.
+const NET_TEST_WAIT: Duration = Duration::from_secs(8);
+
+impl IrohBackend {
+    async fn net_test_impl(&self) -> NetTest {
+        use iroh::Watcher as _;
+        let ep = &self.endpoint;
+        let report = tokio::time::timeout(NET_TEST_WAIT, ep.net_report().initialized()).await.ok();
+        // Le relais : on lui laisse le reste du délai pour se connecter.
+        let _ = tokio::time::timeout(Duration::from_secs(3), ep.online()).await;
+        let relays = ep.home_relay_status().get();
+        let connected = relays.iter().find(|r| r.is_connected());
+        let relay_url = connected.or(relays.first()).map(|r| r.url().clone());
+        let mut t = NetTest {
+            relay_connected: connected.is_some(),
+            relay: relay_url.as_ref().and_then(|u| u.host_str().map(|h| h.trim_end_matches('.').to_string())),
+            relay_only: lock(&self.settings).relay_only,
+            partial: report.is_none(),
+            ..NetTest::default()
+        };
+        if let Some(r) = report {
+            t.udp = r.has_udp();
+            t.ipv6 = r.udp_v6;
+            t.direct = if t.udp { r.mapping_varies_by_dest().map(|v| !v) } else { Some(false) };
+            if let Some(u) = relay_url.as_ref() {
+                t.relay_ms = r.relay_latency.iter().filter(|(_, ru, _)| *ru == u).map(|(_, _, d)| d.as_millis() as u32).min();
+            }
+        }
+        t
+    }
+}
+
 impl P2pBackend for IrohBackend {
+    fn net_test(&self) -> BoxFuture<'_, Result<NetTest, String>> {
+        Box::pin(async move { Ok(self.net_test_impl().await) })
+    }
     fn presence(&self, public_key: &str) -> Presence {
         let Some(k) = hex::decode(public_key).ok().and_then(|b| <[u8; 32]>::try_from(b).ok()) else {
             return Presence::Offline;

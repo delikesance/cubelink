@@ -32,9 +32,14 @@ impl AppState {
         art::set_custom_image(&self.instances, instance_id, path, role).map_err(|e| user_msg(&e))
     }
 
-    pub async fn instances_art_lookup(&self, instance_id: &str) -> Result<Instance, String> {
+    pub async fn instances_description(&self, instance_id: &str) -> Result<Option<String>, String> {
         self.art_id(instance_id)?;
-        art::lookup_and_apply(&providers(), &self.instances, instance_id).await.map_err(|e| user_msg(&e))
+        art::instance_description(&providers(), &self.instances, instance_id).await.map_err(|e| user_msg(&e))
+    }
+
+    pub async fn instances_art_lookup(&self, instance_id: &str, auto: bool) -> Result<Instance, String> {
+        self.art_id(instance_id)?;
+        art::lookup_and_apply(&providers(), &self.instances, instance_id, auto).await.map_err(|e| user_msg(&e))
     }
 }
 
@@ -49,8 +54,13 @@ pub fn instances_art_set(state: State<'_, Arc<AppState>>, instance_id: String, p
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub async fn instances_art_lookup(state: State<'_, Arc<AppState>>, instance_id: String) -> Result<Instance, String> {
-    state.instances_art_lookup(&instance_id).await
+pub async fn instances_description(state: State<'_, Arc<AppState>>, instance_id: String) -> Result<Option<String>, String> {
+    state.instances_description(&instance_id).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn instances_art_lookup(state: State<'_, Arc<AppState>>, instance_id: String, auto: Option<bool>) -> Result<Instance, String> {
+    state.instances_art_lookup(&instance_id, auto.unwrap_or(false)).await
 }
 
 #[cfg(test)]

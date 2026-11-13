@@ -38,8 +38,9 @@ export function UpdateSection() {
           <span role="status" aria-live="polite" className={phase === "error" || err ? "set-error" : undefined}>{err || text}</span>
           {phase === "downloading" && <ProgressBar value={pct} label="Téléchargement de la mise à jour" showValue />}
         </div>
-        {phase === "ready" && <Button onClick={install}>Redémarrer et installer</Button>}
-        <Button variant="secondary" disabled={busy} onClick={check}>Chercher une mise à jour</Button>
+        {/* Une version est déjà trouvée (téléchargement ou prête) : chercher à nouveau n'apporterait rien. */}
+        {phase === "ready" ? <Button onClick={install}>Redémarrer et installer</Button>
+          : phase !== "available" && phase !== "downloading" && <Button variant="secondary" disabled={busy} onClick={check}>Chercher une mise à jour</Button>}
       </div>
     </Card>
   );

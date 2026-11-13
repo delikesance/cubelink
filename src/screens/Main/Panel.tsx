@@ -1,37 +1,42 @@
 import type { ReactNode } from "react";
 import { IconButton } from "../../ui";
+import "./shared.css";
 
+/** Icône Iconoir (trait 1,5). */
 export const Icon = ({ d, size = 18, fill }: { d: ReactNode; size?: number; fill?: boolean }) => (
-  <svg width={size} height={size} viewBox="0 0 24 24" fill={fill ? "currentColor" : "none"} stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ flex: "none" }}>{d}</svg>
+  <svg width={size} height={size} viewBox="0 0 24 24" fill={fill ? "currentColor" : "none"} stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ flex: "none" }}>{d}</svg>
 );
 
 export const ICONS = {
-  close: <path d="M6 6l12 12M18 6L6 18" />,
-  play: <path d="M7 5l12 7-12 7z" />,
-  stop: <rect x="6" y="6" width="12" height="12" rx="2" />,
-  mods: <><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z" /><path d="M12 12l8-4.5M12 12v9M12 12L4 7.5" /></>,
-  gear: <><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" /></>,
-  logs: <path d="M4 6h16M4 12h10M4 18h14" />,
-  dots: <><circle cx="5" cy="12" r="1.2" fill="currentColor" /><circle cx="12" cy="12" r="1.2" fill="currentColor" /><circle cx="19" cy="12" r="1.2" fill="currentColor" /></>,
-  plus: <path d="M12 5v14M5 12h14" />,
-  search: <><circle cx="11" cy="11" r="6" /><path d="M20 20l-4.2-4.2" /></>,
-  trash: <path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13" />,
-  folder: <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />,
-  image: <><rect x="3" y="5" width="18" height="14" rx="2" /><circle cx="9" cy="10" r="1.6" /><path d="M21 16l-5-5-8 8" /></>,
-  wand: <path d="M5 19L17 7M14 4l1 2 2 1-2 1-1 2-1-2-2-1 2-1zM18 12l.7 1.3L20 14l-1.3.7L18 16l-.7-1.3L16 14l1.3-.7z" />,
-  copy: <><rect x="9" y="9" width="11" height="11" rx="2" /><path d="M5 15V6a2 2 0 0 1 2-2h8" /></>,
-  check: <path d="M5 12l5 5 9-10" />,
-  alert: <><path d="M12 4l9 16H3z" /><path d="M12 10v4M12 17.2v.1" /></>,
-  film: <><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M3 9h18M3 15h18M8 4v16M16 4v16" /></>,
-  friends: <><circle cx="9" cy="9" r="3" /><path d="M3 19c0-3 2.7-5 6-5s6 2 6 5" /><path d="M16 6.3a3 3 0 0 1 0 5.4M18 14.4c1.7.6 3 2 3 4.6" /></>,
+  close: <path d="M6.758 17.243L12.001 12m5.243-5.243L12.001 12m0 0L6.758 6.757M12.001 12l5.243 5.243" />,
+  play: <path d="M6.906 4.537A.6.6 0 0 0 6 5.053v13.894a.6.6 0 0 0 .906.516l11.723-6.947a.6.6 0 0 0 0-1.032z" />,
+  stop: <path d="M6 17.4V6.6a.6.6 0 0 1 .6-.6h10.8a.6.6 0 0 1 .6.6v10.8a.6.6 0 0 1-.6.6H6.6a.6.6 0 0 1-.6-.6z" />,
+  mods: <><path d="M3 17.11V6.89a.6.6 0 0 1 .356-.548l8.4-3.734a.6.6 0 0 1 .488 0l8.4 3.734A.6.6 0 0 1 21 6.89v10.22a.6.6 0 0 1-.356.548l-8.4 3.734a.6.6 0 0 1-.488 0l-8.4-3.734A.6.6 0 0 1 3 17.11z" /><path d="M3.5 6.5l8.5 3.8 8.5-3.8M12 21.5V10.3" /><path d="M7.5 4.5l8.644 3.842a.6.6 0 0 1 .356.548V12.5" /></>,
+  gear: <><path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z" /><path d="M19.622 10.395l-1.097-2.65L20 6l-2-2-1.735 1.483-2.707-1.113L12.935 2h-1.954l-.632 2.401-2.645 1.115L6 4 4 6l1.453 1.789-1.08 2.657L2 11v2l2.401.656 1.115 2.644L4 18l2 2 1.791-1.46 2.606 1.072L11 22h2l.604-2.387 2.651-1.098C16.697 18.831 18 20 18 20l2-2-1.484-1.75 1.098-2.652 2.386-.62V11l-2.378-.605z" /></>,
+  logs: <><path d="M4 21.4V2.6a.6.6 0 0 1 .6-.6h11.652a.6.6 0 0 1 .424.176l3.148 3.148A.6.6 0 0 1 20 5.75V21.4a.6.6 0 0 1-.6.6H4.6a.6.6 0 0 1-.6-.6z" /><path d="M8 10h8M8 18h8M8 14h4M16 2v3.4a.6.6 0 0 0 .6.6H20" /></>,
+  dots: <><circle cx="5" cy="12" r="1.2" fill="currentColor" stroke="none" /><circle cx="12" cy="12" r="1.2" fill="currentColor" stroke="none" /><circle cx="19" cy="12" r="1.2" fill="currentColor" stroke="none" /></>,
+  plus: <path d="M6 12h6m6 0h-6m0 0V6m0 6v6" />,
+  search: <path d="M17 17l4 4M3 11a8 8 0 1 0 16 0 8 8 0 0 0-16 0z" />,
+  trash: <><path d="M20 9l-1.995 11.346A2 2 0 0 1 16.035 22h-8.07a2 2 0 0 1-1.97-1.654L4 9" /><path d="M21 6h-5.625M3 6h5.625m0 0V4a2 2 0 0 1 2-2h2.75a2 2 0 0 1 2 2v2m-6.75 0h6.75" /></>,
+  folder: <path d="M2 11V4.6a.6.6 0 0 1 .6-.6h6.178a.6.6 0 0 1 .39.144l3.164 2.712a.6.6 0 0 0 .39.144H21.4a.6.6 0 0 1 .6.6V11M2 11v8.4a.6.6 0 0 0 .6.6h18.8a.6.6 0 0 0 .6-.6V11M2 11h20" />,
+  info: <><path d="M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z" /><path d="M12 11v6M12 7.5v.01" /></>,
+  image: <><path d="M21 3.6v16.8a.6.6 0 0 1-.6.6H3.6a.6.6 0 0 1-.6-.6V3.6a.6.6 0 0 1 .6-.6h16.8a.6.6 0 0 1 .6.6z" /><path d="M3 16l7-3 11 5M16 10a2 2 0 1 1 0-4 2 2 0 0 1 0 4z" /></>,
+  wand: <><path d="M3 21l11-11" /><path d="M16.5 2.5l.9 2.1 2.1.9-2.1.9-.9 2.1-.9-2.1-2.1-.9 2.1-.9zM19.5 10.5l.6 1.4 1.4.6-1.4.6-.6 1.4-.6-1.4-1.4-.6 1.4-.6z" /></>,
+  copy: <><path d="M19.4 20H9.6a.6.6 0 0 1-.6-.6V9.6a.6.6 0 0 1 .6-.6h9.8a.6.6 0 0 1 .6.6v9.8a.6.6 0 0 1-.6.6z" /><path d="M15 9V4.6a.6.6 0 0 0-.6-.6H4.6a.6.6 0 0 0-.6.6v9.8a.6.6 0 0 0 .6.6H9" /></>,
+  check: <path d="M5 13l4 4L19 7" />,
+  alert: <><path d="M20.043 21H3.957c-1.538 0-2.5-1.664-1.734-2.997l8.043-13.988c.77-1.337 2.699-1.337 3.468 0l8.043 13.988C22.543 19.336 21.58 21 20.043 21z" /><path d="M12 9v4M12 17.01l.01-.011" /></>,
+  film: <><path d="M21 3.6v16.8a.6.6 0 0 1-.6.6H3.6a.6.6 0 0 1-.6-.6V3.6a.6.6 0 0 1 .6-.6h16.8a.6.6 0 0 1 .6.6z" /><path d="M9.898 8.513A.6.6 0 0 0 9 9.034v5.932a.6.6 0 0 0 .898.521l5.19-2.966a.6.6 0 0 0 0-1.042z" /></>,
+  friends: <><path d="M1 20v-1a7 7 0 0 1 14 0v1M13 14a5 5 0 0 1 10 0v.5" /><path d="M8 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6z" /></>,
+  userPlus: <><path d="M17 10h3m3 0h-3m0 0V7m0 3v3M1 20v-1a7 7 0 0 1 14 0v1" /><path d="M8 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8z" /></>,
+  sort: <path d="M10 14H2M8 10H2M6 6H2M12 18H2M19 20V4m0 16l3-3m-3 3l-3-3m3-13l3 3m-3-3l-3 3" />,
 };
 
-/** Contenu d'un tiroir : zone centrale + pied, et bouton « Fermer » en haut à droite (le titre vient de <Drawer>). */
-export function Panel({ onClose, children }: { onClose: () => void; children: ReactNode }) {
+/** Contenu d'un panneau : zone centrale + pied ; bouton « Fermer » en haut à droite seulement si `onClose` (tiroir), sans lui en pleine page. */
+export function Panel({ onClose, children }: { onClose?: () => void; children: ReactNode }) {
   return (
     <div className="dr-panel">
       {children}
-      <IconButton variant="secondary" className="dr-close" aria-label="Fermer" icon={<Icon d={ICONS.close} />} onClick={onClose} />
+      {onClose && <IconButton variant="secondary" className="dr-close" aria-label="Fermer" icon={<Icon d={ICONS.close} />} onClick={onClose} />}
     </div>
   );
 }

@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use cubelink_host::{FallbackReason, HostEvent, Observer};
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, POINT, RECT, WAIT_OBJECT_0};
 use windows_sys::Win32::System::Threading::{TerminateProcess, WaitForSingleObject, PROCESS_INFORMATION, STARTF_USESHOWWINDOW, STARTUPINFOW};
-use windows_sys::Win32::Graphics::Gdi::{ClientToScreen, CreateRectRgn, DeleteObject, GetWindowRgn, MonitorFromWindow, MONITOR_DEFAULTTONULL};
+use windows_sys::Win32::Graphics::Gdi::{ClientToScreen, CreateRectRgn, DeleteObject, GetRgnBox, GetWindowRgn, MonitorFromWindow, MONITOR_DEFAULTTONULL};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
@@ -357,7 +357,21 @@ pub fn on_screen(h: isize) -> bool {
     unsafe { !MonitorFromWindow(h as HWND, MONITOR_DEFAULTTONULL).is_null() }
 }
 
-/// Une decoupe (panneau « en jeu ») est appliquee a la fenetre.
+/// La bande du panneau « en jeu » est decoupee : la region de la fenetre est plus etroite qu'elle. (Une fenetre posee porte
+/// toujours une region, pleine sans panneau.)
+pub fn panel_cut(h: isize) -> bool {
+    unsafe {
+        let probe = CreateRectRgn(0, 0, 0, 0);
+        let kind = GetWindowRgn(h as HWND, probe);
+        let mut b: RECT = std::mem::zeroed();
+        GetRgnBox(probe, &mut b);
+        DeleteObject(probe as _);
+        let (_, _, w, _) = rect(h);
+        kind != 0 && b.right - b.left < w
+    }
+}
+
+/// La fenetre porte une region, quelle qu'elle soit.
 pub fn has_region(h: isize) -> bool {
     unsafe {
         let probe = CreateRectRgn(0, 0, 0, 0);

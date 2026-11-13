@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useRef, useState, type CSSProperties, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from "react";
 import "./settings.css";
 import { useScreenTitle, useServices, useShell } from "../../app/context";
 import { useBack } from "../../app/context";
@@ -7,7 +7,22 @@ import { UpdateSection } from "./UpdateSection";
 import { Logo } from "../Login/Logo";
 import { Accounts } from "./Accounts";
 import { useStageSupported } from "../../app/stage";
-import type { Settings as BaseSettings } from "../../services/types";
+import type { NetTest, Settings as BaseSettings } from "../../services/types";
+import { Icon } from "../Main/Panel";
+import "../Friends/friends.css";
+import MyCode from "../Friends/MyCode";
+import Requests from "../Friends/Requests";
+import Add from "../Friends/Add";
+
+/** Icônes Iconoir du menu des réglages. */
+const SECTION_ICONS: Record<string, ReactNode> = {
+  compte: <><path d="M5 20v-1a7 7 0 0 1 14 0v1" /><path d="M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z" /></>,
+  amis: <><path d="M1 20v-1a7 7 0 0 1 14 0v1M13 14a5 5 0 0 1 10 0v.5" /><path d="M8 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6z" /></>,
+  reseau: <path d="M12 19.51l.01-.011M2 8c6-4.5 14-4.5 20 0M5 12c4-3 10-3 14 0M8.5 15.5c2.25-1.5 4.75-1.5 7 0" />,
+  java: <path d="M17 11.6V15a6 6 0 0 1-6 6H9a6 6 0 0 1-6-6v-3.4a.6.6 0 0 1 .6-.6h12.8a.6.6 0 0 1 .6.6zM12 9c0-1 .714-3 3.571-3C18.43 6 18.43 3 18.43 3M8 9v-.5a2 2 0 0 1 2-2 2 2 0 0 0 2-2V4M16 14h2.5a2.5 2.5 0 0 0 0-5H17" />,
+  stockage: <path d="M5 12v6s0 3 7 3 7-3 7-3v-6M5 6v6s0 3 7 3 7-3 7-3V6M12 3c7 0 7 3 7 3s0 3-7 3-7-3-7-3 0-3 7-3z" />,
+  apropos: <path d="M12 11.5v5M12 7.51l.01-.011M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10z" />,
+};
 
 export type SettingsData = BaseSettings;
 
@@ -50,12 +65,100 @@ export function validateJavaPath(path: string): string | null {
 
 export const SECTIONS = [
   { id: "compte", label: "Compte" },
+  { id: "amis", label: "Amis" },
   { id: "reseau", label: "Réseau" },
   { id: "java", label: "Java" },
   { id: "stockage", label: "Stockage" },
   { id: "apropos", label: "À propos" },
 ] as const;
 export type SectionId = (typeof SECTIONS)[number]["id"];
+
+/** Région lisible d'un relais n0 (« euc1-1.relay.n0.iroh.link » → « Europe »). */
+function relayPlace(host: string | null): string {
+  const h = (host ?? "").toLowerCase();
+  if (h.startsWith("eu")) return "Europe";
+  if (h.startsWith("us")) return "Amérique du Nord";
+  if (h.startsWith("ap")) return "Asie-Pacifique";
+  return host ?? "";
+}
+
+export type NetTone = "ok" | "warn" | "danger" | "neutral";
+/** Un point vérifié : `ok` null = non mesuré ou sans objet. */
+export interface NetCheck { label: string; ok: boolean | null; detail: string }
+/** Verdict lisible d'un coup d'œil : niveau (couleur + icône + mot), ce que ça change, puis le détail. */
+export interface NetVerdict { tone: NetTone; label: string; summary: string; checks: NetCheck[] }
+
+export function netVerdict(t: NetTest): NetVerdict {
+  const where = relayPlace(t.relay);
+  const relayDetail = t.relay_connected
+    ? ["joignable", where, t.relay_ms != null ? `${t.relay_ms} ms` : ""].filter(Boolean).join(" · ")
+    : "injoignable";
+  const direct: NetCheck = t.relay_only
+    ? { label: "Connexion directe", ok: null, detail: "désactivée par ton réglage" }
+    : t.partial
+      ? { label: "Connexion directe", ok: null, detail: "pas encore mesurée" }
+      : !t.udp
+        ? { label: "Connexion directe", ok: false, detail: "bloquée par un pare-feu (UDP filtré)" }
+        : t.direct === false
+          ? { label: "Connexion directe", ok: false, detail: "gênée par ton routeur" }
+          : { label: "Connexion directe", ok: true, detail: "possible" };
+  const relay: NetCheck = { label: "Relais de secours", ok: t.relay_connected, detail: relayDetail };
+  const checks = [direct, relay];
+  const v = (tone: NetTone, label: string, summary: string): NetVerdict => ({ tone, label, summary, checks });
+
+  if (!t.relay_connected && (!t.udp || t.relay_only)) {
+    return v("danger", "Hors ligne", t.relay_only
+      ? "Personne ne peut te rejoindre : le relais est injoignable et tu as choisi de toujours passer par lui."
+      : "Personne ne peut te rejoindre. Vérifie ta connexion Internet ou ton pare-feu.");
+  }
+  if (t.relay_only) return v("ok", "Relais uniquement", "Comme demandé, tout passe par le relais : tes amis te rejoignent, un peu plus lentement.");
+  if (t.partial) return v("neutral", "Test incomplet", "La mesure n'est pas terminée. Réessaie dans quelques secondes.");
+  if (!t.udp) return v("warn", "Limitée", "Tes amis peuvent te rejoindre, mais tout passe par le relais : plus lent.");
+  if (t.direct === false) {
+    return t.relay_connected
+      ? v("warn", "Correcte", "Tes amis peuvent te rejoindre ; certaines parties passeront par le relais, un peu plus lent.")
+      : v("danger", "Fragile", "Certains amis risquent de ne pas pouvoir te rejoindre.");
+  }
+  return t.relay_connected
+    ? v("ok", "Excellente", "Tout est bon : tes amis peuvent te rejoindre directement, sans ralentissement.")
+    : v("warn", "Bonne", "Connexion directe possible, mais sans secours si le routeur d'un ami la bloque.");
+}
+
+/** Icônes Iconoir (trait) : réussite, avertissement, échec, non mesuré. */
+const NET_ICONS: Record<NetTone, ReactNode> = {
+  ok: <path d="M7 12.5l3 3 7-7M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10z" />,
+  warn: <path d="M12 8v4M12 16.01l.01-.011M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10z" />,
+  danger: <path d="M9.172 14.828L12.001 12m2.828-2.828L12.001 12m0 0L9.172 9.172M12.001 12l2.828 2.828M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10z" />,
+  neutral: <path d="M8 12h8M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10z" />,
+};
+
+function NetIcon({ tone, size = 18 }: { tone: NetTone; size?: number }) {
+  return (
+    <svg className={`set-net-ic set-net-${tone}`} width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      {NET_ICONS[tone]}
+    </svg>
+  );
+}
+
+function NetResult({ v }: { v: NetVerdict }) {
+  return (
+    <div className="set-net">
+      <div className="set-net-head">
+        <span className={`set-net-pill set-net-${v.tone}`}><NetIcon tone={v.tone} size={16} />{v.label}</span>
+        <span className="set-net-sum">{v.summary}</span>
+      </div>
+      <ul className="set-net-checks">
+        {v.checks.map((c) => (
+          <li key={c.label}>
+            <NetIcon tone={c.ok === null ? "neutral" : c.ok ? "ok" : "warn"} size={16} />
+            <span className="set-net-lbl">{c.label}</span>
+            <span className="set-net-det">{c.detail}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
 
 function messageOf(e: unknown): string {
   if (e instanceof Error && e.message) return e.message;
@@ -89,8 +192,6 @@ export default function Settings({ testConnection, clearCache }: SettingsProps =
   const [settings, setSettings] = useState<SettingsData | null>(null);
   const [saved, setSaved] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const [code, setCode] = useState<string | null>(null);
-  const [copied, setCopied] = useState("");
   const [netMsg, setNetMsg] = useState("");
   const [confirmClear, setConfirmClear] = useState(false);
   const [cacheMsg, setCacheMsg] = useState("");
@@ -113,10 +214,6 @@ export default function Settings({ testConnection, clearCache }: SettingsProps =
         setHotkey(s.overlay_hotkey || DEFAULT_HOTKEY);
       },
       (e) => { if (alive.current) setError(messageOf(e)); },
-    );
-    services.friendMyCode().then(
-      (c) => { if (alive.current) setCode(c); },
-      () => { /* code indisponible : affiché comme tel */ },
     );
     return () => { alive.current = false; };
   }, [services]);
@@ -154,21 +251,20 @@ export default function Settings({ testConnection, clearCache }: SettingsProps =
     tabRefs.current[SECTIONS[n].id]?.focus();
   };
 
-  const copy = async (what: string, text: string) => {
-    try {
-      await navigator.clipboard.writeText(text);
-      setCopied(`${what} copié.`);
-    } catch {
-      setCopied("Copie impossible : sélectionne le texte à la main.");
-    }
-  };
-
+  const [netBusy, setNetBusy] = useState(false);
+  const [netRes, setNetRes] = useState<NetVerdict | null>(null);
   const runTest = async () => {
-    setNetMsg("Test en cours…");
+    if (netBusy) return;
+    setNetBusy(true);
+    setNetRes(null);
+    setNetMsg("Test en cours… (quelques secondes)");
     try {
-      setNetMsg(testConnection ? await testConnection() : "Le test de connexion n'est pas encore disponible.");
+      if (testConnection) setNetMsg(await testConnection());
+      else { setNetRes(netVerdict(await services.netTest())); setNetMsg(""); }
     } catch (e) {
       setNetMsg(messageOf(e));
+    } finally {
+      setNetBusy(false);
     }
   };
 
@@ -232,8 +328,9 @@ export default function Settings({ testConnection, clearCache }: SettingsProps =
 
   return (
     <div className="set screen">
+      <nav className="set-nav">
       <h1 ref={h1} tabIndex={-1} className="enter">Paramètres</h1>
-      <div role="tablist" aria-label="Sections des réglages" className="set-tabs enter" style={{ "--i": 1 } as CSSProperties}>
+      <div role="tablist" aria-label="Sections des réglages" aria-orientation="vertical" className="set-tabs enter" style={{ "--i": 1 } as CSSProperties}>
         {SECTIONS.map((s, i) => (
           <button
             key={s.id}
@@ -247,32 +344,42 @@ export default function Settings({ testConnection, clearCache }: SettingsProps =
             ref={(el) => { tabRefs.current[s.id] = el; }}
             onClick={() => select(s.id)}
             onKeyDown={(e) => onTabKey(e, i)}
-          >{s.label}</button>
+          ><Icon d={SECTION_ICONS[s.id]} size={20} />{s.label}</button>
         ))}
-        <div className="set-bar" aria-hidden="true" style={{ transform: `translateX(${idx * 140}px)` }} />
       </div>
-      <div className="set-status" role="status" aria-live="polite">{saved}</div>
+      </nav>
+      <div className="set-main">
+      <div className="set-head">
+        <h2 className="set-title">{SECTIONS[idx].label}</h2>
+        <div className="set-status" role="status" aria-live="polite">{saved}</div>
+      </div>
       {error && <p className="set-error" role="alert">{error}</p>}
 
       <div {...panel("compte")}>
         <Accounts onError={setError} />
-        <Card as="section" aria-label="Code ami" className="set-field">
-          <b id={`${uid}-fc`}>Mon code ami</b>
-          <div className="set-cr">
-            <code className="set-code" aria-labelledby={`${uid}-fc`}>{code ?? "Indisponible"}</code>
-            <Button variant="secondary" aria-label="Copier mon code ami" disabled={!code} onClick={() => code && void copy("Code ami", code)}>Copier</Button>
+      </div>
+
+      <div {...panel("amis")}>
+        {section === "amis" && <>
+          <Requests />
+          <div className="fr-cards">
+            <Card as="div" className="fr-card"><Add /></Card>
+            <Card as="div" className="fr-card"><MyCode /></Card>
           </div>
-          <span className="set-hint">Ce code ne contient aucun secret. Il permet à ton ami de te joindre&nbsp;: ne le publie pas.</span>
-          <div role="status" aria-live="polite" className="set-hint">{copied}</div>
-        </Card>
+        </>}
       </div>
 
       <div {...panel("reseau")}>
         <p className="set-sub">Connexion directe quand c'est possible, sinon via un relais (un serveur intermédiaire public, plus lent).</p>
         <Card className="set-list">
           <div className="set-row">
-            <div className="set-txt"><b>Ta connexion avec tes amis</b><span role="status" aria-live="polite">{netMsg || "Aucun test effectué pour l'instant."}</span></div>
-            <Button variant="secondary" onClick={() => void runTest()}>Tester ma connexion</Button>
+            <div className="set-txt">
+              <b>Ta connexion avec tes amis</b>
+              <div role="status" aria-live="polite">
+                {netRes ? <NetResult v={netRes} /> : <span className="set-net-msg">{netMsg || "Aucun test effectué pour l'instant."}</span>}
+              </div>
+            </div>
+            <Button variant="secondary" disabled={netBusy} onClick={() => void runTest()}>{netBusy ? "Test en cours…" : "Tester ma connexion"}</Button>
           </div>
           <label className="set-row" style={{ cursor: "pointer" }}>
             <div className="set-txt"><b>Passer toujours par le relais</b><span>Utiliser uniquement le relais&nbsp;: tes amis ne voient pas ton adresse IP, mais le relais la voit. Les transferts seront plus lents.</span></div>
@@ -385,6 +492,7 @@ export default function Settings({ testConnection, clearCache }: SettingsProps =
             <p>Polices Inter (The Inter Project Authors) et Montserrat (The Montserrat Project Authors), sous licence <a className="set-lnk" href="https://openfontlicense.org/" target="_blank" rel="noopener noreferrer">SIL Open Font License&nbsp;1.1</a>.</p>
           </details>
         </div>
+      </div>
       </div>
     </div>
   );

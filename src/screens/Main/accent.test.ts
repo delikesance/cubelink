@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { avatarColors, contrastRatio, ensureContrast, hashHue, INK_DARK, pickInk } from "./accent";
+import { coverUpscale, SOFT_UPSCALE } from "./ArtParts";
 
 describe("contraste", () => {
   it("noir/blanc = 21, identique = 1", () => {
@@ -31,5 +32,14 @@ describe("avatarColors", () => {
     expect(hashHue("Mon pack")).toBe(hashHue("Mon pack"));
     const t = avatarColors(null, "Mon pack");
     expect(contrastRatio(t.bg, t.ink)).toBeGreaterThanOrEqual(4.5);
+  });
+});
+
+describe("décor : agrandissement en cover", () => {
+  it("une capture 992 px sur un écran 1844 px est floutée, une 2560 px ne l'est pas", () => {
+    expect(coverUpscale({ w: 992, h: 733 }, { w: 1844, h: 996 })).toBeGreaterThan(SOFT_UPSCALE);
+    expect(coverUpscale({ w: 2560, h: 1369 }, { w: 1844, h: 996 })).toBeLessThan(1);
+    expect(coverUpscale({ w: 1920, h: 1080 }, { w: 1280, h: 720 }, 1.5)).toBe(1);
+    expect(coverUpscale({ w: 0, h: 0 }, { w: 100, h: 100 })).toBe(1);
   });
 });

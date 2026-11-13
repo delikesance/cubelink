@@ -161,6 +161,12 @@ pub struct Invite {
     pub minecraft: String,
     pub received_at: i64,
     pub expires_at: i64,
+    /// Modpack (instance) de l'ami, si son launcher l'envoie.
+    #[serde(default)]
+    pub pack: Option<String>,
+    /// Icône du monde (`data:image/png;base64,…`), contrôlée à la réception.
+    #[serde(default)]
+    pub world_icon: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

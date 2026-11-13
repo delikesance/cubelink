@@ -36,7 +36,7 @@ fn release_rend_la_fenetre_au_jeu() {
     host.reveal();
     wait_until("dans le jeu", T, || host.in_game() && !visible(curtain) && rect(win) == parent.to_screen(zone));
     assert!(host.set_panel(true, 200));
-    wait_until("decoupe du panneau", T, || has_region(win));
+    wait_until("decoupe du panneau", T, || panel_cut(win));
     assert!(!framed(win) && owner(win) == parent.hwnd);
 
     // ---- repli demande

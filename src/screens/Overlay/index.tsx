@@ -161,7 +161,7 @@ export default function InGamePanel({ open = true }: { open?: boolean }) {
             <ul className="ov-list" aria-label="Invitations">
               {invites.map((i) => (
                 <li key={i.id} className="ov-row ov-row-inv">
-                  <Avatar name={i.name} size={36} />
+                  <Avatar name={i.name} size={36} services={services} />
                   <div className="ov-who">
                     <span className="ov-name"><span>{i.name}</span></span>
                     <span className="ov-sub">{i.world_name} · {i.minecraft}</span>
@@ -185,7 +185,7 @@ export default function InGamePanel({ open = true }: { open?: boolean }) {
                 const pk = f.friend.public_key;
                 return (
                   <li key={pk} className="ov-row">
-                    <Avatar name={f.friend.name} size={36} presence={on ? "online" : "offline"} />
+                    <Avatar name={f.friend.name} size={36} services={services} presence={on ? "online" : "offline"} />
                     <div className="ov-who">
                       <span className="ov-name">
                         <span>{f.friend.name}</span>

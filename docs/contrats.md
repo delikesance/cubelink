@@ -55,7 +55,7 @@ Toute commande renvoie `Result<T, String>` (message d'erreur affichable, en fran
 | `launch://log` | lignes de log du jeu en cours |
 | `browse://progress` | progression d'une installation depuis le catalogue (`done`, `total`, libellé) |
 | `import://warning` | avertissement pendant l'import d'un modpack |
-| `transfer://unknown_mods` | liste des mods inconnus des catalogues, pendant un join |
+| `transfer://unknown_mods` | liste des mods inconnus des catalogues, pendant un join (sans ceux déjà acceptés lors d'un « Rejoindre » précédent) |
 | `transfer://error_details` | échec d'une étape d'installation invitée, émis juste avant la phase `failed` : `{ step, message, details, log_file }`. `message` = `TransferProgress.error` (« Étape : cause » quand la cause est générique) ; `details` = texte multi-ligne copiable (étape, détail, erreur, debug) pour un bloc « Détails » ; `log_file` = `join-errors.log` dans `<data>/logs/` (toujours écrit, horodaté UTC) |
 
 ## Règles

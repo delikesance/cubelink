@@ -1,12 +1,6 @@
 <div align="center">
 
-<img src="src-tauri/icons/128x128.png" alt="Logo de Cubelink" width="96" height="96" />
-
-# Cubelink
-
-**Clique sur un ami, tu as ses mods, tu es dans sa partie.**
-
-Un lanceur Minecraft pour jouer entre amis : les modpacks se synchronisent en pair-à-pair, sans serveur central.
+<img src="docs/images/banner.svg" alt="Cubelink : clique sur un ami, tu as ses mods, tu es dans sa partie" width="100%" />
 
 [![CI](https://github.com/delikesance/cubelink/actions/workflows/ci.yml/badge.svg?branch=development)](https://github.com/delikesance/cubelink/actions/workflows/ci.yml)
 [![Licence MIT](https://img.shields.io/badge/licence-MIT-4FC3E8.svg)](LICENSE)
@@ -32,6 +26,8 @@ Avec Cubelink :
 4. Cubelink installe le bon loader et **les mods exacts de l'hôte**, puis te lance dans sa partie.
 
 Pas de compte Cubelink, pas de serveur à louer, pas de téléchargement manuel.
+
+<img src="docs/images/rejoindre.svg" alt="Rejoindre un ami en 4 étapes : code ami, vérification, installation, jeu" width="100%" />
 
 ## Ce que ça fait
 
@@ -60,11 +56,7 @@ Détails du flux de release : [`docs/release.md`](docs/release.md).
 
 ## Comment ça marche
 
-```
-[Cubelink A] <── QUIC direct (hole punching) ──> [Cubelink B]
-      │                                               │
-      └──────── relais iroh-relay (secours) ──────────┘
-```
+<img src="docs/images/p2p.svg" alt="Connexion QUIC directe entre l'hôte et l'invité, relais sans état en secours" width="100%" />
 
 Chaque lanceur embarque un nœud P2P, un store de blobs adressé par hash, une base SQLite locale (amis, index du cache) et un tunnel QUIC ↔ `localhost` pour que Minecraft se connecte au monde de l'hôte ouvert en LAN. L'identité d'un joueur est une paire de clés ed25519 générée au premier lancement.
 

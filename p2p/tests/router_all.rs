@@ -98,7 +98,7 @@ async fn one_router_carries_every_protocol() {
         minecraft: "1.21.1".into(),
         loader: LoaderSpec { loader: Loader::Fabric, version: "0.16.0".into() },
         java_major: 21,
-        files: vec![ManifestFile { path: "mods/a.jar".into(), size: data.len() as u64, sha256: sha(&data), sha1: None }],
+        files: vec![ManifestFile { path: "mods/a.jar".into(), size: data.len() as u64, sha256: sha(&data), sha1: None, cf_fingerprint: None }],
     };
 
     let transport = IrohTransport::new(host.ep.clone(), host.dir_path.join("host-blobs")).await.unwrap();

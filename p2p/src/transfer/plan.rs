@@ -156,7 +156,7 @@ mod tests {
             std::fs::create_dir_all(root.join(&rel).parent().unwrap()).unwrap();
             std::fs::write(root.join(&rel), data).unwrap();
             index.insert(&sha, &rel, data.len() as u64).unwrap();
-            ManifestFile { path: String::new(), size: data.len() as u64, sha256: sha, sha1: None }
+            ManifestFile { path: String::new(), size: data.len() as u64, sha256: sha, sha1: None, cf_fingerprint: None }
         };
         let (d1, d2) = (b"premier fichier".as_slice(), b"second fichier, un peu plus long".as_slice());
         let f1 = ManifestFile { path: "config/a.json".into(), ..put(d1) };
@@ -202,7 +202,7 @@ mod tests {
     }
 
     fn file(path: &str, n: usize, size: u64) -> ManifestFile {
-        ManifestFile { path: path.into(), size, sha256: h(n), sha1: None }
+        ManifestFile { path: path.into(), size, sha256: h(n), sha1: None, cf_fingerprint: None }
     }
 
     fn manifest(files: Vec<ManifestFile>) -> Manifest {

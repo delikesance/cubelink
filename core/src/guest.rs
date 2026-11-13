@@ -258,7 +258,7 @@ mod tests {
         fs::create_dir_all(dst.parent().unwrap()).unwrap();
         fs::rename(&tmp, &dst).unwrap();
         e.index.insert(&sha, &rel, data.len() as u64).unwrap();
-        ManifestFile { path: String::new(), size: data.len() as u64, sha256: sha, sha1: None }
+        ManifestFile { path: String::new(), size: data.len() as u64, sha256: sha, sha1: None, cf_fingerprint: None }
     }
 
     fn mf(e: &Env, items: &[(&str, &[u8])]) -> Manifest {

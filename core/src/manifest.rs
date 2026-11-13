@@ -116,7 +116,7 @@ pub fn build_manifest_with(
                 file_done: false,
             })
         });
-        let (sha256, sha1, size) = match hashed {
+        let (sha256, sha1, cf_fingerprint, size) = match hashed {
             Ok(v) => v,
             // Fichier verrouillé par le jeu (partage 32, verrou d'octets 33) ou disparu : jamais bloquant pour le partage.
             Err(Error::Io(e)) if is_locked_or_gone(&e) => {
@@ -135,7 +135,7 @@ pub fn build_manifest_with(
             files_total,
             file_done: true,
         });
-        files.push(ManifestFile { path: rel.clone(), size, sha256, sha1 });
+        files.push(ManifestFile { path: rel.clone(), size, sha256, sha1, cf_fingerprint });
     }
     report.skipped.sort();
 
@@ -149,15 +149,18 @@ pub fn build_manifest_with(
     Ok((manifest, report))
 }
 
-/// SHA-256 (et SHA-1 si `want_sha1`) en une seule passe ; `progress` reçoit le nombre d'octets lus.
+/// SHA-256 (et, si `want_sha1` : SHA-1 et empreinte CurseForge) en une seule passe ; `progress` reçoit le
+/// nombre d'octets lus.
 fn hash_stream(
     path: &Path,
     want_sha1: bool,
     progress: &mut dyn FnMut(u64),
-) -> Result<(Sha256Hex, Option<String>, u64)> {
+) -> Result<(Sha256Hex, Option<String>, Option<u32>, u64)> {
     let mut f = fs::File::open(path)?;
     let mut hasher = Sha256::new();
     let mut sha1 = want_sha1.then(crate::unknown_mods::Sha1::new);
+    // Octets non blancs (seuls comptés par l'empreinte CurseForge) ; abandonné au-delà du plafond.
+    let mut cf_data: Option<Vec<u8>> = want_sha1.then(Vec::new);
     let mut buf = vec![0u8; CHUNK];
     let mut size = 0u64;
     loop {
@@ -170,9 +173,16 @@ fn hash_stream(
             s.update(&buf[..n]);
         }
         size += n as u64;
+        if size > crate::unknown_mods::MAX_CF_FINGERPRINT_BYTES {
+            cf_data = None;
+        }
+        if let Some(d) = cf_data.as_mut() {
+            d.extend(buf[..n].iter().filter(|b| !matches!(b, 9 | 10 | 13 | 32)));
+        }
         progress(size);
     }
-    Ok((hex::encode(hasher.finalize()), sha1.map(|s| s.finish()), size))
+    let cf = cf_data.map(|d| crate::providers::curseforge_api::murmur2_fingerprint(&d));
+    Ok((hex::encode(hasher.finalize()), sha1.map(|s| s.finish()), cf, size))
 }
 
 /// Erreurs d'E/S « le fichier est utilisé par le jeu » (Windows 32 partage, 33 verrou) ou « disparu entre-temps ».
@@ -314,6 +324,7 @@ pub fn canonical_json(m: &Manifest) -> String {
 /// NB (S1M) : le champ `sha1` (jars de `mods/`) fait partie de la sérialisation canonique quand il
 /// est présent ; le hash d'un manifeste généré par cette version diffère donc de celui des versions
 /// antérieures. Un manifeste sans sha1 garde exactement l'ancienne sérialisation (donc l'ancien hash).
+/// Idem pour `cf_fingerprint`. Ce hash ne sert qu'à nommer le transfert côté invité (jamais comparé entre pairs).
 pub fn manifest_hash(m: &Manifest) -> Sha256Hex {
     hex::encode(Sha256::digest(canonical_json(m).as_bytes()))
 }
@@ -395,8 +406,11 @@ pub fn validate_manifest(m: &Manifest) -> Result<()> {
         if f.size > MAX_FILE_SIZE {
             return bad(format!("taille implausible pour {:?} : {}", f.path, f.size));
         }
+        let is_jar = f.path.starts_with("mods/") && f.path.to_ascii_lowercase().ends_with(".jar");
+        if f.cf_fingerprint.is_some() && !is_jar {
+            return bad(format!("empreinte CurseForge non autorisée hors des jars de mods/ : {:?}", f.path));
+        }
         if let Some(h) = &f.sha1 {
-            let is_jar = f.path.starts_with("mods/") && f.path.to_ascii_lowercase().ends_with(".jar");
             if !is_jar {
                 return bad(format!("sha1 non autorisé hors des jars de mods/ : {:?}", f.path));
             }
@@ -590,7 +604,7 @@ mod tests {
     }
 
     fn file(path: &str) -> ManifestFile {
-        ManifestFile { path: path.into(), size: 1, sha256: ABC.into(), sha1: None }
+        ManifestFile { path: path.into(), size: 1, sha256: ABC.into(), sha1: None, cf_fingerprint: None }
     }
 
     const ABC_SHA1: &str = "a9993e364706816aba3e25717850c26c9cd0d89d";
@@ -607,7 +621,15 @@ mod tests {
         assert_eq!(f("mods/a.jar").sha1.as_deref(), Some("da39a3ee5e6b4b0d3255bfef95601890afd80709"));
         assert!(m1.files.iter().filter(|x| !x.path.starts_with("mods/")).all(|x| x.sha1.is_none()));
         assert!(m1.files.iter().filter(|f| f.path.starts_with("config/")).all(|f| f.sha1.is_none()));
+        // Empreinte CurseForge : même règle que le sha1 (jars de mods/ seulement), égale au calcul de référence.
+        let cf = crate::providers::curseforge_api::murmur2_fingerprint;
+        assert_eq!(f("mods/b.jar").cf_fingerprint, Some(cf(&std::fs::read(d.path().join("mods/b.jar")).unwrap())));
+        assert_eq!(f("mods/a.jar").cf_fingerprint, Some(cf(b"")));
+        assert!(m1.files.iter().filter(|x| !x.path.starts_with("mods/")).all(|x| x.cf_fingerprint.is_none()));
         validate_manifest(&m1).unwrap();
+        let mut bad = file("config/c.toml");
+        bad.cf_fingerprint = Some(1);
+        assert!(validate_manifest(&mf(vec![bad])).is_err());
     }
 
     #[test]

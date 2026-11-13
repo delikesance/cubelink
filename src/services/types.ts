@@ -138,6 +138,8 @@ export interface JoinPlan {
   unknown_mods: string[];
   /** Jars non vérifiés (sha1 absent, réseau) : ni reconnus ni signalés inconnus. */
   unknown_unchecked?: string[];
+  /** Mods inconnus déjà acceptés lors d'un précédent « Rejoindre » (même contenu) : la confiance n'est pas redemandée. */
+  unknown_trusted?: string[];
 }
 
 // Événements

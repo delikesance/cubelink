@@ -158,6 +158,15 @@ describe("Join", () => {
     expect(screen.queryByRole("checkbox", { name: /confiance/ })).toBeNull();
   });
 
+  it("mod inconnu déjà accepté : pas de case de confiance, simple mention", async () => {
+    const base = createFakeServices({ tickMs: 0 });
+    setup({ joinPlan: async () => ({ ...(await base.joinPlan("x")), unknown_mods: [], unknown_trusted: ["mods/mod-maison.jar"] }) });
+    await screen.findByRole("button", { name: "Rejoindre et jouer" });
+    expect((screen.getByRole("button", { name: "Rejoindre et jouer" }) as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.queryByRole("checkbox", { name: /confiance/ })).toBeNull();
+    expect(screen.getByTestId("already-trusted").textContent).toMatch(/déjà été accepté/);
+  });
+
   it("Annuler et Échap reviennent en arrière (fallback main)", async () => {
     const { goBack } = setup();
     await screen.findByRole("button", { name: "Rejoindre et jouer" });

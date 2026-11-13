@@ -15,6 +15,7 @@ pub mod error;
 pub mod foreground;
 pub mod iroh_backend;
 pub mod last_seen;
+pub mod trusted_mods;
 pub mod install;
 pub mod invites;
 pub mod hotkey;

@@ -76,6 +76,8 @@ describe("Join", () => {
     await waitFor(() => expect(navigate).toHaveBeenCalledWith("main"));
     expect(play).toHaveBeenCalledTimes(1);
     expect(play.mock.calls[0][0]).toBe("pk-alex");
+    // Instance invitée : désignée par le backend (vide), jamais la première instance de la liste.
+    expect(play.mock.calls[0][1]).toBe("");
   });
 
   it("échec de la connexion au jeu : message sur place puis Réessayer", async () => {

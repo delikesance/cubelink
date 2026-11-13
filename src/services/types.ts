@@ -282,6 +282,7 @@ export interface Services {
   joinPlan(friendPublicKey: string): Promise<JoinPlan>;
   joinStart(friendPublicKey: string): Promise<void>;
   /** Invité, en un geste : ouvre le tunnel vers le monde de l'ami, lance l'instance invitée avec connexion automatique à 127.0.0.1:port, referme le tunnel à la fin du jeu. Suit les événements de lancement habituels. */
+  /** `instanceId` vide : l'instance invitée préparée par le dernier transfert. */
   joinPlay(friendPublicKey: string, instanceId: string): Promise<void>;
   joinPause(): Promise<void>;
   joinResume(): Promise<void>;

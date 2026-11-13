@@ -108,9 +108,9 @@ export default function Join() {
     setPlaying(true);
     setPlayError(null);
     try {
-      const id = params.instance ?? (await services.instancesList())[0]?.id;
-      if (!id) throw new Error("Instance introuvable.");
-      try { await services.joinPlay(friend, id); } catch (e) { setPlayError(friendlyJoinError(e, peerName.current)); return; }
+      // Sans instance précisée : celle que le transfert vient de préparer (le backend la connaît ; les instances
+      // reçues d'un ami ne figurent pas dans la liste des instances).
+      try { await services.joinPlay(friend, params.instance ?? ""); } catch (e) { setPlayError(friendlyJoinError(e, peerName.current)); return; }
       navigate("main");
     } catch (e) {
       setPlayError(friendlyJoinError(e, peerName.current));

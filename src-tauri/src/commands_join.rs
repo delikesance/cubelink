@@ -336,7 +336,13 @@ pub async fn join_open_tunnel(state: State<'_, Arc<AppState>>, friend_public_key
 
 #[tauri::command(rename_all = "snake_case")]
 pub async fn join_play(state: State<'_, Arc<AppState>>, friend_public_key: String, instance_id: String) -> Result<(), String> {
-    state.inner().join_play(&friend_public_key, &instance_id).await
+    // Vide = l'instance invitée que le dernier transfert vient de préparer (elle n'apparaît pas dans `instances_list`).
+    let id = if instance_id.is_empty() {
+        lock(&state.last_join_instance).clone().ok_or("la préparation du monde de l'ami a échoué")?
+    } else {
+        instance_id
+    };
+    state.inner().join_play(&friend_public_key, &id).await
 }
 
 #[tauri::command(rename_all = "snake_case")]

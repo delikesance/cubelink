@@ -152,7 +152,7 @@ async fn amis_presence_partage_join_coupure_et_refus() {
     assert_eq!(plan.unknown_mods, vec!["mods/homemade.jar".to_string()], "avertissement avant téléchargement");
     assert!(plan.unknown_unchecked.is_empty());
     a.be.inject_cut_at_fetch(2);
-    a.st.join_start(&b.key()).await.unwrap();
+    a.st.join_start(&b.key(), None).await.unwrap();
     wait_for("transfert terminé", || a.progress().iter().any(|p| matches!(p.phase, TransferPhase::Done | TransferPhase::Failed))).await;
     let prog = a.progress();
     let last = prog.last().unwrap();
@@ -238,11 +238,13 @@ async fn join_handlers_partages_instance_dynamique() {
     let plan = a.st.join_plan(&b.key()).await.unwrap();
     assert_eq!(plan.manifest.files.len(), 1);
 
-    a.st.join_start(&b.key()).await.unwrap();
+    // RAM choisie avant de rejoindre : appliquée à l'instance invitée.
+    a.st.join_start(&b.key(), Some(6144)).await.unwrap();
     wait_for("transfert terminé", || a.progress().iter().any(|p| matches!(p.phase, TransferPhase::Done | TransferPhase::Failed))).await;
     assert_eq!(a.progress().last().unwrap().phase, TransferPhase::Done);
     let guests = a.st.instances.list();
     assert_eq!(guests.len(), 1);
+    assert_eq!(guests[0].ram_mb, 6144);
     let gd = a.st.instances.game_dir(&guests[0].id).unwrap();
     assert_eq!(std::fs::read(gd.join("mods/solo.jar")).unwrap(), data);
 

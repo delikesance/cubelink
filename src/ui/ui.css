@@ -64,3 +64,14 @@
 .cl-badge-ok{color:var(--ok);border-color:var(--ok)} .cl-badge-warn{color:var(--warn);border-color:var(--warn)}
 .cl-badge-danger{color:var(--danger);border-color:var(--danger)} .cl-badge-accent{color:var(--accent);border-color:var(--accent)}
 .cl-sr{position:absolute;width:1px;height:1px;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+
+/* Mémoire allouée (RamPicker) : valeur des paramètres par défaut, ou valeur propre au curseur. */
+.cl-ram{display:flex;flex-direction:column;gap:var(--sp-2)}
+.cl-ram-head{display:flex;justify-content:space-between;align-items:baseline;gap:var(--sp-3)}
+.cl-ram-val{font:700 16px/1 var(--font-display);color:var(--accent-hover);font-variant-numeric:tabular-nums}
+.cl-ram-default{display:flex;align-items:center;gap:var(--sp-2);min-height:32px;cursor:pointer;color:var(--text)}
+.cl-ram-default input{width:16px;height:16px;accent-color:var(--accent);cursor:pointer}
+.cl-ram-muted{color:var(--muted)}
+.cl-ram-range{width:100%;accent-color:var(--accent);height:24px}
+.cl-ram-scale{display:flex;justify-content:space-between;color:var(--muted);font-size:12px}
+.cl-ram-hint{margin:0;color:var(--muted);font-size:13px}

@@ -12,3 +12,4 @@ e2e/artifacts/
 !.env.example
 core/resources/cubelink-lan-agent.jar
 test-results/
+.playwright-mcp/

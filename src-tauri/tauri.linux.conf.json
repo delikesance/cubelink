@@ -1,0 +1,12 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "bundle": {
+    "linux": {
+      "appimage": {
+        "files": {
+          "/usr/lib/libgpg-error.so.0": "/usr/lib/x86_64-linux-gnu/libgpg-error.so.0"
+        }
+      }
+    }
+  }
+}

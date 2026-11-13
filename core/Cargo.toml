@@ -20,6 +20,9 @@ md-5.workspace = true
 uuid.workspace = true
 rusqlite.workspace = true
 zip.workspace = true
+# JRE Adoptium Linux/macOS (.tar.gz).
+flate2 = "1"
+tar = { version = "0.4", default-features = false }
 same-file = "1"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 url.workspace = true

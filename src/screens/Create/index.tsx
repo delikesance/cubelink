@@ -4,7 +4,7 @@ import { useBack, useScreenTitle, useServices } from "../../app/context";
 import { navigate } from "../../app/router";
 import { setImportWarning } from "../../app/importWarning";
 import type { Loader } from "../../services/types";
-import { Button, Field, Input } from "../../ui";
+import { Button, Field, Input, RAM_DEFAULT, RamPicker, useDefaultRam } from "../../ui";
 import { ICONS, Icon } from "../Main/Panel";
 
 export const RECOMMENDED_VERSION = "1.21.1";
@@ -22,7 +22,6 @@ export const RAM_OPTIONS = [
   { mb: 6144, label: "6\u00a0Go" },
   { mb: 8192, label: "8\u00a0Go" },
 ];
-const GB = 1024;
 const isPack = (p: string) => /\.(mrpack|zip)$/i.test(p);
 
 /** Renvoie un message d'erreur en français, ou null si le nom est valide. */
@@ -67,7 +66,8 @@ export default function Create({ pickMrpack }: CreateProps = {}) {
   const [versions, setVersions] = useState<string[] | null>(null);
   const [minecraft, setMinecraft] = useState("");
   const [loader, setLoader] = useState<Loader>("neoforge");
-  const [ram, setRam] = useState(4096);
+  const [ram, setRam] = useState(RAM_DEFAULT);
+  const defaultRam = useDefaultRam(services);
   const [advanced, setAdvanced] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -159,6 +159,7 @@ export default function Create({ pickMrpack }: CreateProps = {}) {
         name: name.trim() || undefined,
         minecraft: minecraft || undefined,
         loader: { loader, version: "" },
+        ram_mb: ram,
       });
       if (alive.current) openCreated(imported?.id);
     } catch (err) {
@@ -193,7 +194,6 @@ export default function Create({ pickMrpack }: CreateProps = {}) {
 
   const nameId = `${uid}-name`;
   const mcId = `${uid}-mc`;
-  const ramGb = Math.round(ram / GB);
   const idx = Math.max(0, LOADERS.findIndex((l) => l.value === loader));
 
   return (
@@ -277,12 +277,7 @@ export default function Create({ pickMrpack }: CreateProps = {}) {
             </button>
             {advanced && (
               <div id={`${uid}-adv`} className="create-adv-body enter">
-                <div className="create-mem-head">
-                  <label htmlFor={`${uid}-ram`} className="cl-label">Mémoire allouée</label>
-                  <output htmlFor={`${uid}-ram`} className="create-mem-val">{ramGb}&nbsp;Go{ram === 4096 ? " (recommandée)" : ""}</output>
-                </div>
-                <input id={`${uid}-ram`} className="create-range" type="range" min={2} max={16} step={1} value={ramGb}
-                  aria-valuetext={`${ramGb} Go`} onChange={(e) => setRam(Number(e.target.value) * GB)} />
+                <RamPicker value={ram} onChange={setRam} defaultMb={defaultRam} disabled={busy} />
               </div>
             )}
           </div>

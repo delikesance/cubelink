@@ -388,4 +388,31 @@ mod tests {
         assert_eq!(sent.len(), 2);
         assert!(sent[1].1.revoke && sent[1].0 == key(1));
     }
+
+    #[tokio::test]
+    async fn annonce_automatique_aux_amis_en_ligne_une_fois_le_monde_ouvert() {
+        let dir = tempfile::tempdir().unwrap();
+        let (st, _) = test_state(dir.path());
+        let rec = Arc::new(Rec::default());
+        st.set_backend(rec.clone());
+        add_friend(&st, 1, "Alice");
+        add_friend(&st, 2, "Bob");
+        let inst = st.instances.create("ATM10 Sky", "1.21.1", LoaderSpec { loader: Loader::NeoForge, version: "21.1.1".into() }, 0).unwrap();
+        let mut sent = std::collections::HashMap::new();
+
+        // Partage prêt mais monde pas encore ouvert : rien n'est annoncé.
+        *lock(&st.host) = Some(HostState { instance_id: inst.id.clone(), sharing: true, world_port: None });
+        st.announce_world(&mut sent).await;
+        assert!(rec.0.lock().unwrap().is_empty());
+
+        // Monde ouvert : chaque ami en ligne reçoit une invitation, une seule fois.
+        *lock(&st.host) = Some(HostState { instance_id: inst.id.clone(), sharing: true, world_port: Some(54321) });
+        st.announce_world(&mut sent).await;
+        st.announce_world(&mut sent).await;
+        let got = rec.0.lock().unwrap();
+        let mut keys: Vec<_> = got.iter().map(|(k, _)| k.clone()).collect();
+        keys.sort();
+        assert_eq!(keys, vec![key(1), key(2)]);
+        assert!(got.iter().all(|(_, m)| !m.revoke && m.pack.as_deref() == Some("ATM10 Sky")));
+    }
 }

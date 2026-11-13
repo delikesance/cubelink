@@ -159,6 +159,9 @@ pub struct BrowseInstallInput {
     pub version_id: Option<String>,
     #[serde(default)]
     pub instance_id: Option<String>,
+    /// Modpack : RAM de la nouvelle instance (`None` ou 0 : « Par défaut », valeur globale).
+    #[serde(default)]
+    pub ram_mb: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -732,7 +735,7 @@ mod tests {
     }
 
     fn input(source: BrowseSource, id: &str, kind: BrowseKind) -> BrowseInstallInput {
-        BrowseInstallInput { source, id: id.into(), kind, version_id: None, instance_id: Some("i1".into()) }
+        BrowseInstallInput { source, id: id.into(), kind, version_id: None, instance_id: Some("i1".into()), ram_mb: None }
     }
 
     async fn serve(s: &MockServer, p: &str, body: &[u8]) {
@@ -1038,7 +1041,7 @@ mod tests {
             .mount(&cf)
             .await;
         serve(&cf, "/dl/pack.zip", &zip_body).await;
-        let ci = BrowseInstallInput { source: BrowseSource::Curseforge, id: "50".into(), kind: BrowseKind::Modpack, version_id: Some("7".into()), instance_id: None };
+        let ci = BrowseInstallInput { source: BrowseSource::Curseforge, id: "50".into(), kind: BrowseKind::Modpack, version_id: Some("7".into()), instance_id: None, ram_mb: None };
         let f = fetch_modpack(&providers(&mr, &cf), &ci, &e.store, &e.index, &tmp, &dlo(), &|_, _, _| {}).await.unwrap();
         assert_eq!(std::fs::read(f).unwrap(), zip_body);
     }
@@ -1074,7 +1077,7 @@ mod tests {
             let vs = versions(&p, hit.source.as_str(), &hit.id, "mod", Some("1.21.1"), Some("fabric")).await.expect("versions");
             println!("[{source:?}] {} : {} versions, plus récente : {:?}", hit.name, vs.len(), vs.first().map(|v| (&v.name, &v.published)));
             let e = env();
-            let input = BrowseInstallInput { source, id: hit.id.clone(), kind: BrowseKind::Mod, version_id: None, instance_id: Some("i1".into()) };
+            let input = BrowseInstallInput { source, id: hit.id.clone(), kind: BrowseKind::Mod, version_id: None, instance_id: Some("i1".into()), ram_mb: None };
             let r = install_content(&p, &input, &instance, &e.game, &e.store, &e.index, &DlOptions::default(), &|_, _, _| {}).await.expect("installation");
             println!("[{source:?}] installés : {:?} ; manquants : {:?}", r.installed, r.missing);
             for f in &r.installed {

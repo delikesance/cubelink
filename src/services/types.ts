@@ -123,7 +123,8 @@ export interface Settings {
 
 // Entrées / sorties de commandes
 export interface DeviceCode { user_code: string; verification_uri: string; expires_in: number }
-export interface ImportTarget { name?: string; minecraft?: string; loader?: LoaderSpec }
+/** `ram_mb` : 0 ou absent = « Par défaut » (valeur globale des paramètres). */
+export interface ImportTarget { name?: string; minecraft?: string; loader?: LoaderSpec; ram_mb?: number }
 export interface CreateInstanceInput { name: string; minecraft: string; loader: LoaderSpec; ram_mb: number }
 /** `last_seen` : dernière fois vu en ligne (secondes Unix), absent si jamais vu. */
 export interface FriendWithPresence { friend: Friend; presence: Presence; last_seen?: number | null }
@@ -164,7 +165,8 @@ export interface BrowseQuery { source: BrowseSource; kind: BrowseKind; query: st
 export interface BrowseHit { source: BrowseSource; id: string; kind: BrowseKind; name: string; summary: string; author: string; icon_url: string | null; downloads: number; page_url: string; downloadable: boolean }
 export interface BrowsePage { hits: BrowseHit[]; total: number }
 export interface BrowseVersion { id: string; name: string; minecraft: string[]; loaders: string[]; published: string; downloadable: boolean }
-export interface BrowseInstallInput { source: BrowseSource; id: string; kind: BrowseKind; version_id?: string; instance_id?: string }
+/** `ram_mb` (modpack) : RAM de la nouvelle instance, 0 ou absent = « Par défaut ». */
+export interface BrowseInstallInput { source: BrowseSource; id: string; kind: BrowseKind; version_id?: string; instance_id?: string; ram_mb?: number }
 export interface BrowseInstallResult { instance: Instance; installed: string[]; missing: string[] }
 /** Verdict d'une version d'un mod dans une instance (simulation dans le pack). */
 export interface VersionVerdict { version_id: string; ok: boolean; problems: string[] }
@@ -280,8 +282,10 @@ export interface Services {
   gameJoinFriend(publicKey: string, instanceId?: string): Promise<void>;
 
   joinPlan(friendPublicKey: string): Promise<JoinPlan>;
-  joinStart(friendPublicKey: string): Promise<void>;
+  /** `ramMb` : RAM de l'instance invitée (0 ou absent = « Par défaut »). */
+  joinStart(friendPublicKey: string, ramMb?: number): Promise<void>;
   /** Invité, en un geste : ouvre le tunnel vers le monde de l'ami, lance l'instance invitée avec connexion automatique à 127.0.0.1:port, referme le tunnel à la fin du jeu. Suit les événements de lancement habituels. */
+  /** `instanceId` vide : l'instance invitée préparée par le dernier transfert. */
   joinPlay(friendPublicKey: string, instanceId: string): Promise<void>;
   joinPause(): Promise<void>;
   joinResume(): Promise<void>;

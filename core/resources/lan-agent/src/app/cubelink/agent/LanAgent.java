@@ -314,7 +314,9 @@ public final class LanAgent {
                 }
                 boolean title = false;
                 for (Class<?> k = screen == null ? null : screen.getClass(); k != null; k = k.getSuperclass()) {
-                    if (k.getName().equals("net.minecraft.client.gui.screens.TitleScreen")) title = true;
+                    // Ecran d'accueil accessibilite (dossier neuf) : il retient le quickPlay comme l'ecran-titre.
+                    if (k.getName().equals("net.minecraft.client.gui.screens.TitleScreen")
+                            || k.getName().equals("net.minecraft.client.gui.screens.AccessibilityOnboardingScreen")) title = true;
                 }
                 if (!title) {
                     idleSince = 0;
@@ -540,19 +542,21 @@ public final class LanAgent {
         }
         // Premier parametre : GameType (jusqu'a 1.21.x / 26.1) ou enum MultiplayerScope (26.3+, on passe LAN).
         Class<?> first = publish.getParameterTypes()[0];
-        Object firstArg;
+        // GameType est AUSSI une enum : seule une enum avec LAN est MultiplayerScope ; sinon, mode de jeu du monde.
+        Object firstArg = null;
         if (first.isEnum()) {
-            firstArg = null;
             for (Object c : first.getEnumConstants()) {
                 if (((Enum<?>) c).name().equals("LAN")) firstArg = c;
             }
-            if (firstArg == null) {
-                log("enum " + first.getName() + " sans constante LAN : version non geree, partage a ouvrir a la main");
-                return;
-            }
-        } else {
+        }
+        if (firstArg == null) {
             if (getGameType == null) {
                 log("getDefaultGameType introuvable : version non geree, partage a ouvrir a la main");
+                return;
+            }
+            if (!first.isAssignableFrom(getGameType.getReturnType())) {
+                log("getDefaultGameType renvoie " + getGameType.getReturnType().getName() + ", publishServer attend "
+                    + first.getName() + " : version non geree, partage a ouvrir a la main");
                 return;
             }
             open(inst, getGameType.getDeclaringClass());

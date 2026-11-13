@@ -39,7 +39,7 @@ pub fn validate_create(name: &str, minecraft: &str, loader: &LoaderSpec, ram_mb:
     if loader.loader == Loader::Vanilla && !loader.version.is_empty() {
         return Err("une instance vanilla n'a pas de version de loader".into());
     }
-    if !(MIN_RAM_MB..=MAX_RAM_MB).contains(&ram_mb) {
+    if ram_mb != core_lib::instance::RAM_DEFAULT && !(MIN_RAM_MB..=MAX_RAM_MB).contains(&ram_mb) {
         return Err(format!("la mémoire doit être comprise entre {MIN_RAM_MB} et {MAX_RAM_MB} Mo"));
     }
     Ok(())
@@ -321,8 +321,9 @@ impl AppState {
         name: Option<String>,
         minecraft: Option<String>,
         loader: Option<LoaderSpec>,
+        ram_mb: Option<u32>,
     ) -> Result<Instance, String> {
-        let (inst, missing) = self.import_pack_file(path, name, minecraft, loader, None).await?;
+        let (inst, missing) = self.import_pack_file(path, name, minecraft, loader, ram_mb, None).await?;
         if !missing.is_empty() {
             self.emit_event("import://warning", &serde_json::json!({ "missing": missing }));
         }
@@ -336,10 +337,16 @@ impl AppState {
         name: Option<String>,
         minecraft: Option<String>,
         loader: Option<LoaderSpec>,
+        ram_mb: Option<u32>,
         progress: Option<core_lib::mrpack::FilesProgress>,
     ) -> Result<(Instance, Vec<String>), String> {
         let file = validate_mrpack_path(path)?;
-        let mut opts = ImportOptions { ram_mb: self.settings_get().default_ram_mb, ..ImportOptions::default() };
+        // Sans choix : « Par défaut » (la valeur globale, lue à chaque lancement).
+        let ram_mb = ram_mb.unwrap_or(core_lib::instance::RAM_DEFAULT);
+        if ram_mb != core_lib::instance::RAM_DEFAULT && !(MIN_RAM_MB..=MAX_RAM_MB).contains(&ram_mb) {
+            return Err(format!("la mémoire doit être comprise entre {MIN_RAM_MB} et {MAX_RAM_MB} Mo"));
+        }
+        let mut opts = ImportOptions { ram_mb, ..ImportOptions::default() };
         if crate::test_hooks::hooks().test_mode {
             // Mode test seulement : télécharge depuis le faux Modrinth en loopback.
             opts.allowed_hosts.extend(["127.0.0.1".to_string(), "localhost".to_string()]);
@@ -520,6 +527,12 @@ impl AppState {
             Ok(d) => d,
             Err(e) => return self.emit_state(&id, LaunchPhase::Failed, Some(user_msg(&e))),
         };
+        // Rejoindre : l'écran d'accueil « accessibilité » d'un dossier neuf bloquerait la connexion directe.
+        if join_server.is_some() {
+            if let Err(e) = core_lib::instance::skip_accessibility_onboarding(&game_dir) {
+                eprintln!("[Cubelink] options.txt : accueil accessibilité non désactivé ({e})");
+            }
+        }
         // Partage / agent LAN : seulement pour nos propres instances, jamais en rejoignant un ami.
         let own = join_server.is_none() && self.instances.kind(&id).map(|k| k == core_lib::instance::InstanceKind::Own).unwrap_or(false);
         let agent_arg = lan_agent_jar(self, own, join_server.as_ref()).and_then(|jar| {
@@ -546,7 +559,7 @@ impl AppState {
             profile,
             access_token: token,
             version_type: "release".into(),
-            ram_mb: inst.ram_mb,
+            ram_mb: core_lib::instance::effective_ram_mb(inst.ram_mb, self.settings_get().default_ram_mb),
             os: Os::current(),
             arch: Arch::current(),
             launcher_name: "Cubelink".into(),
@@ -687,8 +700,9 @@ pub async fn instances_import_mrpack(
     name: Option<String>,
     minecraft: Option<String>,
     loader: Option<LoaderSpec>,
+    ram_mb: Option<u32>,
 ) -> Result<Instance, String> {
-    state.instances_import_mrpack(&path, name, minecraft, loader).await
+    state.instances_import_mrpack(&path, name, minecraft, loader, ram_mb).await
 }
 
 #[tauri::command(rename_all = "snake_case")]

@@ -138,6 +138,15 @@ jobs:
         run: JAVA_HOME="$JAVA_HOME_17_X64" bash core/resources/lan-agent/build.sh
       - name: AppImage
         run: npx tauri build --bundles appimage
+      # libgcrypt est embarquée mais linuxdeploy exclut libgpg-error, dont elle dépend : sur une distribution qui
+      # ne l'a pas, le launcher ne démarre pas (« libgpg-error.so.0: cannot open shared object file »).
+      # tauri.linux.conf.json l'ajoute ; on vérifie que toute bibliothèque embarquée trouve ses dépendances.
+      - name: AppImage autonome (dépendances des bibliothèques embarquées)
+        run: |
+          cd "$(mktemp -d)"
+          "$GITHUB_WORKSPACE"/target/release/bundle/appimage/*.AppImage --appimage-extract >/dev/null
+          test -f squashfs-root/usr/lib/libgpg-error.so.0 || { echo "libgpg-error.so.0 absente de l'AppImage" >&2; exit 1; }
+          ldd squashfs-root/usr/lib/libgcrypt.so.20
       - uses: actions/upload-artifact@v4
         with:
           name: linux-appimage

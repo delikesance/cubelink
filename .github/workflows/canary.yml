@@ -1,0 +1,91 @@
+# Canary : pousser sur la branche `canary` publie vite une pré-version Linux (AppImage seule) pour tester.
+# Pré-version (jamais « Latest »), sans latest.json : les launchers installés ne la reçoivent pas en mise à jour.
+# Version `<majeur>.<mineur>.<patch suivant>-canary.<run>` : la vraie release suivante la remplacera normalement.
+name: canary
+
+on:
+  push:
+    branches: [canary]
+    paths-ignore: ['docs/**', '**/*.md', 'LICENSE']
+
+concurrency:
+  group: canary
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_TERM_COLOR: always
+  # Pas l'optimisation des vraies releases (LTO « fat » + 1 unité de compilation : édition de liens de plusieurs
+  # minutes) : canary = compilation rapide, binaire un peu plus gros et lent, sans importance pour tester.
+  CARGO_PROFILE_RELEASE_LTO: "false"
+  CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+  CARGO_PROFILE_RELEASE_OPT_LEVEL: "1"
+  TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+  TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+jobs:
+  linux:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: canary-${{ runner.os }}
+      # Éditeur de liens rapide (mold) au lieu de celui par défaut.
+      - uses: rui314/setup-mold@v1
+      - name: Dépendances système
+        run: |
+          # Gains connus sur les runners : pas de réindexation des pages de manuel, pas de doc installée,
+          # pas de fsync à chaque fichier (machine jetable).
+          sudo rm -f /var/lib/man-db/auto-update
+          for l in force-unsafe-io 'path-exclude /usr/share/doc/*' 'path-exclude /usr/share/man/*' 'path-exclude /usr/share/locale/*'; do
+            echo "$l"
+          done | sudo tee /etc/dpkg/dpkg.cfg.d/99-ci >/dev/null
+          sudo tee /etc/apt/sources.list >/dev/null <<'LIST'
+          deb http://mirrors.edge.kernel.org/ubuntu jammy main restricted universe multiverse
+          deb http://mirrors.edge.kernel.org/ubuntu jammy-updates main restricted universe multiverse
+          deb http://mirrors.edge.kernel.org/ubuntu jammy-security main restricted universe multiverse
+          LIST
+          pkgs='libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev patchelf xdg-utils'
+          for i in 1 2 3; do
+            sudo timeout 240 apt-get update && sudo timeout 600 apt-get install -y --no-install-recommends $pkgs && break
+            echo "apt : essai $i échoué, nouvel essai"; sleep 5
+            [ $i = 3 ] && exit 1
+          done
+      - run: npm ci
+      - name: Version
+        id: v
+        run: |
+          set -euo pipefail
+          last=$(gh release list --exclude-pre-releases --limit 1 --json tagName -q '.[0].tagName' | sed 's/^v//')
+          next=$(echo "$last" | awk -F. '{print $1"."$2"."$3+1}')
+          version="$next-canary.$GITHUB_RUN_NUMBER"
+          sed -i -E "s/(\"version\"[[:space:]]*:[[:space:]]*\")[^\"]+(\")/\1$version\2/" src-tauri/tauri.conf.json
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Agent LAN (jar Java)
+        run: JAVA_HOME="$JAVA_HOME_17_X64" bash core/resources/lan-agent/build.sh
+      - name: AppImage
+        run: npx tauri build --bundles appimage
+      - name: AppImage autonome
+        run: |
+          cd "$(mktemp -d)"
+          "$GITHUB_WORKSPACE"/target/release/bundle/appimage/*.AppImage --appimage-extract >/dev/null
+          test -f squashfs-root/usr/lib/libgpg-error.so.0
+      - name: Pré-version GitHub
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          v="${{ steps.v.outputs.version }}"
+          git log -10 --pretty='- %s' > notes.md
+          gh release create "v$v" --target "$GITHUB_SHA" --prerelease --latest=false --title "Cubelink $v (canary, Linux)" --notes-file notes.md \
+            target/release/bundle/appimage/*.AppImage

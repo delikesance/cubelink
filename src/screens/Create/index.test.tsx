@@ -96,7 +96,7 @@ describe("écran Créer : formulaire (B4)", () => {
     fireEvent.click(createBtn());
     await waitFor(() => expect(window.location.hash).toMatch(/^#\/instance\?id=inst-/));
     expect(create).toHaveBeenCalledWith({
-      name: "Mon monde", minecraft: "1.21.1", loader: { loader: "fabric", version: "" }, ram_mb: 4096,
+      name: "Mon monde", minecraft: "1.21.1", loader: { loader: "fabric", version: "" }, ram_mb: 0,
     });
   });
 
@@ -114,7 +114,11 @@ describe("écran Créer : formulaire (B4)", () => {
     await form({ ...base, instancesCreate: create });
     fireEvent.change(nameInput(), { target: { value: "Gros pack" } });
     fireEvent.click(screen.getByRole("button", { name: "Options avancées" }));
-    fireEvent.change(screen.getByLabelText("Mémoire allouée"), { target: { value: "8" } });
+    // Par défaut : valeur des paramètres ; décocher pour choisir une valeur propre.
+    const inherit = screen.getByRole("checkbox", { name: /Valeur des paramètres/ }) as HTMLInputElement;
+    expect(inherit.checked).toBe(true);
+    fireEvent.click(inherit);
+    fireEvent.change(screen.getByLabelText("Mémoire allouée (Go)"), { target: { value: "8" } });
     fireEvent.click(createBtn());
     await waitFor(() => expect(window.location.hash).toMatch(/^#\/instance\?id=inst-/));
     expect(create).toHaveBeenCalledWith(expect.objectContaining({ ram_mb: 8192 }));

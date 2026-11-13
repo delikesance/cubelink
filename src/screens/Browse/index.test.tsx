@@ -159,7 +159,7 @@ describe("Parcourir : fiche et installation", () => {
     fireEvent.click(screen.getByRole("button", { name: "Installer le modpack" }));
     fireEvent.click(await screen.findByRole("button", { name: "Ouvrir le modpack" }));
     expect(window.location.hash).toBe("#/instance?id=i1");
-    expect(svc.browseInstall).toHaveBeenCalledWith({ source: "modrinth", id: "p1", kind: "modpack", version_id: "v1", instance_id: undefined });
+    expect(svc.browseInstall).toHaveBeenCalledWith({ source: "modrinth", id: "p1", kind: "modpack", version_id: "v1", instance_id: undefined, ram_mb: 0 });
   });
 
   it("Retour et Échap ramènent à la liste", async () => {

@@ -2,13 +2,21 @@ import { friendlyJoinError, classifyJoinError, joinErrorAdvice } from "./message
 import { useCallback, useEffect, useRef, useState } from "react";
 import "./join.css";
 import { useBack, useShell } from "../../app/context";
-import { Button, Card } from "../../ui";
+import { Button, Card, RAM_DEFAULT, RamPicker, useDefaultRam } from "../../ui";
 import { buildStates } from "../Error/states";
 import { Avatar } from "../Friends/Avatar";
 import { classifyFailure } from "../Install/format";
 import { TransferPanel, type TransferFailure } from "../Install/TransferPanel";
 import { useTransfer } from "../Install/useTransfer";
-import type { JoinPlan, Presence } from "../../services/types";
+import type { JoinPlan, ManifestFile, Presence } from "../../services/types";
+
+/** Conseil RAM selon la taille du pack (nombre de mods reçus). */
+export function ramHint(files: ManifestFile[]): string | undefined {
+  const mods = files.filter((f) => f.path.startsWith("mods/") && f.path.endsWith(".jar")).length;
+  if (mods >= 200) return `Ce modpack compte ${mods} mods : prévois 8 Go ou plus.`;
+  if (mods >= 80) return `Ce modpack compte ${mods} mods : 6 Go ou plus conseillés.`;
+  return undefined;
+}
 
 type PlanState =
   | { kind: "loading" }
@@ -28,6 +36,8 @@ export default function Join() {
   const [trusted, setTrusted] = useState(false);
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
+  const [ram, setRam] = useState(RAM_DEFAULT);
+  const defaultRam = useDefaultRam(services);
   // « plan » : ce qui sera reçu ; « transfer » : réception, installation, lancement et erreurs, sur place.
   const [stage, setStage] = useState<"plan" | "transfer">("plan");
   const stageRef = useRef(stage);
@@ -80,7 +90,7 @@ export default function Join() {
     setStarting(true);
     setStartError(null);
     try {
-      await services.joinStart(friend);
+      await services.joinStart(friend, ram);
       t.reset();
       setStage("transfer");
     } catch (e) {
@@ -108,9 +118,9 @@ export default function Join() {
     setPlaying(true);
     setPlayError(null);
     try {
-      const id = params.instance ?? (await services.instancesList())[0]?.id;
-      if (!id) throw new Error("Instance introuvable.");
-      try { await services.joinPlay(friend, id); } catch (e) { setPlayError(friendlyJoinError(e, peerName.current)); return; }
+      // Sans instance précisée : celle que le transfert vient de préparer (le backend la connaît ; les instances
+      // reçues d'un ami ne figurent pas dans la liste des instances).
+      try { await services.joinPlay(friend, params.instance ?? ""); } catch (e) { setPlayError(friendlyJoinError(e, peerName.current)); return; }
       navigate("main");
     } catch (e) {
       setPlayError(friendlyJoinError(e, peerName.current));
@@ -130,7 +140,7 @@ export default function Join() {
     t.reset();
     setPlayError(null);
     autoPlayed.current = false;
-    await services.joinStart(friend);
+    await services.joinStart(friend, ram);
   }, "Impossible de relancer le transfert.");
 
   // Cause identifiable d'un échec : textes partagés avec l'écran Erreur (pas ceux de la connexion Microsoft ni Java).
@@ -211,6 +221,9 @@ export default function Join() {
           <strong>{plan.to_receive}&nbsp;fichiers à recevoir ({mo(plan.to_receive_bytes)}) sur {total}</strong>
           {plan.cached}&nbsp;fichiers sont déjà dans ton cache · Java {m.java_major}
           <div className="join-meter" aria-hidden="true"><span style={{ width: `${pct}%` }} /></div>
+        </div>
+        <div className="join-ram">
+          <RamPicker value={ram} onChange={setRam} defaultMb={defaultRam} disabled={starting} hint={ramHint(m.files)} />
         </div>
         <div className="join-acts">
           <Button disabled={!canJoin} loading={starting} onClick={() => { void join(); }}>Rejoindre et jouer</Button>

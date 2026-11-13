@@ -176,7 +176,7 @@ impl AppState {
                 serde_json::json!({ "done": d, "total": t, "label": "Installation du modpack" }),
             );
         });
-        let res = self.import_pack_file(&file.display().to_string(), None, None, None, Some(progress)).await;
+        let res = self.import_pack_file(&file.display().to_string(), None, None, None, input.ram_mb, Some(progress)).await;
         let _ = std::fs::remove_dir_all(&tmp);
         let (instance, missing) = res?;
         // Illustrations : meilleur effort, un échec n'affecte jamais l'installation.
@@ -430,6 +430,7 @@ mod tests {
             kind: BrowseKind::Mod,
             version_id: None,
             instance_id: None,
+            ram_mb: None,
         };
         let e = st.browse_install(input.clone()).await.unwrap_err();
         assert!(e.contains("instance"), "{e}");

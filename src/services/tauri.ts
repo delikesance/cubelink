@@ -28,6 +28,7 @@ export function createTauriServices(): Services {
     authAccounts: () => invoke("auth_accounts"),
     authSwitch: (id) => invoke("auth_switch", { id }),
     authSkinHead: (uuid) => invoke("auth_skin_head", { uuid }),
+    skinHeadByName: (name) => invoke("skin_head_by_name", { name }),
     authRemove: (id) => invoke("auth_remove", { id }),
 
     instancesList: () => invoke("instances_list"),

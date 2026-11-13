@@ -386,6 +386,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
       commitAccounts();
     },
     authSkinHead: async () => null,
+    skinHeadByName: async () => null,
 
     instancesList: async () => instances.map((i) => ({ ...i })),
     instancesCreate: async (input: CreateInstanceInput) => {

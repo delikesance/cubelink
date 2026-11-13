@@ -20,8 +20,11 @@ pub const MAX_FILES: usize = 10_000;
 pub const MAX_FILE_SIZE: u64 = 16 * 1024 * 1024 * 1024;
 /// Taille maximale cumulée plausible (256 Gio).
 pub const MAX_TOTAL_SIZE: u64 = 256 * 1024 * 1024 * 1024;
-/// Préfixes autorisés (côté invité).
-pub const ALLOWED_PREFIXES: [&str; 4] = ["mods", "config", "resourcepacks", "shaderpacks"];
+/// Préfixes autorisés (côté invité). `kubejs` : scripts et ressources des modpacks (objets, recettes) ; sans eux le
+/// serveur envoie des registres inconnus du client (« unknown keys »). `defaultconfigs` : réglages par défaut du pack.
+pub const ALLOWED_PREFIXES: [&str; 6] = ["mods", "config", "resourcepacks", "shaderpacks", "kubejs", "defaultconfigs"];
+/// Sous-dossiers générés localement, jamais partagés (exports et typages de KubeJS/ProbeJS, parfois énormes).
+const GENERATED_DIRS: [&str; 2] = ["kubejs/exported/", "kubejs/probe/"];
 
 const CHUNK: usize = 1024 * 1024;
 /// Fragments de nom de fichier jamais partagés (jetons, identifiants).
@@ -75,7 +78,7 @@ pub fn build_manifest_with(
 
     let mut dirs = vec!["mods"];
     if opts.include_config {
-        dirs.push("config");
+        dirs.extend(["config", "kubejs", "defaultconfigs"]);
     }
     if opts.include_resourcepacks {
         dirs.push("resourcepacks");
@@ -92,6 +95,7 @@ pub fn build_manifest_with(
         }
     }
 
+    candidates.retain(|(rel, _)| !GENERATED_DIRS.iter().any(|g| rel.starts_with(g)));
     candidates.sort_by(|a, b| a.0.cmp(&b.0));
     let files_total = candidates.len();
     if files_total > MAX_FILES {
@@ -447,6 +451,11 @@ mod tests {
         put(r, "config/auth_token.json", b"secret");
         put(r, "resourcepacks/rp.zip", b"rp");
         put(r, "shaderpacks/s.zip", b"s");
+        put(r, "kubejs/startup_scripts/items.js", b"s");
+        put(r, "kubejs/assets/kubejs/textures/item/red_cell.png", b"p");
+        put(r, "kubejs/exported/tags.json", b"x");
+        put(r, "kubejs/probe/generated/x.d.ts", b"x");
+        put(r, "defaultconfigs/ftb.snbt", b"d");
         put(r, "saves/w/level.dat", b"x");
         put(r, "logs/latest.log", b"x");
         put(r, "crash-reports/c.txt", b"x");
@@ -485,7 +494,16 @@ mod tests {
         assert_eq!(m.java_major, 17);
         assert_eq!(
             paths(&m),
-            ["config/c.toml", "mods/a.jar", "mods/b.jar", "resourcepacks/rp.zip", "shaderpacks/s.zip"]
+            [
+                "config/c.toml",
+                "defaultconfigs/ftb.snbt",
+                "kubejs/assets/kubejs/textures/item/red_cell.png",
+                "kubejs/startup_scripts/items.js",
+                "mods/a.jar",
+                "mods/b.jar",
+                "resourcepacks/rp.zip",
+                "shaderpacks/s.zip"
+            ]
         );
         assert!(rep.skipped.iter().any(|(p, _)| p == "config/auth_token.json"));
         assert!(rep.skipped.iter().any(|(p, _)| p == "mods/readme.txt"));
@@ -584,8 +602,10 @@ mod tests {
         let m1 = build_manifest(&inst(), d.path(), &opts).unwrap();
         let m2 = build_manifest(&inst(), d.path(), &opts).unwrap();
         assert_eq!(m1, m2);
-        assert_eq!(m1.files[2].sha1.as_deref(), Some(ABC_SHA1));
-        assert_eq!(m1.files[1].sha1.as_deref(), Some("da39a3ee5e6b4b0d3255bfef95601890afd80709"));
+        let f = |p: &str| m1.files.iter().find(|x| x.path == p).unwrap();
+        assert_eq!(f("mods/b.jar").sha1.as_deref(), Some(ABC_SHA1));
+        assert_eq!(f("mods/a.jar").sha1.as_deref(), Some("da39a3ee5e6b4b0d3255bfef95601890afd80709"));
+        assert!(m1.files.iter().filter(|x| !x.path.starts_with("mods/")).all(|x| x.sha1.is_none()));
         assert!(m1.files.iter().filter(|f| f.path.starts_with("config/")).all(|f| f.sha1.is_none()));
         validate_manifest(&m1).unwrap();
     }

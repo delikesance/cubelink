@@ -1,7 +1,7 @@
 //! Tâche N15 : profil invité isolé.
 //!
 //! Une instance `guest` reçoit uniquement les fichiers du manifeste de l'hôte (mods, config,
-//! resourcepacks, shaderpacks), placés par hardlink/copie depuis le cache. Aucun `options.txt`,
+//! resourcepacks, shaderpacks, kubejs, defaultconfigs), placés par hardlink/copie depuis le cache. Aucun `options.txt`,
 //! `saves/` ni compte n'est hérité. Les références du cache sont tracées dans `guest.json`
 //! (à côté du dossier de jeu) pour être libérées à la suppression.
 

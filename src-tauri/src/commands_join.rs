@@ -24,6 +24,9 @@ pub struct JoinPlan {
     /// Jars non vérifiés (sha1 absent, réseau, limite de débit) : ni reconnus ni signalés inconnus.
     #[serde(default)]
     pub unknown_unchecked: Vec<String>,
+    /// Mods inconnus déjà acceptés lors d'un précédent « Rejoindre » (même contenu) : pas redemandés.
+    #[serde(default)]
+    pub unknown_trusted: Vec<String>,
 }
 
 fn progress(phase: TransferPhase) -> TransferProgress {
@@ -127,13 +130,24 @@ impl AppState {
         // Revendication de l'hôte (sha1 du manifeste), re-vérifiée à la réception puis localement
         // (`transfer://unknown_mods`, voir `run_join`). Échec réseau : liste vide + `unknown_unchecked`.
         let report = self.backend().find_unknown_from_manifest(hm.manifest.files.clone()).await;
+        let (unknown_mods, unknown_trusted) = self.trusted_mods.split(report.unknown, &hm.manifest.files);
+        // Ce que l'utilisateur accepte en cliquant « Rejoindre » : enregistré au `join_start`.
+        let shas: Vec<String> = hm
+            .manifest
+            .files
+            .iter()
+            .filter(|f| unknown_mods.contains(&f.path))
+            .map(|f| f.sha256.clone())
+            .collect();
+        lock(&self.pending_trust).insert(friend_public_key.to_string(), shas);
         Ok(JoinPlan {
             manifest: hm.manifest,
             cached,
             to_receive,
             to_receive_bytes,
-            unknown_mods: report.unknown,
+            unknown_mods,
             unknown_unchecked: report.unchecked,
+            unknown_trusted,
         })
     }
 
@@ -158,6 +172,11 @@ impl AppState {
             *j = Some(JoinSession { control: control.clone(), last: last.clone() });
         }
         *lock(&self.last_join_instance) = None;
+        // Les mods inconnus montrés par le plan (case de confiance cochée) sont acceptés pour la suite,
+        // seulement s'ils font toujours partie du manifeste reçu maintenant.
+        if let Some(shas) = lock(&self.pending_trust).remove(friend_public_key) {
+            self.trusted_mods.add_all(shas.iter().map(String::as_str).filter(|h| hm.manifest.files.iter().any(|f| f.sha256 == *h)));
+        }
         let me = self.clone();
         let key = friend_public_key.to_string();
         let (l2, me2) = (last.clone(), self.clone());

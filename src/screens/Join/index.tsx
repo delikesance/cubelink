@@ -83,6 +83,7 @@ export default function Join() {
 
   const unknown = state.kind === "ready" ? state.plan.unknown_mods : [];
   const unchecked = state.kind === "ready" ? (state.plan.unknown_unchecked ?? []) : [];
+  const alreadyTrusted = state.kind === "ready" ? (state.plan.unknown_trusted ?? []) : [];
   const canJoin = state.kind === "ready" && !starting && (unknown.length === 0 || trusted);
 
   const join = async () => {
@@ -288,6 +289,13 @@ export default function Join() {
               <span>Je fais confiance à {name} pour {unknown.length > 1 ? "ces mods" : "ce mod"}</span>
             </label>
           </div>
+        )}
+        {ready && alreadyTrusted.length > 0 && (
+          <p className="join-note enter" data-testid="already-trusted" style={stagger(2)}>
+            {alreadyTrusted.length > 1
+              ? `${alreadyTrusted.length} mods hors catalogue ont déjà été acceptés lors d'une partie précédente : pas besoin de les revalider.`
+              : "Un mod hors catalogue a déjà été accepté lors d'une partie précédente : pas besoin de le revalider."}
+          </p>
         )}
         {ready && unchecked.length > 0 && (
           <div className="join-warn enter" role="note" data-testid="unchecked" style={stagger(2)}>

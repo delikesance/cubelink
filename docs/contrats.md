@@ -38,7 +38,7 @@ Toute commande renvoie `Result<T, String>` (message d'erreur affichable, en fran
 | friends | `friend_requests` | `{ offset, limit, query? }` | `{ items: FriendRequest[], total: number }` |
 | friends | `friend_accept` / `friend_refuse` | `{ public_key }` | — |
 | friends | `friend_refuse_all` | — | `number` (nombre refusé) |
-| join | `join_plan` | `{ friend_public_key }` | `{ manifest: Manifest, cached: number, to_receive: number, to_receive_bytes: number, unknown_mods: string[] }` |
+| join | `join_plan` | `{ friend_public_key }` | `{ manifest: Manifest, cached: number, to_receive: number, to_receive_bytes: number, unknown_mods: string[], unknown_unchecked: string[], unknown_trusted: string[] }` ; `unknown_mods` ne contient que les mods inconnus pas encore acceptés : ceux acceptés lors d'un `join_start` précédent (même sha256, mémorisés dans `p2p/trusted_mods.json`) passent dans `unknown_trusted` |
 | join | `join_start` | `{ friend_public_key }` | — (progression par événement) |
 | join | `join_pause` / `join_resume` / `join_cancel` | — | — |
 | settings | `settings_get` / `settings_set` | `Settings` | `Settings` |

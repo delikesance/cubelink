@@ -383,7 +383,7 @@ mod tests {
             ("CUBELINK_QUILT_META_URL", "http://127.0.0.1:7001"),
             ("CUBELINK_NEOFORGE_MAVEN_URL", "http://127.0.0.1:7002"),
             ("CUBELINK_FORGE_MAVEN_URL", "http://127.0.0.1:7003"),
-            ("CUBELINK_JAVA_PATH", "C:\\fx\\fake-java.cmd"),
+            ("CUBELINK_JAVA_PATH", if cfg!(windows) { "C:\\fx\\fake-java.cmd" } else { "/fx/fake-java.cmd" }),
             ("CUBELINK_RELAY_MODE", "custom:http://127.0.0.1:8000"),
             ("CUBELINK_SKIP_JAVA_PROBE", "1"),
         ];

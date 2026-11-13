@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { isTauri } from "../services";
 
-/** Zone de jeu intégrée (Windows) : un jeu est rattaché, c'est lui qu'on voit, panneau « en jeu » ouvert. */
+/** Zone de jeu intégrée (Windows, Linux X11) : un jeu est rattaché, c'est lui qu'on voit, panneau « en jeu » ouvert. */
 export type StageState = { attached: boolean; game: boolean; panel: boolean };
 
 /** Suit l'état de la zone de jeu (événement `stage://state`). Hors Tauri : jamais rattaché. */
@@ -57,7 +57,7 @@ export function useStageFallback(): { notice: StageFallback | null; dismiss: () 
   return { notice, dismiss };
 }
 
-/** La zone de jeu intégrée existe sur ce système (Windows). Hors Tauri, ou tant que Rust n'a pas répondu : non. */
+/** La zone de jeu intégrée existe sur ce système (Windows, Linux en session X11). Hors Tauri, ou tant que Rust n'a pas répondu : non. */
 export function useStageSupported(): boolean {
   const [ok, setOk] = useState(false);
   useEffect(() => {

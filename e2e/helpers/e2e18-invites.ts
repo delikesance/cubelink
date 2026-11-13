@@ -1,4 +1,4 @@
-// Helpers E2E-18 : invitations « rejoins mon monde » et panneau en jeu (overlay).
+// Helpers E2E-18 : invitations « rejoins mon monde » et panneau en jeu (Scene).
 // Tout passe par le harnais `world` (deux applications reelles, dossiers de donnees temporaires, CUBELINK_TEST_MODE=1).
 import type { Page } from '@playwright/test';
 import { invoke, loginOffline, makeHostInstance, waitForRoute, type App, type World } from '../harness/fixtures';
@@ -75,10 +75,5 @@ export async function emitEvent(page: Page, event: string, payload: unknown) {
   await page.evaluate(([ev, p]) => (window as any).__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: ev, payload: p }), [event, payload] as [string, unknown]);
 }
 
-export interface OverlayState { available: boolean; game_running: boolean; hotkey: string; fullscreen_exclusive: boolean }
-export const overlayState = (page: Page) => invoke<OverlayState>(page, 'overlay_state');
-
-/** Page CDP de la fenetre `overlay` (route #/overlay), si elle existe. */
-export function overlayPage(app: App): Page | undefined {
-  return app.page.context().pages().find((p) => /#\/overlay/.test(p.url()));
-}
+export interface StageState { attached: boolean; game: boolean; panel: boolean }
+export const stageState = (page: Page) => invoke<StageState>(page, 'stage_state');

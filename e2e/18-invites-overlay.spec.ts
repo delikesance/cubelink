@@ -1,10 +1,10 @@
-// E2E-18 : invitations « rejoins mon monde » entre deux vraies instances (A hote, B ami) et panneau en jeu (overlay).
+// E2E-18 : invitations « rejoins mon monde » entre deux vraies instances (A hote, B ami) et panneau en jeu (Scene).
 // Deux applications simultanees, dossiers de donnees temporaires, CUBELINK_TEST_MODE=1 (harnais `world`).
 import fs from 'node:fs';
 import path from 'node:path';
 import { test, expect, invoke, makeHostInstance } from './harness/fixtures';
 import {
-  setupPair, openWorld, invokeErr, record, recorded, until, sleep, emitEvent, overlayState, overlayPage,
+  setupPair, openWorld, invokeErr, record, recorded, until, sleep, emitEvent, stageState,
   TEST_HOTKEY, WORLD_NAME, type Invite,
 } from './helpers/e2e18-invites';
 
@@ -98,8 +98,11 @@ test('invitation : refusee sans monde ouvert (francais) ; ignorer supprime l\'in
   expect(await invitesOf(appB.page)).toEqual([]);
 });
 
-test('overlay : indisponible sans jeu ; apres launch://state running la fenetre #/overlay existe (sans barre de titre) ; exited la rend indisponible', async ({ appA, appB }) => {
-  const { keyA } = await setupPair({ appA, appB });
+test('panneau en jeu : raccourci valide a l\'enregistrement ; hors Scene (mode test) stage_state reste au repos et stage_panel ne fait rien, meme avec un jeu simule', async ({ appA, appB }) => {
+  // Le panneau « en jeu » est la bande de droite de la Scene (fenetre du jeu adoptee) : il n'existe pas de fenetre #/overlay.
+  // Le mode test n'active pas la Scene (CUBELINK_STAGE_TEST), on verifie donc le contrat hors Scene ; l'incrustation reelle
+  // est couverte par les tests d'integration de `host/` et l'essai manuel.
+  await setupPair({ appA, appB });
   const page = appA.page;
 
   // reglage : raccourci invalide refuse, valide accepte
@@ -117,64 +120,22 @@ test('overlay : indisponible sans jeu ; apres launch://state running la fenetre 
   expect((await invoke<Record<string, any>>(page, 'settings_set', { ...s, overlay_hotkey: 'F9' })).overlay_hotkey).toBe('F9');
   await invoke(page, 'settings_set', { ...s, overlay_hotkey: TEST_HOTKEY });
 
-  // sans jeu : indisponible, bascule refusee (francais)
-  const idle = await overlayState(page);
-  expect(idle).toMatchObject({ available: false, game_running: false, hotkey: TEST_HOTKEY });
-  const err = await invokeErr(page, 'overlay_toggle');
-  expect(err).toMatch(/aucun jeu/i);
-  expect(overlayPage(appA)).toBeUndefined();
+  // sans Scene : rien n'est rattache, ouvrir le panneau ne change rien
+  const idle = await stageState(page);
+  expect(idle).toEqual({ attached: false, game: false, panel: false });
+  await invoke(page, 'stage_panel', { open: true });
+  expect(await stageState(page)).toEqual(idle);
 
-  // une invitation en attente chez A pour que le panneau l'affiche (B ouvre un monde et invite A)
-  const hostB = await makeHostInstance(appB, { name: 'Monde de B' });
-  await openWorld(appB, hostB.id);
-  expect(await invokeErr(appB.page, 'friend_invite', { public_key: keyA })).toBeNull();
-  await until('invitation de B chez A', async () => (await invoke<Invite[]>(page, 'friend_invites')).length === 1);
-
-  // jeu simule en cours
+  // jeu simule en cours / fini : l'etat de la Scene ne bouge pas (aucune fenetre adoptee)
   await emitEvent(page, 'launch://state', { id: 'fake-instance', state: 'running', message: '' });
-  await until('overlay disponible', async () => (await overlayState(page)).available);
-  expect(await overlayState(page)).toMatchObject({ available: true, game_running: true, hotkey: TEST_HOTKEY });
-
-  expect(await invokeErr(page, 'overlay_toggle'), 'bascule acceptee pendant une partie').toBeNull();
-  const ov = await until('page CDP de la fenetre overlay', async () => overlayPage(appA), 30_000);
-  await ov.waitForSelector('main[data-route="overlay"]', { timeout: 20_000 });
-  expect(ov.url()).toMatch(/#\/overlay$/);
-
-  // contenu : amis, invitations, modpacks ; pas de barre de titre ; ni bandeau de mise a jour
-  await expect(ov.getByRole('heading', { name: /^Invitations/ })).toBeVisible({ timeout: 15_000 });
-  await expect(ov.getByRole('heading', { name: /^Amis/ })).toBeVisible();
-  await expect(ov.getByRole('heading', { name: 'Modpacks' })).toBeVisible();
-  await expect(ov.locator('header.titlebar')).toHaveCount(0);
-  await expect(ov.getByRole('button', { name: 'Réduire' })).toHaveCount(0);
-  await expect(ov.getByText('Monde de B')).toBeVisible({ timeout: 10_000 }); // invitation de B
-  await expect(ov.getByRole('button', { name: /Ignorer l'invitation de/ })).toBeVisible();
-  await expect(ov.getByRole('list', { name: 'Amis' }).getByRole('listitem')).toHaveCount(1);
-  await expect(ov.getByText(WORLD_NAME)).toBeVisible(); // modpack de A (instance posee)
-  await expect(ov.getByRole('button', { name: /^Lancer / })).toBeVisible();
-  await expect(ov.getByText(TEST_HOTKEY)).toBeVisible();
-  expect(await ov.evaluate(() => document.documentElement.hasAttribute('data-overlay'))).toBe(true);
-
-  // la fenetre principale n'est pas affectee
+  await sleep(500);
+  await invoke(page, 'stage_panel', { open: true });
+  expect(await stageState(page)).toEqual(idle);
+  await emitEvent(page, 'launch://state', { id: 'fake-instance', state: 'exited', message: '' });
+  await sleep(300);
+  expect(await stageState(page)).toEqual(idle);
   expect(appA.page.url()).not.toMatch(/overlay/);
   await expect(appA.page.locator('header.titlebar')).toBeVisible();
-
-  // fin de partie : indisponible, fenetre masquee, bascule refusee
-  await emitEvent(page, 'launch://state', { id: 'fake-instance', state: 'exited', message: '' });
-  await until('overlay indisponible', async () => !(await overlayState(page)).available);
-  expect(await overlayState(page)).toMatchObject({ available: false, game_running: false });
-  expect(await invokeErr(page, 'overlay_toggle')).toMatch(/aucun jeu/i);
-  // une preparation seule ne change rien
-  await emitEvent(page, 'launch://state', { id: 'fake-instance', state: 'preparing', message: '' });
-  await sleep(500);
-  expect((await overlayState(page)).available).toBe(false);
-
-  // desactive dans les reglages : indisponible meme avec un jeu
-  await emitEvent(page, 'launch://state', { id: 'fake-instance', state: 'running', message: '' });
-  await until('overlay disponible (2)', async () => (await overlayState(page)).available);
-  await invoke(page, 'settings_set', { ...s, overlay_hotkey: TEST_HOTKEY, overlay_enabled: false });
-  await until('overlay desactive', async () => !(await overlayState(page)).available);
-  expect(await invokeErr(page, 'overlay_toggle')).toMatch(/aucun jeu/i);
-  await emitEvent(page, 'launch://state', { id: 'fake-instance', state: 'exited', message: '' });
 });
 
 test('game_switch : sans jeu lance l\'instance ; avec un jeu le ferme puis relance (faux java)', async ({ appA, appB }) => {

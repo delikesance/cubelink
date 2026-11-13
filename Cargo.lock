@@ -1101,6 +1101,7 @@ dependencies = [
  "hex",
  "iroh",
  "iroh-blobs",
+ "raw-window-handle",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -1115,6 +1116,7 @@ dependencies = [
  "tokio",
  "windows-sys 0.61.2",
  "wiremock",
+ "x11rb",
 ]
 
 [[package]]
@@ -1162,6 +1164,7 @@ dependencies = [
  "serde_json",
  "tiny-skia",
  "windows-sys 0.61.2",
+ "x11rb",
 ]
 
 [[package]]

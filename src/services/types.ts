@@ -205,7 +205,7 @@ export interface PickFilesOptions { extensions: string[]; multiple?: boolean }
 export type Unsubscribe = () => void;
 
 /** Une méthode par commande (rejet = message d'erreur en français), un abonnement par événement. */
-export type UpdatePhase = "idle" | "checking" | "up_to_date" | "available" | "downloading" | "ready" | "error";
+export type UpdatePhase = "idle" | "checking" | "up_to_date" | "available" | "downloading" | "ready" | "available_manual" | "error";
 
 /** État de la mise à jour automatique du launcher (octets pour downloaded/total, message d'erreur en français). */
 export interface UpdateState {
@@ -218,6 +218,8 @@ export interface UpdateState {
   downloaded: number;
   total: number | null;
   message: string | null;
+  /** Page de la release (phase available_manual : paquet Nix ou lecture seule, pas d'installation automatique). */
+  url?: string | null;
 }
 
 export interface Services {

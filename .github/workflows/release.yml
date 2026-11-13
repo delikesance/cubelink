@@ -29,6 +29,12 @@ env:
   # Clé de signature des mises à jour (générée par `tauri signer generate`, sans mot de passe).
   TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
   TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+  # Clés embarquées à la compilation (`option_env!`) dans l'app publiée :
+  # - CUBELINK_CF_API_KEY : clé de développeur CurseForge (reconnaissance des mods au « Rejoindre », import, parcourir).
+  #   Extractible de l'installeur : choix assumé, comme les autres launchers.
+  # - CUBELINK_MS_CLIENT_ID : identifiant Azure (facultatif, l'app a une valeur par défaut).
+  CUBELINK_CF_API_KEY: ${{ secrets.CUBELINK_CF_API_KEY }}
+  CUBELINK_MS_CLIENT_ID: ${{ secrets.CUBELINK_MS_CLIENT_ID }}
 
 jobs:
   version:
@@ -55,6 +61,11 @@ jobs:
             echo "Le tag v$version existe déjà" >&2; exit 1
           fi
           if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then echo "::warning::secret TAURI_SIGNING_PRIVATE_KEY absent : les mises à jour ne seront pas signées"; fi
+          # Sans clé CurseForge, l'app publiée retomberait sur Modrinth seul (mods CurseForge « hors catalogue ») : on refuse de publier.
+          if [ -z "$CUBELINK_CF_API_KEY" ]; then
+            if [ "$publish" = "true" ]; then echo "::error::secret CUBELINK_CF_API_KEY absent : publication refusée (mods CurseForge non reconnus)"; exit 1; fi
+            echo "::warning::secret CUBELINK_CF_API_KEY absent : build sans CurseForge"
+          fi
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
 
@@ -78,7 +89,6 @@ jobs:
       - name: Agent LAN (jar Java)
         shell: bash
         run: JAVA_HOME="$JAVA_HOME_17_X64" bash core/resources/lan-agent/build.sh
-      # Pas de CUBELINK_CF_API_KEY ici : une clé embarquée serait extractible de l'installeur public.
       - name: Installeur MSI
         run: npx tauri build --bundles msi
       - uses: actions/upload-artifact@v4

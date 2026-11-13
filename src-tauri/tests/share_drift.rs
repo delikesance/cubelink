@@ -81,7 +81,7 @@ fn world(host: &Node) -> String {
 /// Lance un join et renvoie la dernière progression terminale (Done ou Failed).
 async fn join(guest: &Node, host_key: &str) -> TransferProgress {
     let before = guest.progress().len();
-    guest.st.join_start(host_key).await.unwrap();
+    guest.st.join_start(host_key, None).await.unwrap();
     for _ in 0..300 {
         let p = guest.progress();
         if let Some(t) = p[before..].iter().find(|p| matches!(p.phase, TransferPhase::Done | TransferPhase::Failed)) {

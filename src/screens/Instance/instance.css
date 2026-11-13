@@ -129,3 +129,9 @@
   .ipg-prep{width:100%}
 }
 .home-session time{font-variant-numeric:tabular-nums;color:var(--text)}
+/* Mémoire (RamPicker) dans la grille libellé | réglage de la page instance. */
+.ipg-panel .dr-mem{display:block}
+.ipg-panel .cl-ram{display:grid;grid-template-columns:minmax(200px,1fr) minmax(0,1.6fr);column-gap:var(--sp-6);row-gap:6px;align-items:center}
+.ipg-panel .cl-ram-head{grid-column:1;grid-row:1 / span 4;justify-content:flex-start;gap:var(--sp-3)}
+.ipg-panel .cl-ram>:not(.cl-ram-head){grid-column:2}
+@media (max-width:720px){.ipg-panel .cl-ram{grid-template-columns:minmax(0,1fr)}.ipg-panel .cl-ram>*{grid-column:1 !important;grid-row:auto !important}}

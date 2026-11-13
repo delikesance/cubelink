@@ -19,7 +19,8 @@ use crate::types::{Error, Instance, LoaderSpec, Manifest, Result};
 const GUEST_META: &str = "guest.json";
 const GUEST_SUFFIX: &str = " (invité)";
 const MAX_NAME_CHARS: usize = 64;
-const DEFAULT_GUEST_RAM_MB: u32 = 4096;
+/// Monde reçu d'un ami : RAM des paramètres globaux, sauf choix explicite avant de rejoindre.
+const DEFAULT_GUEST_RAM_MB: u32 = crate::instance::RAM_DEFAULT;
 
 /// Ce que l'appelant doit installer (réseau) avant de lancer le profil invité.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -1,5 +1,6 @@
 import { useId, useState, type FormEvent } from "react";
-import { Button, Field, Input } from "../../ui";
+import { Button, Field, Input, RamPicker, useDefaultRam } from "../../ui";
+import { useServices } from "../../app/context";
 import { validateName } from "../Create";
 import type { Instance, InstancePatch } from "../../services";
 import { ICONS, Icon, Panel } from "./Panel";
@@ -14,15 +15,12 @@ export interface SettingsDialogProps {
   onDelete: () => void;
 }
 
-const GB = 1024;
-const MIN_GB = 2;
-const memLabel = (mb: number) => `${Math.round((mb / GB) * 10) / 10} Go`.replace(".", ",");
-
 /** Panneau « Paramètres » d'une instance (A5) : nom, mémoire, Java, arguments JVM, dossier, zone dangereuse. */
 export function SettingsDialog({ instance, onSave, onClose, onOpenFolder, onDelete }: SettingsDialogProps) {
   const uid = useId();
   const [name, setName] = useState(instance.name);
   const [ram, setRam] = useState(instance.ram_mb);
+  const defaultRam = useDefaultRam(useServices());
   const [java, setJava] = useState(instance.java_path ?? "");
   const [jvm, setJvm] = useState(instance.jvm_args ?? "");
   const [nameError, setNameError] = useState<string | null>(null);
@@ -30,8 +28,6 @@ export function SettingsDialog({ instance, onSave, onClose, onOpenFolder, onDele
   const [busy, setBusy] = useState(false);
   const [confirmDel, setConfirmDel] = useState(false);
   const [saved, setSaved] = useState(false);
-
-  const maxGb = Math.max(16, Math.ceil(instance.ram_mb / GB));
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
@@ -60,17 +56,7 @@ export function SettingsDialog({ instance, onSave, onClose, onOpenFolder, onDele
         </Field>
 
         <div className="dr-mem">
-          <div className="dr-mem-head">
-            <label htmlFor={`${uid}-ram`} className="cl-label">Mémoire allouée</label>
-            <output htmlFor={`${uid}-ram`} className="dr-mem-val">{memLabel(ram)}</output>
-          </div>
-          <input
-            id={`${uid}-ram`} className="dr-range" type="range" min={MIN_GB} max={maxGb} step={1}
-            value={Math.min(maxGb, Math.max(MIN_GB, Math.round(ram / GB)))}
-            aria-valuetext={memLabel(ram)}
-            onChange={(e) => setRam(Number(e.target.value) * GB)}
-          />
-          <div className="dr-mem-scale"><span>{MIN_GB}&nbsp;Go</span><span>{maxGb}&nbsp;Go</span></div>
+          <RamPicker value={ram} onChange={(mb) => { setRam(mb); setSaved(false); }} defaultMb={defaultRam} disabled={busy} />
         </div>
 
         <Field label="Chemin de Java (facultatif)" id={`${uid}-java`} hint="Vide : Cubelink choisit et installe la bonne version.">

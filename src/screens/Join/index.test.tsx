@@ -27,12 +27,24 @@ const P = (o: Partial<TransferProgress> & { error?: string } = {}): TransferProg
 
 async function startJoin() {
   await screen.findByText("mods/mod-maison.jar");
-  fireEvent.click(screen.getByRole("checkbox"));
+  fireEvent.click(screen.getByRole("checkbox", { name: /confiance/ }));
   fireEvent.click(screen.getByRole("button", { name: "Rejoindre et jouer" }));
   await screen.findByRole("progressbar");
 }
 
 describe("Join", () => {
+  it("RAM : valeur des paramètres par défaut, ou valeur choisie transmise à joinStart", async () => {
+    const start = vi.fn(async () => {});
+    setup({ joinStart: start });
+    await screen.findByText("mods/mod-maison.jar");
+    const inherit = screen.getByRole("checkbox", { name: /Valeur des paramètres/ }) as HTMLInputElement;
+    expect(inherit.checked).toBe(true);
+    fireEvent.click(inherit);
+    fireEvent.change(screen.getByRole("slider", { name: "Mémoire allouée (Go)" }), { target: { value: "10" } });
+    await startJoin();
+    expect(start).toHaveBeenCalledWith("pk-alex", 10240);
+  });
+
   it("affiche le plan sans rien télécharger, titre focalisé", async () => {
     const start = vi.fn(async () => {});
     setup({ joinStart: start });
@@ -52,7 +64,7 @@ describe("Join", () => {
     expect(screen.getByText(/L'intégrité est vérifiée, pas la sécurité/)).toBeTruthy();
     const btn = screen.getByRole("button", { name: "Rejoindre et jouer" }) as HTMLButtonElement;
     expect(btn.disabled).toBe(true);
-    fireEvent.click(screen.getByRole("checkbox"));
+    fireEvent.click(screen.getByRole("checkbox", { name: /confiance/ }));
     expect(btn.disabled).toBe(false);
   });
 
@@ -60,7 +72,7 @@ describe("Join", () => {
     const { services, navigate, emit } = setup({ joinPlay: vi.fn(async () => {}) });
     const spy = vi.spyOn(services, "joinStart");
     await startJoin();
-    expect(spy).toHaveBeenCalledWith("pk-alex");
+    expect(spy).toHaveBeenCalledWith("pk-alex", 0);
     expect(navigate).not.toHaveBeenCalled();
     emit(P());
     expect(screen.getByRole("progressbar").getAttribute("aria-valuenow")).toBe("28");
@@ -132,7 +144,7 @@ describe("Join", () => {
   it("échec de joinStart : erreur sur le plan, pas de transfert", async () => {
     setup({ joinStart: vi.fn().mockRejectedValue(new Error("Ton ami est hors ligne.")) });
     await screen.findByText("mods/mod-maison.jar");
-    fireEvent.click(screen.getByRole("checkbox"));
+    fireEvent.click(screen.getByRole("checkbox", { name: /confiance/ }));
     fireEvent.click(screen.getByRole("button", { name: "Rejoindre et jouer" }));
     expect(await screen.findByText(/est hors ligne\./)).toBeTruthy();
     expect(screen.queryByRole("progressbar")).toBeNull();
@@ -143,7 +155,7 @@ describe("Join", () => {
     setup({ joinPlan: async () => ({ ...(await base.joinPlan("x")), unknown_mods: [] }) });
     await screen.findByRole("button", { name: "Rejoindre et jouer" });
     expect((screen.getByRole("button", { name: "Rejoindre et jouer" }) as HTMLButtonElement).disabled).toBe(false);
-    expect(screen.queryByRole("checkbox")).toBeNull();
+    expect(screen.queryByRole("checkbox", { name: /confiance/ })).toBeNull();
   });
 
   it("Annuler et Échap reviennent en arrière (fallback main)", async () => {

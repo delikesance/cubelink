@@ -19,6 +19,13 @@ const MAX_NAME_CHARS: usize = 64;
 const MAX_ID_LEN: usize = 96;
 pub const MIN_RAM_MB: u32 = 512;
 pub const MAX_RAM_MB: u32 = 65536;
+/// RAM d'une instance « Par défaut » : la valeur globale des paramètres, lue au lancement.
+pub const RAM_DEFAULT: u32 = 0;
+
+/// RAM réellement donnée au jeu : celle de l'instance, ou la valeur globale si l'instance suit le défaut.
+pub fn effective_ram_mb(instance_mb: u32, global_mb: u32) -> u32 {
+    if instance_mb == RAM_DEFAULT { global_mb } else { instance_mb }
+}
 
 /// Origine d'une instance : créée par l'utilisateur ou reçue d'un ami.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -297,7 +304,7 @@ fn now_secs() -> i64 {
 }
 
 fn check_ram(mb: u32) -> Result<()> {
-    if (MIN_RAM_MB..=MAX_RAM_MB).contains(&mb) {
+    if mb == RAM_DEFAULT || (MIN_RAM_MB..=MAX_RAM_MB).contains(&mb) {
         Ok(())
     } else {
         Err(Error::Invalid(format!("RAM hors bornes ({MIN_RAM_MB}-{MAX_RAM_MB} Mo) : {mb}")))
@@ -517,6 +524,19 @@ mod tests {
         assert!(s.update_ram(&i.id, 65536).is_ok());
         assert!(matches!(s.update_ram("nope", 1024), Err(Error::NotFound(_))));
         assert_eq!(s.get(&i.id).unwrap().ram_mb, 65536);
+    }
+
+    #[test]
+    fn ram_par_defaut_suit_la_valeur_globale() {
+        let d = tempfile::tempdir().unwrap();
+        let s = InstanceStore::new(d.path().to_path_buf());
+        let i = s.create("Défaut", "1.21.1", LoaderSpec { loader: Loader::Vanilla, version: String::new() }, RAM_DEFAULT).unwrap();
+        assert_eq!(i.ram_mb, RAM_DEFAULT);
+        assert_eq!(effective_ram_mb(i.ram_mb, 10240), 10240);
+        // Valeur propre à l'instance, puis retour au défaut.
+        assert_eq!(effective_ram_mb(s.update_ram(&i.id, 6144).unwrap().ram_mb, 10240), 6144);
+        assert_eq!(s.update(&i.id, None, Some(RAM_DEFAULT), None, None).unwrap().ram_mb, RAM_DEFAULT);
+        assert!(s.update_ram(&i.id, 100).is_err());
     }
 
     #[test]

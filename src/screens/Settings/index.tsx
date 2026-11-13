@@ -428,7 +428,7 @@ export default function Settings({ testConnection, clearCache }: SettingsProps =
       <div {...panel("java")}>
         <p className="set-sub">Réglages appliqués par défaut aux nouvelles instances. Chaque instance garde ses propres valeurs.</p>
         <Card className="set-two">
-          <Field label="Mémoire par défaut (Mo)" error={ramError}>
+          <Field label="Mémoire par défaut (Mo)" error={ramError} hint="Utilisée par toutes les instances réglées sur « Valeur des paramètres », dont les mondes de tes amis.">
             {(p) => (
               <Input {...p} type="number" inputMode="numeric" min={RAM_MIN_MB} max={RAM_MAX_MB} step={256} disabled={dis}
                 value={ram} onChange={(e) => setRam(e.target.value)} onBlur={commitRam}

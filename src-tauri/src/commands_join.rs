@@ -137,8 +137,13 @@ impl AppState {
         })
     }
 
-    pub async fn join_start(self: &Arc<Self>, friend_public_key: &str) -> Result<(), String> {
+    /// `ram_mb` : RAM de l'instance invitée (`None` ou 0 : « Par défaut », valeur globale).
+    pub async fn join_start(self: &Arc<Self>, friend_public_key: &str, ram_mb: Option<u32>) -> Result<(), String> {
         self.check_friend(friend_public_key)?;
+        let ram_mb = ram_mb.unwrap_or(core_lib::instance::RAM_DEFAULT);
+        if ram_mb != core_lib::instance::RAM_DEFAULT && !(core_lib::instance::MIN_RAM_MB..=core_lib::instance::MAX_RAM_MB).contains(&ram_mb) {
+            return Err("mémoire invalide".into());
+        }
         if lock(&self.join).is_some() {
             return Err("un transfert est déjà en cours".into());
         }
@@ -169,6 +174,12 @@ impl AppState {
         tokio::spawn(async move {
             me.emit_event("transfer://progress", &progress(TransferPhase::Preparing));
             let outcome = me.run_join(&key, hm, plan, cb, control, &last).await;
+            // RAM choisie avant de rejoindre (aussi pour une instance invitée réutilisée : même ami, même pack).
+            if outcome.is_ok() {
+                if let Some(id) = lock(&me.last_join_instance).clone() {
+                    let _ = me.instances.update_ram(&id, ram_mb);
+                }
+            }
             let last_p = lock(&last).clone();
             match outcome {
                 Ok(()) => {
@@ -310,8 +321,8 @@ pub async fn join_plan(state: State<'_, Arc<AppState>>, friend_public_key: Strin
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub async fn join_start(state: State<'_, Arc<AppState>>, friend_public_key: String) -> Result<(), String> {
-    state.inner().join_start(&friend_public_key).await
+pub async fn join_start(state: State<'_, Arc<AppState>>, friend_public_key: String, ram_mb: Option<u32>) -> Result<(), String> {
+    state.inner().join_start(&friend_public_key, ram_mb).await
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -368,7 +379,7 @@ mod tests {
             .add_friend(&Friend { public_key: key.clone(), name: "Bob".into(), trust: TrustLevel::Ask, added_at: 1 })
             .unwrap();
         assert!(st.join_plan(&key).await.unwrap_err().contains("pas encore disponible"));
-        assert!(st.join_start(&key).await.is_err());
+        assert!(st.join_start(&key, None).await.is_err());
         assert!(st.join_pause().unwrap_err().contains("aucun transfert"));
         assert!(st.join_cancel().is_err());
     }

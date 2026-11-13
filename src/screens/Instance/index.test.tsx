@@ -284,7 +284,7 @@ describe("Page modpack : onglet Réglages", () => {
     const panel = screen.getByRole("tabpanel");
     expect(within(panel).queryByRole("button", { name: "Annuler" })).toBeNull();
     fireEvent.change(within(panel).getByLabelText("Nom de l'instance"), { target: { value: "Renommé" } });
-    fireEvent.change(within(panel).getByLabelText("Mémoire allouée"), { target: { value: "8" } });
+    fireEvent.change(within(panel).getByLabelText("Mémoire allouée (Go)"), { target: { value: "8" } });
     fireEvent.change(within(panel).getByLabelText(/Chemin de Java/), { target: { value: "C:\\java\\bin\\java.exe" } });
     fireEvent.change(within(panel).getByLabelText("Arguments JVM"), { target: { value: "-XX:+UseG1GC" } });
     fireEvent.click(within(panel).getByRole("button", { name: "Enregistrer" }));

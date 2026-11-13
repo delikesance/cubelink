@@ -341,7 +341,7 @@ impl AppState {
         let instance = match instance_id {
             Some(id) => id.to_string(),
             None => {
-                self.join_start(public_key).await?;
+                self.join_start(public_key, None).await?;
                 let deadline = tokio::time::Instant::now() + JOIN_WAIT_TIMEOUT;
                 while lock(&self.join).is_some() {
                     if tokio::time::Instant::now() >= deadline {

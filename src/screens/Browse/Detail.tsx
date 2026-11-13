@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { navigate } from "../../app/router";
 import type { BrowseHit, BrowseInstallResult, BrowseVersion, ContentCheck, Instance, Services } from "../../services/types";
+import { RAM_DEFAULT, RamPicker, useDefaultRam } from "../../ui";
 
 export const SOURCE_LABEL = { curseforge: "CurseForge", modrinth: "Modrinth" } as const;
 
@@ -60,6 +61,8 @@ export function Detail({ hit, services, minecraft, loader, instance, installed, 
 
   // Pour un modpack, la version de Minecraft/loader des filtres n'est pas pertinente.
   const modpack = hit.kind === "modpack";
+  const [ram, setRam] = useState(RAM_DEFAULT);
+  const defaultRam = useDefaultRam(services);
   useEffect(() => {
     let cancelled = false;
     setVersions(null);
@@ -145,6 +148,7 @@ export function Detail({ hit, services, minecraft, loader, instance, installed, 
         source: hit.source, id: hit.id, kind: hit.kind,
         version_id: versionId || undefined,
         instance_id: modpack ? undefined : instance?.id,
+        ram_mb: modpack ? ram : undefined,
       });
       if (!alive.current) return;
       setResult(r);
@@ -229,6 +233,12 @@ export function Detail({ hit, services, minecraft, loader, instance, installed, 
           </p>
         )}
         {modpack && <p className="br-muted">Une nouvelle instance sera créée à partir de ce modpack.</p>}
+        {modpack && !openTarget && (
+          <div className="br-field">
+            <RamPicker value={ram} onChange={setRam} defaultMb={defaultRam} disabled={busy}
+              hint="Les gros modpacks (plus de 200 mods) demandent souvent 8 Go ou plus." />
+          </div>
+        )}
 
         {checkable && checking && <p className="br-muted" role="status">Vérification de la compatibilité avec les mods de « {instance?.name} »…</p>}
         {checkable && checkErr && <p className="br-muted" role="status">Compatibilité non vérifiée : {checkErr}</p>}

@@ -11,3 +11,4 @@ e2e/artifacts/
 .env.*
 !.env.example
 core/resources/cubelink-lan-agent.jar
+test-results/

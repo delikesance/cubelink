@@ -301,6 +301,7 @@ impl AppState {
         let version = resolve_loader_version(&minecraft, &loader).await.map_err(|e| user_msg(&e))?;
         let spec = LoaderSpec { loader: loader.loader, version };
         let inst = self.instances.create(name.trim(), &minecraft, spec, ram_mb).map_err(|e| user_msg(&e))?;
+        let _ = self.instances.mark_custom(&inst.id);
         let java = self.settings_get().java_path;
         let noop: Progress = Arc::new(|_| {});
         match ensure_game(&self.paths, &inst, java, noop).await {

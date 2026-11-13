@@ -96,7 +96,8 @@ struct State {
     /// Toute fenetre du jeu qu'on a touchee (garee, adoptee), telle qu'elle etait avant : de quoi la rendre. Une fenetre absente
     /// d'ici n'est plus (ou pas) a nous : le fil de la fenetre du jeu ignore les commandes qui la visent.
     origin: HashMap<isize, Origin>,
-    /// (largeur, hauteur, bande) de la decoupe actuellement appliquee a la fenetre du jeu.
+    /// (largeur, hauteur, bande) de la decoupe actuellement appliquee a la fenetre du jeu ; (0, 0, 0) : aucune. Bande 0 : region
+    /// pleine (le jeu en porte toujours une une fois pose, voir `game_window::apply_region`).
     region: (i32, i32, i32),
     /// Zone de jeu en coordonnees client de la fenetre du launcher (x, y, largeur, hauteur).
     view: (i32, i32, i32, i32),
@@ -130,6 +131,12 @@ struct State {
     close_asked: bool,
     /// Fenetres rendues au jeu par le dernier repli : `request_close` peut encore leur demander de se fermer.
     released: Vec<isize>,
+    /// LA fenetre du jeu est en plein ecran (derniere valeur annoncee par `HostEvent::Fullscreen`).
+    fullscreen: bool,
+    /// Dernier changement de `fullscreen` (voir `embedded::note_fullscreen`).
+    fullscreen_at: Option<Instant>,
+    /// Le focus est a rendre au jeu apres la bascule plein ecran du launcher (voir `embedded::refocus`).
+    refocus: bool,
     guards: Guards,
 }
 
@@ -228,10 +235,8 @@ fn dispatch(st: &mut State, ev: Event) -> Todo {
     for e in &effects {
         match *e {
             Effect::ShowCurtain { fresh: true } => st.curtain_t0 = Some(now),
-            Effect::ClearRegion => {
-                st.region = (0, 0, 0);
-                adopted = st.adopted.clone();
-            }
+            // `st.region` reste la decoupe REELLEMENT posee : c'est le fil du jeu qui la referme (en glissant) et la met a jour
+            Effect::ClearRegion => adopted = st.adopted.clone(),
             Effect::Detach => {
                 st.tracker = None;
                 st.pids.clear();
@@ -249,6 +254,9 @@ fn dispatch(st: &mut State, ev: Event) -> Todo {
                 st.pose_pending = false;
                 st.reframed_at = None;
                 st.close_asked = false;
+                st.fullscreen_at = None;
+                st.refocus = false;
+                st.fullscreen = false; // le launcher le quitte de lui-meme quand le jeu n'est plus rattache
             }
             Effect::CloseBarDone => {
                 if let Some(c) = st.closer.as_mut() {

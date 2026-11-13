@@ -22,7 +22,7 @@
   --shadow-soft:0 8px 24px rgba(0,0,0,.28);
   --shadow-drawer:-12px 0 40px rgba(0,0,0,.4);
   --edge-primary:0 4px 0 var(--accent-edge); --edge-primary-active:0 1px 0 var(--accent-edge);
-  --edge-secondary:0 3px 0 var(--edge-2);
+  --edge-secondary:0 4px 0 var(--edge-2);
   --edge-danger:0 4px 0 var(--danger-edge); --edge-danger-active:0 1px 0 var(--danger-edge);
   /* Espacements */
   --sp-1:4px; --sp-2:8px; --sp-3:12px; --sp-4:16px; --sp-5:24px; --sp-6:32px; --sp-7:48px;

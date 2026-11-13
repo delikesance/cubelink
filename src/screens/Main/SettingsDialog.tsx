@@ -7,7 +7,8 @@ import { ICONS, Icon, Panel } from "./Panel";
 export interface SettingsDialogProps {
   instance: Instance;
   onSave: (patch: InstancePatch) => Promise<void>;
-  onClose: () => void;
+  /** Absent : panneau en pleine page (pas de bouton Annuler, la page reste ouverte après l'enregistrement). */
+  onClose?: () => void;
   onOpenFolder: () => void;
   /** Suppression confirmée depuis la zone dangereuse. */
   onDelete: () => void;
@@ -28,6 +29,7 @@ export function SettingsDialog({ instance, onSave, onClose, onOpenFolder, onDele
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [confirmDel, setConfirmDel] = useState(false);
+  const [saved, setSaved] = useState(false);
 
   const maxGb = Math.max(16, Math.ceil(instance.ram_mb / GB));
 
@@ -38,9 +40,12 @@ export function SettingsDialog({ instance, onSave, onClose, onOpenFolder, onDele
     setNameError(problem);
     if (problem) { document.getElementById(`${uid}-name`)?.focus(); return; }
     setError(null);
+    setSaved(false);
     setBusy(true);
     try {
       await onSave({ name: name.trim(), ram_mb: ram, java_path: java.trim() || null, jvm_args: jvm.trim() });
+      // En tiroir le parent se ferme ; en page on reste là et on le dit.
+      if (!onClose) { setBusy(false); setSaved(true); }
     } catch (err) {
       setError(err instanceof Error && err.message ? err.message : String(err));
       setBusy(false);
@@ -49,7 +54,7 @@ export function SettingsDialog({ instance, onSave, onClose, onOpenFolder, onDele
 
   return (
     <Panel onClose={onClose}>
-      <form id={`${uid}-form`} className="dr-body dr-form" noValidate onSubmit={(e) => { void submit(e); }}>
+      <form id={`${uid}-form`} className="dr-body dr-form" noValidate onChange={() => setSaved(false)} onSubmit={(e) => { void submit(e); }}>
         <Field label="Nom de l'instance" id={`${uid}-name`} error={nameError ?? undefined}>
           {(p) => <Input {...p} type="text" value={name} autoComplete="off" onChange={(e) => { setName(e.target.value); setNameError(null); }} />}
         </Field>
@@ -81,6 +86,7 @@ export function SettingsDialog({ instance, onSave, onClose, onOpenFolder, onDele
         </div>
 
         {error && <p className="home-err" role="alert">{error}</p>}
+        {saved && !error && <p className="dr-notice" role="status">Réglages enregistrés.</p>}
 
         <div className="dr-danger">
           <div className="dr-danger-t">Zone dangereuse</div>
@@ -99,7 +105,7 @@ export function SettingsDialog({ instance, onSave, onClose, onOpenFolder, onDele
         </div>
       </form>
       <footer className="dr-foot">
-        <Button variant="secondary" onClick={onClose}>Annuler</Button>
+        {onClose && <Button variant="secondary" onClick={onClose}>Annuler</Button>}
         <Button type="submit" form={`${uid}-form`} loading={busy}>{busy ? "Enregistrement…" : "Enregistrer"}</Button>
       </footer>
     </Panel>

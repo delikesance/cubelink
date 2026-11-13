@@ -13,7 +13,7 @@ export function resolveState(raw: string | undefined): ErrorStateId {
 
 export type Action =
   | { kind: "go"; label: string; route: RouteName; primary?: boolean }
-  /** Relance join_start pour l'ami du contexte, puis ouvre l'installation ; sans ami : `fallback`. */
+  /** Retourne à l'écran Rejoindre de l'ami du contexte ; sans ami : `fallback`. */
   | { kind: "retry"; label: string; fallback: RouteName; primary?: boolean }
   | { kind: "reopen"; label: string }
   /** Relance le jeu pour l'instance du contexte (`instance`) ; sans instance : `fallback`. */

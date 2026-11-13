@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ShellContext } from "../../app/context";
-import { goBack, navigate } from "../../app/router";
+import { goBack, navigate, resetHistory, useLocation } from "../../app/router";
 import { createFakeServices } from "../../services/fake";
 import type { BrowseHit, BrowsePage, BrowseVersion, Instance, Services } from "../../services/types";
 import Browse, { DEBOUNCE_MS, formatDownloads } from "./index";
@@ -22,17 +22,24 @@ function setup(over: Record<string, unknown> = {}, params: Record<string, string
     browseSearch: vi.fn(async (): Promise<BrowsePage> => ({ hits: [hit()], total: 1 })),
     browseVersions: vi.fn(async () => [version()]),
     browseInstall: vi.fn(async () => ({ instance: inst, installed: ["a.jar"], missing: [] })),
+    browseCheck: vi.fn(async () => ({ installed: [], recommended: "v1", verdicts: [{ version_id: "v1", ok: true, problems: [] }], blockers: [] })),
     onBrowseProgress: vi.fn(() => () => {}),
     instancesList: vi.fn(async () => [inst]),
     minecraftVersions: vi.fn(async () => ["1.21.1", "1.20.1"]),
     ...over,
   } as unknown as Services;
-  const value = { services: svc, route: "browse", params, navigate, goBack, canGoBack: true, setTitle: () => {} };
-  render(<ShellContext.Provider value={value as never}><Browse /></ShellContext.Provider>);
+  if (Object.keys(params).length) window.location.hash = `#/browse?${new URLSearchParams(params).toString()}`;
+  // Les params viennent de l'URL (comme dans le Shell) : la fiche s'ouvre et se ferme via le hash.
+  function Harness() {
+    const loc = useLocation();
+    const value = { services: svc, route: "browse", params: loc.params, navigate, goBack, canGoBack: true, setTitle: () => {} };
+    return <ShellContext.Provider value={value as never}><Browse /></ShellContext.Provider>;
+  }
+  render(<Harness />);
   return svc as unknown as Record<string, ReturnType<typeof vi.fn>> & Services;
 }
 
-beforeEach(() => { window.location.hash = "#/browse"; });
+beforeEach(() => { window.location.hash = "#/browse"; resetHistory(); });
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); });
 
 describe("formatDownloads", () => {
@@ -132,29 +139,75 @@ describe("Parcourir : onglets et source", () => {
   });
 });
 
+const packArt = (o: Partial<NonNullable<Instance["art"]>> = {}) => ({
+  source: "modrinth" as const, project_id: "p1", title: "Super Pack", author: "alice", summary: "Résumé.",
+  color: null, icon: null, screenshots: [], page_url: "https://modrinth.com/modpack/p1", ...o,
+});
+
 describe("Parcourir : fiche et installation", () => {
-  it("modpack : fiche, source + lien, installation puis navigation vers main", async () => {
+  it("modpack : la fiche s'ouvre comme une page (URL), lien source, installation puis Ouvrir le modpack", async () => {
     const svc = setup();
     fireEvent.click(await screen.findByRole("button", { name: /Super Pack/ }));
-    const dlg = await screen.findByRole("dialog", { name: "Super Pack" });
-    expect(dlg.getAttribute("aria-modal")).toBe("true");
+    expect(await screen.findByRole("heading", { name: "Super Pack" })).toBeTruthy();
+    expect(window.location.hash).toContain("detail=modrinth%3Ap1");
+    expect(screen.queryByRole("dialog")).toBeNull();
     const link = screen.getByRole("link", { name: /Ouvrir la page sur Modrinth/ });
     expect(link.getAttribute("href")).toBe("https://modrinth.com/modpack/p1");
     expect(link.getAttribute("rel")).toContain("noopener");
     expect(link.getAttribute("target")).toBe("_blank");
     await screen.findByRole("option", { name: /1\.0\.0/ });
     fireEvent.click(screen.getByRole("button", { name: "Installer le modpack" }));
-    await waitFor(() => expect(window.location.hash).toBe("#/main"));
+    fireEvent.click(await screen.findByRole("button", { name: "Ouvrir le modpack" }));
+    expect(window.location.hash).toBe("#/instance?id=i1");
     expect(svc.browseInstall).toHaveBeenCalledWith({ source: "modrinth", id: "p1", kind: "modpack", version_id: "v1", instance_id: undefined });
   });
 
-  it("Échap ferme la fiche sans quitter l'écran", async () => {
+  it("Retour et Échap ramènent à la liste", async () => {
     setup();
     fireEvent.click(await screen.findByRole("button", { name: /Super Pack/ }));
-    const dlg = await screen.findByRole("dialog");
-    fireEvent.keyDown(dlg, { key: "Escape" });
-    expect(screen.queryByRole("dialog")).toBeNull();
-    expect(window.location.hash).toBe("#/browse");
+    await screen.findByRole("heading", { name: "Super Pack" });
+    fireEvent.click(screen.getByRole("button", { name: "Retour aux résultats" }));
+    await waitFor(() => expect(window.location.hash).toBe("#/browse"));
+    expect(await screen.findByRole("tablist")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /Super Pack/ }));
+    await screen.findByRole("heading", { name: "Super Pack" });
+    fireEvent.keyDown(document.body, { key: "Escape" });
+    await waitFor(() => expect(window.location.hash).toBe("#/browse"));
+    expect(await screen.findByRole("tablist")).toBeTruthy();
+  });
+
+  it("ouverture directe par l'URL : fiche retrouvée dans les résultats chargés", async () => {
+    setup({}, { detail: "modrinth:p1" });
+    expect(await screen.findByRole("heading", { name: "Super Pack" })).toBeTruthy();
+  });
+
+  it("ouverture directe d'un pack installé sans résultat : fiche reconstruite, bouton Ouvrir", async () => {
+    setup({
+      browseSearch: vi.fn(async () => ({ hits: [], total: 0 })),
+      instancesList: vi.fn(async () => [{ ...inst, art: packArt() }]),
+    }, { detail: "modrinth:p1" });
+    expect(await screen.findByRole("heading", { name: "Super Pack" })).toBeTruthy();
+    fireEvent.click(await screen.findByRole("button", { name: "Ouvrir" }));
+    expect(window.location.hash).toBe("#/instance?id=i1");
+  });
+
+  it("fiche introuvable : message et retour à la liste", async () => {
+    setup({ browseSearch: vi.fn(async () => ({ hits: [], total: 0 })) }, { detail: "modrinth:zzz" });
+    expect(await screen.findByText("Cette fiche est introuvable.")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Retour aux résultats" }));
+    await waitFor(() => expect(window.location.hash).toBe("#/browse"));
+  });
+
+  it("modpack déjà installé : Ouvrir (page instance) au lieu d'Installer, réinstaller en secondaire", async () => {
+    const svc = setup({ instancesList: vi.fn(async () => [{ ...inst, art: packArt() }]) });
+    fireEvent.click(await screen.findByRole("button", { name: /Super Pack/ }));
+    await screen.findByRole("heading", { name: "Super Pack" });
+    expect(await screen.findByText(/déjà installé/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Installer le modpack" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Réinstaller" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Ouvrir" }));
+    expect(window.location.hash).toBe("#/instance?id=i1");
+    expect(svc.browseInstall).not.toHaveBeenCalled();
   });
 
   it("mod sans instance : message, aucun appel", async () => {
@@ -178,6 +231,7 @@ describe("Parcourir : fiche et installation", () => {
     await waitFor(() => expect(screen.getByLabelText("Loader")).toHaveProperty("value", "fabric"));
     fireEvent.click(await screen.findByRole("button", { name: /Sodium/ }));
     await screen.findByRole("option", { name: /1\.0\.0/ });
+    await waitFor(() => expect((screen.getByRole("button", { name: "Installer" }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByRole("button", { name: "Installer" }));
     await act(async () => { emit({ done: 1, total: 4, label: "Téléchargement de sodium.jar" }); });
     expect(screen.getByText("Téléchargement de sodium.jar")).toBeTruthy();
@@ -188,12 +242,61 @@ describe("Parcourir : fiche et installation", () => {
     expect(svc.browseInstall).toHaveBeenCalledWith(expect.objectContaining({ kind: "mod", instance_id: "i1" }));
   });
 
+  const modSetup = (over: Record<string, unknown>) => setup({
+    browseSearch: vi.fn(async () => ({ hits: [hit({ kind: "mod", name: "Iris" })], total: 1 })),
+    browseVersions: vi.fn(async () => [version({ id: "v2", name: "1.11.4" }), version({ id: "v1", name: "1.10.9" })]),
+    ...over,
+  }, { kind: "mod", instance: "i1" });
+
+  it("mod : la version recommandée (compatible avec les autres mods) est choisie par défaut", async () => {
+    const svc = modSetup({
+      browseCheck: vi.fn(async () => ({ installed: [], recommended: "v1", blockers: [],
+        verdicts: [{ version_id: "v2", ok: false, problems: ["Iris : Requiert Sodium 0.9.x"] }, { version_id: "v1", ok: true, problems: [] }] })),
+    });
+    await waitFor(() => expect(screen.getByLabelText("Loader")).toHaveProperty("value", "fabric"));
+    fireEvent.click(await screen.findByRole("button", { name: /Iris/ }));
+    await waitFor(() => expect((screen.getByLabelText("Version") as HTMLSelectElement).value).toBe("v1"));
+    expect(screen.getByRole("option", { name: /1\.10\.9.*\(recommandée\)/ })).toBeTruthy();
+    expect(screen.getByRole("option", { name: /1\.11\.4.*\(incompatible\)/ })).toBeTruthy();
+    // Version incompatible choisie à la main : installation impossible, raison affichée.
+    fireEvent.change(screen.getByLabelText("Version"), { target: { value: "v2" } });
+    expect(await screen.findByText("Iris : Requiert Sodium 0.9.x")).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Installer" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(svc.browseCheck).toHaveBeenCalledWith("modrinth", "p1", "mod", "i1");
+  });
+
+  it("mod incompatible avec un mod présent : Installer bloqué, mods en cause listés", async () => {
+    const svc = modSetup({
+      browseCheck: vi.fn(async () => ({ installed: [], recommended: null, verdicts: [], blockers: ["Iris : Incompatible avec Embeddium."] })),
+    });
+    await waitFor(() => expect(screen.getByLabelText("Loader")).toHaveProperty("value", "fabric"));
+    fireEvent.click(await screen.findByRole("button", { name: /Iris/ }));
+    expect(await screen.findByText(/Aucune version n'est compatible avec les mods déjà présents/)).toBeTruthy();
+    expect(screen.getByText("Iris : Incompatible avec Embeddium.")).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Installer" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(svc.browseInstall).not.toHaveBeenCalled();
+  });
+
+  it("mod déjà installé : Désinstaller à la place d'Installer", async () => {
+    let installed = ["iris-1.10.9.jar"];
+    const svc = modSetup({
+      browseCheck: vi.fn(async () => ({ installed, recommended: "v1", verdicts: [{ version_id: "v1", ok: true, problems: [] }], blockers: [] })),
+      modsRemove: vi.fn(async () => { installed = []; }),
+    });
+    await waitFor(() => expect(screen.getByLabelText("Loader")).toHaveProperty("value", "fabric"));
+    fireEvent.click(await screen.findByRole("button", { name: /Iris/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Désinstaller" }));
+    expect(screen.queryByRole("button", { name: "Installer" })).toBeNull();
+    await waitFor(() => expect(svc.modsRemove).toHaveBeenCalledWith("i1", "iris-1.10.9.jar"));
+    expect(await screen.findByRole("button", { name: "Installer" })).toBeTruthy();
+  });
+
   it("non téléchargeable : Installer désactivé, message et lien Ouvrir sur CurseForge", async () => {
     setup({
       browseSearch: vi.fn(async () => ({ hits: [hit({ source: "curseforge", downloadable: false, page_url: "https://www.curseforge.com/x" })], total: 1 })),
     });
     fireEvent.click(await screen.findByRole("button", { name: /Super Pack/ }));
-    await screen.findByRole("dialog");
+    await screen.findByRole("heading", { name: "Super Pack" });
     expect((screen.getByRole("button", { name: "Installer le modpack" }) as HTMLButtonElement).disabled).toBe(true);
     expect(screen.getByText(/n'est pas téléchargeable/)).toBeTruthy();
     expect(screen.getByRole("link", { name: "Ouvrir sur CurseForge" }).getAttribute("href")).toBe("https://www.curseforge.com/x");

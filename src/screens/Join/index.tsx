@@ -3,7 +3,11 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import "./join.css";
 import { useBack, useShell } from "../../app/context";
 import { Button, Card } from "../../ui";
+import { buildStates } from "../Error/states";
 import { Avatar } from "../Friends/Avatar";
+import { classifyFailure } from "../Install/format";
+import { TransferPanel, type TransferFailure } from "../Install/TransferPanel";
+import { useTransfer } from "../Install/useTransfer";
 import type { JoinPlan, Presence } from "../../services/types";
 
 type PlanState =
@@ -24,6 +28,14 @@ export default function Join() {
   const [trusted, setTrusted] = useState(false);
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
+  // « plan » : ce qui sera reçu ; « transfer » : réception, installation, lancement et erreurs, sur place.
+  const [stage, setStage] = useState<"plan" | "transfer">("plan");
+  const stageRef = useRef(stage);
+  stageRef.current = stage;
+  const t = useTransfer(services);
+  const [playing, setPlaying] = useState(false);
+  const [playError, setPlayError] = useState<string | null>(null);
+  const autoPlayed = useRef(false);
 
   // Nom et présence réels du pair (sans eux, libellé neutre).
   useEffect(() => {
@@ -69,7 +81,8 @@ export default function Join() {
     setStartError(null);
     try {
       await services.joinStart(friend);
-      navigate("install", { friend });
+      t.reset();
+      setStage("transfer");
     } catch (e) {
       setStartError(friendlyJoinError(e, peerName.current));
       setStarting(false);
@@ -81,7 +94,7 @@ export default function Join() {
   cancelRef.current = cancel;
   useEffect(() => {
     const onEsc = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !e.defaultPrevented) { e.preventDefault(); cancelRef.current(); }
+      if (e.key === "Escape" && !e.defaultPrevented && stageRef.current === "plan") { e.preventDefault(); cancelRef.current(); }
     };
     document.addEventListener("keydown", onEsc);
     return () => document.removeEventListener("keydown", onEsc);
@@ -89,6 +102,45 @@ export default function Join() {
 
   const name = peer?.name ?? "ton ami";
   peerName.current = peer?.name ?? "";
+
+  const joinAndPlay = useCallback(async () => {
+    if (!friend) return;
+    setPlaying(true);
+    setPlayError(null);
+    try {
+      const id = params.instance ?? (await services.instancesList())[0]?.id;
+      if (!id) throw new Error("Instance introuvable.");
+      try { await services.joinPlay(friend, id); } catch (e) { setPlayError(friendlyJoinError(e, peerName.current)); return; }
+      navigate("main");
+    } catch (e) {
+      setPlayError(friendlyJoinError(e, peerName.current));
+    } finally { setPlaying(false); }
+  }, [services, friend, params.instance, navigate]);
+
+  // Transfert terminé : le jeu se lance et rejoint l'ami (une seule fois).
+  useEffect(() => {
+    if (stage === "transfer" && t.phase === "done" && !autoPlayed.current) {
+      autoPlayed.current = true;
+      void joinAndPlay();
+    }
+  }, [stage, t.phase, joinAndPlay]);
+
+  const retryTransfer = () => t.run(async () => {
+    if (!friend) return;
+    t.reset();
+    setPlayError(null);
+    autoPlayed.current = false;
+    await services.joinStart(friend);
+  }, "Impossible de relancer le transfert.");
+
+  // Cause identifiable d'un échec : textes partagés avec l'écran Erreur (pas ceux de la connexion Microsoft ni Java).
+  const failKind = t.phase === "failed" ? classifyFailure(t.p?.error) : null;
+  let failure: TransferFailure | undefined;
+  if (failKind === "friend-left" || failKind === "bad-hash" || failKind === "disk-full") {
+    const file = /[\w.+-]+\.jar/i.exec(t.p?.error ?? "")?.[0];
+    const def = buildStates({ friend: peer?.name, file })[failKind];
+    failure = { title: def.title, body: def.body, more: def.more };
+  }
   const online = peer?.presence === "online";
   const cancelBtn = <Button variant="secondary" onClick={cancel}>{friend ? "Annuler" : "Retour à l'accueil"}</Button>;
 
@@ -168,6 +220,36 @@ export default function Join() {
           )}
         </div>
       </Card>
+    );
+  }
+
+  if (friend && stage === "transfer") {
+    return (
+      <div className="join">
+        <header className="join-head enter">
+          <h1 ref={title} tabIndex={-1}>Rejoindre {name}</h1>
+          <p>{t.phase === "done" ? "Installation terminée, lancement du jeu." : t.phase === "failed" ? "Le transfert n'a pas abouti." : "Installation en cours. Les fichiers sont vérifiés à la réception."}</p>
+        </header>
+        <section aria-label="Rejoindre un ami" className="join-extra">
+          <TransferPanel
+            t={t}
+            failure={failure}
+            extraError={playError}
+            status={t.phase === "done" && playing ? <span role="status">Lancement et connexion…</span> : null}
+            extra={
+              t.phase === "failed"
+                ? <Button disabled={t.busy} onClick={() => { void retryTransfer(); }}>Réessayer</Button>
+                : t.phase === "done" && playError
+                  ? <Button size="lg" disabled={t.busy || playing} onClick={() => { void joinAndPlay(); }}>Réessayer</Button>
+                  : null
+            }
+            onCancelled={() => navigate("main")}
+            onHome={() => navigate("main")}
+            onPause={() => services.joinPause()}
+            onResume={() => services.joinResume()}
+          />
+        </section>
+      </div>
     );
   }
 

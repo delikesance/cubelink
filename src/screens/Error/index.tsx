@@ -22,7 +22,6 @@ export default function ErrorScreen() {
     detail: params.detail || undefined,
   };
   const def = buildStates(ctx)[id];
-  const [retryFailed, setRetryFailed] = useState(false);
   const title = useRef<HTMLHeadingElement>(null);
   const [busy, setBusy] = useState(false);
   const [reopenFailed, setReopenFailed] = useState(false);
@@ -44,14 +43,9 @@ export default function ErrorScreen() {
     return () => { alive = false; };
   }, [services, friendKey, params.name]);
 
-  const retry = async (a: Action & { kind: "retry" }) => {
-    if (!friendKey) { navigate(a.fallback); return; }
-    setBusy(true);
-    setRetryFailed(false);
-    try {
-      await services.joinStart(friendKey);
-      navigate("install", { friend: friendKey });
-    } catch { setRetryFailed(true); } finally { setBusy(false); }
+  // Le parcours ami se déroule maintenant dans l'écran Rejoindre : on y retourne (le plan est recalculé).
+  const retry = (a: Action & { kind: "retry" }) => {
+    navigate(friendKey ? "join" : a.fallback, friendKey ? { friend: friendKey } : undefined);
   };
 
   const reopen = async () => {
@@ -91,7 +85,7 @@ export default function ErrorScreen() {
       return <Button key={a.label} loading={busy} onClick={() => { void reopen(); }}>{a.label}</Button>;
     }
     if (a.kind === "retry") {
-      return <Button key={a.label} variant={variant(a)} loading={busy} onClick={() => { void retry(a); }}>{a.label}</Button>;
+      return <Button key={a.label} variant={variant(a)} onClick={() => retry(a)}>{a.label}</Button>;
     }
     if (a.kind === "launch") {
       return <Button key={a.label} variant={variant(a)} loading={busy} onClick={() => { void relaunch(a); }}>{a.label}</Button>;
@@ -118,7 +112,6 @@ export default function ErrorScreen() {
         </div>
         <p className="err-body enter" style={stagger(1)}>{def.body}</p>
         {reopenFailed && <p className="err-note" role="alert">Impossible de rouvrir la fenêtre. Réessaie dans un instant.</p>}
-        {retryFailed && <p className="err-note" role="alert">Impossible de relancer le transfert. Vérifie que ton ami est en ligne, puis réessaie.</p>}
         {launchFailed && <p className="err-note" role="alert">{launchFailed}</p>}
         <div className="err-actions enter" style={stagger(2)}>{def.actions.map(renderAction)}</div>
         {hasMore && (

@@ -19,18 +19,25 @@ describe("routeur", () => {
   it("route par défaut : login", () => {
     render(<Shell services={createFakeServices({ tickMs: 0 })} />);
     expect(screen.getByRole("main").getAttribute("data-route")).toBe("login");
-    expect(document.querySelector(".titlebar-title")!.textContent).toBe("Cubelink · Connexion");
+    expect(document.querySelector(".titlebar-title")!.textContent).toBe("Connexion");
   });
 
   it("navigation par hash et focus sur le contenu", () => {
     render(<Shell services={createFakeServices({ tickMs: 0 })} />);
-    go("#/friends");
+    go("#/legal");
     const main = screen.getByRole("main");
-    expect(main.getAttribute("data-route")).toBe("friends");
+    expect(main.getAttribute("data-route")).toBe("legal");
     // le focus est dans le contenu : sur le h1 de l'écran s'il en a un (il le prend lui-même), sinon sur <main> (shell)
     const h1 = main.querySelector("h1");
     expect(document.activeElement).toBe(h1 ?? main);
-    expect(document.querySelector(".titlebar-title")!.textContent).toBe("Cubelink · Amis");
+    expect(document.querySelector(".titlebar-title")!.textContent).toBe("Mentions légales");
+  });
+
+  it("l'ancien écran Amis ouvre Paramètres > Amis", () => {
+    render(<Shell services={createFakeServices({ tickMs: 0 })} />);
+    go("#/friends");
+    expect(screen.getByRole("main").getAttribute("data-route")).toBe("settings");
+    expect(screen.getByRole("tab", { name: "Amis" }).getAttribute("aria-selected")).toBe("true");
   });
 
   it("route inconnue : repli sur login", () => {

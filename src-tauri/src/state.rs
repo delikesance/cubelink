@@ -98,6 +98,8 @@ pub struct AppState {
     pub instances: Arc<InstanceStore>,
     pub identity: Arc<Identity>,
     pub friends: Arc<FriendsDb>,
+    /// Dernière fois que chaque ami a été vu en ligne.
+    pub last_seen: Arc<crate::last_seen::LastSeen>,
     pub settings: Arc<Mutex<Settings>>,
     pub profile: Mutex<Option<Profile>>,
     pub pending_login: Mutex<Option<DeviceCode>>,
@@ -357,7 +359,9 @@ impl AppState {
         let settings = crate::commands_settings::load_settings(&paths.settings_file);
         let stage = crate::stage::Stage::default();
         stage.set_wanted(settings.embedded_game);
+        let last_seen = Arc::new(crate::last_seen::LastSeen::open(paths.p2p.join("last_seen.json")));
         Ok(Self {
+            last_seen,
             instances: Arc::new(InstanceStore::new(paths.instances.clone())),
             store: Arc::new(store),
             identity: Arc::new(identity),

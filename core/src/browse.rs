@@ -194,7 +194,7 @@ fn parse_loader(s: Option<&str>) -> Result<Option<Loader>> {
     }
 }
 
-fn safe_token(s: &str, what: &str) -> Result<()> {
+pub(crate) fn safe_token(s: &str, what: &str) -> Result<()> {
     if s.is_empty() || s.len() > 64 || !s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '+')) {
         return Err(invalid(format!("{what} invalide")));
     }
@@ -219,7 +219,7 @@ fn clean_sort(s: Option<&str>) -> Result<Option<&'static str>> {
 }
 
 /// Loaders acceptés pour un loader d'instance (Quilt exécute aussi les mods Fabric). Vide : tout.
-fn accepted(l: Option<Loader>) -> Vec<&'static str> {
+pub(crate) fn accepted(l: Option<Loader>) -> Vec<&'static str> {
     match l {
         None | Some(Loader::Vanilla) => vec![],
         Some(Loader::Quilt) => vec!["quilt", "fabric"],
@@ -246,7 +246,7 @@ fn server_loader(acc: &[&str], l: Option<Loader>) -> Option<Loader> {
     }
 }
 
-fn check_url(url: &str, source: BrowseSource, allow_loopback: bool) -> Result<()> {
+pub(crate) fn check_url(url: &str, source: BrowseSource, allow_loopback: bool) -> Result<()> {
     let u = url::Url::parse(url).map_err(|_| invalid("URL de téléchargement invalide"))?;
     let host = u.host_str().unwrap_or("").to_ascii_lowercase();
     if u.username() != "" || u.password().is_some() {
@@ -343,7 +343,7 @@ fn parse_id(id: &str) -> Result<u64> {
     id.trim().parse::<u64>().map_err(|_| invalid("identifiant CurseForge invalide"))
 }
 
-async fn modrinth_versions(p: &Providers, id: &str, kind: BrowseKind, mc: Option<&str>, loader: Option<Loader>) -> Result<Vec<Version>> {
+pub(crate) async fn modrinth_versions(p: &Providers, id: &str, kind: BrowseKind, mc: Option<&str>, loader: Option<Loader>) -> Result<Vec<Version>> {
     safe_token(id, "identifiant Modrinth")?;
     let loader = if kind.uses_loader() { loader } else { None };
     let acc = accepted(loader);
@@ -353,7 +353,7 @@ async fn modrinth_versions(p: &Providers, id: &str, kind: BrowseKind, mc: Option
     Ok(v)
 }
 
-async fn cf_versions(p: &Providers, id: &str, kind: BrowseKind, mc: Option<&str>, loader: Option<Loader>) -> Result<Vec<CfFile>> {
+pub(crate) async fn cf_versions(p: &Providers, id: &str, kind: BrowseKind, mc: Option<&str>, loader: Option<Loader>) -> Result<Vec<CfFile>> {
     let loader = if kind.uses_loader() { loader } else { None };
     let acc = accepted(loader);
     let mut v = p.cf.mod_files(parse_id(id)?, mc, server_loader(&acc, loader).and_then(cfapi::loader_type)).await?;
@@ -396,14 +396,14 @@ pub async fn versions(p: &Providers, source: &str, id: &str, kind: &str, minecra
 // ---------- Plan d'installation ----------
 
 #[derive(Debug, Clone)]
-struct Planned {
-    source: BrowseSource,
-    project_id: String,
-    name: String,
-    url: String,
-    size: u64,
-    sha1: String,
-    sha512: String,
+pub(crate) struct Planned {
+    pub(crate) source: BrowseSource,
+    pub(crate) project_id: String,
+    pub(crate) name: String,
+    pub(crate) url: String,
+    pub(crate) size: u64,
+    pub(crate) sha1: String,
+    pub(crate) sha512: String,
 }
 
 fn check_name(name: &str, ext: &str) -> Result<()> {
@@ -414,7 +414,7 @@ fn check_name(name: &str, ext: &str) -> Result<()> {
     Ok(())
 }
 
-fn plan_modrinth(p: &Providers, v: &Version, ext: &str) -> Result<Planned> {
+pub(crate) fn plan_modrinth(p: &Providers, v: &Version, ext: &str) -> Result<Planned> {
     let f = v
         .files
         .iter()
@@ -436,7 +436,7 @@ fn plan_modrinth(p: &Providers, v: &Version, ext: &str) -> Result<Planned> {
 
 const NOT_DOWNLOADABLE: &str = "ce fichier ne peut pas être téléchargé par Cubelink : l'auteur a désactivé la distribution par des applications tierces. Ouvre-le sur CurseForge.";
 
-fn plan_cf(p: &Providers, f: &CfFile, mod_id: u64, ext: &str) -> Result<Planned> {
+pub(crate) fn plan_cf(p: &Providers, f: &CfFile, mod_id: u64, ext: &str) -> Result<Planned> {
     let url = f.url().ok_or_else(|| invalid(NOT_DOWNLOADABLE))?;
     check_name(&f.file_name, ext)?;
     check_url(url, BrowseSource::Curseforge, p.allow_loopback)?;
@@ -487,7 +487,7 @@ async fn plan_main(p: &Providers, input: &BrowseInstallInput, mc: Option<&str>, 
     }
 }
 
-fn no_compatible(mc: Option<&str>, loader: Option<Loader>) -> Error {
+pub(crate) fn no_compatible(mc: Option<&str>, loader: Option<Loader>) -> Error {
     let l = accepted(loader).join("/");
     Error::NotFound(format!("aucune version compatible avec Minecraft {} ({})", mc.unwrap_or("?"), if l.is_empty() { "tout loader" } else { &l }))
 }
@@ -563,14 +563,14 @@ async fn plan_deps(p: &Providers, first: Vec<DepRef>, mc: Option<&str>, loader: 
     out
 }
 
-fn installed_project(game_dir: &Path, source: &str, id: &str) -> bool {
+pub(crate) fn installed_project(game_dir: &Path, source: &str, id: &str) -> bool {
     let dir = game_dir.join("mods");
     mods::files_of_project(game_dir, source, id).iter().any(|f| dir.join(f).is_file() || dir.join(format!("{f}.disabled")).is_file())
 }
 
 // ---------- Téléchargement ----------
 
-async fn fetch(pl: &Planned, store_root: &Path, index: &StoreIndex, dl: &DlOptions) -> Result<crate::providers::modrinth_dl::StoredObject> {
+pub(crate) async fn fetch(pl: &Planned, store_root: &Path, index: &StoreIndex, dl: &DlOptions) -> Result<crate::providers::modrinth_dl::StoredObject> {
     if pl.sha1.is_empty() && pl.sha512.is_empty() {
         return fetch_into_store_unverified(&pl.url, MAX_FILE_BYTES, store_root, index, dl).await;
     }

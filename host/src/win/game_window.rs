@@ -175,7 +175,20 @@ fn serve(rx: mpsc::Receiver<Cmd>) {
             }
             Cmd::ClearRegion(wins) => {
                 for g in wins.into_iter().filter(|g| ours(s, *g)) {
-                    unsafe { SetWindowRgn(hw(g), null_mut(), 1) };
+                    let (cur, (w, h, pw)) = {
+                        let st = s.lock();
+                        (st.current == Some(g), st.region)
+                    };
+                    unsafe {
+                        if cur && w > 0 {
+                            // LA fenetre du jeu : la bande se referme en glissant (le panneau s'efface dans le meme temps), la
+                            // region redevient pleine
+                            animate_region(s, hw(g), w, h, pw, 0);
+                            s.lock().region = (w, h, 0);
+                        } else {
+                            SetWindowRgn(hw(g), null_mut(), 1);
+                        }
+                    }
                 }
             }
             Cmd::Release { wins, reason, detail } => release_now(s, wins, reason, detail),
@@ -390,12 +403,40 @@ pub(super) unsafe fn hide_from_taskbar(win: HWND) {
 }
 
 /// Decoupe la bande de droite de la fenetre du jeu : le launcher (dessous) y apparait, le reste du jeu reste visible et intact.
+/// Sans panneau : region PLEINE, jamais aucune region. En plein ecran, une fenetre sans region qui couvre l'ecran est affichee
+/// par Windows sans composition (« independent flip ») ; en sortir, ou poser une premiere region, coute une image noire (vu
+/// par le joueur a chaque Ctrl+Maj+C, en plein ecran seulement). Avec une region permanente, ouvrir le panneau n'en change que
+/// la forme.
 unsafe fn apply_region(g: HWND, w: i32, h: i32, pw: i32) {
-    if pw > 0 && pw < w {
-        SetWindowRgn(g, CreateRectRgn(0, 0, w - pw, h), 1);
-    } else {
-        SetWindowRgn(g, null_mut(), 1);
+    let keep = if pw > 0 && pw < w { w - pw } else { w };
+    SetWindowRgn(g, CreateRectRgn(0, 0, keep, h), 1);
+}
+
+/// Duree du glissement de la bande du panneau ; meme duree et meme courbe que le panneau cote interface (`overlay.css`).
+const REGION_SLIDE: std::time::Duration = std::time::Duration::from_millis(180);
+
+/// Pur : largeur de bande a l'instant `t` (0..=1) d'un glissement de `from` a `to`, sortie douce (cubique).
+pub(crate) fn region_step(from: i32, to: i32, t: f32) -> i32 {
+    let t = t.clamp(0.0, 1.0);
+    let e = 1.0 - (1.0 - t).powi(3);
+    from + ((to - from) as f32 * e).round() as i32
+}
+
+/// Fait glisser la bande decoupee de `from` a `to` (~60 images/s), puis pose la decoupe finale. Sur ce fil (celui de la fenetre
+/// du jeu) : `SetWindowRgn` attend le jeu. S'interrompt si la fenetre n'est plus a nous (jeu ferme, repli).
+unsafe fn animate_region(s: &Shared, g: HWND, w: i32, h: i32, from: i32, to: i32) {
+    if from != to && from >= 0 && to >= 0 {
+        let start = Instant::now();
+        loop {
+            let t = start.elapsed().as_secs_f32() / REGION_SLIDE.as_secs_f32();
+            if t >= 1.0 || IsWindow(g) == 0 || !ours(s, g as isize) {
+                break;
+            }
+            apply_region(g, w, h, region_step(from, to, t));
+            std::thread::sleep(std::time::Duration::from_millis(12));
+        }
     }
+    apply_region(g, w, h, to);
 }
 
 /// Corrections de la fenetre du jeu (style etendu, proprietaire, cadre, decoupe) : elles peuvent bloquer tant que le jeu ne pompe
@@ -421,8 +462,11 @@ unsafe fn fix_now(s: &Shared, g: HWND, parent: isize, region: Option<(i32, i32, 
         }
     }
     if let Some((w, h, pw)) = region {
-        apply_region(g, w, h, pw);
-        s.lock().region = if pw > 0 { (w, h, pw) } else { (0, 0, 0) };
+        let (aw, ah, apw) = s.lock().region;
+        // meme taille de zone : la bande s'ouvre ou se ferme en glissant ; zone redimensionnee : tout de suite (suivre la fenetre)
+        let from = if (aw, ah) == (w, h) { apw } else { pw };
+        animate_region(s, g, w, h, from, pw);
+        s.lock().region = (w, h, pw);
     }
     if note_owner(s, g as isize) {
         // Rattachement obtenu apres coup. Une fenetre affichee pendant qu'elle n'etait pas possedee n'a pas ete reconnue comme LA
@@ -550,4 +594,23 @@ fn release_now(s: &Shared, wins: Vec<Returned>, reason: FallbackReason, detail: 
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::region_step;
+
+    #[test]
+    fn glissement_de_la_bande() {
+        assert_eq!(region_step(0, 380, 0.0), 0);
+        assert_eq!(region_step(0, 380, 1.0), 380);
+        assert_eq!(region_step(380, 0, 1.0), 0);
+        assert_eq!(region_step(0, 380, 2.0), 380, "borne");
+        // sortie douce : a mi-temps, deja bien plus de la moitie du chemin
+        assert!(region_step(0, 380, 0.5) > 300);
+        assert!(region_step(380, 0, 0.5) < 80);
+        // monotone
+        let v: Vec<i32> = (0..=10).map(|i| region_step(0, 380, i as f32 / 10.0)).collect();
+        assert!(v.windows(2).all(|p| p[0] <= p[1]), "{v:?}");
+    }
 }

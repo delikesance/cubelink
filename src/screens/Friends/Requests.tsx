@@ -176,7 +176,7 @@ export default function Requests() {
         Demandes reçues <RequestsBadge total={grand} />
       </h2>
 
-      <div className="rq-bar">
+      {(grand > 0 || input !== "") && <div className="rq-bar">
         <input
           type="search"
           className="rq-search"
@@ -188,7 +188,7 @@ export default function Requests() {
         {grand > 0 && !confirming && (
           <button type="button" className="rq-link" onClick={() => setConfirming(true)}>Tout refuser</button>
         )}
-      </div>
+      </div>}
 
       {confirming && (
         <div className="rq-confirm" role="group" aria-label="Confirmer le refus de toutes les demandes">

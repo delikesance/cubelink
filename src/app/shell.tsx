@@ -6,7 +6,9 @@ import { navigate, goBack, parseHash, takePendingFocus, useCanGoBack, useLocatio
 import { TitleBar } from "./TitleBar";
 import { UpdateBanner } from "./UpdateBanner";
 import { StageNotice } from "./StageNotice";
-import { setStagePanel, useStage, useStageLayout } from "./stage";
+import { useContextMenu, useSuppressNativeMenu } from "./useContextMenu";
+import { openExternal } from "./externalLinks";
+import { setStagePanel, useStage, useStageFullscreen, useStageLayout } from "./stage";
 import InGamePanel from "../screens/Overlay";
 import "../screens/Overlay/overlay.css";
 
@@ -15,13 +17,13 @@ export { navigate, goBack, canGoBack, useCanGoBack, ROUTES, parseHash, type Rout
 
 export const ROUTE_LABELS: Record<RouteName, string> = {
   login: "Connexion", main: "Accueil", create: "Créer une instance", install: "Installation",
-  join: "Rejoindre", friends: "Amis", settings: "Paramètres", error: "Erreur", legal: "Mentions légales", browse: "Parcourir",
+  instance: "Modpack", join: "Rejoindre", settings: "Paramètres", error: "Erreur", legal: "Mentions légales", browse: "Parcourir",
 };
 
 // Dossier d'écran par route. Les écrans sont chargés sans être modifiés.
 const SCREEN_DIRS: Record<RouteName, string> = {
   login: "Login", main: "Main", create: "Create", install: "Install", join: "Join",
-  friends: "Friends", settings: "Settings", error: "Error", legal: "Legal", browse: "Browse",
+  instance: "Instance", settings: "Settings", error: "Error", legal: "Legal", browse: "Browse",
 };
 type ScreenModule = { default?: ComponentType };
 // Accueil et connexion : chargés tout de suite ; les autres écrans le sont à la demande (code splitting).
@@ -144,6 +146,18 @@ export function Shell({ services }: { services?: Services } = {}) {
   }, []);
 
   const canBack = useCanGoBack();
+  useSuppressNativeMenu();
+  // Clic droit sur un lien web (descriptions, mentions légales…) quand l'écran ne propose pas son propre menu.
+  const linkMenu = useContextMenu();
+  const onLinkMenu = (e: React.MouseEvent<HTMLElement>) => {
+    const a = (e.target as Element | null)?.closest?.("a[href]") as HTMLAnchorElement | null;
+    if (!a || !/^https?:\/\//i.test(a.href)) return;
+    const url = a.href;
+    linkMenu.bind("Lien", [
+      { key: "open", label: "Ouvrir dans le navigateur", onSelect: () => openExternal(url) },
+      { key: "copy", label: "Copier le lien", onSelect: () => { void navigator.clipboard?.writeText(url).catch(() => {}); } },
+    ])(e);
+  };
   const set = useCallback((t: string | null) => setTitle(t), []);
   const value = useMemo<ShellContextValue>(
     () => ({ services: svc, route, params, navigate, goBack, canGoBack: canBack, setTitle: set }),
@@ -154,6 +168,7 @@ export function Shell({ services }: { services?: Services } = {}) {
   // Zone de jeu : l'élément réservé est mesuré et son rectangle publié à Rust.
   const slotRef = useRef<HTMLDivElement>(null);
   useStageLayout(slotRef);
+  const fullscreen = useStageFullscreen(stage);
 
   // Échap : ferme le panneau « en jeu » et rend le clavier au jeu (la confirmation du panneau gère sa propre touche Échap avant).
   useEffect(() => {
@@ -165,7 +180,7 @@ export function Shell({ services }: { services?: Services } = {}) {
 
   return (
     <ShellContext.Provider value={value}>
-      <div className="app">
+      <div className="app" data-fullscreen={fullscreen || undefined}>
         <a
           className="skip-link"
           href="#contenu"
@@ -174,15 +189,22 @@ export function Shell({ services }: { services?: Services } = {}) {
           Aller au contenu
         </a>
         <TitleBar context={title ?? ROUTE_LABELS[route]} />
-        <main id="contenu" className="content" ref={mainRef} tabIndex={-1} data-route={route}>
+        <main id="contenu" className="content" ref={mainRef} tabIndex={-1} data-route={route} onContextMenu={onLinkMenu}>
           {route === "login" && booting
             ? <div className="boot" role="status">Chargement…</div>
             : Screen ? <Screen /> : <Fallback route={route} />}
         </main>
+        {linkMenu.menu}
         <UpdateBanner services={svc} />
         <StageNotice />
         <div className="stage-slot" ref={slotRef} aria-hidden="true" />
-        {stage.panel && <div className="ov-dock"><InGamePanel /></div>}
+        {/* Monté (et déjà dessiné) sous la fenêtre du jeu tant que le jeu est affiché : la découpe animée de la fenêtre du jeu
+            le révèle, sans flash. Fermé : inerte (ni focus ni clic). */}
+        {stage.attached && stage.game && (
+          <div className="ov-dock" data-open={stage.panel || undefined} {...(stage.panel ? {} : { inert: "" })}>
+            <InGamePanel open={stage.panel} />
+          </div>
+        )}
       </div>
     </ShellContext.Provider>
   );

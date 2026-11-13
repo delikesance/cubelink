@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { useServices, useShell } from "../../app/context";
 import { useAccounts } from "../../app/useAccounts";
-import { Badge, Button, Card } from "../../ui";
+import { Button, Card } from "../../ui";
+import { SkinHead } from "../../app/AccountSwitcher";
+import { ICONS, Icon } from "../Main/Panel";
 import { OfflineForm } from "../Login/OfflineForm";
 import { messageOf, useDeviceLogin } from "../Login/useDeviceLogin";
 import { formatCountdown } from "../Login";
@@ -83,7 +85,6 @@ export function Accounts({ onError }: { onError: (message: string | null) => voi
 
   return (
     <Card as="section" aria-label="Comptes" className="acc-card">
-      <h2 className="acc-h">Comptes</h2>
       {state.accounts.length === 0 ? (
         <p className="set-warn">Aucun compte connecté</p>
       ) : (
@@ -93,13 +94,10 @@ export function Accounts({ onError }: { onError: (message: string | null) => voi
             const ask = confirming === a.id;
             return (
               <li key={a.id} className="acc-row" data-active={isActive || undefined}>
-                <span className="set-badge acc-badge" aria-hidden="true">{a.name.slice(0, 1).toUpperCase()}</span>
+                <SkinHead services={services} account={a} size={40} />
                 <div className="acc-who">
-                  <div className="name">{a.name}</div>
-                  <div className="acc-meta">
-                    {a.kind === "offline" ? <Badge>Hors ligne</Badge> : <span className="set-hint">Microsoft</span>}
-                    {isActive && <span className="set-ok acc-active">Actif</span>}
-                  </div>
+                  <div className="name"><span className="acc-nm">{a.name}</span>{isActive && <span className="acc-active">Actif</span>}</div>
+                  <div className="acc-meta">{a.kind === "offline" ? "Hors ligne" : "Compte Microsoft"}</div>
                 </div>
                 {ask ? (
                   <div className="acc-confirm" role="group" aria-label={`Retirer ${a.name}`}>
@@ -113,7 +111,9 @@ export function Accounts({ onError }: { onError: (message: string | null) => voi
                       <Button variant="secondary" aria-label={`Utiliser ${a.name}`} loading={busy === a.id}
                         onClick={() => { void act(a.id, () => services.authSwitch(a.id), `Compte actif : ${a.name}.`); }}>Utiliser</Button>
                     )}
-                    <Button variant="secondary" aria-label={`Retirer ${a.name}`} disabled={busy === a.id} onClick={() => setConfirming(a.id)}>Retirer</Button>
+                    <button type="button" className="acc-remove" aria-label={`Retirer ${a.name}`} title="Retirer" disabled={busy === a.id} onClick={() => setConfirming(a.id)}>
+                      <Icon d={ICONS.trash} size={18} />
+                    </button>
                   </div>
                 )}
               </li>
@@ -124,8 +124,8 @@ export function Accounts({ onError }: { onError: (message: string | null) => voi
       <div role="status" aria-live="polite" className="set-hint acc-notice">{notice}</div>
 
       <div className="acc-add">
-        <Button variant="secondary" aria-expanded={adding === "microsoft"} onClick={() => toggleAdding("microsoft")}>Ajouter un compte Microsoft</Button>
-        <Button variant="secondary" aria-expanded={adding === "offline"} aria-controls="acc-offline" onClick={() => toggleAdding("offline")}>Ajouter un compte hors ligne</Button>
+        <button type="button" className="acc-addbtn" aria-expanded={adding === "microsoft"} onClick={() => toggleAdding("microsoft")}><Icon d={ICONS.plus} size={18} />Ajouter un compte Microsoft</button>
+        <button type="button" className="acc-addbtn" aria-expanded={adding === "offline"} aria-controls="acc-offline" onClick={() => toggleAdding("offline")}><Icon d={ICONS.plus} size={18} />Ajouter un compte hors ligne</button>
       </div>
 
       {adding === "microsoft" && (

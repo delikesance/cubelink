@@ -12,7 +12,8 @@ import { setStagePanel } from "../../app/stage";
 
 type Confirm =
   | { kind: "join"; publicKey: string; name: string }
-  | { kind: "switch"; instance: Instance };
+  | { kind: "switch"; instance: Instance }
+  | { kind: "close"; instance: Instance };
 
 function messageOf(e: unknown): string {
   if (e instanceof Error && e.message) return e.message;
@@ -20,11 +21,17 @@ function messageOf(e: unknown): string {
   return "Une erreur est survenue. Réessaie dans un instant.";
 }
 
-export default function InGamePanel() {
+/**
+ * `open` : le panneau reste monté (déjà dessiné) sous la fenêtre du jeu tant que le jeu est affiché ; la découpe de la fenêtre
+ * du jeu le révèle alors sans flash. Fermé, il ne charge rien, ne prend ni le focus ni la touche Échap.
+ */
+export default function InGamePanel({ open = true }: { open?: boolean }) {
   const services = useServices();
   const [friends, setFriends] = useState<FriendWithPresence[]>([]);
   const [instances, setInstances] = useState<Instance[]>([]);
   const [running, setRunning] = useState(false);
+  /** Instance du jeu en cours : son bouton ferme le jeu au lieu de le lancer. */
+  const [current, setCurrent] = useState<string | null>(null);
   const [confirm, setConfirm] = useState<Confirm | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -40,23 +47,41 @@ export default function InGamePanel() {
 
   const close = useCallback(() => { void setStagePanel(false).catch(() => {}); }, []);
 
+  // Listes rechargées à chaque ouverture.
   useEffect(() => {
+    if (!open) return;
     let alive = true;
     services.friendList().then((l) => { if (alive) setFriends(l); }, () => {});
     services.instancesList().then((l) => { if (alive) setInstances(l); }, () => {});
+    services.gameCurrent().then((id) => { if (alive) setCurrent(id); }, () => {});
+    return () => { alive = false; };
+  }, [services, open]);
+
+  // Fermé : une confirmation ou une erreur en cours ne survit pas jusqu'à la prochaine ouverture.
+  useEffect(() => {
+    if (!open) { setConfirm(null); setError(null); }
+  }, [open]);
+
+  useEffect(() => {
     setRunning(true); // le panneau n'existe que pendant une partie
     const offs = [
       services.onFriendPresence((e) => setFriends((l) => l.map((f) => (f.friend.public_key === e.public_key ? { ...f, presence: e.presence } : f)))),
       services.onLaunchState((s) => {
-        if (s.state === "running") setRunning(true);
-        else if (s.state === "exited" || s.state === "failed") setRunning(false);
+        if (s.state === "running" || s.state === "preparing") {
+          if (s.state === "running") setRunning(true);
+          setCurrent(s.id);
+        } else if (s.state === "exited" || s.state === "failed") {
+          setRunning(false);
+          setCurrent((c) => (c === s.id ? null : c));
+        }
       }),
     ];
-    return () => { alive = false; offs.forEach((o) => o()); };
+    return () => { offs.forEach((o) => o()); };
   }, [services]);
 
-  // Le panneau prend le focus clavier à l'ouverture (montage et retour de focus de la fenêtre).
+  // Le panneau prend le focus clavier à l'ouverture (ouverture et retour de focus de la fenêtre).
   useEffect(() => {
+    if (!open) return;
     titleRef.current?.focus();
     const onFocus = () => {
       const a = document.activeElement;
@@ -64,10 +89,11 @@ export default function InGamePanel() {
     };
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
-  }, []);
+  }, [open]);
 
   // Échap : annule une confirmation en cours, sinon ferme le panneau.
   useEffect(() => {
+    if (!open) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape" || e.defaultPrevented) return;
       e.preventDefault();
@@ -75,7 +101,7 @@ export default function InGamePanel() {
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [close]);
+  }, [close, open]);
 
   useEffect(() => { if (confirm) cancelRef.current?.focus(); }, [confirm]);
 
@@ -109,6 +135,7 @@ export default function InGamePanel() {
     if (!c) return;
     setConfirm(null);
     if (c.kind === "join") void run(`join-${c.publicKey}`, () => services.gameJoinFriend(c.publicKey));
+    else if (c.kind === "close") void run(`close-${c.instance.id}`, () => services.gameClose());
     else void run(`switch-${c.instance.id}`, () => services.gameSwitch(c.instance.id));
     titleRef.current?.focus();
   };
@@ -192,7 +219,11 @@ export default function InGamePanel() {
                     <span className="ov-sub">{inst.minecraft} · {inst.loader.loader}</span>
                   </div>
                   <div className="ov-actions">
-                    <Button variant="secondary" aria-label={`Lancer ${inst.name}`} loading={busy === `switch-${inst.id}`} onClick={() => launch(inst)}>Lancer</Button>
+                    {inst.id === current ? (
+                      <Button variant="danger" aria-label={`Fermer ${inst.name}`} loading={busy === `close-${inst.id}`} onClick={() => setConfirm({ kind: "close", instance: inst })}>Fermer</Button>
+                    ) : (
+                      <Button variant="secondary" aria-label={`Lancer ${inst.name}`} loading={busy === `switch-${inst.id}`} onClick={() => launch(inst)}>Lancer</Button>
+                    )}
                   </div>
                 </li>
               ))}
@@ -206,10 +237,14 @@ export default function InGamePanel() {
           <p>
             {confirm.kind === "join"
               ? `Fermer le jeu en cours et rejoindre ${confirm.name} ? Les changements non sauvegardés seront perdus.`
-              : `Fermer le jeu et lancer ${confirm.instance.name} ? Les changements non sauvegardés seront perdus.`}
+              : confirm.kind === "close"
+                ? `Fermer ${confirm.instance.name} ? Le jeu enregistre le monde avant de se fermer.`
+                : `Fermer le jeu et lancer ${confirm.instance.name} ? Les changements non sauvegardés seront perdus.`}
           </p>
           <div className="ov-actions">
-            <Button onClick={doConfirm}>{confirm.kind === "join" ? "Fermer et rejoindre" : "Fermer et lancer"}</Button>
+            <Button variant={confirm.kind === "close" ? "danger" : undefined} onClick={doConfirm}>
+              {confirm.kind === "join" ? "Fermer et rejoindre" : confirm.kind === "close" ? "Fermer le jeu" : "Fermer et lancer"}
+            </Button>
             <Button variant="secondary" ref={cancelRef} onClick={() => { setConfirm(null); titleRef.current?.focus(); }}>Annuler</Button>
           </div>
         </div>

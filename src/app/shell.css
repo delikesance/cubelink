@@ -1,11 +1,13 @@
 /* Coquille : cadre sans decoration, barre de titre 36 px. Tokens dans src/styles/tokens.css. */
 .app{display:flex;flex-direction:column;height:100%;background:var(--bg)}
 .titlebar{position:relative;height:var(--titlebar-h);flex:none;display:flex;align-items:stretch;background:var(--bg);border-bottom:1px solid var(--line);user-select:none}
-.titlebar-spacer{width:138px;flex:none;display:flex}
+.titlebar-spacer{min-width:138px;flex:none;display:flex;align-items:center}
+.tb-brand{flex:none;display:flex;align-items:center;gap:8px;padding:0 10px 0 4px;font:700 13px/1 var(--font-display);color:var(--text);pointer-events:none}
+.titlebar-drag{flex:1}
 .tb-back{width:46px}
 .tb-back[disabled]{visibility:hidden}
-.tb-stage{width:auto;flex:1;padding:0 8px;font:600 11px/var(--titlebar-h) var(--font-display);letter-spacing:.04em;color:var(--accent-hover);white-space:nowrap}
-.titlebar-title{flex:1;margin:0;display:flex;align-items:center;justify-content:center;font:600 12px/var(--titlebar-h) var(--font-display);letter-spacing:.04em;color:var(--muted)}
+.tb-btn.tb-stage{width:auto;flex:none;padding:0 12px;border-left:1px solid var(--line);font:600 11px/var(--titlebar-h) var(--font-display);letter-spacing:.04em;color:var(--accent-hover);white-space:nowrap}
+.titlebar-title{position:absolute;left:50%;top:0;transform:translateX(-50%);pointer-events:none;margin:0;display:flex;align-items:center;justify-content:center;font:600 12px/var(--titlebar-h) var(--font-display);letter-spacing:.04em;color:var(--muted)}
 .titlebar-buttons{display:flex;width:138px;flex:none}
 .tb-btn{width:46px;height:var(--titlebar-h);border:0;padding:0;background:transparent;color:var(--text);display:flex;align-items:center;justify-content:center;cursor:default;transition:background var(--dur-feedback) var(--ease)}
 .tb-btn:hover{background:var(--surface-2)}
@@ -15,6 +17,9 @@
 .skip-link:focus{top:calc(var(--titlebar-h) + 4px)}
 /* Zone de jeu : emplacement réservé sous la barre de titre, seulement mesuré (publié à Rust) ; ni peint ni cliquable. */
 .stage-slot{position:fixed;top:var(--titlebar-h);left:0;right:0;bottom:0;pointer-events:none;visibility:hidden}
+/* Plein écran du jeu (F11) : plus de barre de titre, la zone de jeu (et le panneau « en jeu ») couvrent tout l'écran. */
+.app[data-fullscreen]{--titlebar-h:0px}
+.app[data-fullscreen] .titlebar{display:none}
 .content{flex:1;min-height:0;overflow:auto;outline:none}
 /* Conteneurs de page : .page plafonne la largeur, .page-fill remplit tout (grilles). Blocs de texte : ~68ch. */
 .page{width:100%;max-width:var(--page-max);margin-inline:auto;padding-inline:var(--page-pad);box-sizing:border-box}
@@ -41,21 +46,24 @@
 /* Démarrage : contrôle de la session avant d'afficher l'écran Connexion */
 .boot{height:100%;display:grid;place-items:center;color:var(--muted);font-size:14px}
 
-/* Sélecteur de compte (barre de titre) : à gauche des boutons de fenêtre */
-.acc-sw{position:absolute;top:0;right:138px;height:var(--titlebar-h);display:flex;align-items:stretch;z-index:20}
-.acc-trigger{display:flex;align-items:center;gap:8px;padding:0 12px;border:0;background:transparent;color:var(--text);font:500 12px var(--font-ui);cursor:default;max-width:200px;transition:background var(--dur-feedback) var(--ease)}
-.acc-trigger:hover,.acc-trigger[aria-expanded="true"]{background:var(--surface-2)}
+/* Carte de profil (bas du panneau de l'accueil) : tête du skin, pseudo, type de compte ; menu ouvert vers le haut */
+.acc-sw{position:relative;flex:1;min-width:0;display:flex}
+.acc-trigger{flex:1;min-width:0;display:flex;align-items:center;gap:12px;padding:8px;border:0;border-radius:12px;background:transparent;color:var(--text);font:inherit;text-align:left;cursor:pointer;transition:background var(--dur-feedback) var(--ease)}
 .acc-trigger:focus-visible{outline-offset:-2px}
-.acc-av{width:18px;height:18px;flex:none;border-radius:4px;background:var(--surface-2);color:var(--accent);display:grid;place-items:center;font:700 11px var(--font-display)}
-.acc-trigger .acc-av{background:var(--surface)}
+.acc-head{flex:none;border-radius:8px;image-rendering:pixelated;display:block}
+.acc-txt{flex:1;min-width:0;display:flex;flex-direction:column;gap:4px}
+.acc-txt .acc-name{font:700 15px/1.2 var(--font-ui)}
+.acc-kind{font:500 12px/1.2 var(--font-ui);color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .acc-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
-.acc-menu{position:absolute;top:100%;right:0;min-width:220px;padding:6px;display:flex;flex-direction:column;gap:2px;background:var(--surface);border:1px solid var(--line);border-radius:var(--r-md)}
-.acc-item{display:flex;align-items:center;gap:10px;min-height:36px;padding:0 10px;border:0;border-radius:4px;background:transparent;color:var(--text);font:500 13px var(--font-ui);text-align:left;cursor:pointer}
-.acc-item:hover{background:var(--surface-2)}
+.acc-menu{position:absolute;bottom:calc(100% + 12px);left:-5px;right:-49px;z-index:20;padding:6px;display:flex;flex-direction:column;gap:2px;background:var(--surface);border:1px solid var(--line);border-radius:var(--r-md);box-shadow:var(--shadow-soft)}
+.acc-item{display:flex;align-items:center;gap:10px;min-height:40px;padding:0 10px;border:0;border-radius:10px;background:transparent;color:var(--text);font:500 13px var(--font-ui);text-align:left;cursor:pointer}
+.acc-item:hover,.acc-item:focus-visible{background:var(--surface-2)}
+.acc-item .acc-head{border-radius:5px}
 .acc-item .acc-name{flex:1}
 .acc-tag{color:var(--muted);font-size:11px}
 .acc-ok{color:var(--accent);flex:none}
-.acc-manage{color:var(--muted);margin-top:4px;border-top:1px solid var(--line);border-radius:0 0 4px 4px}
+.acc-manage{color:var(--muted);margin-top:4px;border-top:1px solid var(--line);border-radius:0 0 10px 10px}
 .acc-err{margin:4px 10px;color:var(--danger);font-size:12px}
+.px-img{image-rendering:pixelated}
 
 /* Panneau en jeu (#/overlay) : fenêtre sans cadre et transparente ; l'écran dessine sa propre carte. */

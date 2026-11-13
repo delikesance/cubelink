@@ -351,6 +351,28 @@ pub fn auth_accounts(state: State<'_, Arc<AppState>>) -> Result<AccountsState, S
     Ok(state.auth_accounts())
 }
 
+/// Tête du skin (PNG 8×8 en data URL) d'un compte Microsoft, `None` si elle est indisponible (hors ligne, pas de
+/// skin). Mise en cache pour la session : un seul appel réseau par compte.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn auth_skin_head(uuid: String) -> Result<Option<String>, String> {
+    use base64::Engine;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    static CACHE: Mutex<Option<HashMap<String, Option<String>>>> = Mutex::new(None);
+    let Some(id) = core_lib::skin::normalize_uuid(&uuid) else { return Ok(None) };
+    if let Some(hit) = lock(&CACHE).as_ref().and_then(|m| m.get(&id).cloned()) {
+        return Ok(hit);
+    }
+    let head = match core_lib::skin::head_png(&id).await {
+        Ok(png) => Some(format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(png))),
+        // Réseau indisponible : pas mis en cache, on réessaiera.
+        Err(Error::Network(_)) => return Ok(None),
+        Err(_) => None,
+    };
+    lock(&CACHE).get_or_insert_with(HashMap::new).insert(id, head.clone());
+    Ok(head)
+}
+
 #[tauri::command(rename_all = "snake_case")]
 pub fn auth_switch(state: State<'_, Arc<AppState>>, id: String) -> Result<Profile, String> {
     state.auth_switch(&id)

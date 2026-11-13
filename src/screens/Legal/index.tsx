@@ -3,14 +3,7 @@ import "./legal.css";
 import { useBack } from "../../app/context";
 import { SECTIONS } from "./sections";
 
-const TABS = [
-  { id: "compte", label: "Compte" },
-  { id: "reseau", label: "Réseau" },
-  { id: "java", label: "Java" },
-  { id: "stockage", label: "Stockage" },
-  { id: "apropos", label: "À propos" },
-] as const;
-
+/** Mentions légales, dans l'appli : bouton Retour (ou Échap) vers l'écran d'origine, Paramètres par défaut. */
 export default function Legal() {
   const back = useBack("settings");
   const backRef = useRef(back);
@@ -27,15 +20,14 @@ export default function Legal() {
 
   return (
     <div className="legal screen">
-      <h1 className="enter" ref={title} tabIndex={-1}>Paramètres</h1>
-      <nav className="legal-nav enter" aria-label="Sections des réglages" style={{ "--i": 1 } as React.CSSProperties}>
-        {TABS.map((t) => (
-          <a key={t.id} className="legal-tab" href={`#/settings?tab=${t.id}`} aria-current={t.id === "apropos" ? "page" : undefined}>{t.label}</a>
-        ))}
-        <div className="legal-bar" aria-hidden="true" />
-      </nav>
-      <article className="legal-article enter" style={{ "--i": 2 } as React.CSSProperties} aria-labelledby="leg-title">
-        <h2 id="leg-title">Mentions légales et confidentialité</h2>
+      <div className="legal-top enter">
+        <button type="button" className="cl-btn cl-btn-secondary legal-back" onClick={() => back()}>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6" /></svg>
+          Retour
+        </button>
+      </div>
+      <article className="legal-article enter" style={{ "--i": 1 } as React.CSSProperties} aria-labelledby="leg-title">
+        <h1 id="leg-title" ref={title} tabIndex={-1}>Mentions légales et confidentialité</h1>
         {SECTIONS.map((s) => (
           <section key={s.id} className="legal-section" id={`leg-${s.id}`}>{s.content}</section>
         ))}

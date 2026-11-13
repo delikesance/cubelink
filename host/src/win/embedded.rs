@@ -9,9 +9,10 @@
 use std::ptr::{null, null_mut};
 use std::sync::atomic::Ordering;
 
-use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_F11};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 use super::curtain_window::{self, TIMER_CURTAIN};
@@ -292,6 +293,8 @@ pub(super) unsafe fn on_moved(s: &Shared, hwnd: HWND) {
         (placed, st.origin.contains_key(&h), st.view)
     };
     if placed {
+        note_fullscreen(s, hwnd, true);
+        unminimize(s, hwnd);
         // Recalage DIRECT, d'ici (fil de surveillance : sans fenetre, donc vraiment asynchrone) : il n'attend ni le fil de
         // l'interface ni la file des appels synchrones, ou une correction de cadre peut occuper le jeu pendant deux allers-retours.
         // Une fenetre posee a qui le jeu remet cadre et taille (mesure : 8/31/8/8 px autour de la zone) revient ainsi sur la zone,
@@ -306,6 +309,131 @@ pub(super) unsafe fn on_moved(s: &Shared, hwnd: HWND) {
         dbg(&format!("fenetre {h:#x} revenue a l'ecran avant sa pose : regaree"));
         watch::park_offscreen(hwnd);
     }
+}
+
+/// Plein ecran du jeu, quelle que soit la version de Minecraft (lectures locales, aucun message vers le jeu). Trois bibliotheques
+/// de fenetrage selon la version : LWJGL2 (jusqu'a 1.12.2), GLFW (1.13 a 26.2), SDL3 (26.3 et plus). Ce qu'elles font TOUTES en
+/// passant en plein ecran : retirer la barre de titre et donner elles-memes a la fenetre la taille de son ecran ; en sortant :
+/// remettre leur style normal, AVEC barre de titre. D'ou :
+/// * entree : pas de barre de titre ET (`moved`, la fenetre vient de bouger) taille = celle de l'ecran, alors que notre zone de
+///   jeu est ailleurs. La TAILLE seule, pas le rectangle : SDL3 (mesure sur 26.3 Fabric) deplace en (0,0) puis redimensionne en
+///   deux appels, et notre recalage passe entre les deux (on lit (138,167,1920x1080)). En renfort, `WS_EX_TOPMOST` (GLFW, mesure
+///   sur 26.2 Fabric), qui ne depend pas de l'instant de lecture. Notre style a nous (`WS_POPUP` seul) ne l'a pas ;
+/// * sortie : la barre de titre revient (GLFW et SDL3 mesures).
+///
+/// La regle du rectangle est suspendue `FULLSCREEN_SETTLE` apres chaque changement : c'est alors NOUS qui deplacons la fenetre
+/// (zone agrandie a tout l'ecran, puis rendue), et un recalage en retard la poserait sur l'ecran entier sans demande du jeu.
+/// Lu AVANT notre correction du cadre (`sync`). Annonce chaque changement a l'observateur (hors verrou).
+unsafe fn note_fullscreen(s: &Shared, g: HWND, moved: bool) {
+    // Nos propres recalages apres une bascule durent ~150 ms (mesure 26.3) ; un joueur qui rappuie sur F11 met ~0,8 s. A 1,5 s,
+    // une entree rapide passait inapercue et il fallait trois appuis pour retrouver le plein ecran.
+    const FULLSCREEN_SETTLE: std::time::Duration = std::time::Duration::from_millis(400);
+    let style = GetWindowLongPtrW(g, GWL_STYLE) as u32;
+    let topmost = GetWindowLongPtrW(g, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST != 0;
+    let caption = style & WS_CAPTION == WS_CAPTION;
+    let mut r: RECT = std::mem::zeroed();
+    GetWindowRect(g, &mut r);
+    let covers = monitor_sized(g, &r);
+    if super::debug::dbg_on() {
+        let ex = GetWindowLongPtrW(g, GWL_EXSTYLE) as u32;
+        dbg(&format!(
+            "plein ecran ? moved={moved} style={style:#010x} ex={ex:#010x} rect=({},{},{}x{}) ecran_entier={covers}",
+            r.left,
+            r.top,
+            r.right - r.left,
+            r.bottom - r.top
+        ));
+    }
+    let on = {
+        let mut st = s.lock();
+        if st.current != Some(g as isize) || st.close_asked {
+            return;
+        }
+        let settled = st.fullscreen_at.is_none_or(|t| t.elapsed() >= FULLSCREEN_SETTLE);
+        let elsewhere = to_screen(s, st.view).is_none_or(|(x, y, w, h)| (r.left, r.top, r.right - r.left, r.bottom - r.top) != (x, y, w, h));
+        let on = match st.fullscreen {
+            false => !caption && (topmost || (moved && settled && covers && elsewhere)),
+            true => !caption,
+        };
+        if on == st.fullscreen {
+            return;
+        }
+        st.fullscreen = on;
+        st.fullscreen_at = Some(std::time::Instant::now());
+        st.refocus = true;
+        on
+    };
+    let why = if topmost { "marque GLFW" } else { "fenetre a la taille de l'ecran" };
+    s.log(if on { format!("plein ecran demande par le jeu ({why}) : le launcher passe en plein ecran") } else { "plein ecran quitte par le jeu".to_string() });
+    s.emit(crate::HostEvent::Fullscreen(on));
+}
+
+/// Le rectangle ecran `r` de `g` a exactement la taille de son moniteur (position ignoree).
+unsafe fn monitor_sized(g: HWND, r: &RECT) -> bool {
+    let mon = MonitorFromWindow(g, MONITOR_DEFAULTTONULL);
+    if mon.is_null() {
+        return false;
+    }
+    let mut mi: MONITORINFO = std::mem::zeroed();
+    mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+    GetMonitorInfoW(mon, &mut mi) != 0
+        && (mi.rcMonitor.right - mi.rcMonitor.left, mi.rcMonitor.bottom - mi.rcMonitor.top) == (r.right - r.left, r.bottom - r.top)
+}
+
+/// En plein ecran, GLFW REDUIT sa fenetre des qu'elle perd le focus (mesure : 26.2 Fabric, quand le launcher passe en plein
+/// ecran ou qu'on ouvre le panneau). Une fenetre du jeu posee et reduite est rouverte, sans l'activer, mais seulement quand le
+/// launcher (ou le jeu) est au premier plan : le joueur parti sur une autre application (Alt+Tab) ne doit pas voir revenir par-dessus elle
+/// un jeu qui est toujours « au-dessus de tout ». Le focus suit si le panneau n'est pas ouvert.
+unsafe fn unminimize(s: &Shared, g: HWND) {
+    let parent = hw(s.parent);
+    if IsIconic(g) == 0 || IsIconic(parent) != 0 {
+        return;
+    }
+    // premier plan : personne (bascule en cours), le launcher ou le jeu ; jamais une autre application
+    let fg = GetForegroundWindow();
+    let mut fg_pid = 0u32;
+    if !fg.is_null() {
+        GetWindowThreadProcessId(fg, &mut fg_pid);
+    }
+    let (closing, panel, ours) = {
+        let st = s.lock();
+        (st.close_asked, st.machine.panel_width() > 0, fg.is_null() || fg_pid == std::process::id() || st.pids.contains(&fg_pid))
+    };
+    if closing || !ours {
+        return;
+    }
+    dbg(&format!("fenetre du jeu {:#x} reduite par le jeu : rouverte", g as isize));
+    ShowWindowAsync(g, SW_SHOWNOACTIVATE);
+    if !panel {
+        game_window::foreground(s, g as isize);
+    }
+}
+
+/// Le launcher qui entre en plein ecran ou en sort (`setFullscreen` de Tauri) PREND l'activation : le joueur qui vient de faire
+/// F11 perd le clavier. Une seule fois par bascule, dans les 2 s, quand le launcher est au premier plan (jamais une autre
+/// application) et que le panneau est ferme, le focus est rendu au jeu. Appele a chaque `sync` (le launcher qui gagne le focus
+/// en declenche un). Jamais touche F11 encore enfoncee : le jeu qui recoit le focus avec F11 appuyee y voit un second F11 et
+/// rebascule (mesure sur 26.3 Fabric : entree, puis sortie toute seule 0,7 s apres ; focus rendu 80 ms apres l'appui).
+unsafe fn refocus(s: &Shared, g: HWND) {
+    const WINDOW: std::time::Duration = std::time::Duration::from_secs(3);
+    let fg = GetForegroundWindow();
+    let f11_down = GetAsyncKeyState(VK_F11 as i32) as u16 & 0x8000 != 0;
+    {
+        let mut st = s.lock();
+        if !st.refocus {
+            return;
+        }
+        if st.close_asked || st.fullscreen_at.is_none_or(|t| t.elapsed() > WINDOW) {
+            st.refocus = false;
+            return;
+        }
+        if fg != hw(s.parent) || st.machine.panel_width() > 0 || f11_down {
+            return; // pas encore (bascule en cours, F11 tenue) ou panneau ouvert : on reessaie au prochain sync, dans les 3 s
+        }
+        st.refocus = false;
+    }
+    dbg("bascule plein ecran du launcher : focus rendu au jeu");
+    game_window::foreground(s, g as isize);
 }
 
 /// Issue d'une adoption.
@@ -389,6 +517,9 @@ pub(super) unsafe fn sync(s: &Shared) {
     // une fenetre detruite (jeu ferme ou tue, avant que le launcher ne l'apprenne) n'est ni calee ni corrigee
     if let (true, Some(g)) = (placed, cur.filter(|g| IsWindow(hw(*g)) != 0)) {
         let g = hw(g);
+        note_fullscreen(s, g, false);
+        unminimize(s, g);
+        refocus(s, g);
         // Le calage part AVANT la correction, et sur le fil de la fenetre du jeu (voir `game_window::show`) : il est asynchrone, le
         // jeu le traite a son prochain passage dans sa file. La correction du cadre, elle, lui coute deux allers-retours synchrones.
         // Quand le jeu repose son cadre ET une taille plus grande que la zone (mesure : NeoForge au demarrage, ~185 ms), sa fenetre
@@ -404,13 +535,14 @@ pub(super) unsafe fn sync(s: &Shared) {
         let ex = GetWindowLongPtrW(g, GWL_EXSTYLE) as u32;
         let style = GetWindowLongPtrW(g, GWL_STYLE) as u32;
         // la decoupe peut disparaitre sans nous (fenetre recreee par le jeu) : on la verifie, pas seulement la valeur memorisee
-        let lost = pw > 0 && applied == (w, h, pw) && {
+        let lost = applied == (w, h, pw) && {
             let probe = CreateRectRgn(0, 0, 0, 0);
             let kind = GetWindowRgn(g, probe);
             DeleteObject(probe as _);
             kind == 0 // ERROR : plus de region
         };
-        let need_region = lost || (pw > 0 && applied != (w, h, pw)) || (pw == 0 && applied != (0, 0, 0));
+        // une region TOUJOURS posee (pleine sans panneau, voir `game_window::apply_region`)
+        let need_region = lost || applied != (w, h, pw);
         let need_ex = ((ex & !WS_EX_APPWINDOW) | WS_EX_TOOLWINDOW) != ex; // le jeu peut reposer ses styles (plein ecran)
         let need_owner = GetWindow(g, GW_OWNER) as isize != s.parent; // adoption incomplete (fil du jeu occupe)
         let need_style = style & FRAME_BITS != 0 || style & WS_POPUP == 0; // F11 : le jeu rend son cadre

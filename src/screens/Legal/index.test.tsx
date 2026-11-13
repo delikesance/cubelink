@@ -20,17 +20,18 @@ function setup() {
 describe("Legal", () => {
   it("affiche toutes les sections à la suite, sous le titre", () => {
     setup();
-    expect(screen.getByRole("heading", { level: 2, name: "Mentions légales et confidentialité" })).toBeTruthy();
-    for (const s of SECTIONS) expect(screen.getByRole("heading", { level: 3, name: new RegExp(s.label === "Licences" ? "Licences" : s.label.split(" ")[0]!) })).toBeTruthy();
+    expect(screen.getByRole("heading", { level: 1, name: "Mentions légales et confidentialité" })).toBeTruthy();
+    for (const s of SECTIONS) expect(screen.getByRole("heading", { level: 3, name: s.label === "Licences" ? /^Licences/ : s.label })).toBeTruthy();
     expect(screen.getByText(/n'est pas approuvé par Mojang ou Microsoft/)).toBeTruthy();
+    expect(screen.getByText(/sans but commercial/)).toBeTruthy();
+    expect(screen.queryByText(/à compléter/)).toBeNull();
   });
 
-  it("la navigation des réglages renvoie aux onglets, À propos est la page courante", () => {
-    setup();
-    const nav = screen.getByRole("navigation", { name: "Sections des réglages" });
-    expect(nav.querySelectorAll("a")).toHaveLength(5);
-    expect(screen.getByRole("link", { name: "À propos" }).getAttribute("aria-current")).toBe("page");
-    expect(screen.getByRole("link", { name: "Java" }).getAttribute("href")).toBe("#/settings?tab=java");
+  it("Retour revient à l'écran d'origine (Paramètres par défaut), dans l'appli", () => {
+    const navigate = setup();
+    expect(screen.queryByRole("navigation")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Retour" }));
+    expect(navigate.goBack).toHaveBeenCalledWith("settings");
   });
 
   it("Échap revient via goBack(settings)", () => {

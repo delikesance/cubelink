@@ -1,18 +1,25 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ModEntry, Services } from "../../services";
+import type { FixResult, ModEntry, ModIssue, Services } from "../../services";
 import { Button, IconButton } from "../../ui";
 import { avatarColors } from "./accent";
+import { FixDialog } from "./FixDialog";
 import { ICONS, Icon, Panel } from "./Panel";
+import { useContextMenu } from "../../app/useContextMenu";
 
 export interface ModsPanelProps {
   services: Services;
   instanceId: string;
-  onClose: () => void;
+  /** Absent : panneau en pleine page, sans bouton Fermer. */
+  onClose?: () => void;
   /** Appelé quand le nombre de mods change (liste chargée, ajout, suppression). */
   onCount: (count: number) => void;
   onBrowse: () => void;
   /** Informe le parent du total (titre du tiroir). */
   onTotal?: (n: number | null) => void;
+  /** Passe à true pour ouvrir directement la correction automatique (une fois). */
+  autoFix?: boolean;
+  /** Appelé quand `autoFix` a été pris en compte (le parent le remet à false). */
+  onAutoFixed?: () => void;
 }
 
 // Retire le préfixe technique du backend (« introuvable : », « entrée invalide : »…).
@@ -21,6 +28,8 @@ const isJar = (p: string) => /\.jar$/i.test(p);
 const baseName = (p: string) => p.split(/[\\/]/).pop() ?? p;
 /** Délai pendant lequel une suppression reste annulable. */
 export const UNDO_MS = 5000;
+/** Durée d'affichage du résultat d'une correction (avec « Annuler la correction »). */
+export const FIX_RESULT_MS = 30000;
 
 export function formatSize(n: number): string {
   if (n >= 1_048_576) return `${(n / 1_048_576).toFixed(1).replace(".", ",")} Mo`;
@@ -29,6 +38,36 @@ export function formatSize(n: number): string {
 }
 
 const initial = (f: string) => (f.replace(/^[^A-Za-z0-9]+/, "")[0] ?? "?").toUpperCase();
+
+/** Icônes déjà lues (instance|fichier activé → data URL ou null), partagées entre les ouvertures du panneau. */
+const iconCache = new Map<string, string | null>();
+const enabledName = (f: string) => f.replace(/\.disabled$/i, "");
+
+/** Pastille d'un mod : son icône (lue dans le .jar quand la ligne devient visible), sinon son initiale. */
+function ModAvatar({ services, instanceId, file }: { services: Services; instanceId: string; file: string }) {
+  const key = `${instanceId}|${enabledName(file)}`;
+  const [src, setSrc] = useState<string | null | undefined>(() => iconCache.get(key));
+  const ref = useRef<HTMLSpanElement>(null);
+  useEffect(() => {
+    if (iconCache.has(key)) { setSrc(iconCache.get(key)); return; }
+    const el = ref.current;
+    let alive = true;
+    const load = () => services.modsIcon(instanceId, file).then(
+      (u) => { iconCache.set(key, u); if (alive) setSrc(u); },
+      () => { iconCache.set(key, null); if (alive) setSrc(null); },
+    );
+    if (!el || typeof IntersectionObserver === "undefined") { void load(); return () => { alive = false; }; }
+    const io = new IntersectionObserver((es) => { if (es.some((e) => e.isIntersecting)) { io.disconnect(); void load(); } }, { rootMargin: "200px" });
+    io.observe(el);
+    return () => { alive = false; io.disconnect(); };
+  }, [services, instanceId, file, key]);
+  const c = avatarColors(null, file);
+  return src ? (
+    <span ref={ref} className="dr-av has-img" aria-hidden="true"><img src={src} alt="" onError={() => { iconCache.set(key, null); setSrc(null); }} /></span>
+  ) : (
+    <span ref={ref} className="dr-av" aria-hidden="true" style={{ background: c.bg, color: c.ink }}>{initial(file)}</span>
+  );
+}
 
 /** Ligne « retiré, annuler (5 s) » affichée pendant le délai d'annulation. */
 function UndoRow({ file, onUndo }: { file: string; onUndo: () => void }) {
@@ -45,8 +84,22 @@ function UndoRow({ file, onUndo }: { file: string; onUndo: () => void }) {
   );
 }
 
+const issueWord = (n: number) => `${n} problème${n > 1 ? "s" : ""} de compatibilité`;
+
+/** Pastille d'alerte d'une ligne : message en title et en texte masqué. */
+function IssueBadge({ issues }: { issues: ModIssue[] }) {
+  const danger = issues.some((i) => i.severity === "error");
+  const text = issues.map((i) => i.message).join(" ");
+  return (
+    <span className={`dr-flag ${danger ? "is-error" : "is-warn"}`} title={text}>
+      <Icon d={ICONS.alert} size={14} />
+      <span className="home-sr">{text}</span>
+    </span>
+  );
+}
+
 /** Panneau « Mods » (A4) : recherche, liste, activation, suppression annulable 5 s, ajout (bouton ou glisser-déposer). */
-export function ModsPanel({ services, instanceId, onClose, onCount, onBrowse, onTotal }: ModsPanelProps) {
+export function ModsPanel({ services, instanceId, onClose, onCount, onBrowse, onTotal, autoFix, onAutoFixed }: ModsPanelProps) {
   const [mods, setMods] = useState<ModEntry[] | null>(null);
   const [filter, setFilter] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -58,12 +111,47 @@ export function ModsPanel({ services, instanceId, onClose, onCount, onBrowse, on
   const totalRef = useRef(onTotal);
   totalRef.current = onTotal;
   const timers = useRef(new Map<string, number>());
+  const ctx = useContextMenu();
+  const [issues, setIssues] = useState<ModIssue[]>([]);
+  const [issuesOpen, setIssuesOpen] = useState(false);
+  const checkSeq = useRef(0);
+  const checkTimer = useRef<number | undefined>(undefined);
+  const [fix, setFix] = useState<{ only?: string } | null>(null);
+  const [fixRes, setFixRes] = useState<{ applied: number; failed: FixResult["failed"]; backup: string | null } | null>(null);
+  const [undoing, setUndoing] = useState(false);
+  const fixTimer = useRef<number | undefined>(undefined);
+  const onAutoFixedRef = useRef(onAutoFixed);
+  onAutoFixedRef.current = onAutoFixed;
+  useEffect(() => () => window.clearTimeout(fixTimer.current), []);
+  useEffect(() => {
+    if (!autoFix) return;
+    setFix({});
+    onAutoFixedRef.current?.();
+  }, [autoFix]);
 
-  const apply = useCallback((next: ModEntry[]) => {
-    setMods(next);
-    countRef.current(next.length);
-    totalRef.current?.(next.length);
-  }, []);
+  /** Relance la vérification (anti-rebond) ; une réponse périmée est ignorée, un échec n'affiche rien. */
+  const recheck = useCallback((delay = 300) => {
+    window.clearTimeout(checkTimer.current);
+    const seq = ++checkSeq.current;
+    checkTimer.current = window.setTimeout(() => {
+      let p: Promise<{ issues: ModIssue[] }>;
+      try { p = services.modsCheck(instanceId); } catch { return; }
+      p.then((c) => { if (seq === checkSeq.current) setIssues(c.issues); }, () => { if (seq === checkSeq.current) setIssues([]); });
+    }, delay);
+  }, [services, instanceId]);
+  useEffect(() => {
+    recheck(0);
+    return () => { checkSeq.current++; window.clearTimeout(checkTimer.current); };
+  }, [recheck]);
+
+  const apply = useCallback((next: ModEntry[]) => setMods(next), []);
+
+  // Compteur et total remontés au parent après le rendu (jamais depuis un updater : le parent se met à jour aussi).
+  useEffect(() => {
+    if (mods === null) return;
+    countRef.current(mods.length);
+    totalRef.current?.(mods.length);
+  }, [mods?.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     let alive = true;
@@ -95,19 +183,15 @@ export function ModsPanel({ services, instanceId, onClose, onCount, onBrowse, on
       catch (e) { failed.push(`${baseName(p)} (${errMsg(e)})`); }
     }
     if (added.length) {
-      setMods((cur) => {
-        const next = [...(cur ?? []), ...added];
-        countRef.current(next.length);
-        totalRef.current?.(next.length);
-        return next;
-      });
+      setMods((cur) => [...(cur ?? []), ...added]);
+      recheck();
     }
     const parts: string[] = [];
     if (added.length) parts.push(`${added.length} mod${added.length > 1 ? "s ajoutés" : " ajouté"}.`);
     if (refused.length) parts.push(`Fichier${refused.length > 1 ? "s" : ""} refusé${refused.length > 1 ? "s" : ""} (seuls les .jar sont acceptés) : ${refused.join(", ")}.`);
     if (failed.length) setError(`Échec de l'ajout : ${failed.join(", ")}.`);
     if (parts.length) setNotice(parts.join(" "));
-  }, [services, instanceId]);
+  }, [services, instanceId, recheck]);
 
   useEffect(() => services.onFilesDropped((paths) => { setOver(false); void addPaths(paths); }), [services, addPaths]);
 
@@ -124,6 +208,7 @@ export function ModsPanel({ services, instanceId, onClose, onCount, onBrowse, on
     try {
       await services.modsToggle(instanceId, m.file, !m.enabled);
       setMods((cur) => (cur ?? []).map((x) => (x.file === m.file ? { ...x, enabled: !m.enabled } : x)));
+      recheck();
     } catch (e) { setError(errMsg(e)); }
   };
 
@@ -132,12 +217,8 @@ export function ModsPanel({ services, instanceId, onClose, onCount, onBrowse, on
     setRemoving((r) => r.filter((f) => f !== file));
     try {
       await services.modsRemove(instanceId, file);
-      setMods((cur) => {
-        const next = (cur ?? []).filter((x) => x.file !== file);
-        countRef.current(next.length);
-        totalRef.current?.(next.length);
-        return next;
-      });
+      setMods((cur) => (cur ?? []).filter((x) => x.file !== file));
+      recheck();
     } catch (e) { setError(errMsg(e)); }
   };
   const startRemove = (m: ModEntry) => {
@@ -152,6 +233,40 @@ export function ModsPanel({ services, instanceId, onClose, onCount, onBrowse, on
     timers.current.delete(file);
     setRemoving((r) => r.filter((f) => f !== file));
   };
+
+  /** Recharge la liste des mods (après une correction ou son annulation). */
+  const reload = useCallback(async () => {
+    try { setMods(await services.modsList(instanceId)); } catch (e) { setError(errMsg(e)); }
+  }, [services, instanceId]);
+
+  const onFixed = (r: FixResult) => {
+    setFix(null);
+    setError(null);
+    setNotice(null);
+    checkSeq.current++;
+    window.clearTimeout(checkTimer.current);
+    setIssues(r.check.issues);
+    setFixRes({ applied: r.applied.length, failed: r.failed, backup: r.backup_id });
+    window.clearTimeout(fixTimer.current);
+    fixTimer.current = window.setTimeout(() => setFixRes(null), FIX_RESULT_MS);
+    void reload();
+  };
+  const undoFix = async () => {
+    if (!fixRes?.backup) return;
+    setUndoing(true);
+    setError(null);
+    try {
+      const c = await services.modsFixUndo(instanceId, fixRes.backup);
+      checkSeq.current++;
+      window.clearTimeout(checkTimer.current);
+      setIssues(c.issues);
+      window.clearTimeout(fixTimer.current);
+      setFixRes(null);
+      await reload();
+    } catch (e) { setError(errMsg(e)); }
+    finally { setUndoing(false); }
+  };
+  const modOf = (file: string) => (mods ?? []).find((m) => m.enabled && enabledName(m.file) === file);
 
   const shown = useMemo(() => {
     const t = filter.trim().toLowerCase();
@@ -180,7 +295,58 @@ export function ModsPanel({ services, instanceId, onClose, onCount, onBrowse, on
               value={filter} onChange={(e) => setFilter(e.target.value)}
             />
           </div>
+          <div className="dr-search-actions">
+            <Button icon={<Icon d={ICONS.plus} />} onClick={onBrowse}>Parcourir des mods</Button>
+            <Button variant="secondary" onClick={() => { void pick(); }}>Ajouter un .jar</Button>
+          </div>
         </div>
+        {issues.length > 0 && (
+          <div className={`dr-issues${issues.some((i) => i.severity === "error") ? " is-error" : " is-warn"}`}>
+            <div className="dr-issues-bar">
+              <button type="button" className="dr-issues-h" aria-expanded={issuesOpen} onClick={() => setIssuesOpen((o) => !o)}>
+                <Icon d={ICONS.alert} size={16} />
+                <span>{issueWord(issues.length)}</span>
+                <span className="dr-issues-c" aria-hidden="true">{issuesOpen ? "▴" : "▾"}</span>
+              </button>
+              {issues.some((i) => i.severity === "error") && (
+                <Button onClick={() => setFix({})}>Corriger automatiquement</Button>
+              )}
+            </div>
+            {issuesOpen && (
+              <ul className="dr-issues-list" aria-label="Problèmes de compatibilité">
+                {issues.map((i, k) => {
+                  const mine = i.kind === "incompatible" ? modOf(i.file) : undefined;
+                  const other = i.kind === "incompatible" && i.related ? modOf(i.related) : undefined;
+                  return (
+                    <li key={`${i.file}-${i.kind}-${k}`}>
+                      <span><strong>{i.mod_name}</strong> : {i.message}</span>
+                      <span className="dr-issues-act">
+                        {i.related && (mods ?? []).some((m) => m.file === i.related) && (
+                          <button type="button" className="home-link" aria-label={`Voir ${i.related}`} onClick={() => setFilter(i.related!)}>Voir</button>
+                        )}
+                        {i.severity === "error" && i.kind !== "incompatible" && (
+                          <Button variant="secondary" aria-label={`Corriger ${i.mod_name}`} onClick={() => setFix({ only: i.file })}>Corriger</Button>
+                        )}
+                        {mine && <Button variant="secondary" onClick={() => { void toggle(mine); }}>Désactiver {i.mod_name}</Button>}
+                        {other && <Button variant="secondary" onClick={() => { void toggle(other); }}>Désactiver {i.related}</Button>}
+                      </span>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
+        )}
+        {fixRes && (
+          <div className={`dr-fixres${fixRes.failed.length ? " has-fail" : ""}`} role="status">
+            <span className="dr-fixres-txt">
+              <span>{fixRes.applied === 0 ? "Aucune correction appliquée." : `${fixRes.applied} correction${fixRes.applied > 1 ? "s" : ""} appliquée${fixRes.applied > 1 ? "s" : ""}.`}</span>
+              {fixRes.failed.map((f) => <span key={f.title}>1 a échoué : {f.title} — {f.error}</span>)}
+            </span>
+            {fixRes.backup && <Button variant="secondary" loading={undoing} onClick={() => { void undoFix(); }}>Annuler la correction</Button>}
+            <IconButton aria-label="Fermer le résultat" icon={<Icon d={ICONS.close} />} onClick={() => setFixRes(null)} />
+          </div>
+        )}
         <div className="dr-live" aria-live="polite">
           <p className="dr-count" role="status">
             {mods === null ? "Chargement des mods…"
@@ -199,10 +365,20 @@ export function ModsPanel({ services, instanceId, onClose, onCount, onBrowse, on
               {shown.map((m) => removing.includes(m.file) ? (
                 <UndoRow key={m.file} file={m.file} onUndo={() => undo(m.file)} />
               ) : (
-                <li key={m.file} className={`dr-row${m.enabled ? "" : " is-off"}`}>
-                  <span className="dr-av" aria-hidden="true" style={{ background: avatarColors(null, m.file).bg, color: avatarColors(null, m.file).ink }}>{initial(m.file)}</span>
+                <li
+                  key={m.file} className={`dr-row${m.enabled ? "" : " is-off"}`}
+                  onContextMenu={ctx.bind(`Actions pour ${m.file}`, [
+                    { key: "toggle", label: m.enabled ? "Désactiver" : "Activer", icon: <Icon d={m.enabled ? ICONS.close : ICONS.check} />, onSelect: () => { void toggle(m); } },
+                    { key: "copy", label: "Copier le nom du fichier", icon: <Icon d={ICONS.copy} />, onSelect: () => { void navigator.clipboard?.writeText(m.file).catch(() => {}); } },
+                    { key: "delete", label: "Supprimer", icon: <Icon d={ICONS.trash} />, danger: true, separator: true, onSelect: () => startRemove(m) },
+                  ])}
+                >
+                  <ModAvatar services={services} instanceId={instanceId} file={m.file} />
                   <span className="dr-nm">
-                    <span className="n">{m.file}</span>
+                    <span className="n">
+                      {m.file}
+                      {issues.some((i) => i.file === enabledName(m.file)) && <IssueBadge issues={issues.filter((i) => i.file === enabledName(m.file))} />}
+                    </span>
                     <span className="m">
                       <span>{formatSize(m.size)}</span>
                       {m.custom && <span className="dr-chip">Personnalisé</span>}
@@ -219,12 +395,10 @@ export function ModsPanel({ services, instanceId, onClose, onCount, onBrowse, on
             </ul>
           )
         )}
+        {ctx.menu}
+        {fix && <FixDialog services={services} instanceId={instanceId} only={fix.only} onClose={() => setFix(null)} onDone={onFixed} />}
         <div className="dr-drop" aria-hidden={!over}>Dépose des fichiers .jar ici pour les ajouter</div>
       </div>
-      <footer className="dr-foot">
-        <Button icon={<Icon d={ICONS.plus} />} onClick={onBrowse}>Parcourir des mods</Button>
-        <Button variant="secondary" onClick={() => { void pick(); }}>Ajouter un .jar</Button>
-      </footer>
     </Panel>
   );
 }

@@ -38,6 +38,10 @@ pub enum HostEvent {
     /// visible a l'ecran, plus de proprietaire), le rideau s'est rouvert sur le launcher, la surveillance est arretee. Le jeu
     /// continue dans sa propre fenetre ; il n'est jamais tue. Emis au plus une fois par lancement.
     Fallback { reason: FallbackReason, detail: String },
+    /// LA fenetre du jeu, posee, entre (`true`) ou sort (`false`) du plein ecran (F11, ou reglage du jeu). Le jeu ne peut pas
+    /// couvrir l'ecran lui-meme (il est cale sur la zone de jeu) : c'est au launcher de passer en plein ecran pour lui. Emis a
+    /// chaque changement, jamais deux fois de suite la meme valeur pour un meme lancement.
+    Fullscreen(bool),
     /// Ligne de journal, TOUJOURS emise (pas seulement avec `CUBELINK_STAGE_DEBUG`) : etapes cles seulement (lancement, hooks,
     /// detection, adoption, pose, plein ecran corrige, fermeture), jamais un flux par image.
     Log(String),

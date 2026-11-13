@@ -1,8 +1,25 @@
 import { useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
+import { PixelHead } from "../screens/Main/Pixel";
+import type { AccountInfo, Services } from "../services/types";
 import { useShell } from "./context";
 import { useAccounts } from "./useAccounts";
 
-/** Sélecteur compact du compte actif, dans la barre de titre : changer de compte en deux clics. */
+/** Tête du skin d'un compte Microsoft (8×8, agrandie sans lissage) ; tête générée pour un compte hors ligne ou sans réseau. */
+export function SkinHead({ services, account, size }: { services: Services; account: AccountInfo; size: number }) {
+  const [src, setSrc] = useState<string | null>(null);
+  useEffect(() => {
+    setSrc(null);
+    if (account.kind !== "online") return;
+    let alive = true;
+    services.authSkinHead(account.uuid).then((s) => { if (alive) setSrc(s); }, () => {});
+    return () => { alive = false; };
+  }, [services, account.kind, account.uuid]);
+  return src
+    ? <img className="acc-head px-img" src={src} width={size} height={size} alt="" />
+    : <PixelHead className="acc-head" seed={account.uuid || account.name} size={size} />;
+}
+
+/** Carte de profil (bas du panneau de l'accueil) : compte actif, changer de compte en deux clics, menu ouvert vers le haut. */
 export function AccountSwitcher() {
   const { services, route, navigate } = useShell();
   const { state, refresh } = useAccounts(services);
@@ -70,9 +87,11 @@ export function AccountSwitcher() {
         aria-label={active ? `Compte actif : ${active.name}. Changer de compte` : "Choisir un compte"}
         onClick={() => setOpen((o) => !o)}
       >
-        <span className="acc-av" aria-hidden="true">{(active?.name ?? "?").slice(0, 1).toUpperCase()}</span>
-        <span className="acc-name">{active?.name ?? "Aucun compte"}</span>
-        <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M1.5 3.5L5 7l3.5-3.5" fill="none" stroke="currentColor" /></svg>
+        {active ? <SkinHead services={services} account={active} size={40} /> : <PixelHead className="acc-head" seed="?" size={40} />}
+        <span className="acc-txt">
+          <span className="acc-name">{active?.name ?? "Aucun compte"}</span>
+          <span className="acc-kind">{active?.kind === "offline" ? "Hors ligne" : "Compte Microsoft"} · changer</span>
+        </span>
       </button>
       {open && (
         <div id={`${uid}-menu`} className="acc-menu" role="menu" aria-label="Changer de compte" onKeyDown={onMenuKey}>
@@ -81,11 +100,11 @@ export function AccountSwitcher() {
               key={a.id} type="button" role="menuitemradio" aria-checked={a.id === state.active}
               ref={(el) => { items.current[i] = el; }} className="acc-item" onClick={() => { void pick(a.id); }}
             >
-              <span className="acc-av" aria-hidden="true">{a.name.slice(0, 1).toUpperCase()}</span>
+              <SkinHead services={services} account={a} size={24} />
               <span className="acc-name">{a.name}</span>
               {a.kind === "offline" && <span className="acc-tag">Hors ligne</span>}
               {a.id === state.active && (
-                <svg className="acc-ok" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.25" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5" /></svg>
+                <svg className="acc-ok" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M5 13l4 4L19 7" /></svg>
               )}
             </button>
           ))}

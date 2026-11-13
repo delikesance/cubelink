@@ -102,6 +102,13 @@ pub fn read_provenance(game_dir: &Path) -> BTreeMap<String, Provenance> {
 
 fn write_provenance(game_dir: &Path, map: &BTreeMap<String, Provenance>) -> Result<()> {
     let path = prov_path(game_dir);
+    if map.is_empty() {
+        // Rien à retenir : pas de fichier (l'état d'une instance sans provenance reste identique).
+        return match std::fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
+            _ => Ok(()),
+        };
+    }
     let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
     let json = serde_json::to_vec_pretty(map).map_err(|e| Error::Other(e.to_string()))?;
     std::fs::write(&tmp, json)?;
@@ -125,6 +132,21 @@ pub fn record_provenance(game_dir: &Path, entries: &[(String, Provenance)]) -> R
 fn forget(game_dir: &Path, base: &str) -> Result<()> {
     let mut map = read_provenance(game_dir);
     if map.remove(base).is_some() {
+        write_provenance(game_dir, &map)?;
+    }
+    Ok(())
+}
+
+/// Oublie la provenance de fichiers (noms activés ou désactivés), sans toucher aux fichiers.
+pub fn forget_provenance(game_dir: &Path, files: &[String]) -> Result<()> {
+    let _g = guard();
+    let mut map = read_provenance(game_dir);
+    let mut changed = false;
+    for f in files {
+        let base = jar_base(f).unwrap_or_else(|| f.clone());
+        changed |= map.remove(&base).is_some();
+    }
+    if changed {
         write_provenance(game_dir, &map)?;
     }
     Ok(())
@@ -154,6 +176,12 @@ pub fn list(game_dir: &Path) -> Result<Vec<ModEntry>> {
     }
     out.sort_by_key(|m| lower(&m.file));
     Ok(out)
+}
+
+/// Icône d'un mod de `mods/` (data URL), `None` s'il n'en a pas. `file` : nom actuel du fichier.
+pub fn icon(game_dir: &Path, file: &str) -> Result<Option<String>> {
+    validate_mod_name(file)?;
+    Ok(crate::mod_icon::icon_data_url(&mods_dir(game_dir).join(file)))
 }
 
 /// Active ou désactive un mod (renomme `.jar` <-> `.jar.disabled`). `file` : nom actuel ou nom activé.

@@ -1,3 +1,4 @@
+import "./shared.css";
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import type { Instance, Services } from "../../services";
 import { avatarColors } from "./accent";
@@ -37,12 +38,36 @@ export function Avatar({ services, inst, className }: { services: ImgServices; i
 }
 
 /** Une couche de décor : image par défaut (blocs) toujours dessous, image du modpack par-dessus quand elle est prête. */
+/** Côté le plus grand de l'écran en pixels physiques (2560 max) : le décor est demandé à cette taille, pas plus. */
+export function backdropPx(): number {
+  if (typeof window === "undefined" || !window.screen) return 1920;
+  const px = Math.max(window.screen.width || 0, window.screen.height || 0) * (window.devicePixelRatio || 1);
+  return Math.min(2560, Math.max(1280, Math.ceil(px)));
+}
+
+/** Agrandissement au-delà duquel une image étirée en plein cadre se voit pixelisée : on la montre alors floutée. */
+export const SOFT_UPSCALE = 1.5;
+
+/** Agrandissement réel d'une image en `object-fit: cover` dans une boîte `w` x `h` (pixels CSS). */
+export function coverUpscale(natural: { w: number; h: number }, box: { w: number; h: number }, dpr = 1): number {
+  if (natural.w <= 0 || natural.h <= 0) return 1;
+  return Math.max(box.w / natural.w, box.h / natural.h) * dpr;
+}
+
 function BackdropLayer({ services, inst, fading }: { services: ImgServices; inst: Instance | null; fading?: boolean }) {
-  const img = useArtImage(services, inst?.id ?? "", inst?.art?.screenshots[0] ?? null, false, 1920);
+  const img = useArtImage(services, inst?.id ?? "", inst?.art?.screenshots[0] ?? null, false, backdropPx());
+  const [soft, setSoft] = useState(false);
+  const onLoad = (e: React.SyntheticEvent<HTMLImageElement>) => {
+    const el = e.currentTarget;
+    const up = coverUpscale({ w: el.naturalWidth, h: el.naturalHeight }, { w: el.clientWidth, h: el.clientHeight }, window.devicePixelRatio || 1);
+    setSoft(up > SOFT_UPSCALE);
+  };
   return (
     <div className={`home-layer${fading ? " is-out" : ""}`} aria-hidden="true">
       <DefaultArt className="home-default-art" />
-      {img.status === "ready" && img.src && <img className="home-bg" src={img.src} alt="" onError={img.markError} />}
+      {img.status === "ready" && img.src && (
+        <img className={`home-bg${soft ? " is-soft" : ""}`} src={img.src} alt="" onLoad={onLoad} onError={img.markError} />
+      )}
     </div>
   );
 }

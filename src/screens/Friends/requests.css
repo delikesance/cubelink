@@ -1,5 +1,5 @@
-.rq{display:flex;flex-direction:column;gap:12px;padding:16px 32px;color:var(--text);font-family:var(--font-ui);font-size:14px}
-.rq-title{margin:0;font-size:16px;font-weight:700;display:flex;align-items:center;gap:8px}
+.rq{display:flex;flex-direction:column;gap:12px;padding:0;color:var(--text);font-family:var(--font-ui);font-size:14px}
+.rq-title{margin:0;font:600 16px var(--font-display);display:flex;align-items:center;gap:8px}
 .rq-badge{padding:2px 8px;border-radius:999px;background:var(--warn);color:var(--accent-ink);font-size:13px;font-weight:700}
 .rq-bar{display:flex;align-items:center;gap:16px}
 .rq-search{flex:1 1 auto;min-width:0;box-sizing:border-box;min-height:44px;padding:0 14px;border-radius:var(--r-md);border:1px solid var(--line);background:var(--bg);color:var(--text);font:inherit;color-scheme:dark}

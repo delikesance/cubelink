@@ -27,6 +27,7 @@ export function createTauriServices(): Services {
     offlineAvailable: async () => true,
     authAccounts: () => invoke("auth_accounts"),
     authSwitch: (id) => invoke("auth_switch", { id }),
+    authSkinHead: (uuid) => invoke("auth_skin_head", { uuid }),
     authRemove: (id) => invoke("auth_remove", { id }),
 
     instancesList: () => invoke("instances_list"),
@@ -40,9 +41,10 @@ export function createTauriServices(): Services {
     instancesLogs: (id) => invoke("instances_logs", { id }),
     instancesArtImage: (instanceId, file, maxPx) => invoke("instances_art_image", { instance_id: instanceId, file, max_px: maxPx ?? null }),
     instancesArtSet: (instanceId, path, role) => invoke("instances_art_set", { instance_id: instanceId, path, role }),
-    instancesArtLookup: (instanceId) => invoke("instances_art_lookup", { instance_id: instanceId }),
+    instancesArtLookup: (instanceId, auto) => invoke("instances_art_lookup", { instance_id: instanceId, auto: auto ?? false }),
     minecraftVersions: () => invoke("minecraft_versions"),
 
+    netTest: () => invoke("net_test"),
     friendMyCode: () => invoke("friend_my_code"),
     friendRegenerateCode: () => invoke("friend_regenerate_code"),
     friendList: () => invoke("friend_list"),
@@ -55,6 +57,8 @@ export function createTauriServices(): Services {
     friendInvites: () => invoke("friend_invites"),
     friendInviteDismiss: (id) => invoke("friend_invite_dismiss", { id }),
     gameSwitch: (instance_id) => invoke("game_switch", { instance_id }),
+    gameCurrent: () => invoke("game_current"),
+    gameClose: () => invoke("game_close"),
     gameJoinFriend: (public_key, instance_id) => invoke("game_join_friend", { public_key, instance_id }),
 
     joinPlan: (friend_public_key) => invoke("join_plan", { friend_public_key }),
@@ -71,8 +75,15 @@ export function createTauriServices(): Services {
     browseVersions: (source, id, kind, minecraft, loader) =>
       invoke("browse_versions", { source, id, kind, minecraft, loader }),
     browseInstall: (input) => invoke("browse_install", { input }),
+    browseCheck: (source, id, kind, instance_id, version_id) => invoke("browse_check", { source, id, kind, instance_id, version_id: version_id ?? null }),
     modsList: (instance_id) => invoke("mods_list", { instance_id }),
+    modsIcon: (instance_id, file) => invoke("mods_icon", { instance_id, file }),
+    modsCheck: (instance_id) => invoke("mods_check", { instance_id }),
+    instancesDescription: (instance_id) => invoke("instances_description", { instance_id }),
     modsToggle: (instance_id, file, enabled) => invoke("mods_toggle", { instance_id, file, enabled }),
+    modsFixPlan: (instance_id) => invoke("mods_fix_plan", { instance_id }),
+    modsFixApply: (instance_id, plan_id, action_ids) => invoke("mods_fix_apply", { instance_id, plan_id, action_ids }),
+    modsFixUndo: (instance_id, backup_id) => invoke("mods_fix_undo", { instance_id, backup_id }),
     modsRemove: (instance_id, file) => invoke("mods_remove", { instance_id, file }),
     modsAdd: (instance_id, path) => invoke("mods_add", { instance_id, path }),
     pickFiles: async ({ extensions, multiple }) => {
@@ -100,6 +111,7 @@ export function createTauriServices(): Services {
     updateInstall: () => invoke("update_install"),
     onUpdateState: (cb) => on("update://state", cb),
     onBrowseProgress: (cb) => on("browse://progress", cb),
+    onModsFixProgress: (cb) => on("mods-fix://progress", cb),
     onFilesDropped: (cb) => {
       let off: (() => void) | null = null;
       let cancelled = false;

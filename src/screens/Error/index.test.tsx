@@ -57,15 +57,21 @@ describe("écran Erreur", () => {
     expect(window.location.hash).toBe("#/login");
   });
 
-  it("Réessayer (bad-hash) relance join_start avec l'ami puis ouvre l'installation", async () => {
+  it("Réessayer (bad-hash) avec un ami retourne à l'écran Rejoindre, sans appel de service", () => {
     const base = createFakeServices({ tickMs: 0 });
     const start = vi.fn(async () => {});
     show("#/error?state=bad-hash&friend=pk-1&name=Léa&file=a.jar&others=2", { ...base, joinStart: start });
     expect(document.getElementById("err-title")?.textContent).toContain("Léa");
     expect(screen.getByText("a.jar")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Réessayer" }));
-    await waitFor(() => expect(window.location.hash).toBe("#/install?friend=pk-1"));
-    expect(start).toHaveBeenCalledWith("pk-1");
+    expect(window.location.hash).toBe("#/join?friend=pk-1");
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it("Réessayer (bad-hash) sans ami retombe sur l'accueil", () => {
+    show("#/error?state=bad-hash");
+    fireEvent.click(screen.getByRole("button", { name: "Réessayer" }));
+    expect(window.location.hash).toBe("#/main");
   });
 
   it("lancement échoué : détail technique copiable, Réessayer relance l'instance", async () => {

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { isTauri } from "../services";
 
 /** Zone de jeu intégrée (Windows) : un jeu est rattaché, c'est lui qu'on voit, panneau « en jeu » ouvert. */
@@ -153,6 +153,42 @@ export function useStageLayout(ref: React.RefObject<HTMLElement | null>): void {
       mq?.removeEventListener("change", onDpr);
     };
   }, [ref]);
+}
+
+/** Le launcher est en plein écran pour le jeu : le jeu l'a demandé (F11), il est rattaché et c'est lui qu'on voit. */
+export function stageFullscreen(requested: boolean, st: StageState): boolean {
+  return requested && st.attached && st.game;
+}
+
+/**
+ * Plein écran du jeu (événement `stage://fullscreen`, F11 dans le jeu) : le jeu est calé sur la zone de jeu, c'est donc la
+ * fenêtre du launcher qui passe en plein écran, et la zone (sans barre de titre) couvre tout l'écran. Retour au launcher :
+ * plein écran suspendu ; fin du jeu : oublié. Rend vrai tant que le launcher est en plein écran pour le jeu.
+ */
+export function useStageFullscreen(st: StageState): boolean {
+  const [requested, setRequested] = useState(false);
+  useEffect(() => {
+    if (!isTauri()) return;
+    let off: (() => void) | undefined;
+    let dead = false;
+    void (async () => {
+      const { listen } = await import("@tauri-apps/api/event");
+      const un = await listen<boolean>("stage://fullscreen", (e) => setRequested(e.payload === true));
+      if (dead) un(); else off = un;
+    })().catch(() => { /* best effort */ });
+    return () => { dead = true; off?.(); };
+  }, []);
+  useEffect(() => { if (!st.attached) setRequested(false); }, [st.attached]);
+
+  const on = stageFullscreen(requested, st);
+  // Ne rend la fenêtre (false) que si c'est nous qui l'avions mise en plein écran.
+  const applied = useRef(false);
+  useEffect(() => {
+    if (!isTauri() || applied.current === on) return;
+    applied.current = on;
+    void import("@tauri-apps/api/window").then(({ getCurrentWindow }) => getCurrentWindow().setFullscreen(on)).catch(() => { /* best effort */ });
+  }, [on]);
+  return on;
 }
 
 export async function switchStageView(game: boolean): Promise<void> {

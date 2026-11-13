@@ -3,22 +3,27 @@
 //! La logique est dans `core_lib::browse` et `core_lib::mods` ; ici : état de l'application, événements
 //! `browse://progress`, création d'instance pour les modpacks et surcharges de test.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
-use core_lib::browse::{self, BrowseInstallInput, BrowseKind, BrowsePage, BrowseQuery, BrowseVersion, Providers};
+use core_lib::browse::{self, BrowseInstallInput, BrowseKind, BrowsePage, BrowseQuery, BrowseSource, BrowseVersion, Providers};
+use core_lib::mod_check::{self, ModCheck};
+use core_lib::mod_fix::{self, ContentCheck, FixPlan, FixResult, PreparedFix};
 use core_lib::mods::{self, ModEntry};
 use core_lib::providers::curseforge::CfResolver;
 use core_lib::providers::curseforge_api::CfApi;
 use core_lib::providers::modrinth_api::ModrinthClient;
 use core_lib::providers::modrinth_dl::DlOptions;
-use core_lib::types::Instance;
+use core_lib::types::{Instance, Loader};
 use serde::Serialize;
 use tauri::State;
 
 use crate::commands_instances::valid_id;
 use crate::error::user_msg;
 use crate::state::{lock, AppState};
+
+
 
 /// Clé factice envoyée au faux serveur CurseForge en mode test.
 pub const TEST_CF_KEY: &str = "test-key";
@@ -43,6 +48,17 @@ pub(crate) fn providers() -> Providers {
         None => CfApi::new(),
     };
     Providers { modrinth, cf, allow_loopback: h.test_mode }
+}
+
+/// Plans de correction des mods en mémoire : `plan_id` -> (instance, création, plan). Valables 10 minutes.
+const FIX_PLAN_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+const FIX_STALE: &str = "La liste des mods a changé, relance la correction.";
+
+type FixPlans = Mutex<HashMap<String, (String, std::time::Instant, PreparedFix)>>;
+
+fn fix_plans() -> &'static FixPlans {
+    static PLANS: OnceLock<FixPlans> = OnceLock::new();
+    PLANS.get_or_init(Default::default)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -98,7 +114,20 @@ impl AppState {
         browse::versions(&providers(), source, id, kind, minecraft, loader).await.map_err(|e| user_msg(&e))
     }
 
-    pub async fn browse_install(&self, input: BrowseInstallInput) -> Result<BrowseInstallResult, String> {
+    /// Compatibilité d'un mod avec une instance avant installation : déjà installé, version recommandée, blocages.
+    pub async fn browse_check(&self, source: &str, id: &str, kind: &str, instance_id: &str, version_id: Option<&str>) -> Result<ContentCheck, String> {
+        let source = BrowseSource::parse(source).map_err(|e| user_msg(&e))?;
+        if BrowseKind::parse(kind).map_err(|e| user_msg(&e))? != BrowseKind::Mod {
+            return Ok(ContentCheck::default());
+        }
+        let (inst, dir) = self.instance_game_dir(instance_id)?;
+        let p = providers();
+        mod_fix::check_content(&p, &inst.minecraft, inst.loader.loader, &dir, &self.paths.store, &self.store, &DlOptions::default(), source, id, version_id)
+            .await
+            .map_err(|e| user_msg(&e))
+    }
+
+    pub async fn browse_install(&self, mut input: BrowseInstallInput) -> Result<BrowseInstallResult, String> {
         let p = providers();
         let dl = DlOptions::default();
         let cb = |d: u32, t: u32, l: &str| self.emit_browse_progress(d, t, l);
@@ -108,6 +137,24 @@ impl AppState {
         let id = input.instance_id.as_deref().ok_or("choisis l'instance dans laquelle installer ce contenu")?;
         let (inst, game_dir) = self.instance_game_dir(id)?;
         self.ensure_not_running(id)?;
+        if input.kind == BrowseKind::Mod {
+            // Jamais un mod qui casserait le pack : version choisie vérifiée, sinon la version recommandée.
+            let c = mod_fix::check_content(&p, &inst.minecraft, inst.loader.loader, &game_dir, &self.paths.store, &self.store, &dl, input.source, &input.id, input.version_id.as_deref())
+                .await
+                .map_err(|e| user_msg(&e))?;
+            match &input.version_id {
+                Some(v) => {
+                    if let Some(vd) = c.verdicts.iter().find(|x| x.version_id == *v).filter(|x| !x.ok) {
+                        return Err(format!("Cette version n'est pas compatible avec les mods du pack : {}", vd.problems.join(" ; ")));
+                    }
+                }
+                None => match c.recommended {
+                    Some(r) => input.version_id = Some(r),
+                    None if !c.blockers.is_empty() => return Err(format!("Aucune version compatible avec les mods du pack : {}", c.blockers.join(" ; "))),
+                    None => {}
+                },
+            }
+        }
         let report = browse::install_content(&p, &input, &inst, &game_dir, &self.paths.store, &self.store, &dl, &cb)
             .await
             .map_err(|e| user_msg(&e))?;
@@ -140,6 +187,84 @@ impl AppState {
     pub async fn mods_list(&self, instance_id: &str) -> Result<Vec<ModEntry>, String> {
         let (_, dir) = self.instance_game_dir(instance_id)?;
         mods::list(&dir).map_err(|e| user_msg(&e))
+    }
+
+    pub async fn mods_icon(&self, instance_id: &str, file: &str) -> Result<Option<String>, String> {
+        let (_, dir) = self.instance_game_dir(instance_id)?;
+        let file = file.to_string();
+        tokio::task::spawn_blocking(move || mods::icon(&dir, &file))
+            .await
+            .map_err(|_| "lecture interrompue".to_string())?
+            .map_err(|e| user_msg(&e))
+    }
+
+    /// Vérification hors ligne de la compatibilité des mods activés de l'instance.
+    pub async fn mods_check(&self, instance_id: &str) -> Result<ModCheck, String> {
+        let (inst, dir) = self.instance_game_dir(instance_id)?;
+        let loader = match inst.loader.loader {
+            Loader::Vanilla => "vanilla",
+            Loader::NeoForge => "neoforge",
+            Loader::Fabric => "fabric",
+            Loader::Quilt => "quilt",
+            Loader::Forge => "forge",
+        };
+        let minecraft = inst.minecraft;
+        tokio::task::spawn_blocking(move || mod_check::check(&dir, &minecraft, loader))
+            .await
+            .map_err(|_| "lecture interrompue".to_string())?
+            .map_err(|e| user_msg(&e))
+    }
+
+    fn emit_fix_progress(&self, done: u32, total: u32, label: &str) {
+        self.emit_event("mods-fix://progress", &ProgressEvent { done, total, label });
+    }
+
+    /// Calcule (sans rien modifier dans l'instance) les corrections des problèmes de mods.
+    pub async fn mods_fix_plan(&self, instance_id: &str) -> Result<FixPlan, String> {
+        let (inst, dir) = self.instance_game_dir(instance_id)?;
+        self.ensure_not_running(instance_id)?;
+        let p = providers();
+        let dl = DlOptions::default();
+        let cb = |d: u32, t: u32, l: &str| self.emit_fix_progress(d, t, l);
+        let mut prep = mod_fix::plan(&p, &inst.minecraft, inst.loader.loader, &dir, &self.paths.store, &self.store, &dl, &cb)
+            .await
+            .map_err(|e| user_msg(&e))?;
+        let plan_id = format!("fix-{}", uuid_like());
+        prep.plan.plan_id = plan_id.clone();
+        let plan = prep.plan.clone();
+        let mut plans = lock(fix_plans());
+        plans.retain(|_, (_, at, _)| at.elapsed() < FIX_PLAN_TTL);
+        plans.insert(plan_id, (instance_id.to_string(), std::time::Instant::now(), prep));
+        Ok(plan)
+    }
+
+    /// Applique les actions choisies d'un plan encore valable.
+    pub async fn mods_fix_apply(&self, instance_id: &str, plan_id: &str, action_ids: Vec<String>) -> Result<FixResult, String> {
+        let (inst, dir) = self.instance_game_dir(instance_id)?;
+        self.ensure_not_running(instance_id)?;
+        let prep = {
+            let mut plans = lock(fix_plans());
+            plans.retain(|_, (_, at, _)| at.elapsed() < FIX_PLAN_TTL);
+            match plans.get(plan_id) {
+                Some((iid, _, prep)) if iid == instance_id => prep.clone(),
+                _ => return Err(FIX_STALE.into()),
+            }
+        };
+        if mod_fix::mods_fingerprint(&dir) != prep.fingerprint {
+            lock(fix_plans()).remove(plan_id);
+            return Err(FIX_STALE.into());
+        }
+        let cb = |d: u32, t: u32, l: &str| self.emit_fix_progress(d, t, l);
+        let res = mod_fix::apply(&prep, &action_ids, &dir, &self.paths.store, &self.store, &inst.minecraft, inst.loader.loader, &cb).map_err(|e| user_msg(&e))?;
+        lock(fix_plans()).remove(plan_id);
+        Ok(res)
+    }
+
+    /// Annule une correction : remet les jars sauvegardés et retire ceux ajoutés.
+    pub async fn mods_fix_undo(&self, instance_id: &str, backup_id: &str) -> Result<ModCheck, String> {
+        let (inst, dir) = self.instance_game_dir(instance_id)?;
+        self.ensure_not_running(instance_id)?;
+        mod_fix::undo(&dir, backup_id, &self.store, &inst.minecraft, inst.loader.loader).map_err(|e| user_msg(&e))
     }
 
     pub async fn mods_toggle(&self, instance_id: &str, file: &str, enabled: bool) -> Result<(), String> {
@@ -199,6 +324,36 @@ pub async fn browse_install(state: State<'_, Arc<AppState>>, input: BrowseInstal
 #[tauri::command(rename_all = "snake_case")]
 pub async fn mods_list(state: State<'_, Arc<AppState>>, instance_id: String) -> Result<Vec<ModEntry>, String> {
     state.mods_list(&instance_id).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn mods_icon(state: State<'_, Arc<AppState>>, instance_id: String, file: String) -> Result<Option<String>, String> {
+    state.mods_icon(&instance_id, &file).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn mods_check(state: State<'_, Arc<AppState>>, instance_id: String) -> Result<ModCheck, String> {
+    state.mods_check(&instance_id).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn browse_check(state: State<'_, Arc<AppState>>, source: String, id: String, kind: String, instance_id: String, version_id: Option<String>) -> Result<ContentCheck, String> {
+    state.browse_check(&source, &id, &kind, &instance_id, version_id.as_deref()).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn mods_fix_plan(state: State<'_, Arc<AppState>>, instance_id: String) -> Result<FixPlan, String> {
+    state.mods_fix_plan(&instance_id).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn mods_fix_apply(state: State<'_, Arc<AppState>>, instance_id: String, plan_id: String, action_ids: Vec<String>) -> Result<FixResult, String> {
+    state.mods_fix_apply(&instance_id, &plan_id, action_ids).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn mods_fix_undo(state: State<'_, Arc<AppState>>, instance_id: String, backup_id: String) -> Result<ModCheck, String> {
+    state.mods_fix_undo(&instance_id, &backup_id).await
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -280,5 +435,30 @@ mod tests {
         assert!(e.contains("instance"), "{e}");
         let e = st.browse_install(BrowseInstallInput { instance_id: Some("../x".into()), ..input }).await.unwrap_err();
         assert!(e.contains("invalide"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn fix_plan_is_refused_when_mods_change_or_unknown_or_game_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let (st, _) = test_state(dir.path());
+        let inst = st.instances.create("T", "1.21.1", vanilla(), 2048).unwrap();
+        let gd = st.instances.game_dir(&inst.id).unwrap();
+        std::fs::create_dir_all(gd.join("mods")).unwrap();
+        std::fs::write(gd.join("mods/a.jar"), b"1").unwrap();
+        let plan = st.mods_fix_plan(&inst.id).await.unwrap();
+        assert!(plan.plan_id.starts_with("fix-") && plan.actions.is_empty() && plan.unresolved.is_empty());
+        // Plan inconnu ou d'une autre instance.
+        assert_eq!(st.mods_fix_apply(&inst.id, "fix-nope", vec![]).await.unwrap_err(), FIX_STALE);
+        // Le dossier mods change : plan périmé.
+        std::fs::write(gd.join("mods/b.jar"), b"22").unwrap();
+        assert_eq!(st.mods_fix_apply(&inst.id, &plan.plan_id, vec![]).await.unwrap_err(), FIX_STALE);
+        // Plan valable : rien à modifier, pas de sauvegarde.
+        let plan = st.mods_fix_plan(&inst.id).await.unwrap();
+        let r = st.mods_fix_apply(&inst.id, &plan.plan_id, vec![]).await.unwrap();
+        assert!(r.applied.is_empty() && r.backup_id.is_none());
+        assert!(st.mods_fix_undo(&inst.id, "../x").await.is_err());
+        *lock(&st.game) = Some(inst.id.clone());
+        assert!(st.mods_fix_plan(&inst.id).await.unwrap_err().contains("jeu"));
+        assert!(st.mods_fix_undo(&inst.id, "123").await.unwrap_err().contains("jeu"));
     }
 }

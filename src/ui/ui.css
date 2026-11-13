@@ -6,7 +6,7 @@
 .cl-btn-primary:active{transform:translateY(3px);box-shadow:var(--edge-primary-active)}
 .cl-btn-secondary{background:var(--surface-2);color:var(--text);border-color:var(--line);box-shadow:var(--edge-secondary)}
 .cl-btn-secondary:hover{background:#2C2733}
-.cl-btn-secondary:active{transform:translateY(2px);box-shadow:0 1px 0 var(--edge-2)}
+.cl-btn-secondary:active{transform:translateY(3px);box-shadow:0 1px 0 var(--edge-2)}
 .cl-btn-danger{background:var(--danger);color:var(--danger-ink);box-shadow:var(--edge-danger)}
 .cl-btn-danger:hover{background:#F58886}
 .cl-btn-danger:active{transform:translateY(3px);box-shadow:var(--edge-danger-active)}

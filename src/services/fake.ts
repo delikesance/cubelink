@@ -1,6 +1,6 @@
 import { validateOfflineName } from "./accounts";
 import type {
-  AccountInfo, AccountsState, BrowseHit, BrowseInstallResult, BrowseKind, BrowseProgressEvent, BrowseSource, BrowseVersion, ModEntry,
+  AccountInfo, AccountsState, BrowseHit, BrowseInstallResult, BrowseKind, BrowseProgressEvent, BrowseSource, BrowseVersion, FixPlan, FixProgressEvent, FixResult, ModCheck, ModEntry, ModIssue,
   CreateInstanceInput, DeviceCode, HostState, Invite, ImportWarningEvent, LaunchLogEvent, FriendRequest, FriendWithPresence, Instance, InstanceArt,
   JoinPlan, LaunchState, Manifest, PresenceEvent, UnknownModsEvent, Profile, Services, Settings,
   TransferProgress, Unsubscribe, UpdateState,
@@ -29,7 +29,7 @@ export interface FakeControls {
   /** Test : reçoit une invitation (friend://invite + friend://invites). */
   emitInvite(i: Partial<Invite> & { public_key: string }): Invite;
   /** Test : appels de commandes de jeu enregistrés (switch, join, invite). */
-  readonly gameCalls: Array<{ kind: "switch" | "join" | "invite"; arg: string; instanceId?: string }>;
+  readonly gameCalls: Array<{ kind: "switch" | "join" | "invite" | "close"; arg: string; instanceId?: string }>;
   /** Test : fusionne `patch` dans l'état de mise à jour et émet update://state (ex. available, downloading, ready). */
   emitUpdateState(patch: Partial<UpdateState>): void;
   /** Test : état (fusionné) auquel aboutit la prochaine updateCheck ; par défaut up_to_date. */
@@ -201,12 +201,12 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
   let requests: FriendRequest[] = Array.from({ length: requestCount }, (_, i) => makeRequest(i));
   const friends: FriendWithPresence[] = [
     { friend: { public_key: hex(1, 64), name: "Alex", trust: "ask", added_at: NOW - 86400 }, presence: "online" },
-    { friend: { public_key: hex(2, 64), name: "Noor", trust: "always", added_at: NOW - 172800 }, presence: "offline" },
+    { friend: { public_key: hex(2, 64), name: "Noor", trust: "always", added_at: NOW - 172800 }, presence: "offline", last_seen: NOW - 3 * 3600 },
   ];
 
   let invites: Invite[] = [];
   let inviteN = 0;
-  const gameCalls: Array<{ kind: "switch" | "join" | "invite"; arg: string; instanceId?: string }> = [];
+  const gameCalls: Array<{ kind: "switch" | "join" | "invite" | "close"; arg: string; instanceId?: string }> = [];
 
   const listeners = {
     auth: new Set<(p: Profile | null) => void>(),
@@ -218,6 +218,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     unknown: new Set<(e: UnknownModsEvent) => void>(),
     log: new Set<(e: LaunchLogEvent) => void>(),
     browse: new Set<(e: BrowseProgressEvent) => void>(),
+    fix: new Set<(e: FixProgressEvent) => void>(),
     drop: new Set<(p: string[]) => void>(),
     warning: new Set<(e: ImportWarningEvent) => void>(),
     host: new Set<(e: HostState) => void>(),
@@ -248,7 +249,9 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     logs.set(id, [...(logs.get(id) ?? []), line]);
     emit(listeners.log, { id, line });
   };
+  let current: string | null = null;
   const clearLaunch = (id: string) => {
+    if (current === id) current = null;
     launchTimers.get(id)?.forEach(clearTimeout);
     launchTimers.delete(id);
   };
@@ -276,6 +279,32 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     const m = modsOf(id).find((x) => x.file === file);
     if (!m) throw new Error("Mod introuvable.");
     return m;
+  };
+  /** Corrections appliquées par instance (le contrôle de démo ne signale alors plus les erreurs). */
+  const fixed = new Set<string>();
+  const FIX_ADDED = "sodium-0.6.0.jar";
+  const FIX_PLAN: FixPlan = {
+    plan_id: "plan-demo",
+    actions: [
+      { id: "enable-lithium", kind: "enable", title: "Activer Lithium", detail: "Requis par Iris.", file: "lithium-1.3.0.jar", issue_files: ["iris-1.2.0.jar"] },
+      { id: "install-sodium", kind: "install", title: "Installer Sodium 0.6.0 (Modrinth)", detail: "Iris en a besoin.", source: "modrinth", file: FIX_ADDED, issue_files: ["iris-1.2.0.jar"] },
+      { id: "update-waystones", kind: "update", title: "Mettre à jour Waystones vers 1.7.0 (CurseForge)", detail: "Version prévue pour Minecraft 1.21.", source: "curseforge", file: "waystones-1.7.0.jar", issue_files: ["waystones-1.6.0.jar"] },
+    ],
+    unresolved: [
+      { file: "sodium-1.1.0.jar", mod_name: "Sodium", message: "Incompatible avec « Xaero's Minimap ».", reason: "Choisis lequel garder : la correction automatique ne décide pas." },
+      { file: "create-1.0.0.jar", mod_name: "Create", message: "Version trop ancienne pour Minecraft 1.21.1.", reason: "Fichier non distribuable : à télécharger depuis la page du mod.", page_url: "https://www.curseforge.com/minecraft/mc-mods/create" },
+    ],
+  };
+  const checkOf = (id: string): ModCheck => {
+    const list = modsOf(id);
+    const has = (f: string) => list.some((m) => m.file === f);
+    const issues: ModIssue[] = [];
+    if (id === "inst-aeronautics") {
+      if (!fixed.has(id) && has("iris-1.2.0.jar")) issues.push({ file: "iris-1.2.0.jar", mod_name: "Iris", kind: "missing_dep", severity: "error", message: "Il lui manque le mod « Sodium » en version 0.6 ou plus.", });
+      if (!fixed.has(id) && has("sodium-1.1.0.jar") && has("xaero-minimap-1.5.0.jar")) issues.push({ file: "sodium-1.1.0.jar", mod_name: "Sodium", kind: "incompatible", severity: "error", message: "Incompatible avec « Xaero's Minimap ».", related: "xaero-minimap-1.5.0.jar" });
+      if (has("waystones-1.6.0.jar")) issues.push({ file: "waystones-1.6.0.jar", mod_name: "Waystones", kind: "wrong_minecraft", severity: "warning", message: "Prévu pour Minecraft 1.20 : il peut ne pas fonctionner." });
+    }
+    return { issues, checked: list.filter((m) => m.enabled).length };
   };
   const syncCount = (id: string) => { need(id).mod_count = modsOf(id).length; };
 
@@ -356,6 +385,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
       if (active === id) active = accounts[0]?.id ?? null;
       commitAccounts();
     },
+    authSkinHead: async () => null,
 
     instancesList: async () => instances.map((i) => ({ ...i })),
     instancesCreate: async (input: CreateInstanceInput) => {
@@ -377,6 +407,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     instancesLaunch: async (id) => {
       if (!instances.some((i) => i.id === id)) throw new Error("Instance introuvable.");
       clearLaunch(id);
+      current = id;
       emit(listeners.launch, { id, state: "preparing" });
       pushLog(id, "[Cubelink] Préparation du jeu…");
       if (tickMs > 0) {
@@ -441,9 +472,10 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     },
     minecraftVersions: async () => ["1.21.4", "1.21.1", "1.20.6", "1.20.1", "1.19.4", "1.18.2"],
 
+    netTest: async () => ({ relay_connected: true, relay: "euc1-1.relay.n0.iroh.link", relay_ms: 28, udp: true, ipv6: false, direct: true, relay_only: false, partial: false }),
     friendMyCode: async () => `mcl1-${hex(codeN * 7, 24)}`,
     friendRegenerateCode: async () => { codeN += 1; return `mcl1-${hex(codeN * 7, 24)}`; },
-    friendList: async () => friends.map((f) => ({ friend: { ...f.friend }, presence: f.presence })),
+    friendList: async () => friends.map((f) => ({ friend: { ...f.friend }, presence: f.presence, last_seen: f.last_seen })),
     friendInvite: async (pk) => {
       if (!friends.some((f) => f.friend.public_key === pk)) throw new Error("Ami introuvable.");
       gameCalls.push({ kind: "invite", arg: pk });
@@ -454,6 +486,14 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
       emit(listeners.invites, invites.map((i) => ({ ...i })));
     },
     gameSwitch: async (id) => { need(id); gameCalls.push({ kind: "switch", arg: id }); },
+    gameCurrent: async () => current,
+    gameClose: async () => {
+      const id = current;
+      if (!id) return;
+      gameCalls.push({ kind: "close", arg: id });
+      clearLaunch(id);
+      emit(listeners.launch, { id, state: "exited" });
+    },
     gameJoinFriend: async (pk, instanceId) => { gameCalls.push({ kind: "join", arg: pk, instanceId }); },
     friendSendRequest: async (code) => {
       if (!/^mcl1-[0-9a-f]{8,}$/i.test(code.trim())) throw new Error("Code ami invalide.");
@@ -541,8 +581,59 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
       }
       return { instance: { ...inst }, installed: [file], missing: [] };
     },
+    browseCheck: async (source, id, kind, instanceId, versionId) => {
+      const hit = HITS.find((h) => h.source === source && h.id === id && h.kind === kind);
+      if (!hit || kind !== "mod") return { installed: [], recommended: null, verdicts: [], blockers: [] };
+      const prefix = `${slug(hit.name)}-`;
+      const installed = modsOf(need(instanceId).id).filter((m) => m.file.startsWith(prefix)).map((m) => m.file.replace(/\.disabled$/, ""));
+      const first = makeVersions(hit)[0]?.id ?? null;
+      const vid = versionId ?? first;
+      return { installed, recommended: versionId ? null : first, verdicts: vid ? [{ version_id: vid, ok: true, problems: [] }] : [], blockers: [] };
+    },
     modsList: async (id) => modsOf(id).map((m) => ({ ...m })),
+    modsIcon: async () => null,
+    modsCheck: async (id) => checkOf(id),
+    instancesDescription: async (id) => {
+      const art = artOf(id).art;
+      if (!art || art.source === "custom") return null;
+      return `<h2>${art.title}</h2><p>${art.summary}</p><ul><li>Plus de 90 mods</li><li>Quêtes</li></ul><p><a href="https://modrinth.com" target="_blank" rel="noopener noreferrer">Page du projet</a></p>`;
+    },
     modsToggle: async (id, file, enabled) => { modFile(id, file).enabled = enabled; },
+    modsFixPlan: async (id) => {
+      need(id);
+      if (id !== "inst-aeronautics") return { plan_id: "plan-vide", actions: [], unresolved: [] };
+      return structuredClone(FIX_PLAN);
+    },
+    modsFixApply: async (id, _planId, actionIds): Promise<FixResult> => {
+      const list = modsOf(id);
+      const picked = FIX_PLAN.actions.filter((a) => actionIds.includes(a.id));
+      const total = picked.length;
+      const applied: string[] = [];
+      const failed: FixResult["failed"] = [];
+      let done = 0;
+      for (const a of picked) {
+        emit(listeners.fix, { done, total, label: a.title });
+        done++;
+        if (a.id === "update-waystones") { failed.push({ title: a.title, error: "Téléchargement impossible (hors ligne ?)." }); continue; }
+        if (a.id === "enable-lithium") modFile(id, "lithium-1.3.0.jar").enabled = true;
+        if (a.id === "install-sodium" && !list.some((m) => m.file === FIX_ADDED)) list.push({ file: FIX_ADDED, enabled: true, size: 1_100_000, custom: false });
+        applied.push(a.title);
+      }
+      emit(listeners.fix, { done: total, total, label: "Terminé" });
+      if (applied.length) { fixed.add(id); syncCount(id); }
+      const check = checkOf(id);
+      return { applied, failed, backup_id: applied.length ? "backup-demo" : null, check };
+    },
+    modsFixUndo: async (id) => {
+      const list = modsOf(id);
+      fixed.delete(id);
+      const lith = list.find((m) => m.file === "lithium-1.3.0.jar");
+      if (lith) lith.enabled = false;
+      const k = list.findIndex((m) => m.file === FIX_ADDED);
+      if (k >= 0) list.splice(k, 1);
+      syncCount(id);
+      return checkOf(id);
+    },
     modsRemove: async (id, file) => {
       const m = modFile(id, file);
       const list = modsOf(id);
@@ -608,6 +699,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     onUnknownMods: (cb) => sub(listeners.unknown, cb),
     onTransferErrorDetails: () => () => {},
     onBrowseProgress: (cb) => sub(listeners.browse, cb),
+    onModsFixProgress: (cb) => sub(listeners.fix, cb),
     onFilesDropped: (cb) => sub(listeners.drop, cb),
   };
 }

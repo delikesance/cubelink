@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { isTauri } from "../services";
-import { AccountSwitcher } from "./AccountSwitcher";
+import { Logo } from "../screens/Login/Logo";
 import { goBack, useCanGoBack, useLocation } from "./router";
 import { switchStageView, useStage } from "./stage";
 
@@ -52,14 +52,15 @@ export function TitleBar({ context }: { context: string }) {
             <path d="M11 6H1M5 2L1 6l4 4" fill="none" stroke="currentColor" />
           </svg>
         </button>
+        <span className="tb-brand"><Logo width={18} small />Cubelink</span>
         {stage.attached && (
           <button type="button" className="tb-btn tb-stage" onClick={() => void switchStageView(!stage.game)}>
             {stage.game ? "Launcher" : "Retour au jeu"}
           </button>
         )}
       </span>
-      <h1 className="titlebar-title" data-tauri-drag-region>Cubelink · {context}</h1>
-      <AccountSwitcher />
+      <span className="titlebar-drag" data-tauri-drag-region />
+      <span className="titlebar-title">{context}</span>
       <div className="titlebar-buttons">
         <button type="button" className="tb-btn" aria-label="Réduire" onClick={() => void windowAction("minimize")}>
           <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M0 5h10" stroke="currentColor" /></svg>

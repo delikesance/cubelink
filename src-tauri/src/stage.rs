@@ -225,6 +225,12 @@ impl Core {
         self.note("hote", &format!("fenetre du jeu adoptee (classe {class}, apres {after_ms} ms)"));
     }
 
+    /// Le jeu entre ou sort du plein ecran : l'interface met la fenetre du launcher en plein ecran pour lui (`stage://fullscreen`).
+    #[cfg_attr(not(any(windows, test)), allow(dead_code))]
+    fn on_fullscreen(&self, on: bool) {
+        self.emit("stage://fullscreen", serde_json::Value::Bool(on), true);
+    }
+
     /// L'hote a rendu sa fenetre au jeu : a partir d'ici le lancement en cours se comporte comme hors Scene (plus de rideau a
     /// ouvrir, plus de sortie a suivre, fermer le launcher ne ferme plus le jeu).
     #[cfg_attr(not(any(windows, test)), allow(dead_code))]
@@ -484,6 +490,7 @@ impl Stage {
                     cubelink_host::HostEvent::Log(line) => core.on_log(line),
                     cubelink_host::HostEvent::Adopted { class, after_ms } => core.on_adopted(class, *after_ms),
                     cubelink_host::HostEvent::Fallback { reason, detail } => core.on_fallback(reason.as_str(), detail),
+                    cubelink_host::HostEvent::Fullscreen(on) => core.on_fullscreen(*on),
                 }));
                 self.refresh_calm(&h, true);
                 let _ = self.host.set(Box::new(h));

@@ -1,6 +1,16 @@
 import { cleanup, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { stageLayout, useStageLayout } from "./stage";
+import { stageFullscreen, stageLayout, useStageLayout } from "./stage";
+
+describe("stageFullscreen : plein écran du launcher pour le jeu", () => {
+  const st = (attached: boolean, game: boolean) => ({ attached, game, panel: false });
+  it("seulement demandé par le jeu, rattaché et visible", () => {
+    expect(stageFullscreen(true, st(true, true))).toBe(true);
+    expect(stageFullscreen(false, st(true, true))).toBe(false);
+    expect(stageFullscreen(true, st(true, false))).toBe(false); // retour au launcher : suspendu
+    expect(stageFullscreen(true, st(false, false))).toBe(false); // jeu terminé
+  });
+});
 
 describe("stageLayout : px CSS vers pixels physiques", () => {
   const rect = { left: 0, top: 36, width: 1101, height: 683 };

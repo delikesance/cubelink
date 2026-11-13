@@ -14,6 +14,8 @@ use crate::state::{lock, now_secs, AppState};
 pub struct FriendWithPresence {
     pub friend: Friend,
     pub presence: Presence,
+    /// Dernière fois vu en ligne (secondes Unix), si connu.
+    pub last_seen: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -78,7 +80,11 @@ impl AppState {
             .into_iter()
             .map(|f| {
                 let presence = self.backend().presence(&f.public_key);
-                FriendWithPresence { friend: f, presence }
+                if presence == Presence::Online {
+                    self.last_seen.touch(&f.public_key, now_secs());
+                }
+                let last_seen = self.last_seen.get(&f.public_key);
+                FriendWithPresence { friend: f, presence, last_seen }
             })
             .collect())
     }
@@ -153,6 +159,12 @@ impl AppState {
         self.friends.remove_all_requests().map_err(|e| user_msg(&e))?;
         Ok(total)
     }
+}
+
+/// Test de connexion réseau (Paramètres → « Tester ma connexion »).
+#[tauri::command(rename_all = "snake_case")]
+pub async fn net_test(state: State<'_, Arc<AppState>>) -> Result<crate::p2p_backend::NetTest, String> {
+    state.backend().net_test().await
 }
 
 #[tauri::command(rename_all = "snake_case")]

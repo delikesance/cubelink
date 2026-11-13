@@ -52,7 +52,7 @@ describe("écran Créer : choix (B3)", () => {
     const imp = vi.fn(base.instancesImportMrpack);
     await chooser({ ...base, instancesImportMrpack: imp, pickFiles: async () => ["C:\\p\\a.mrpack"] });
     fireEvent.click(screen.getByRole("button", { name: /Importer un fichier/ }));
-    await waitFor(() => expect(window.location.hash).toBe("#/main"));
+    await waitFor(() => expect(window.location.hash).toMatch(/^#\/instance\?id=inst-/));
     expect(imp).toHaveBeenCalledWith("C:\\p\\a.mrpack", expect.objectContaining({ loader: expect.anything() }));
   });
 
@@ -63,7 +63,7 @@ describe("écran Créer : choix (B3)", () => {
     fireEvent.click(screen.getByRole("button", { name: /Importer un fichier/ }));
     fireEvent.change(await screen.findByLabelText("Chemin du modpack (.mrpack ou .zip)"), { target: { value: "C:\\p\\a.mrpack" } });
     fireEvent.click(screen.getByRole("button", { name: "Importer" }));
-    await waitFor(() => expect(window.location.hash).toBe("#/main"));
+    await waitFor(() => expect(window.location.hash).toMatch(/^#\/instance\?id=inst-/));
     expect(imp).toHaveBeenCalled();
   });
 
@@ -87,17 +87,25 @@ describe("écran Créer : formulaire (B4)", () => {
     expect(document.activeElement).toBe(nameInput());
   });
 
-  it("création réussie : instancesCreate puis retour à main", async () => {
+  it("création réussie : instancesCreate puis page de la nouvelle instance", async () => {
     const base = createFakeServices({ tickMs: 0 });
     const create = vi.fn(base.instancesCreate);
     await form({ ...base, instancesCreate: create });
     fireEvent.change(nameInput(), { target: { value: "Mon monde" } });
     fireEvent.click(screen.getByRole("radio", { name: "Fabric" }));
     fireEvent.click(createBtn());
-    await waitFor(() => expect(window.location.hash).toBe("#/main"));
+    await waitFor(() => expect(window.location.hash).toMatch(/^#\/instance\?id=inst-/));
     expect(create).toHaveBeenCalledWith({
       name: "Mon monde", minecraft: "1.21.1", loader: { loader: "fabric", version: "" }, ram_mb: 4096,
     });
+  });
+
+  it("id absent de la réponse : retour à main", async () => {
+    const base = createFakeServices({ tickMs: 0 });
+    await form({ ...base, instancesCreate: async (i) => ({ ...(await base.instancesCreate(i)), id: "" }) });
+    fireEvent.change(nameInput(), { target: { value: "Sans id" } });
+    fireEvent.click(createBtn());
+    await waitFor(() => expect(window.location.hash).toBe("#/main"));
   });
 
   it("options avancées : la mémoire modifiée est transmise", async () => {
@@ -108,7 +116,7 @@ describe("écran Créer : formulaire (B4)", () => {
     fireEvent.click(screen.getByRole("button", { name: "Options avancées" }));
     fireEvent.change(screen.getByLabelText("Mémoire allouée"), { target: { value: "8" } });
     fireEvent.click(createBtn());
-    await waitFor(() => expect(window.location.hash).toBe("#/main"));
+    await waitFor(() => expect(window.location.hash).toMatch(/^#\/instance\?id=inst-/));
     expect(create).toHaveBeenCalledWith(expect.objectContaining({ ram_mb: 8192 }));
   });
 

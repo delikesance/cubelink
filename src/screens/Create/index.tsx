@@ -121,6 +121,12 @@ export default function Create({ pickMrpack }: CreateProps = {}) {
     return () => document.removeEventListener("keydown", onEsc);
   }, []);
 
+  /** Page de la nouvelle instance si son id est connu, sinon l'accueil. */
+  const openCreated = (id?: string) => {
+    if (id) navigate("instance", { id });
+    else navigate("main");
+  };
+
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     if (busy) return;
@@ -133,8 +139,8 @@ export default function Create({ pickMrpack }: CreateProps = {}) {
     setError(null);
     setBusy(true);
     try {
-      await services.instancesCreate({ name: name.trim(), minecraft, loader: { loader, version: "" }, ram_mb: ram });
-      if (alive.current) navigate("main");
+      const created = await services.instancesCreate({ name: name.trim(), minecraft, loader: { loader, version: "" }, ram_mb: ram });
+      if (alive.current) openCreated(created?.id);
     } catch (err) {
       if (alive.current) { setError(messageOf(err)); setBusy(false); }
     }
@@ -149,12 +155,12 @@ export default function Create({ pickMrpack }: CreateProps = {}) {
     setBusy(true);
     try {
       // Nom, version et loader servent seulement aux zip sans métadonnées.
-      await services.instancesImportMrpack(file, {
+      const imported = await services.instancesImportMrpack(file, {
         name: name.trim() || undefined,
         minecraft: minecraft || undefined,
         loader: { loader, version: "" },
       });
-      if (alive.current) navigate("main");
+      if (alive.current) openCreated(imported?.id);
     } catch (err) {
       if (alive.current) { setError(messageOf(err)); setBusy(false); }
     }
@@ -228,7 +234,7 @@ export default function Create({ pickMrpack }: CreateProps = {}) {
             {error && <p className="create-error" role="alert">{error}</p>}
           </div>
           <div className="create-actions">
-            <Button variant="secondary" onClick={cancel}>Annuler</Button>
+            <Button variant="secondary" size="lg" className="create-cancel" icon={<Icon d={ICONS.close} size={20} />} onClick={cancel}>Annuler</Button>
           </div>
         </div>
       ) : (

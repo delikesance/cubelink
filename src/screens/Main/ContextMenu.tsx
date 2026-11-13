@@ -1,3 +1,4 @@
+import "./shared.css";
 import { Fragment, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 
 export interface MenuItem {
@@ -7,6 +8,8 @@ export interface MenuItem {
   icon?: ReactNode;
   /** Filet de séparation au-dessus de l'entrée. */
   separator?: boolean;
+  /** Visible mais inactive (ex. Jouer pendant qu'un autre jeu tourne). */
+  disabled?: boolean;
   onSelect: () => void;
 }
 
@@ -74,7 +77,7 @@ export function ContextMenu({ label, x, y, items, onClose }: ContextMenuProps) {
         <Fragment key={it.key}>
           {it.separator && <div role="separator" className="home-menusep" />}
           <button
-            type="button" role="menuitem" tabIndex={-1}
+            type="button" role="menuitem" tabIndex={-1} disabled={it.disabled} aria-disabled={it.disabled || undefined}
             className={`home-menuitem${it.danger ? " is-danger" : ""}`}
             onClick={() => { onClose(false); it.onSelect(); }}
           >

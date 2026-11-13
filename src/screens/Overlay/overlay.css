@@ -1,6 +1,10 @@
 /* Panneau « en jeu » : bande de 380 px a droite du jeu, sous la barre de titre (la fenetre du jeu y est decoupee). */
-.ov-dock{position:fixed;z-index:50;top:var(--titlebar-h);right:0;bottom:0;width:var(--panel-w);display:flex}
-.ov{flex:1;min-width:0;min-height:0;display:flex;flex-direction:column;background:var(--surface);border-left:1px solid var(--line);color:var(--text);overflow:hidden}
+/* Le fond est sur le dock, toujours dessiné : la découpe qui s'élargit ne révèle jamais autre chose. Le contenu glisse et apparaît
+   pendant la découpe (même durée, même courbe que l'hôte : 180 ms, sortie douce). */
+.ov-dock{position:fixed;z-index:50;top:var(--titlebar-h);right:0;bottom:0;width:var(--panel-w);display:flex;background:var(--surface);border-left:1px solid var(--line)}
+.ov{flex:1;min-width:0;min-height:0;display:flex;flex-direction:column;color:var(--text);overflow:hidden;opacity:0;transform:translateX(16px);transition:opacity 180ms cubic-bezier(.33,1,.68,1),transform 180ms cubic-bezier(.33,1,.68,1)}
+.ov-dock[data-open] .ov{opacity:1;transform:none}
+@media (prefers-reduced-motion:reduce){.ov{transition:none}}
 .ov-head{flex:none;display:flex;align-items:center;gap:8px;padding:0 6px 0 16px;height:44px;border-bottom:1px solid var(--line);user-select:none}
 .ov-title{flex:1;margin:0;font:700 14px var(--font-display);letter-spacing:.02em;outline:none}
 .ov-foot{flex:none;padding:8px 16px;border-top:1px solid var(--line);color:var(--muted);font-size:12px;text-align:center}

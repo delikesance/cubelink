@@ -17,6 +17,11 @@ permissions:
 env:
   CARGO_INCREMENTAL: 0
   CARGO_TERM_COLOR: always
+  # Pas l'optimisation des vraies releases (LTO « fat » + 1 unité de compilation : édition de liens de plusieurs
+  # minutes) : canary = compilation rapide, binaire un peu plus gros et lent, sans importance pour tester.
+  CARGO_PROFILE_RELEASE_LTO: "false"
+  CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+  CARGO_PROFILE_RELEASE_OPT_LEVEL: "1"
   TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
   TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
@@ -31,8 +36,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: release-${{ runner.os }}
-          save-if: false
+          shared-key: canary-${{ runner.os }}
       - name: Dépendances système
         run: |
           sudo tee /etc/apt/sources.list >/dev/null <<'LIST'

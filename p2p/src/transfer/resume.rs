@@ -491,7 +491,9 @@ impl<T: BlobTransport> ResumableReceive<T> {
         let mut retries = 0u32;
         loop {
             self.wait_if_paused(sh, progress).await?;
-            let remaining = self.remaining();
+            let mut remaining = self.remaining();
+            // Les plus gros d'abord : un gros mod parti en dernier finirait seul et laisserait le lien sous-utilisé.
+            remaining.sort_by_key(|f| std::cmp::Reverse(f.size));
             if remaining.is_empty() {
                 return Ok(summary);
             }

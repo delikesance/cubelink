@@ -941,6 +941,7 @@ impl P2pBackend for IrohBackend {
             if let Some(c) = keep {
                 c.close(0u32.into(), b"done");
             }
+            self.transport.close_peer(&peer);
             res
         })
     }

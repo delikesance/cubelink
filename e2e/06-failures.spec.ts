@@ -69,7 +69,7 @@ test('T6 coupure au milieu du transfert puis retour de l hote : reprise, sha256 
   await gotoHash(appB, `#/join?friend=${keyA}`, 'join');
   await page.getByLabel(/^Je fais confiance à .+ pour ce mod$/).check({ timeout: 30_000 });
   await page.getByRole('button', { name: 'Rejoindre et jouer' }).click();
-  await expect(page.getByRole('heading', { name: 'Installation en cours' })).toBeVisible();
+  await expect(page.getByText('Installation en cours. Les fichiers sont vérifiés à la réception.')).toBeVisible(); // transfert sur place (ecran Rejoindre)
 
   // Des octets sont arrives mais pas tout : on gele l'hote.
   await expect.poll(async () => {
@@ -81,7 +81,7 @@ test('T6 coupure au milieu du transfert puis retour de l hote : reprise, sha256 
   expect(cut.bytes_done, 'coupure avant la fin').toBeLessThan(cut.bytes_total);
   await sleep(8000); // pas d'echec immediat : B retente
   expect(((await events(appB, 'transfer://progress')) as any[]).some((e) => e.phase === 'failed')).toBe(false);
-  await expect(page.getByRole('heading', { name: 'Installation en cours' })).toBeVisible();
+  await expect(page.getByText('Installation en cours. Les fichiers sont vérifiés à la réception.')).toBeVisible(); // transfert sur place (ecran Rejoindre)
 
   // L'hote revient : le transfert reprend (reprise automatique) jusqu'au bout.
   resumeApp(appA);

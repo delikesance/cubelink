@@ -1,7 +1,8 @@
 //! Hôte : partage d'une instance et du monde LAN (`host_start_sharing` / `host_stop_sharing`).
 //!
 //! En usage réel, le partage est automatique : `HostAuto` partage l'instance (manifeste, sans port) dès que le jeu
-//! tourne, détecte l'ouverture au réseau local dans la sortie du jeu, puis arrête le partage à la fin du jeu.
+//! tourne, détecte l'ouverture au réseau local dans la sortie du jeu, invite alors automatiquement les amis en ligne
+//! (invitations renouvelées tant que le jeu tourne, annulées à la fin), puis arrête le partage à la fin du jeu.
 
 use std::sync::Arc;
 
@@ -103,6 +104,40 @@ pub struct HostAuto {
     id: String,
     share: Option<tauri::async_runtime::JoinHandle<()>>,
     port: Option<u16>,
+    /// Annonce du monde ouvert aux amis en ligne (invitations renouvelées tant que le jeu tourne).
+    announce: Option<tauri::async_runtime::JoinHandle<()>>,
+}
+
+/// Renouvellement des invitations automatiques, avant leur échéance (`INVITE_TTL`).
+const ANNOUNCE_RENEW: std::time::Duration = std::time::Duration::from_secs(4 * 60);
+/// Fréquence de vérification (amis qui viennent de se connecter, partage enfin prêt).
+const ANNOUNCE_TICK: std::time::Duration = std::time::Duration::from_secs(15);
+
+impl AppState {
+    /// Invite chaque ami en ligne pas encore invité (ou dont l'invitation arrive à échéance).
+    /// Sans effet tant que le monde n'est pas ouvert et partagé.
+    pub(crate) async fn announce_world(&self, sent: &mut std::collections::HashMap<String, std::time::Instant>) {
+        if self.host_state().and_then(|h| h.world_port).is_none() {
+            return;
+        }
+        let Ok(friends) = self.friend_list() else { return };
+        for f in friends {
+            let key = f.friend.public_key;
+            if f.presence != core_lib::types::Presence::Online {
+                sent.remove(&key);
+                continue;
+            }
+            if sent.get(&key).is_some_and(|t| t.elapsed() < ANNOUNCE_RENEW) {
+                continue;
+            }
+            match self.friend_invite(&key).await {
+                Ok(()) => {
+                    sent.insert(key, std::time::Instant::now());
+                }
+                Err(e) => eprintln!("[Cubelink] annonce du monde à un ami impossible : {e}"),
+            }
+        }
+    }
 }
 
 impl HostAuto {
@@ -114,7 +149,15 @@ impl HostAuto {
                 eprintln!("partage automatique impossible : {e}");
             }
         });
-        Self { st: st.clone(), id: instance_id.to_string(), share: Some(share), port: None }
+        let s = st.clone();
+        let announce = tauri::async_runtime::spawn(async move {
+            let mut sent = std::collections::HashMap::new();
+            loop {
+                s.announce_world(&mut sent).await;
+                tokio::time::sleep(ANNOUNCE_TICK).await;
+            }
+        });
+        Self { st: st.clone(), id: instance_id.to_string(), share: Some(share), port: None, announce: Some(announce) }
     }
 
     /// Une ligne de sortie du jeu : détecte l'ouverture du monde au réseau local (le port ne change qu'à l'ouverture).
@@ -127,12 +170,23 @@ impl HostAuto {
         }
     }
 
-    /// Fin du jeu : attend la fin d'un partage encore en cours puis l'arrête.
+    /// Fin du jeu : arrête l'annonce, attend la fin d'un partage encore en cours puis l'arrête.
     pub async fn finish(mut self) {
+        if let Some(a) = self.announce.take() {
+            a.abort();
+        }
         if let Some(h) = self.share.take() {
             let _ = h.await;
         }
         self.st.host_stop_sharing();
+    }
+}
+
+impl Drop for HostAuto {
+    fn drop(&mut self) {
+        if let Some(a) = self.announce.take() {
+            a.abort();
+        }
     }
 }
 

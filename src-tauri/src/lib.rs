@@ -130,11 +130,11 @@ macro_rules! commands {
             commands_game::game_current,
             commands_game::game_close,
             commands_game::game_join_friend,
-            stage::stage_view,
-            stage::stage_state,
-            stage::stage_panel,
-            stage::stage_layout,
-            stage::stage_supported,
+            stage::commands::stage_view,
+            stage::commands::stage_state,
+            stage::commands::stage_panel,
+            stage::commands::stage_layout,
+            stage::commands::stage_supported,
             $($extra)*
         ]
     };

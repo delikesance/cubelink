@@ -1,6 +1,6 @@
 //! Sante de la Scene : ce que l'hote annonce a son appelant (le launcher). Sans systeme : compile sur toutes les plateformes.
 //!
-//! CONTRAT entre le crate `cubelink-host` et le launcher (`src-tauri/src/stage.rs`). L'observateur est appele depuis des fils de
+//! CONTRAT entre le crate `cubelink-host` et le launcher (`src-tauri/src/stage/`). L'observateur est appele depuis des fils de
 //! l'hote, HORS du verrou d'etat : il doit rendre la main vite et ne jamais rappeler l'hote de facon synchrone.
 
 use std::sync::Arc;

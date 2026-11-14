@@ -18,6 +18,7 @@
 //! * [`health`]   : ce que l'hote annonce a son appelant (adoption, repli, journal) : contrat avec le launcher.
 //! * [`foreground`] : amener la fenetre du jeu invite, ou celle du launcher, au premier plan.
 //! * [`system`]   : preferences du systeme (mouvement reduit).
+//! * `scene` : [`GameHost`], l'API publique et l'etat du lancement COMMUNS aux deux systemes ; chacun fournit son `Backend`.
 //! * `win` (Windows) : [`GameHost`], la zone de jeu, l'adoption, le rideau.
 //! * `x11` (Linux) : meme [`GameHost`] sur X11 / XWayland : la fenetre du jeu est REPARENTEE dans une sous-fenetre du launcher
 //!   (une fille X11 peut avoir le focus clavier), le rideau est une fenetre ARGB traversee par la souris. Wayland natif ne permet
@@ -33,14 +34,17 @@ pub mod progress;
 pub mod system;
 
 pub use guard::Guards;
+
+#[cfg(any(windows, target_os = "linux"))]
+mod scene;
 pub use health::{FallbackReason, HostEvent, Observer};
 
 #[cfg(windows)]
 mod win;
 #[cfg(windows)]
-pub use win::*;
+pub use win::GameHost;
 
 #[cfg(target_os = "linux")]
 mod x11;
 #[cfg(target_os = "linux")]
-pub use x11::*;
+pub use x11::GameHost;

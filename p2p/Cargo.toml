@@ -23,6 +23,7 @@ data-encoding.workspace = true
 rand.workspace = true
 hex.workspace = true
 futures-util.workspace = true
+blake3.workspace = true
 tracing.workspace = true
 iroh = "=1.4.1"
 iroh-blobs = "=0.104.1"

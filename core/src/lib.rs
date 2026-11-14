@@ -27,3 +27,4 @@ pub mod mod_fix;
 pub mod art;
 pub mod skin;
 pub mod world;
+pub mod hearth;

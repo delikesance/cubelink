@@ -13,4 +13,6 @@ pub mod transfer;
 pub mod manifest_channel;
 pub mod reach;
 pub mod snapshot;
+pub mod join_request;
+pub mod hearth;
 mod util;

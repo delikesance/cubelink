@@ -27,6 +27,7 @@ ed25519-dalek = { version = "2", features = ["rand_core", "serde"] }
 data-encoding = "2"
 hex = "0.4"
 futures-util = "0.3"
+blake3 = "1.8"
 tracing = "0.1"
 # dev
 tempfile = "3"

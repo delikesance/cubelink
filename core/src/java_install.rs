@@ -18,8 +18,6 @@ use crate::types::{Error, Result};
 pub const DEFAULT_ADOPTIUM_URL: &str = "https://api.adoptium.net";
 /// Versions majeures supportées.
 pub const SUPPORTED_MAJORS: [u32; 4] = [8, 17, 21, 25];
-/// Version installée par défaut.
-pub const DEFAULT_MAJOR: u32 = 21;
 
 const MAX_ENTRIES: usize = 50_000;
 const MAX_FILE_BYTES: u64 = 1 << 30;

@@ -87,15 +87,7 @@ impl NeoForgeClient {
     }
 
     async fn get_bytes(&self, url: &str) -> Result<Vec<u8>> {
-        let resp = self.http.get(url).send().await.map_err(|e| Error::Network(e.to_string()))?;
-        let status = resp.status();
-        if status.as_u16() == 404 {
-            return Err(Error::NotFound(url.to_string()));
-        }
-        if !status.is_success() {
-            return Err(Error::Network(format!("HTTP {} pour {url}", status.as_u16())));
-        }
-        Ok(resp.bytes().await.map_err(|e| Error::Network(e.to_string()))?.to_vec())
+        crate::mojang::versions::get_bytes(&self.http, url).await
     }
 
     /// Versions NeoForge pour `minecraft`, de la plus récente à la plus ancienne (bêtas incluses, `stable` = false).
@@ -142,7 +134,7 @@ impl NeoForgeClient {
         if let Some(parent) = dest.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
-        write_atomic(dest, &bytes).await
+        super::write_atomic(dest, &bytes).await
     }
 
     /// Télécharge (ou extrait de l'installeur) les libraries de l'installeur manquantes ou invalides.
@@ -178,7 +170,7 @@ impl NeoForgeClient {
             if let Some(parent) = dest.parent() {
                 tokio::fs::create_dir_all(parent).await?;
             }
-            write_atomic(&dest, &bytes).await?;
+            super::write_atomic(&dest, &bytes).await?;
         }
         Ok(())
     }
@@ -197,18 +189,6 @@ fn file_matches(path: &Path, sha1: Option<&str>) -> bool {
         return false;
     }
     sha1.is_none_or(|e| sha1_hex(&data).eq_ignore_ascii_case(e))
-}
-
-async fn write_atomic(dest: &Path, data: &[u8]) -> Result<()> {
-    let mut tmp = dest.as_os_str().to_owned();
-    tmp.push(".tmp");
-    let tmp = PathBuf::from(tmp);
-    tokio::fs::write(&tmp, data).await?;
-    if let Err(e) = tokio::fs::rename(&tmp, dest).await {
-        let _ = tokio::fs::remove_file(&tmp).await;
-        return Err(e.into());
-    }
-    Ok(())
 }
 
 /// Versions NeoForge (client par défaut).
@@ -363,7 +343,7 @@ pub async fn write_version_json(profile: &InstallerProfile, versions_dir: &Path)
     tokio::fs::create_dir_all(&dir).await?;
     let json_path = dir.join(format!("{id}.json"));
     let body = serde_json::to_vec_pretty(&profile.version_json).map_err(|e| Error::Other(e.to_string()))?;
-    write_atomic(&json_path, &body).await?;
+    super::write_atomic(&json_path, &body).await?;
     Ok(InstalledProfile { id: id.clone(), json_path })
 }
 

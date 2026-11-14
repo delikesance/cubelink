@@ -15,7 +15,6 @@ serde_json.workspace = true
 tokio.workspace = true
 reqwest.workspace = true
 sha2.workspace = true
-blake3.workspace = true
 md-5.workspace = true
 uuid.workspace = true
 rusqlite.workspace = true

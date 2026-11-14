@@ -136,6 +136,60 @@ export const commands = {
 	friendInvites: (options?: InvokeOptions) => __TAURI_INVOKE<Invite_Serialize[]>("friend_invites", undefined, options),
 	/**  Écarte une invitation reçue. */
 	friendInviteDismiss: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("friend_invite_dismiss", { id }, options),
+	/**  Demandes à rejoindre mon monde reçues d'amis, en attente de réponse. */
+	friendJoinRequests: (options?: InvokeOptions) => __TAURI_INVOKE<JoinRequest[]>("friend_join_requests", undefined, options),
+	/**  Accepte ou refuse la demande à rejoindre d'un ami. */
+	friendJoinRequestAnswer: (publicKey: string, accept: boolean, options?: InvokeOptions) => __TAURI_INVOKE<null>("friend_join_request_answer", { public_key: publicKey, accept }, options),
+	/**  Demande à un ami de rejoindre son monde ; renvoie `accepted`, `refused` ou `expired`. */
+	friendJoinRequest: (publicKey: string, options?: InvokeOptions) => __TAURI_INVOKE<JoinAnswer>("friend_join_request", { public_key: publicKey }, options),
+	/**  Serveurs de groupe de ce PC (cartes de l'accueil). */
+	hearthList: (options?: InvokeOptions) => __TAURI_INVOKE<HearthCard_Serialize[]>("hearth_list", undefined, options),
+	/**  Page d'un serveur de groupe : membres, versions du monde, votes, réglages. */
+	hearthDetail: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<HearthDetail_Serialize>("hearth_detail", { id }, options),
+	/**  Mondes d'une instance, proposés à la création d'un groupe. */
+	hearthWorlds: (instanceId: string, options?: InvokeOptions) => __TAURI_INVOKE<HearthWorld[]>("hearth_worlds", { instance_id: instanceId }, options),
+	/**  Crée un serveur de groupe à partir d'une instance (et d'un de ses mondes) et invite les amis donnés. */
+	hearthCreate: (name: string, instanceId: string, world: string | null, members: string[], options?: InvokeOptions) => __TAURI_INVOKE<HearthCard_Serialize>("hearth_create", { name, instance_id: instanceId, world, members }, options),
+	/**  Invitations à des groupes reçues d'amis. */
+	hearthInvites: (options?: InvokeOptions) => __TAURI_INVOKE<HearthInvite[]>("hearth_invites", undefined, options),
+	/**  Accepte une invitation à un groupe. */
+	hearthInviteAccept: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_invite_accept", { id }, options),
+	/**  Écarte une invitation à un groupe. */
+	hearthInviteDismiss: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_invite_dismiss", { id }, options),
+	/**  Joue sur le serveur du groupe : le rejoint s'il est hébergé, sinon l'héberge sur ce PC. */
+	hearthPlay: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_play", { id }, options),
+	/**  Arrête le serveur du groupe hébergé sur ce PC (monde publié, bail relâché). */
+	hearthStop: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_stop", { id }, options),
+	/**  Choix du groupe après une partie mal terminée. */
+	hearthUncleanChoice: (id: string, choice: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_unclean_choice", { id, choice }, options),
+	/**  Associe l'instance locale du modpack au groupe. */
+	hearthSetInstance: (id: string, instanceId: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_set_instance", { id, instance_id: instanceId }, options),
+	/**  Propose d'ajouter un ami au groupe. */
+	hearthAddMember: (id: string, publicKey: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_add_member", { id, public_key: publicKey }, options),
+	/**  Propose de retirer un membre du groupe. */
+	hearthRemoveMember: (id: string, publicKey: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_remove_member", { id, public_key: publicKey }, options),
+	/**  Quitte le groupe. */
+	hearthLeave: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_leave", { id }, options),
+	/**  Approuve une décision du groupe en attente. */
+	hearthVote: (id: string, proposalId: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_vote", { id, proposal_id: proposalId }, options),
+	/**  Propose de continuer sans la version d'un membre absent. */
+	hearthContinueWithout: (id: string, publicKey: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_continue_without", { id, public_key: publicKey }, options),
+	/**  Propose de passer le groupe à une nouvelle version du modpack. */
+	hearthPackUpdate: (id: string, instanceId: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_pack_update", { id, instance_id: instanceId }, options),
+	/**  Restaure une version du monde. */
+	hearthRestore: (id: string, versionId: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_restore", { id, version_id: versionId }, options),
+	/**  Choisit la version gardée quand le monde a deux versions. */
+	hearthResolveFork: (id: string, versionId: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_resolve_fork", { id, version_id: versionId }, options),
+	/**  Garde le serveur ouvert quand le jeu de ce PC se ferme. */
+	hearthSetBackground: (id: string, on: boolean, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_set_background", { id, on }, options),
+	/**  État de l'acceptation du CLUF Minecraft (serveur dédié) et son adresse. */
+	hearthEula: (options?: InvokeOptions) => __TAURI_INVOKE<HearthEula>("hearth_eula", undefined, options),
+	/**  Accepte le CLUF Minecraft pour le serveur dédié. */
+	hearthEulaAccept: (options?: InvokeOptions) => __TAURI_INVOKE<void>("hearth_eula_accept", undefined, options),
+	/**  Serveurs de groupe activés (fonction expérimentale). */
+	hearthEnabled: (options?: InvokeOptions) => __TAURI_INVOKE<boolean>("hearth_enabled", undefined, options),
+	/**  Active ou coupe les serveurs de groupe. */
+	hearthSetEnabled: (enabled: boolean, options?: InvokeOptions) => __TAURI_INVOKE<void>("hearth_set_enabled", { enabled }, options),
 	/**  Ferme le jeu en cours puis lance l'instance. */
 	gameSwitch: (instanceId: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("game_switch", { instance_id: instanceId }, options),
 	/**  Instance du jeu en cours (en préparation ou lancé), `None` sinon. */
@@ -449,6 +503,283 @@ export type FriendWithPresence_Serialize = {
 	last_seen: number | null,
 };
 
+/**  Bannière « X avait la version la plus récente et n'est pas revenu depuis N jours ». */
+export type HearthBlocker = {
+	member: HearthMemberLite,
+	days: number,
+};
+
+/**  Une des deux versions d'une fourche. */
+export type HearthBranch = {
+	version_id: string,
+	number: number,
+	author_name: string,
+	created_at: number,
+	played_secs: number,
+	total_size: number,
+};
+
+/**  Carte d'un serveur de groupe sur l'accueil (événement `hearth://state`, commande `hearth_list`). */
+export type HearthCard = HearthCard_Serialize | HearthCard_Deserialize;
+
+/**  Carte d'un serveur de groupe sur l'accueil (événement `hearth://state`, commande `hearth_list`). */
+export type HearthCard_Deserialize = {
+	/**  Identifiant du groupe (32 caractères hexadécimaux). */
+	id: string,
+	name: string,
+	minecraft: string,
+	loader: string,
+	state: HearthStateKind,
+	/**  Titulaire du bail (état `hosted` ou `hosting`). */
+	host?: HearthMemberLite | null,
+	/**  Joueurs connectés au serveur (nous compris quand c'est notre serveur). */
+	players: number,
+	/**  Avancement de la mise à jour du monde, en pour cent (état `syncing`). */
+	progress?: number | null,
+	/**  Étape du lancement (état `launching`) : libellé et rang (0 à `step_count - 1`). */
+	step?: string | null,
+	step_index?: number | null,
+	step_count: number,
+	unclean?: HearthUnclean_Deserialize | null,
+	/**  Membres en ligne autres que nous. */
+	members_online: HearthMemberLite[],
+	members_total: number,
+	is_creator: boolean,
+	/**  Le modpack du groupe est installé ici (on peut héberger). */
+	can_host: boolean,
+	/**  Instance locale du modpack du groupe. */
+	instance_id?: string | null,
+	/**  Numéro de la version du monde la plus récente connue. */
+	version?: number | null,
+};
+
+/**  Carte d'un serveur de groupe sur l'accueil (événement `hearth://state`, commande `hearth_list`). */
+export type HearthCard_Serialize = {
+	/**  Identifiant du groupe (32 caractères hexadécimaux). */
+	id: string,
+	name: string,
+	minecraft: string,
+	loader: string,
+	state: HearthStateKind,
+	/**  Titulaire du bail (état `hosted` ou `hosting`). */
+	host: HearthMemberLite | null,
+	/**  Joueurs connectés au serveur (nous compris quand c'est notre serveur). */
+	players: number,
+	/**  Avancement de la mise à jour du monde, en pour cent (état `syncing`). */
+	progress: number | null,
+	/**  Étape du lancement (état `launching`) : libellé et rang (0 à `step_count - 1`). */
+	step: string | null,
+	step_index: number | null,
+	step_count: number,
+	unclean: HearthUnclean_Serialize | null,
+	/**  Membres en ligne autres que nous. */
+	members_online: HearthMemberLite[],
+	members_total: number,
+	is_creator: boolean,
+	/**  Le modpack du groupe est installé ici (on peut héberger). */
+	can_host: boolean,
+	/**  Instance locale du modpack du groupe. */
+	instance_id: string | null,
+	/**  Numéro de la version du monde la plus récente connue. */
+	version: number | null,
+};
+
+/**  Page du serveur (commande `hearth_detail`). */
+export type HearthDetail = HearthDetail_Serialize | HearthDetail_Deserialize;
+
+/**  Page du serveur (commande `hearth_detail`). */
+export type HearthDetail_Deserialize = {
+	card: HearthCard_Deserialize,
+	members: HearthMember_Deserialize[],
+	versions: HearthVersion[],
+	proposals: HearthProposal_Deserialize[],
+	blocker?: HearthBlocker | null,
+	fork: HearthBranch[],
+	settings: HearthSettings_Deserialize,
+};
+
+/**  Page du serveur (commande `hearth_detail`). */
+export type HearthDetail_Serialize = {
+	card: HearthCard_Serialize,
+	members: HearthMember_Serialize[],
+	versions: HearthVersion[],
+	proposals: HearthProposal_Serialize[],
+	blocker: HearthBlocker | null,
+	fork: HearthBranch[],
+	settings: HearthSettings_Serialize,
+};
+
+/**  Réponse de `hearth_eula`. */
+export type HearthEula = {
+	accepted: boolean,
+	url: string,
+};
+
+/**  Invitation à un groupe reçue d'un ami (événement `hearth://invites`). */
+export type HearthInvite = {
+	group_id: string,
+	name: string,
+	from: HearthMemberLite,
+	members: number,
+	minecraft: string,
+	loader: string,
+	received_at: number,
+};
+
+/**  Membre sur la page du serveur. */
+export type HearthMember = HearthMember_Serialize | HearthMember_Deserialize;
+
+/**  Un membre d'un groupe, tel que l'interface l'affiche. */
+export type HearthMemberLite = {
+	public_key: string,
+	name: string,
+	online: boolean,
+};
+
+/**  Membre sur la page du serveur. */
+export type HearthMember_Deserialize = {
+	public_key: string,
+	name: string,
+	online: boolean,
+	is_me: boolean,
+	is_creator: boolean,
+	/**  `ok` (a la version la plus récente), `behind` (en retard), `unknown` (pas encore sondé). */
+	sync: string,
+	/**  Numéro de la version la plus récente qu'il dit avoir. */
+	version?: number | null,
+	/**  Jours depuis qu'on l'a vu en ligne (`None` : jamais vu, ou en ligne). */
+	unseen_days?: number | null,
+};
+
+/**  Membre sur la page du serveur. */
+export type HearthMember_Serialize = {
+	public_key: string,
+	name: string,
+	online: boolean,
+	is_me: boolean,
+	is_creator: boolean,
+	/**  `ok` (a la version la plus récente), `behind` (en retard), `unknown` (pas encore sondé). */
+	sync: string,
+	/**  Numéro de la version la plus récente qu'il dit avoir. */
+	version: number | null,
+	/**  Jours depuis qu'on l'a vu en ligne (`None` : jamais vu, ou en ligne). */
+	unseen_days: number | null,
+};
+
+/**  Décision du groupe en attente de votes. */
+export type HearthProposal = HearthProposal_Serialize | HearthProposal_Deserialize;
+
+/**  Décision du groupe en attente de votes. */
+export type HearthProposal_Deserialize = {
+	id: string,
+	/**  `continue_without`, `add_member`, `remove_member`, `pack_update` ou `leave`. */
+	kind: string,
+	subject?: HearthMemberLite | null,
+	approvals: number,
+	needed: number,
+	i_voted: boolean,
+	can_vote: boolean,
+};
+
+/**  Décision du groupe en attente de votes. */
+export type HearthProposal_Serialize = {
+	id: string,
+	/**  `continue_without`, `add_member`, `remove_member`, `pack_update` ou `leave`. */
+	kind: string,
+	subject: HearthMemberLite | null,
+	approvals: number,
+	needed: number,
+	i_voted: boolean,
+	can_vote: boolean,
+};
+
+/**  Réglages d'un groupe pour ce PC. */
+export type HearthSettings = HearthSettings_Serialize | HearthSettings_Deserialize;
+
+/**  Réglages d'un groupe pour ce PC. */
+export type HearthSettings_Deserialize = {
+	/**  Garder le serveur ouvert quand mon jeu se ferme. */
+	keep_background: boolean,
+	/**  Place prise par le groupe sur ce disque (octets). */
+	disk_bytes: number,
+	/**  Versions en attente d'envoi chez les autres membres. */
+	outbox_pending: number,
+	/**  Nom de l'instance locale du modpack. */
+	instance_name?: string | null,
+};
+
+/**  Réglages d'un groupe pour ce PC. */
+export type HearthSettings_Serialize = {
+	/**  Garder le serveur ouvert quand mon jeu se ferme. */
+	keep_background: boolean,
+	/**  Place prise par le groupe sur ce disque (octets). */
+	disk_bytes: number,
+	/**  Versions en attente d'envoi chez les autres membres. */
+	outbox_pending: number,
+	/**  Nom de l'instance locale du modpack. */
+	instance_name: string | null,
+};
+
+/**  État visible d'un serveur de groupe (carte de l'accueil). */
+export type HearthStateKind = 
+/**  Personne ne joue. */
+"idle" | 
+/**  Un autre membre héberge : on peut le rejoindre. */
+"hosted" | 
+/**  Le monde se met à jour sur ce PC (`progress` en pour cent). */
+"syncing" | 
+/**  Aucun membre joignable : le jeu hors ligne est interdit sur un serveur de groupe. */
+"blocked" | 
+/**  La partie d'un membre ne s'est pas terminée proprement : le groupe choisit. */
+"unclean" | 
+/**  Deux versions du monde existent : le groupe en choisit une. */
+"fork" | 
+/**  Lancement en cours (`step`, `step_index`). */
+"launching" | 
+/**  Ce PC héberge le serveur. */
+"hosting" | 
+/**  Le modpack du groupe n'est pas installé sur ce PC. */
+"pack_missing";
+
+/**  Partie mal terminée : qui, et jusqu'où on peut reprendre. */
+export type HearthUnclean = HearthUnclean_Serialize | HearthUnclean_Deserialize;
+
+/**  Partie mal terminée : qui, et jusqu'où on peut reprendre. */
+export type HearthUnclean_Deserialize = {
+	holder: HearthMemberLite,
+	/**  Date (secondes Unix) de son dernier point de reprise connu de nous ; `None` : aucun. */
+	checkpoint_at?: number | null,
+};
+
+/**  Partie mal terminée : qui, et jusqu'où on peut reprendre. */
+export type HearthUnclean_Serialize = {
+	holder: HearthMemberLite,
+	/**  Date (secondes Unix) de son dernier point de reprise connu de nous ; `None` : aucun. */
+	checkpoint_at: number | null,
+};
+
+/**  Version du monde (historique). */
+export type HearthVersion = {
+	id: string,
+	number: number,
+	/**  `session`, `checkpoint` ou `restore`. */
+	kind: string,
+	author: string,
+	author_name: string,
+	created_at: number,
+	played_secs: number,
+	total_size: number,
+	is_head: boolean,
+	/**  Branche mise de côté (époque révolue) : restaurable, jamais tête. */
+	side_branch: boolean,
+};
+
+/**  Monde d'une instance, proposé à la création d'un groupe. */
+export type HearthWorld = {
+	name: string,
+	size_bytes: number,
+};
+
 /**  État du partage hôte (événement `host://state`, commande `host_state`). */
 export type HostState = HostState_Serialize | HostState_Deserialize;
 
@@ -589,6 +920,9 @@ export type Invite_Serialize = {
 	world_icon: string | null,
 };
 
+/**  Réponse de l'hôte à une demande. */
+export type JoinAnswer = "accepted" | "refused" | "expired";
+
 export type JoinPlan = JoinPlan_Serialize | JoinPlan_Deserialize;
 
 export type JoinPlan_Deserialize = {
@@ -629,6 +963,15 @@ export type JoinPlan_Serialize = {
 	 *  pas redemandés.
 	 */
 	unknown_trusted: string[],
+};
+
+/**  Demande à rejoindre reçue d'un ami, en attente de la décision de l'hôte (événement `friend://join_request`). */
+export type JoinRequest = {
+	public_key: string,
+	name: string,
+	received_at: number,
+	/**  Fin de la fenêtre de réponse : au-delà, le demandeur est prévenu que sa demande a expiré. */
+	expires_at: number,
 };
 
 export type LaunchPhase = "preparing" | "running" | "exited" | "failed";
@@ -837,6 +1180,7 @@ export type SettingsInput_Deserialize = {
 	overlay_hotkey?: string | null,
 	embedded_game?: boolean | null,
 	start_with_os?: boolean | null,
+	open_to_all_friends?: boolean | null,
 };
 
 /**  Entrée de `settings_set` : les champs de `Settings` ; les plus récents sont facultatifs (absents : valeur actuelle gardée). */
@@ -855,6 +1199,7 @@ export type SettingsInput_Serialize = {
 	overlay_hotkey: string | null,
 	embedded_game: boolean | null,
 	start_with_os: boolean | null,
+	open_to_all_friends: boolean | null,
 };
 
 /**  Paramètres de l'application (écran Paramètres). Forme alignée sur `src/services/types.ts`. */
@@ -889,6 +1234,11 @@ export type Settings_Deserialize = {
 	 *  ouvert n'est pas touché. `true` par défaut (fichiers de réglages anciens : `true`).
 	 */
 	embedded_game?: boolean,
+	/**
+	 *  Inviter automatiquement tous mes amis en ligne quand mon monde s'ouvre (voir docs/hearth.md § 2). `false` par
+	 *  défaut : seuls les amis invités un par un, ou dont la demande à rejoindre est acceptée, peuvent entrer.
+	 */
+	open_to_all_friends?: boolean,
 	/**
 	 *  Lancer Cubelink (en fond, sans fenêtre) à l'ouverture de session, pour rester joignable par ses amis.
 	 *  `true` par défaut (fichiers de réglages anciens : `true`).
@@ -928,6 +1278,11 @@ export type Settings_Serialize = {
 	 *  ouvert n'est pas touché. `true` par défaut (fichiers de réglages anciens : `true`).
 	 */
 	embedded_game: boolean,
+	/**
+	 *  Inviter automatiquement tous mes amis en ligne quand mon monde s'ouvre (voir docs/hearth.md § 2). `false` par
+	 *  défaut : seuls les amis invités un par un, ou dont la demande à rejoindre est acceptée, peuvent entrer.
+	 */
+	open_to_all_friends: boolean,
 	/**
 	 *  Lancer Cubelink (en fond, sans fenêtre) à l'ouverture de session, pour rester joignable par ses amis.
 	 *  `true` par défaut (fichiers de réglages anciens : `true`).

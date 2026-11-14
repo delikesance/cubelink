@@ -1,6 +1,6 @@
 import { listen } from "@tauri-apps/api/event";
 import { commands } from "./bindings";
-import type { Services, Unsubscribe } from "./types";
+import type { HearthDetail, Services, Unsubscribe } from "./types";
 
 // Commandes : fonctions générées depuis Rust (`bindings.ts`, `npm run bindings`), donc noms, arguments et types de retour
 // vérifiés par tsc. Une erreur Rust (`Result<T, String>`) rejette la promesse avec le message en français.
@@ -66,6 +66,9 @@ export function createTauriServices(): Services {
     friendInvite: (publicKey) => done(commands.friendInvite(publicKey)),
     friendInvites: () => commands.friendInvites(),
     friendInviteDismiss: (id) => done(commands.friendInviteDismiss(id)),
+    friendJoinRequest: (publicKey) => commands.friendJoinRequest(publicKey),
+    friendJoinRequestAnswer: (publicKey, accept) => done(commands.friendJoinRequestAnswer(publicKey, accept)),
+    friendJoinRequests: () => commands.friendJoinRequests(),
     gameSwitch: (instanceId) => done(commands.gameSwitch(instanceId)),
     gameCurrent: () => commands.gameCurrent(),
     gameClose: () => done(commands.gameClose()),
@@ -116,6 +119,37 @@ export function createTauriServices(): Services {
     onFriendRequest: (cb) => on("friend://request", cb),
     onFriendInvite: (cb) => on("friend://invite", cb),
     onFriendInvites: (cb) => on("friend://invites", cb),
+    onFriendJoinRequest: (cb) => on("friend://join_request", cb),
+    onFriendJoinRequests: (cb) => on("friend://join_requests", cb),
+    hearthList: () => commands.hearthList(),
+    // Champs à valeurs fixes resserrés dans `types.ts` (Rust les envoie en `String`).
+    hearthDetail: (id) => commands.hearthDetail(id) as Promise<HearthDetail>,
+    hearthWorlds: (instanceId) => commands.hearthWorlds(instanceId),
+    hearthCreate: (i) => commands.hearthCreate(i.name, i.instanceId, i.world, i.members),
+    hearthInvites: () => commands.hearthInvites(),
+    hearthInviteAccept: (id) => done(commands.hearthInviteAccept(id)),
+    hearthInviteDismiss: (id) => done(commands.hearthInviteDismiss(id)),
+    hearthPlay: (id) => done(commands.hearthPlay(id)),
+    hearthStop: (id) => done(commands.hearthStop(id)),
+    hearthUncleanChoice: (id, choice) => done(commands.hearthUncleanChoice(id, choice)),
+    hearthSetInstance: (id, instanceId) => done(commands.hearthSetInstance(id, instanceId)),
+    hearthAddMember: (id, publicKey) => done(commands.hearthAddMember(id, publicKey)),
+    hearthRemoveMember: (id, publicKey) => done(commands.hearthRemoveMember(id, publicKey)),
+    hearthLeave: (id) => done(commands.hearthLeave(id)),
+    hearthVote: (id, proposalId) => done(commands.hearthVote(id, proposalId)),
+    hearthContinueWithout: (id, publicKey) => done(commands.hearthContinueWithout(id, publicKey)),
+    hearthPackUpdate: (id, instanceId) => done(commands.hearthPackUpdate(id, instanceId)),
+    hearthRestore: (id, versionId) => done(commands.hearthRestore(id, versionId)),
+    hearthResolveFork: (id, versionId) => done(commands.hearthResolveFork(id, versionId)),
+    hearthSetBackground: (id, on) => done(commands.hearthSetBackground(id, on)),
+    hearthEula: () => commands.hearthEula(),
+    hearthEulaAccept: () => commands.hearthEulaAccept(),
+    hearthEnabled: () => commands.hearthEnabled(),
+    hearthSetEnabled: (enabled) => commands.hearthSetEnabled(enabled),
+    onHearthState: (cb) => on("hearth://state", cb),
+    onHearthInvites: (cb) => on("hearth://invites", cb),
+    onHearthHandover: (cb) => on("hearth://handover", cb),
+    onHearthHostPrompt: (cb) => on("hearth://host_prompt", cb),
     onUnknownMods: (cb) => on("transfer://unknown_mods", cb),
     onTransferErrorDetails: (cb) => on("transfer://error_details", cb),
     updateState: () => commands.updateState(),

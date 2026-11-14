@@ -8,6 +8,7 @@ pub mod commands_auth;
 pub mod commands_browse;
 pub mod commands_friends;
 pub mod commands_game;
+pub mod commands_hearth;
 pub mod commands_host;
 pub mod commands_instances;
 pub mod commands_join;
@@ -19,6 +20,7 @@ pub mod last_seen;
 pub mod trusted_mods;
 pub mod install;
 pub mod invites;
+pub mod hearth;
 pub mod hotkey;
 pub mod p2p_backend;
 pub mod stage;
@@ -97,6 +99,33 @@ macro_rules! commands {
             invites::friend_invite,
             invites::friend_invites,
             invites::friend_invite_dismiss,
+            invites::friend_join_requests,
+            invites::friend_join_request_answer,
+            invites::friend_join_request,
+            commands_hearth::hearth_list,
+            commands_hearth::hearth_detail,
+            commands_hearth::hearth_worlds,
+            commands_hearth::hearth_create,
+            commands_hearth::hearth_invites,
+            commands_hearth::hearth_invite_accept,
+            commands_hearth::hearth_invite_dismiss,
+            commands_hearth::hearth_play,
+            commands_hearth::hearth_stop,
+            commands_hearth::hearth_unclean_choice,
+            commands_hearth::hearth_set_instance,
+            commands_hearth::hearth_add_member,
+            commands_hearth::hearth_remove_member,
+            commands_hearth::hearth_leave,
+            commands_hearth::hearth_vote,
+            commands_hearth::hearth_continue_without,
+            commands_hearth::hearth_pack_update,
+            commands_hearth::hearth_restore,
+            commands_hearth::hearth_resolve_fork,
+            commands_hearth::hearth_set_background,
+            commands_hearth::hearth_eula,
+            commands_hearth::hearth_eula_accept,
+            commands_hearth::hearth_enabled,
+            commands_hearth::hearth_set_enabled,
             commands_game::game_switch,
             commands_game::game_current,
             commands_game::game_close,

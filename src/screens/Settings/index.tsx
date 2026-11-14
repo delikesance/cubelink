@@ -198,6 +198,8 @@ export default function Settings({ testConnection, clearCache }: SettingsProps =
   const [javaPath, setJavaPath] = useState("");
   const [ram, setRam] = useState("");
   const [hotkey, setHotkey] = useState(DEFAULT_HOTKEY);
+  // Interrupteur de sécurité des serveurs de groupe : `null` tant qu'il n'est pas lu.
+  const [hearthOn, setHearthOn] = useState<boolean | null>(null);
   // Le jeu intégré n'existe que sous Windows et Linux (X11) : ailleurs le réglage n'aurait aucun effet, il n'est pas montré.
   const stageSupported = useStageSupported(services);
   // Sans jeu intégré il n'y a pas de panneau « en jeu » : son raccourci ne sert à rien, on le dit plutôt que de le laisser modifiable.
@@ -215,7 +217,21 @@ export default function Settings({ testConnection, clearCache }: SettingsProps =
       },
       (e) => { if (alive.current) setError(messageOf(e)); },
     );
+    services.hearthEnabled().then((v) => { if (alive.current) setHearthOn(v); }, () => { if (alive.current) setHearthOn(false); });
     return () => { alive.current = false; };
+  }, [services]);
+
+  const toggleHearth = useCallback(async (on: boolean) => {
+    setSaved("");
+    setError(null);
+    try {
+      await services.hearthSetEnabled(on);
+      if (!alive.current) return;
+      setHearthOn(on);
+      setSaved("Enregistré");
+    } catch (e) {
+      if (alive.current) setError(messageOf(e));
+    }
   }, [services]);
 
   const update = useCallback(async (patch: Partial<SettingsData>) => {
@@ -392,6 +408,14 @@ export default function Settings({ testConnection, clearCache }: SettingsProps =
           <label className="set-row" style={{ cursor: "pointer" }}>
             <div className="set-txt"><b>Ouvrir mon monde au réseau local automatiquement</b><span>Quand tu entres dans un monde solo, Cubelink l'ouvre pour que tes amis puissent te rejoindre. Appliqué au prochain lancement du jeu.</span></div>
             <input type="checkbox" className="set-check" disabled={dis} checked={settings?.lan_auto !== false} onChange={(e) => void update({ lan_auto: e.target.checked })} />
+          </label>
+          <label className="set-row" style={{ cursor: "pointer" }}>
+            <div className="set-txt"><b>Laisser tous mes amis rejoindre mes mondes solo sans invitation</b><span>Quand ton monde s'ouvre, tous tes amis en ligne sont invités d'office. Désactivé : seuls les amis que tu invites, ou dont tu acceptes la demande, entrent.</span></div>
+            <input type="checkbox" className="set-check" disabled={dis} checked={!!settings?.open_to_all_friends} onChange={(e) => void update({ open_to_all_friends: e.target.checked })} />
+          </label>
+          <label className="set-row" style={{ cursor: "pointer" }}>
+            <div className="set-txt"><b>Serveurs de groupe (expérimental)</b><span>Des mondes partagés qui vivent même quand tu es hors ligne. Pas encore éprouvé avec de vrais serveurs : désactivé par défaut.</span></div>
+            <input type="checkbox" className="set-check" disabled={dis || hearthOn === null} checked={!!hearthOn} onChange={(e) => void toggleHearth(e.target.checked)} />
           </label>
           <label className="set-row" style={{ cursor: "pointer" }}>
             <div className="set-txt"><b>Lancer Cubelink au démarrage de l'ordinateur</b><span>Cubelink démarre en arrière-plan pour que tes amis puissent toujours te rejoindre. Fermer la fenêtre le garde ouvert dans la zone de notification&nbsp;; pour le quitter, clic droit sur son icône puis «&nbsp;Quitter Cubelink&nbsp;».</span></div>

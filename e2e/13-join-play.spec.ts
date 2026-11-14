@@ -1,7 +1,7 @@
 // T1 : « Rejoindre et jouer » (join_play) : tunnel ouvert, jeu lance avec --quickPlayMultiplayer, tunnel referme a la fin.
 import fs from 'node:fs';
 import path from 'node:path';
-import { test, expect, invoke, joinStart, testState, startFakeWorld } from './harness/fixtures';
+import { test, expect, grantByRequest, invoke, joinStart, testState, startFakeWorld } from './harness/fixtures';
 import { setupHostAndGuest, sleep, recordEvents, events, waitProgress, guestInstance } from './helpers/e2e2-common';
 
 test.describe.configure({ mode: 'serial' });
@@ -64,6 +64,9 @@ test('join_play : hote sans monde ouvert, message francais clair et aucun tunnel
   // (setupHostAndGuest a partage avec un port : on arrete d'abord le partage, ce qui referme le monde.)
   await invoke(appA.page, 'host_stop_sharing');
   await invoke(appA.page, 'host_start_sharing', { instance_id: host.id, world_port: 0 });
+  // L'arret du partage a retire l'acces de B (regle de jonction) : sa demande a rejoindre est acceptee par A.
+  const keyB = (await invoke<{ friend: { public_key: string } }[]>(appA.page, 'friend_list'))[0].friend.public_key;
+  await grantByRequest(appA, appB, keyA, keyB);
 
   const err = await invoke(appB.page, 'join_play', { friend_public_key: keyA, instance_id: guest.id }).then(
     () => null,

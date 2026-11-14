@@ -82,7 +82,7 @@ const SCENARIO = async () => {
   await step("authAccounts", () => svc.authAccounts());
   const s = await step("settingsGet", () => svc.settingsGet());
   if (s) {
-    await step("settingsSet", () => svc.settingsSet({ ...s, close_on_launch: !s.close_on_launch, overlay_hotkey: "Ctrl+Alt+F9", start_with_os: false }));
+    await step("settingsSet", () => svc.settingsSet({ ...s, close_on_launch: !s.close_on_launch, overlay_hotkey: "Ctrl+Alt+F9", start_with_os: false, open_to_all_friends: true }));
     await step("settingsGet (relu)", () => svc.settingsGet());
     await step("settingsSet (refus français)", () => svc.settingsSet({ ...s, allow_relay: false, relay_only: true }), true);
   }
@@ -93,6 +93,17 @@ const SCENARIO = async () => {
   // Commande d'enrobage (Linux) : instance semée sur le disque (Mojang est injoignable ici), enregistrée puis relue.
   const u = await step("instancesUpdate (wrapper)", () => svc.instancesUpdate("essai-enrobage", { wrapper: "  gamemoderun mangohud " }));
   if (u?.wrapper !== "gamemoderun mangohud") out.push({ name: "wrapper relu", ok: false, error: JSON.stringify(u?.wrapper) });
+  // Serveurs de groupe (Hearth) et demandes à rejoindre, par les liaisons générées.
+  await step("hearthEnabled", () => svc.hearthEnabled());
+  await step("hearthList", () => svc.hearthList());
+  await step("hearthCreate (désactivé)", () => svc.hearthCreate({ name: "X", instanceId: "essai-enrobage", world: null, members: [] }), true);
+  await step("hearthSetEnabled", () => svc.hearthSetEnabled(true));
+  await step("hearthWorlds", () => svc.hearthWorlds("essai-enrobage"));
+  await step("hearthEula", () => svc.hearthEula());
+  await step("hearthDetail (inconnu)", () => svc.hearthDetail("00".repeat(16)), true);
+  await step("hearthSetEnabled (retour)", () => svc.hearthSetEnabled(false));
+  await step("friendJoinRequests", () => svc.friendJoinRequests());
+  await step("friendJoinRequestAnswer (aucune)", () => svc.friendJoinRequestAnswer("00".repeat(32), true), true);
   await step("instancesArtImage (inconnue)", () => svc.instancesArtImage("absente", "icon.png", 128), true);
   await step("modsList (inconnue)", () => svc.modsList("absente"), true);
   await step("modsToggle (inconnue)", () => svc.modsToggle("absente", "a.jar", false), true);
@@ -152,8 +163,8 @@ try {
       if (!r.ok) failed = true;
     }
     const settings = JSON.parse(fs.readFileSync(path.join(dataDir, "settings.json"), "utf8"));
-    const disk = settings.overlay_hotkey === "Ctrl+Alt+F9" && settings.start_with_os === false;
-    console.log(`${disk ? "OK  " : "ÉCHEC"} settings.json sur le disque — overlay_hotkey = ${settings.overlay_hotkey}, start_with_os = ${settings.start_with_os}`);
+    const disk = settings.overlay_hotkey === "Ctrl+Alt+F9" && settings.start_with_os === false && settings.open_to_all_friends === true;
+    console.log(`${disk ? "OK  " : "ÉCHEC"} settings.json sur le disque — overlay_hotkey = ${settings.overlay_hotkey}, start_with_os = ${settings.start_with_os}, open_to_all_friends = ${settings.open_to_all_friends}`);
     if (!disk) failed = true;
     const meta = JSON.parse(fs.readFileSync(path.join(dataDir, "instances", "essai-enrobage", "instance.json"), "utf8"));
     const wrapped = meta.wrapper === "gamemoderun mangohud";

@@ -115,12 +115,19 @@ describe("Main", () => {
     expect(within(side()).getByRole("tab", { name: /^En partie/ }).getAttribute("aria-selected")).toBe("true");
   });
 
-  it("colonne d'amis permanente : liste, onglets, recherche, Rejoindre", async () => {
-    const { navigate } = setup();
+  it("colonne d'amis permanente : liste, onglets, recherche, Demander puis Rejoindre", async () => {
+    const { navigate, services } = setup();
+    const ctl = services as unknown as { setJoinAnswer: (a: string) => void; joinRequestCalls: Array<{ kind: string; arg: string }> };
+    ctl.setJoinAnswer("accepted");
     await screen.findByRole("group", { name: "Instances" });
     const list = within(side()).getByRole("list", { name: "Amis" });
     await waitFor(() => expect(within(list).getAllByRole("listitem").length).toBeGreaterThan(1));
-    fireEvent.click(within(list).getAllByRole("button", { name: /^Rejoindre / })[0]);
+    // Un ami en ligne sans invitation : on ne le rejoint pas directement, on le demande.
+    expect(within(list).queryByRole("button", { name: /^Rejoindre / })).toBeNull();
+    fireEvent.click(within(list).getByRole("button", { name: /^Demander à rejoindre / }));
+    // Demande acceptée : le bouton devient Rejoindre.
+    fireEvent.click(await within(list).findByRole("button", { name: /^Rejoindre / }));
+    expect(ctl.joinRequestCalls.map((c) => c.kind)).toEqual(["ask"]);
     expect(navigate).toHaveBeenCalledWith("join", expect.objectContaining({ friend: expect.any(String) }));
     fireEvent.click(within(side()).getByRole("tab", { name: /^En ligne/ }));
     expect(within(side()).getByRole("tab", { name: /^En ligne/ }).getAttribute("aria-selected")).toBe("true");
@@ -146,5 +153,30 @@ describe("Main", () => {
     const noor = list.find((f) => f.presence === "offline")!.friend;
     act(() => push({ public_key: noor.public_key, presence: "online" }));
     expect(screen.getByText(/2 en ligne/)).toBeTruthy();
+  });
+
+  it("demande à rejoindre : « Demande envoyée… » pendant l'attente, puis refusée : on peut redemander", async () => {
+    const { services } = setup();
+    const ctl = services as unknown as { setJoinAnswer: (a: string) => void; resolveJoinRequest: (k: string, a: string) => void };
+    ctl.setJoinAnswer("hold");
+    await screen.findByRole("group", { name: "Instances" });
+    const alex = (await services.friendList())[0].friend;
+    const list = within(side()).getByRole("list", { name: "Amis" });
+    fireEvent.click(await within(list).findByRole("button", { name: `Demander à rejoindre ${alex.name}` }));
+    const pending = await within(list).findByRole("button", { name: `Demander à rejoindre ${alex.name}` });
+    expect(pending.textContent).toContain("Demande envoyée…");
+    expect(pending.getAttribute("aria-busy")).toBe("true");
+    act(() => ctl.resolveJoinRequest(alex.public_key, "refused"));
+    await waitFor(() => expect(within(list).getByText("Demande refusée")).toBeTruthy());
+    expect(within(list).getByRole("button", { name: `Demander à rejoindre ${alex.name}` }).textContent).toBe("Demander");
+    expect(within(list).queryByRole("button", { name: `Rejoindre ${alex.name}` })).toBeNull();
+  });
+
+  it("demande à rejoindre qui échoue : le message d'erreur s'affiche", async () => {
+    setup({ friendJoinRequest: async () => { throw new Error("Ton ami n'est pas en ligne. Il doit ouvrir Cubelink."); } });
+    await screen.findByRole("group", { name: "Instances" });
+    const list = within(side()).getByRole("list", { name: "Amis" });
+    fireEvent.click(await within(list).findByRole("button", { name: /^Demander à rejoindre / }));
+    expect(await screen.findByText(/n'est pas en ligne/)).toBeTruthy();
   });
 });

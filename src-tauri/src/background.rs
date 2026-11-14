@@ -111,6 +111,8 @@ pub fn on_close_requested(app: &AppHandle, st: &Arc<AppState>) {
         st.cancel_quit();
         CLOSING.store(false, Ordering::SeqCst);
         if EXIT_PENDING.load(Ordering::SeqCst) {
+            // Un serveur de groupe encore actif est arrêté proprement (monde publié, bail relâché).
+            st.hearth_stop_all().await;
             app.exit(0);
         }
     });
@@ -130,6 +132,8 @@ pub fn quit_app(app: &AppHandle, st: &Arc<AppState>) {
         } else {
             st.stage.flush_log();
         }
+        // Un serveur de groupe encore actif est arrêté proprement (monde publié, bail relâché).
+        st.hearth_stop_all().await;
         app.exit(0);
     });
 }

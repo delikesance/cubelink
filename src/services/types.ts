@@ -54,6 +54,10 @@ export type Sha256Hex = string;
 
 /** Champs modifiables d'une instance (instances_update). */
 export interface InstancePatch { name?: string; ram_mb?: number; java_path?: string | null; jvm_args?: string; wrapper?: string }
+/** Demande à rejoindre reçue d'un ami (hôte), en attente de sa décision. Timestamps en secondes Unix. */
+export type JoinRequest = B.JoinRequest;
+/** Réponse de l'hôte à ma demande à rejoindre. */
+export type JoinAnswer = B.JoinAnswer;
 
 // Entrées / sorties de commandes
 export type DeviceCode = B.DeviceCodeInfo;
@@ -98,6 +102,52 @@ export interface PickFilesOptions { extensions: string[]; multiple?: boolean }
 export type Unsubscribe = () => void;
 
 /** Une méthode par commande (rejet = message d'erreur en français), un abonnement par événement. */
+
+// ---------------------------------------------------------------------------
+// Serveurs de groupe (Hearth) : types générés depuis core/src/types.rs, voir docs/contrats.md.
+// ---------------------------------------------------------------------------
+
+export type HearthStateKind = B.HearthStateKind;
+export type HearthMemberLite = B.HearthMemberLite;
+export type HearthUnclean = B.HearthUnclean_Serialize;
+export type HearthCard = B.HearthCard_Serialize;
+export type HearthInvite = B.HearthInvite;
+export type HearthWorld = B.HearthWorld;
+// Champs `String` côté Rust, à valeurs fixes : le front les resserre (voir `core/src/types.rs`).
+export type HearthMember = Omit<B.HearthMember_Serialize, "sync"> & { sync: "ok" | "behind" | "unknown" };
+export type HearthVersion = Omit<B.HearthVersion, "kind"> & { kind: "session" | "checkpoint" | "restore" };
+export type HearthProposal = Omit<B.HearthProposal_Serialize, "kind"> & {
+  kind: "continue_without" | "add_member" | "remove_member" | "pack_update" | "set_governance" | "leave";
+};
+export type HearthBlocker = B.HearthBlocker;
+export type HearthBranch = B.HearthBranch;
+export type HearthSettings = B.HearthSettings_Serialize;
+export type HearthDetail = Omit<B.HearthDetail_Serialize, "members" | "versions" | "proposals"> & {
+  members: HearthMember[];
+  versions: HearthVersion[];
+  proposals: HearthProposal[];
+};
+export type HearthEula = B.HearthEula;
+
+// Charges d'événements (typées à la main).
+export interface HearthHandover { group_id: string; name: string; from_name: string }
+export interface HearthHostPrompt { group_id: string; name: string; players: number }
+
+export interface HearthCreateInput {
+  name: string;
+  instanceId: string;
+  /** Nom du monde existant de l'instance ; null : nouveau monde. */
+  world: string | null;
+  /** Clés publiques des amis invités. */
+  members: string[];
+}
+
+/** Choix après une partie mal terminée : attendre l'hôte, reprendre au point de reprise ou à la dernière version. */
+export type HearthUncleanChoice = "wait" | "checkpoint" | "last";
+
+/** Erreur renvoyée par `hearthPlay` tant que le contrat d'utilisation de Minecraft n'est pas accepté. */
+export const HEARTH_EULA_REQUIRED = "eula_required";
+
 export interface Services {
   authStatus(): Promise<Profile | null>;
   authBeginLogin(): Promise<DeviceCode>;
@@ -152,6 +202,12 @@ export interface Services {
   /** Invitations reçues en attente. */
   friendInvites(): Promise<Invite[]>;
   friendInviteDismiss(id: string): Promise<void>;
+  /** Invité : demande à un ami de rejoindre sa partie ; attend sa décision (au plus ~2 min). */
+  friendJoinRequest(publicKey: string): Promise<JoinAnswer>;
+  /** Hôte : accepte (ouvre l'accès à la partie en cours) ou refuse la demande d'un ami. Rejette si elle n'est plus valable. */
+  friendJoinRequestAnswer(publicKey: string, accept: boolean): Promise<void>;
+  /** Hôte : demandes à rejoindre en attente de décision. */
+  friendJoinRequests(): Promise<JoinRequest[]>;
   /** Ferme le jeu en cours puis lance l'instance. */
   gameSwitch(instanceId: string): Promise<void>;
   /** Instance du jeu en cours (en préparation ou lancé), `null` sinon. */
@@ -213,6 +269,45 @@ export interface Services {
   onFriendInvite(cb: (i: Invite) => void): Unsubscribe;
   /** Liste complète des invitations à chaque changement. */
   onFriendInvites(cb: (l: Invite[]) => void): Unsubscribe;
+  /** Hôte : une demande à rejoindre vient d'arriver. */
+  onFriendJoinRequest(cb: (r: JoinRequest) => void): Unsubscribe;
+  /** Hôte : liste complète des demandes en attente, à chaque changement. */
+  onFriendJoinRequests(cb: (l: JoinRequest[]) => void): Unsubscribe;
+  // --- serveurs de groupe (Hearth) ---
+  hearthList(): Promise<HearthCard[]>;
+  hearthDetail(id: string): Promise<HearthDetail>;
+  /** Mondes existants d'une instance, proposés à la création. */
+  hearthWorlds(instanceId: string): Promise<HearthWorld[]>;
+  hearthCreate(input: HearthCreateInput): Promise<HearthCard>;
+  hearthInvites(): Promise<HearthInvite[]>;
+  hearthInviteAccept(groupId: string): Promise<void>;
+  hearthInviteDismiss(groupId: string): Promise<void>;
+  /** Le bouton unique de la carte : jouer ou rejoindre selon l'état. Rejette avec `eula_required` au premier hébergement. */
+  hearthPlay(id: string): Promise<void>;
+  hearthStop(id: string): Promise<void>;
+  hearthUncleanChoice(id: string, choice: HearthUncleanChoice): Promise<void>;
+  /** Associe le modpack du groupe à une instance locale. */
+  hearthSetInstance(id: string, instanceId: string): Promise<void>;
+  hearthAddMember(id: string, publicKey: string): Promise<void>;
+  hearthRemoveMember(id: string, publicKey: string): Promise<void>;
+  hearthLeave(id: string): Promise<void>;
+  hearthVote(id: string, proposalId: string): Promise<void>;
+  hearthContinueWithout(id: string, publicKey: string): Promise<void>;
+  hearthPackUpdate(id: string, instanceId: string): Promise<void>;
+  hearthRestore(id: string, versionId: string): Promise<void>;
+  hearthResolveFork(id: string, versionId: string): Promise<void>;
+  hearthSetBackground(id: string, on: boolean): Promise<void>;
+  hearthEula(): Promise<HearthEula>;
+  hearthEulaAccept(): Promise<void>;
+  /** Interrupteur de sécurité « Serveurs de groupe (expérimental) » : désactivé par défaut. Coupé, les commandes `hearth*` refusent. */
+  hearthEnabled(): Promise<boolean>;
+  hearthSetEnabled(enabled: boolean): Promise<void>;
+  /** Liste complète des cartes à chaque changement. */
+  onHearthState(cb: (l: HearthCard[]) => void): Unsubscribe;
+  /** Liste complète des invitations de groupe en attente. */
+  onHearthInvites(cb: (l: HearthInvite[]) => void): Unsubscribe;
+  onHearthHandover(cb: (e: HearthHandover) => void): Unsubscribe;
+  onHearthHostPrompt(cb: (e: HearthHostPrompt) => void): Unsubscribe;
   onUnknownMods(cb: (e: UnknownModsEvent) => void): Unsubscribe;
   onTransferErrorDetails(cb: (e: TransferErrorDetails) => void): Unsubscribe;
   onBrowseProgress(cb: (e: BrowseProgressEvent) => void): Unsubscribe;

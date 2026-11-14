@@ -7,7 +7,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { test, expect, invoke, joinStart, testState } from './harness/fixtures';
+import { test, expect, invoke, inviteAllFriends, joinStart, testState } from './harness/fixtures';
 import { AGENT_JAR, findJava25, killProcsOfDir, prepareDataDir, readLog, sleep, startRealApp, tmpRoot, waitLog, type RealApp } from './helpers/e2e14-real';
 import { makeFriends, friendKeyOnB, guestInstance, recordEvents, waitProgress, lastProgress } from './helpers/e2e2-common';
 
@@ -87,6 +87,7 @@ test('invite reel : amitie, transfert P2P des mods, join_play avec vrai Minecraf
     console.log('[mc2] hote : ' + JSON.stringify(await invoke(A.page, 'host_state')));
 
     await makeFriends(A as any, B as any);
+    await inviteAllFriends(A as any); // règle de jonction : B est invité pour cette partie
     const keyA = await friendKeyOnB(B as any);
     await recordEvents(B.page, 'transfer://progress');
     const plan = await invoke<{ to_receive: number; manifest: { files: unknown[] } }>(B.page, 'join_plan', { friend_public_key: keyA });

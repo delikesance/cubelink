@@ -17,13 +17,13 @@ export { navigate, goBack, canGoBack, useCanGoBack, ROUTES, parseHash, type Rout
 
 export const ROUTE_LABELS: Record<RouteName, string> = {
   login: "Connexion", main: "Accueil", create: "Créer une instance", install: "Installation",
-  instance: "Modpack", join: "Rejoindre", settings: "Paramètres", error: "Erreur", legal: "Mentions légales", browse: "Parcourir",
+  instance: "Modpack", join: "Rejoindre", settings: "Paramètres", error: "Erreur", legal: "Mentions légales", browse: "Parcourir", hearth: "Serveur de groupe",
 };
 
 // Dossier d'écran par route. Les écrans sont chargés sans être modifiés.
 const SCREEN_DIRS: Record<RouteName, string> = {
   login: "Login", main: "Main", create: "Create", install: "Install", join: "Join",
-  instance: "Instance", settings: "Settings", error: "Error", legal: "Legal", browse: "Browse",
+  instance: "Instance", settings: "Settings", error: "Error", legal: "Legal", browse: "Browse", hearth: "Hearth",
 };
 type ScreenModule = { default?: ComponentType };
 // Accueil et connexion : chargés tout de suite ; les autres écrans le sont à la demande (code splitting).

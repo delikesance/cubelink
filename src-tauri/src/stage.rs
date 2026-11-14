@@ -620,6 +620,11 @@ impl Stage {
         self.core.no_reveal.store(true, Ordering::SeqCst);
     }
 
+    /// Inverse de [`Self::forbid_reveal`] : le launcher n'a pas quitté (masqué en fond), un prochain jeu pourra être montré.
+    pub fn allow_reveal(&self) {
+        self.core.no_reveal.store(false, Ordering::SeqCst);
+    }
+
     /// Attend (brievement) que le journal soit ecrit, avant de quitter le processus.
     pub fn flush_log(&self) {
         if let Some(o) = self.core.outbox.get() {

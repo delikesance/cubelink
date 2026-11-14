@@ -566,8 +566,9 @@ impl AppState {
             launcher_name: "Cubelink".into(),
             launcher_version: env!("CARGO_PKG_VERSION").into(),
             extra_jvm_args: {
-                let mut a = core_lib::instance::default_jvm_args(cfg!(windows), ram_mb_eff);
-                a.extend(core_lib::instance::split_jvm_args(&inst.jvm_args));
+                let user = core_lib::instance::split_jvm_args(&inst.jvm_args);
+                let mut a = core_lib::instance::default_jvm_args(cfg!(windows), ram_mb_eff, &user);
+                a.extend(user);
                 a.extend(agent_arg.map(|arg| match &lan_map {
                     Some(m) => with_map(arg, m),
                     None => arg,

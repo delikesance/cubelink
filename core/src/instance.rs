@@ -682,16 +682,23 @@ b")).is_err());
 }
 
 /// Arguments JVM par défaut hors Windows (Linux, macOS) : tas fixe et G1 réglé pour des pauses courtes, afin d'éviter les
-/// saccades dues à la croissance du tas. Ils précèdent `jvm_args` de l'instance : le dernier argument l'emporte côté JVM,
-/// l'utilisateur garde donc la main. Windows : aucun (comportement inchangé).
-pub fn default_jvm_args(windows: bool, ram_mb: u32) -> Vec<String> {
+/// saccades dues à la croissance du tas. Ils précèdent `jvm_args` de l'instance (`user`). La JVM refuse de démarrer si un
+/// `-Xms` dépasse le `-Xmx` final ou si deux ramasse-miettes sont choisis : le tas fixe est donc omis quand l'utilisateur
+/// règle lui-même `-Xms`/`-Xmx`, et les réglages G1 quand il choisit un ramasse-miettes. Windows : aucun (inchangé).
+pub fn default_jvm_args(windows: bool, ram_mb: u32, user: &[String]) -> Vec<String> {
     if windows {
         return Vec::new();
     }
-    let mut a = vec![format!("-Xms{ram_mb}M")];
-    a.extend(
-        ["-XX:+UseG1GC", "-XX:+ParallelRefProcEnabled", "-XX:MaxGCPauseMillis=130", "-XX:+DisableExplicitGC"].map(String::from),
-    );
+    let user_heap = user.iter().any(|a| a.starts_with("-Xms") || a.starts_with("-Xmx"));
+    let user_gc = user.iter().any(|a| a.starts_with("-XX:+Use") && a.ends_with("GC"));
+    let mut a = Vec::new();
+    if !user_heap {
+        a.push(format!("-Xms{ram_mb}M"));
+    }
+    if !user_gc {
+        a.extend(["-XX:+UseG1GC", "-XX:+ParallelRefProcEnabled", "-XX:MaxGCPauseMillis=130"].map(String::from));
+    }
+    a.push("-XX:+DisableExplicitGC".into());
     a
 }
 
@@ -701,9 +708,20 @@ mod default_jvm_args_tests {
 
     #[test]
     fn windows_untouched_and_linux_fixed_heap() {
-        assert!(default_jvm_args(true, 4096).is_empty());
-        let l = default_jvm_args(false, 4096);
+        assert!(default_jvm_args(true, 4096, &[]).is_empty());
+        let l = default_jvm_args(false, 4096, &[]);
         assert_eq!(l[0], "-Xms4096M");
         assert!(l.contains(&"-XX:+UseG1GC".to_string()));
+    }
+
+    #[test]
+    fn user_heap_and_gc_win() {
+        // `-Xms4096M ... -Xmx2G` ferait refuser le démarrage à la JVM ; idem pour deux ramasse-miettes.
+        let l = default_jvm_args(false, 4096, &split_jvm_args("-Xmx2G -XX:+UseZGC"));
+        assert!(!l.iter().any(|a| a.starts_with("-Xms")));
+        assert!(!l.iter().any(|a| a.contains("G1") || a.contains("MaxGCPause")));
+        let l = default_jvm_args(false, 4096, &split_jvm_args("-XX:+UseG1GC"));
+        assert!(l.contains(&"-Xms4096M".to_string()));
+        assert!(!l.contains(&"-XX:+UseG1GC".to_string()));
     }
 }

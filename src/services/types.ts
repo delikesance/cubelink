@@ -135,10 +135,14 @@ export interface JoinPlan {
   cached: number;
   to_receive: number;
   to_receive_bytes: number;
+  /** Hash du manifeste montré : à renvoyer à `joinStart`, qui refuse un manifeste qui a changé depuis. */
+  manifest_hash: string;
   unknown_mods: string[];
-  /** Jars non vérifiés (sha1 absent, réseau) : ni reconnus ni signalés inconnus. */
+  /** Jars non vérifiés (sha1 absent, réseau) : traités comme inconnus, la case de confiance est obligatoire. */
   unknown_unchecked?: string[];
-  /** Mods inconnus déjà acceptés lors d'un précédent « Rejoindre » (même contenu) : la confiance n'est pas redemandée. */
+  /** Scripts KubeJS, exécutés par le jeu : la case de confiance est obligatoire. */
+  unknown_scripts?: string[];
+  /** Fichiers déjà acceptés lors d'un précédent « Rejoindre » (même contenu) : la confiance n'est pas redemandée. */
   unknown_trusted?: string[];
 }
 
@@ -288,8 +292,10 @@ export interface Services {
   gameJoinFriend(publicKey: string, instanceId?: string): Promise<void>;
 
   joinPlan(friendPublicKey: string): Promise<JoinPlan>;
-  /** `ramMb` : RAM de l'instance invitée (0 ou absent = « Par défaut »). */
-  joinStart(friendPublicKey: string, ramMb?: number): Promise<void>;
+  /** `manifestHash` : `JoinPlan.manifest_hash` du plan montré. `acceptUnknown` : case de confiance cochée (exigée par
+   *  le backend s'il y a des mods inconnus ou non vérifiés, ou des scripts). `ramMb` : RAM de l'instance invitée
+   *  (0 ou absent = « Par défaut »). */
+  joinStart(friendPublicKey: string, manifestHash: string, acceptUnknown: boolean, ramMb?: number): Promise<void>;
   /** Invité, en un geste : ouvre le tunnel vers le monde de l'ami, lance l'instance invitée avec connexion automatique à 127.0.0.1:port, referme le tunnel à la fin du jeu. Suit les événements de lancement habituels. */
   /** `instanceId` vide : l'instance invitée préparée par le dernier transfert. */
   joinPlay(friendPublicKey: string, instanceId: string): Promise<void>;

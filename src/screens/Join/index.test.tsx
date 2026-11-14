@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { ShellContext, type ShellContextValue } from "../../app/context";
-import { createFakeServices } from "../../services/fake";
+import { createFakeServices, FAKE_MANIFEST_HASH } from "../../services/fake";
 import type { Services } from "../../services";
 import type { TransferProgress } from "../../services/types";
 import Join from "./index";
@@ -42,7 +42,7 @@ describe("Join", () => {
     fireEvent.click(inherit);
     fireEvent.change(screen.getByRole("slider", { name: "Mémoire allouée (Go)" }), { target: { value: "10" } });
     await startJoin();
-    expect(start).toHaveBeenCalledWith("pk-alex", 10240);
+    expect(start).toHaveBeenCalledWith("pk-alex", FAKE_MANIFEST_HASH, true, 10240);
   });
 
   it("affiche le plan sans rien télécharger, titre focalisé", async () => {
@@ -72,7 +72,7 @@ describe("Join", () => {
     const { services, navigate, emit } = setup({ joinPlay: vi.fn(async () => {}) });
     const spy = vi.spyOn(services, "joinStart");
     await startJoin();
-    expect(spy).toHaveBeenCalledWith("pk-alex", 0);
+    expect(spy).toHaveBeenCalledWith("pk-alex", FAKE_MANIFEST_HASH, true, 0);
     expect(navigate).not.toHaveBeenCalled();
     emit(P());
     expect(screen.getByRole("progressbar").getAttribute("aria-valuenow")).toBe("28");
@@ -195,11 +195,37 @@ describe("Join", () => {
     expect(plan).toHaveBeenCalledTimes(2);
   });
 
-  it("affiche les jars non vérifiés sans les présenter comme sûrs ni exiger la confiance", async () => {
+  /** S1 (T2) : un jar non vérifié (p. ex. sans sha1 dans le manifeste) exige la case de confiance, comme un inconnu. */
+  it("jars non vérifiés : traités comme inconnus, la case de confiance est obligatoire", async () => {
     const base = createFakeServices({ tickMs: 0 });
-    setup({ joinPlan: async () => ({ ...(await base.joinPlan("x")), unknown_mods: [], unknown_unchecked: ["mods/x.jar"] }) });
+    const start = vi.fn(async () => {});
+    setup({ joinStart: start, joinPlan: async () => ({ ...(await base.joinPlan("x")), unknown_mods: [], unknown_unchecked: ["mods/x.jar"] }) });
     expect(await screen.findByText("mods/x.jar")).toBeTruthy();
-    expect(screen.getByTestId("unchecked").textContent).toMatch(/Ne les considère pas comme sûrs/);
-    expect((screen.getByRole("button", { name: "Rejoindre et jouer" }) as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.getByTestId("unchecked").textContent).toMatch(/traités comme inconnus/);
+    const btn = screen.getByRole("button", { name: "Rejoindre et jouer" }) as HTMLButtonElement;
+    expect(btn.disabled).toBe(true);
+    fireEvent.click(screen.getByRole("checkbox", { name: /confiance/ }));
+    fireEvent.click(btn);
+    await waitFor(() => expect(start).toHaveBeenCalledWith("pk-alex", FAKE_MANIFEST_HASH, true, 0));
+  });
+
+  it("scripts KubeJS : la case de confiance est obligatoire", async () => {
+    const base = createFakeServices({ tickMs: 0 });
+    setup({ joinPlan: async () => ({ ...(await base.joinPlan("x")), unknown_mods: [], unknown_scripts: ["kubejs/server_scripts/a.js"] }) });
+    expect(await screen.findByText("kubejs/server_scripts/a.js")).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Rejoindre et jouer" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("le monde a changé depuis le plan : message et nouveau plan à revérifier", async () => {
+    const base = createFakeServices({ tickMs: 0 });
+    const plan = vi.fn(() => base.joinPlan("x"));
+    setup({ joinPlan: plan, joinStart: vi.fn().mockRejectedValue(new Error("La partie de ton ami a changé depuis l'affichage du plan : vérifie le nouveau plan avant de rejoindre.")) });
+    await screen.findByText("mods/mod-maison.jar");
+    fireEvent.click(screen.getByRole("checkbox", { name: /confiance/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Rejoindre et jouer" }));
+    expect(await screen.findByText(/a changé depuis l'affichage du plan/)).toBeTruthy();
+    await waitFor(() => expect(plan).toHaveBeenCalledTimes(2));
+    await screen.findByText("mods/mod-maison.jar");
+    expect((screen.getByRole("checkbox", { name: /confiance/ }) as HTMLInputElement).checked).toBe(false);
   });
 });

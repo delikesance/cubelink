@@ -6,7 +6,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { test, expect, invoke, testState } from './harness/fixtures';
+import { test, expect, invoke, joinStart, testState } from './harness/fixtures';
 import { AGENT_JAR, findJava25, killProcsOfDir, prepareDataDir, readLog, sleep, startRealApp, tmpRoot, waitLog, type RealApp } from './helpers/e2e14-real';
 import { makeFriends, friendKeyOnB, guestInstance, recordEvents, waitProgress, lastProgress } from './helpers/e2e2-common';
 
@@ -102,7 +102,7 @@ test('invite reel : amitie, transfert P2P des mods, join_play avec vrai Minecraf
     await recordEvents(B.page, 'transfer://progress');
     const plan = await invoke<{ to_receive: number; manifest: { files: unknown[] } }>(B.page, 'join_plan', { friend_public_key: keyA });
     console.log(`[mc2] plan : ${plan.manifest.files.length} fichiers, ${plan.to_receive} a recevoir`);
-    await invoke(B.page, 'join_start', { friend_public_key: keyA });
+    await joinStart(B.page, keyA);
     await waitProgress(B.page, (p) => p.phase === 'done' || p.phase === 'failed', 900_000, 'fin du transfert');
     const last = await lastProgress(B.page);
     console.log('[mc2] fin du transfert : ' + JSON.stringify(last));

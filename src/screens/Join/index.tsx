@@ -83,20 +83,31 @@ export default function Join() {
 
   const unknown = state.kind === "ready" ? state.plan.unknown_mods : [];
   const unchecked = state.kind === "ready" ? (state.plan.unknown_unchecked ?? []) : [];
+  const scripts = state.kind === "ready" ? (state.plan.unknown_scripts ?? []) : [];
   const alreadyTrusted = state.kind === "ready" ? (state.plan.unknown_trusted ?? []) : [];
-  const canJoin = state.kind === "ready" && !starting && (unknown.length === 0 || trusted);
+  // Tout ce qui s'exécutera sans avoir été reconnu : mods inconnus, jars non vérifiés, scripts KubeJS. La case de
+  // confiance est obligatoire (le backend la revérifie, avec le hash du manifeste montré).
+  const toAccept = unknown.length + unchecked.length + scripts.length;
+  const canJoin = state.kind === "ready" && !starting && (toAccept === 0 || trusted);
+  // Plan et accord du dernier départ : « Réessayer » repart sur les mêmes.
+  const started = useRef<{ hash: string; accept: boolean } | null>(null);
 
   const join = async () => {
-    if (!friend) return;
+    if (!friend || state.kind !== "ready") return;
     setStarting(true);
     setStartError(null);
+    const consent = { hash: state.plan.manifest_hash, accept: trusted };
     try {
-      await services.joinStart(friend, ram);
+      await services.joinStart(friend, consent.hash, consent.accept, ram);
+      started.current = consent;
       t.reset();
       setStage("transfer");
     } catch (e) {
-      setStartError(friendlyJoinError(e, peerName.current));
+      const msg = friendlyJoinError(e, peerName.current);
       setStarting(false);
+      // Le monde a changé depuis l'affichage : nouveau plan, à revérifier avant de rejoindre.
+      if (/a changé/.test(msg)) load();
+      setStartError(msg);
     }
   };
 
@@ -141,7 +152,26 @@ export default function Join() {
     t.reset();
     setPlayError(null);
     autoPlayed.current = false;
-    await services.joinStart(friend, ram);
+    const c = started.current;
+    if (!c) throw new Error("Recharge le plan avant de réessayer.");
+    // Un fichier a pu changer chez l'ami (son manifeste est recalculé) : plan frais. S'il n'y a rien à accepter, on
+    // repart dessus ; sinon retour au plan, à revérifier.
+    const fresh = await services.joinPlan(friend);
+    let hash = c.hash;
+    if (fresh.manifest_hash !== c.hash) {
+      const pending = fresh.unknown_mods.length + (fresh.unknown_unchecked?.length ?? 0) + (fresh.unknown_scripts?.length ?? 0);
+      if (pending > 0) {
+        setState({ kind: "ready", plan: fresh });
+        setTrusted(false);
+        setStarting(false);
+        setStage("plan");
+        setStartError(`La partie de ${peerName.current || "ton ami"} a changé : vérifie le nouveau plan avant de rejoindre.`);
+        return;
+      }
+      hash = fresh.manifest_hash;
+    }
+    await services.joinStart(friend, hash, c.accept, ram);
+    started.current = { hash, accept: c.accept };
   }, "Impossible de relancer le transfert.");
 
   // Cause identifiable d'un échec : textes partagés avec l'écran Erreur (pas ceux de la connexion Microsoft ni Java).
@@ -229,7 +259,7 @@ export default function Join() {
         <div className="join-acts">
           <Button disabled={!canJoin} loading={starting} onClick={() => { void join(); }}>Rejoindre et jouer</Button>
           {cancelBtn}
-          {unknown.length > 0 && !trusted && (
+          {toAccept > 0 && !trusted && (
             <span className="join-hint" aria-live="polite">Coche la case de confiance pour activer « Rejoindre et jouer ».</span>
           )}
         </div>
@@ -279,14 +309,32 @@ export default function Join() {
       <section aria-label="Rejoindre un ami" className="join-extra">
         {card}
         {startError && <p className="join-error" role="alert" style={{ margin: 0, color: "var(--danger)" }}>{startError}</p>}
-        {ready && unknown.length > 0 && (
+        {ready && toAccept > 0 && (
           <div className="join-warn enter" role="note" style={stagger(2)}>
-            <h2>{unknown.length > 1 ? `${unknown.length} mods inconnus vont s'exécuter sur ton ordinateur` : "Un mod inconnu va s'exécuter sur ton ordinateur"}</h2>
-            <ul>{unknown.map((u) => <li key={u}>{u}</li>)}</ul>
-            <p>Ces mods ne sont pas référencés dans les catalogues : Cubelink ne peut pas les comparer à une version connue. Ils s'exécuteront avec les mêmes droits que le jeu. L'intégrité est vérifiée, pas la sécurité : vérifie-les avant d'accepter.</p>
+            {unknown.length > 0 && (
+              <>
+                <h2>{unknown.length > 1 ? `${unknown.length} mods inconnus vont s'exécuter sur ton ordinateur` : "Un mod inconnu va s'exécuter sur ton ordinateur"}</h2>
+                <ul>{unknown.map((u) => <li key={u}>{u}</li>)}</ul>
+                <p>Ces mods ne sont pas référencés dans les catalogues : Cubelink ne peut pas les comparer à une version connue.</p>
+              </>
+            )}
+            {unchecked.length > 0 && (
+              <div data-testid="unchecked">
+                <h2>{unchecked.length > 1 ? `${unchecked.length} mods n'ont pas pu être vérifiés` : "Un mod n'a pas pu être vérifié"}</h2>
+                <ul>{unchecked.map((u) => <li key={u}>{u}</li>)}</ul>
+                <p>Cubelink n'a pas pu comparer ces jars aux catalogues (empreinte absente ou vérification impossible, par exemple sans réseau). Ils sont traités comme inconnus.</p>
+              </div>
+            )}
+            {scripts.length > 0 && (
+              <div data-testid="scripts">
+                <h2>{scripts.length > 1 ? `${scripts.length} scripts KubeJS vont s'exécuter dans le jeu` : "Un script KubeJS va s'exécuter dans le jeu"}</h2>
+                <ul>{scripts.map((u) => <li key={u}>{u}</li>)}</ul>
+              </div>
+            )}
+            <p>Ces fichiers s'exécuteront avec les mêmes droits que le jeu. L'intégrité est vérifiée, pas la sécurité : vérifie-les avant d'accepter.</p>
             <label className="join-trust">
               <input type="checkbox" checked={trusted} onChange={(e) => setTrusted(e.target.checked)} />
-              <span>Je fais confiance à {name} pour {unknown.length > 1 ? "ces mods" : "ce mod"}</span>
+              <span>Je fais confiance à {name} pour {scripts.length > 0 ? (toAccept > 1 ? "ces fichiers" : "ce fichier") : toAccept > 1 ? "ces mods" : "ce mod"}</span>
             </label>
           </div>
         )}
@@ -296,13 +344,6 @@ export default function Join() {
               ? `${alreadyTrusted.length} mods hors catalogue ont déjà été acceptés lors d'une partie précédente : pas besoin de les revalider.`
               : "Un mod hors catalogue a déjà été accepté lors d'une partie précédente : pas besoin de le revalider."}
           </p>
-        )}
-        {ready && unchecked.length > 0 && (
-          <div className="join-warn enter" role="note" data-testid="unchecked" style={stagger(2)}>
-            <h2>{unchecked.length > 1 ? `${unchecked.length} fichiers n'ont pas pu être vérifiés` : "Un fichier n'a pas pu être vérifié"}</h2>
-            <ul>{unchecked.map((u) => <li key={u}>{u}</li>)}</ul>
-            <p>Cubelink n'a pas pu comparer ces jars aux catalogues (vérification impossible, par exemple sans réseau) : ils ne sont ni reconnus ni signalés comme inconnus. Ne les considère pas comme sûrs.</p>
-          </div>
         )}
         {ready && (
           <>

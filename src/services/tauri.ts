@@ -63,7 +63,8 @@ export function createTauriServices(): Services {
     gameJoinFriend: (public_key, instance_id) => invoke("game_join_friend", { public_key, instance_id }),
 
     joinPlan: (friend_public_key) => invoke("join_plan", { friend_public_key }),
-    joinStart: (friend_public_key, ram_mb) => invoke("join_start", { friend_public_key, ram_mb: ram_mb || null }),
+    joinStart: (friend_public_key, manifest_hash, accept_unknown, ram_mb) =>
+      invoke("join_start", { friend_public_key, manifest_hash, accept_unknown, ram_mb: ram_mb || null }),
     joinPlay: (friend_public_key, instance_id) => invoke("join_play", { friend_public_key, instance_id }),
     joinPause: () => invoke("join_pause"),
     joinResume: () => invoke("join_resume"),

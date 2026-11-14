@@ -2,7 +2,7 @@
 // jeton Microsoft refuse / code expire / sans licence ; messages en francais et actions (Reessayer, Annuler).
 import fs from 'node:fs';
 import path from 'node:path';
-import { test, expect, invoke, testState } from './harness/fixtures';
+import { test, expect, invoke, joinStart, testState } from './harness/fixtures';
 import { guestInstance } from './helpers/e2e2-common';
 import {
   befriend, captureEvents, events, gotoHash, hostShare, killApp, resumeApp, sha256File, sleep, suspendApp,
@@ -154,7 +154,7 @@ test('T6 mod remplace apres le partage : echec clair puis nouvel essai avec un m
   fs.writeFileSync(jar, updated);
   const page = appB.page;
   await captureEvents(appB, ['transfer://progress']);
-  await invoke(page, 'join_start', { friend_public_key: keyA });
+  await joinStart(page, keyA);
   await expect.poll(async () => ((await events(appB, 'transfer://progress')) as any[]).some((p) => p.phase === 'failed'), { timeout: 90_000 }).toBe(true);
   const failed = ((await events(appB, 'transfer://progress')) as any[]).filter((p) => p.phase === 'failed');
   expect(failed.at(-1).error).toMatch(/a changé chez ton ami/);
@@ -164,7 +164,7 @@ test('T6 mod remplace apres le partage : echec clair puis nouvel essai avec un m
     const plan = await invoke<{ manifest: { files: { path: string; size: number }[] } }>(page, 'join_plan', { friend_public_key: keyA });
     return plan.manifest.files.some((f) => f.size === updated.length);
   }, { timeout: 30_000 }).toBe(true);
-  await invoke(page, 'join_start', { friend_public_key: keyA });
+  await joinStart(page, keyA);
   await expect.poll(async () => ((await events(appB, 'transfer://progress')) as any[]).some((p) => p.phase === 'done'), { timeout: 90_000 }).toBe(true);
 });
 

@@ -36,6 +36,9 @@ export interface FakeControls {
   setUpdateCheckResult(patch: Partial<UpdateState>): void;
 }
 
+/** Hash du manifeste simulé, renvoyé par `joinPlan` et exigé par `joinStart`. */
+export const FAKE_MANIFEST_HASH = "f".repeat(64);
+
 const KIND_WORDS: Record<BrowseKind, string[]> = {
   modpack: ["Aventure", "Technologie", "Magie", "Skyblock", "Survie", "Exploration", "Industrie", "Médiéval"],
   mod: ["Sodium", "Iris", "Lithium", "Create", "Jade", "Xaero", "Farmers", "Biomes", "Backpacks", "Waystones"],
@@ -521,11 +524,14 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     friendRefuseAll: async () => { const n = requests.length; requests = []; return n; },
 
     joinPlan: async (): Promise<JoinPlan> => ({
-      manifest: makeManifest(), cached: 91, to_receive: 3, to_receive_bytes: bytes_total,
+      manifest: makeManifest(), manifest_hash: FAKE_MANIFEST_HASH, cached: 91, to_receive: 3, to_receive_bytes: bytes_total,
       unknown_mods: ["mods/mod-maison.jar"],
     }),
     joinPlay: async () => {},
-    joinStart: async () => {
+    // Comme le backend : refuse un autre manifeste, et des mods inconnus sans la case de confiance.
+    joinStart: async (_pk, manifestHash, acceptUnknown) => {
+      if (manifestHash !== FAKE_MANIFEST_HASH) throw new Error("La partie de ton ami a changé depuis l'affichage du plan : vérifie le nouveau plan avant de rejoindre.");
+      if (!acceptUnknown) throw new Error("Des mods inconnus ou non vérifiés demandent ton accord : ouvre « Rejoindre » dans Cubelink pour les voir et les accepter.");
       step = 0;
       emit(listeners.transfer, progress("preparing"));
       startTimer();

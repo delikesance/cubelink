@@ -63,6 +63,13 @@ pub fn link_into(root: &Path, rel_path: &str, src: &Path) -> Result<LinkKind> {
     link_or_copy(src, &dst)
 }
 
+/// Copie `src` dans `root/rel_path`, jamais de lien : pour les fichiers que le jeu peut réécrire en place (configs),
+/// qui altéreraient sinon l'objet partagé du cache sans changer son hash.
+pub fn copy_into(root: &Path, rel_path: &str, src: &Path) -> Result<LinkKind> {
+    let dst = safe_join(root, rel_path)?;
+    link_or_copy_with(src, &dst, &|_, _| Err(io::Error::other("copie demandée")))
+}
+
 /// Place `src` à `dst` : hardlink si possible, sinon copie.
 pub fn link_or_copy(src: &Path, dst: &Path) -> Result<LinkKind> {
     link_or_copy_with(src, dst, &|s, d| fs::hard_link(s, d))

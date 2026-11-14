@@ -337,11 +337,13 @@ impl AppState {
         if self.auth_status_refresh().await.is_none() {
             return Err("connectez-vous avant de lancer le jeu".into());
         }
-        self.join_plan(public_key).await?;
+        let plan = self.join_plan(public_key).await?;
         let instance = match instance_id {
             Some(id) => id.to_string(),
             None => {
-                self.join_start(public_key, None).await?;
+                // Pas de case de confiance ici : des fichiers inconnus ou non vérifiés font échouer le départ, et
+                // l'utilisateur les accepte depuis l'écran « Rejoindre ».
+                self.join_start(public_key, None, &plan.manifest_hash, false).await?;
                 let deadline = tokio::time::Instant::now() + JOIN_WAIT_TIMEOUT;
                 while lock(&self.join).is_some() {
                     if tokio::time::Instant::now() >= deadline {

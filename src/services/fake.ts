@@ -199,7 +199,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     overlay_enabled: true, overlay_hotkey: "Ctrl+Shift+C", embedded_game: true, start_with_os: true,
   };
   // Champs que Rust renvoie toujours (voir `Instance` dans bindings.ts), vides par défaut.
-  const noExtras = { java_path: null, jvm_args: "", art: null } satisfies Partial<Instance>;
+  const noExtras = { java_path: null, jvm_args: "", wrapper: "", art: null } satisfies Partial<Instance>;
   const instances: Instance[] = [{
     ...noExtras,
     id: "inst-aeronautics", name: "Create: Aeronautics", minecraft: "1.21.1",
@@ -463,6 +463,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
       if (patch.ram_mb !== undefined) inst.ram_mb = patch.ram_mb;
       if (patch.java_path !== undefined) inst.java_path = patch.java_path;
       if (patch.jvm_args !== undefined) inst.jvm_args = patch.jvm_args;
+      if (patch.wrapper !== undefined) inst.wrapper = patch.wrapper;
       return { ...inst };
     },
     instancesArtImage: async (id, file) => {

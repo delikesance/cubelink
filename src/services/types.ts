@@ -53,7 +53,7 @@ export type BrowseInstallInput = B.BrowseInstallInput_Deserialize;
 export type Sha256Hex = string;
 
 /** Champs modifiables d'une instance (instances_update). */
-export interface InstancePatch { name?: string; ram_mb?: number; java_path?: string | null; jvm_args?: string }
+export interface InstancePatch { name?: string; ram_mb?: number; java_path?: string | null; jvm_args?: string; wrapper?: string }
 
 // Entrées / sorties de commandes
 export type DeviceCode = B.DeviceCodeInfo;

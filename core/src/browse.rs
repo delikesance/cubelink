@@ -709,6 +709,7 @@ mod tests {
             mod_count: 0,
             java_path: None,
             jvm_args: String::new(),
+            wrapper: String::new(),
             art: None,
         }
     }

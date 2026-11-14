@@ -46,7 +46,7 @@ export function createTauriServices(): Services {
     instancesKill: (id) => done(commands.instancesKill(id)),
     instancesDelete: (id) => done(commands.instancesDelete(id)),
     instancesUpdate: (id, p) =>
-      commands.instancesUpdate(id, p.name ?? null, p.ram_mb ?? null, p.java_path ?? null, p.jvm_args ?? null),
+      commands.instancesUpdate(id, p.name ?? null, p.ram_mb ?? null, p.java_path ?? null, p.jvm_args ?? null, p.wrapper ?? null),
     instancesOpenFolder: (id) => done(commands.instancesOpenFolder(id)),
     instancesLogs: (id) => commands.instancesLogs(id),
     instancesArtImage: (instanceId, file, maxPx) => commands.instancesArtImage(instanceId, file, maxPx ?? null),

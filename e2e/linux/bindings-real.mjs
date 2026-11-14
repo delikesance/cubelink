@@ -20,6 +20,12 @@ const VITE_PORT = 5173; // devUrl de tauri.conf.json : le build debug charge l'i
 
 const procs = [];
 const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "cubelink-bindings-"));
+// Instance déjà installée (sans réseau) pour `instances_update`.
+fs.mkdirSync(path.join(dataDir, "instances", "essai-enrobage", "minecraft"), { recursive: true });
+fs.writeFileSync(path.join(dataDir, "instances", "essai-enrobage", "instance.json"), JSON.stringify({
+  id: "essai-enrobage", name: "Essai enrobage", minecraft: "1.21.1", loader: { loader: "vanilla", version: "" },
+  ram_mb: 2048, mod_count: 0, created_at: 0,
+}));
 
 function start(cmd, args, env = {}) {
   const p = spawn(cmd, args, { cwd: ROOT, env: { ...process.env, ...env }, stdio: ["ignore", "pipe", "pipe"], detached: true });
@@ -84,6 +90,9 @@ const SCENARIO = async () => {
   await step("minecraftVersions (hors réseau)", () => svc.minecraftVersions(), true);
   await step("instancesCreate (nom vide refusé)", () => svc.instancesCreate({ name: " ", minecraft: "1.21.1", loader: { loader: "vanilla", version: "" }, ram_mb: 2048 }), true);
   await step("instancesUpdate (inconnue)", () => svc.instancesUpdate("absente", { name: "X", ram_mb: 3072 }), true);
+  // Commande d'enrobage (Linux) : instance semée sur le disque (Mojang est injoignable ici), enregistrée puis relue.
+  const u = await step("instancesUpdate (wrapper)", () => svc.instancesUpdate("essai-enrobage", { wrapper: "  gamemoderun mangohud " }));
+  if (u?.wrapper !== "gamemoderun mangohud") out.push({ name: "wrapper relu", ok: false, error: JSON.stringify(u?.wrapper) });
   await step("instancesArtImage (inconnue)", () => svc.instancesArtImage("absente", "icon.png", 128), true);
   await step("modsList (inconnue)", () => svc.modsList("absente"), true);
   await step("modsToggle (inconnue)", () => svc.modsToggle("absente", "a.jar", false), true);
@@ -146,6 +155,10 @@ try {
     const disk = settings.overlay_hotkey === "Ctrl+Alt+F9" && settings.start_with_os === false;
     console.log(`${disk ? "OK  " : "ÉCHEC"} settings.json sur le disque — overlay_hotkey = ${settings.overlay_hotkey}, start_with_os = ${settings.start_with_os}`);
     if (!disk) failed = true;
+    const meta = JSON.parse(fs.readFileSync(path.join(dataDir, "instances", "essai-enrobage", "instance.json"), "utf8"));
+    const wrapped = meta.wrapper === "gamemoderun mangohud";
+    console.log(`${wrapped ? "OK  " : "ÉCHEC"} instance.json sur le disque — wrapper = ${meta.wrapper}`);
+    if (!wrapped) failed = true;
   } finally {
     await wd("DELETE", `/session/${sid}`).catch(() => {});
   }

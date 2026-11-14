@@ -47,6 +47,11 @@ impl Process {
         Ok(ExitStatus::from_raw(code.unwrap_or(1)))
     }
 
+    /// Handle du processus, valide tant que `self` vit.
+    pub fn raw_handle(&self) -> HANDLE {
+        self.handle.as_raw_handle() as HANDLE
+    }
+
     /// Arrêt forcé, par le handle du processus.
     pub fn kill(&self) {
         // SAFETY : le handle appartient à `self.handle`, valide tant que `self` vit.

@@ -26,7 +26,7 @@ Arguments : clés JSON envoyées à Tauri (snake_case) et leur type TypeScript. 
 | `minecraft_versions` | — | `string[]` | Versions de Minecraft disponibles. |
 | `instances_kill` | `id: string` | — | Arrête le jeu de l'instance. |
 | `instances_delete` | `id: string` | — | Supprime l'instance (refusé si elle est en lancement ou en jeu). |
-| `instances_update` | `id: string`, `name: string \| null`, `ram_mb: number \| null`, `java_path: string \| null`, `jvm_args: string \| null` | `Instance_Serialize` | Modifie les champs donnés d'une instance (les autres restent). |
+| `instances_update` | `id: string`, `name: string \| null`, `ram_mb: number \| null`, `java_path: string \| null`, `jvm_args: string \| null`, `wrapper: string \| null` | `Instance_Serialize` | Modifie les champs donnés d'une instance (les autres restent). `wrapper` : commande d'enrobage placée devant Java, Linux seulement ; chaîne vide = aucune. |
 | `instances_open_folder` | `id: string` | — | Ouvre le dossier de l'instance dans le gestionnaire de fichiers. |
 | `instances_logs` | `id: string` | `string` | Fin de `latest.log` (ou `latest.log.old`) de l'instance. |
 | `instances_art_image` | `instance_id: string`, `file: string`, `max_px: number \| null` | `string` | Data URL d'un fichier d'illustration (`icon` ou une capture), réduit à `max_px` de côté (512 par défaut). |

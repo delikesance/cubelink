@@ -68,6 +68,10 @@ pub struct Instance {
     /// Arguments JVM supplémentaires, séparés par des espaces.
     #[serde(default)]
     pub jvm_args: String,
+    /// Commande d'enrobage (Linux) : programme et arguments placés devant Java, séparés par des espaces
+    /// (ex. `gamemoderun`, `mangohud`, `prime-run`). Vide : Java est lancé directement. Ignorée sous Windows.
+    #[serde(default)]
+    pub wrapper: String,
     /// Illustrations du modpack (icône, captures, couleur). Absent des anciens `instance.json`.
     #[serde(default)]
     pub art: Option<InstanceArt>,

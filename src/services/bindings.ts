@@ -46,8 +46,8 @@ export const commands = {
 	instancesKill: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("instances_kill", { id }, options),
 	/**  Supprime l'instance (refusé si elle est en lancement ou en jeu). */
 	instancesDelete: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("instances_delete", { id }, options),
-	/**  Modifie les champs donnés d'une instance (les autres restent). */
-	instancesUpdate: (id: string, name: string | null, ramMb: number | null, javaPath: string | null, jvmArgs: string | null, options?: InvokeOptions) => __TAURI_INVOKE<Instance_Serialize>("instances_update", { id, name, ram_mb: ramMb, java_path: javaPath, jvm_args: jvmArgs }, options),
+	/**  Modifie les champs donnés d'une instance (les autres restent). `wrapper` : commande d'enrobage placée devant Java, Linux seulement ; chaîne vide = aucune. */
+	instancesUpdate: (id: string, name: string | null, ramMb: number | null, javaPath: string | null, jvmArgs: string | null, wrapper: string | null, options?: InvokeOptions) => __TAURI_INVOKE<Instance_Serialize>("instances_update", { id, name, ram_mb: ramMb, java_path: javaPath, jvm_args: jvmArgs, wrapper }, options),
 	/**  Ouvre le dossier de l'instance dans le gestionnaire de fichiers. */
 	instancesOpenFolder: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("instances_open_folder", { id }, options),
 	/**  Fin de `latest.log` (ou `latest.log.old`) de l'instance. */
@@ -518,6 +518,11 @@ export type Instance_Deserialize = {
 	java_path?: string | null,
 	/**  Arguments JVM supplémentaires, séparés par des espaces. */
 	jvm_args?: string,
+	/**
+	 *  Commande d'enrobage (Linux) : programme et arguments placés devant Java, séparés par des espaces
+	 *  (ex. `gamemoderun`, `mangohud`, `prime-run`). Vide : Java est lancé directement. Ignorée sous Windows.
+	 */
+	wrapper?: string,
 	/**  Illustrations du modpack (icône, captures, couleur). Absent des anciens `instance.json`. */
 	art?: InstanceArt_Deserialize | null,
 };
@@ -533,6 +538,11 @@ export type Instance_Serialize = {
 	java_path: string | null,
 	/**  Arguments JVM supplémentaires, séparés par des espaces. */
 	jvm_args: string,
+	/**
+	 *  Commande d'enrobage (Linux) : programme et arguments placés devant Java, séparés par des espaces
+	 *  (ex. `gamemoderun`, `mangohud`, `prime-run`). Vide : Java est lancé directement. Ignorée sous Windows.
+	 */
+	wrapper: string,
 	/**  Illustrations du modpack (icône, captures, couleur). Absent des anciens `instance.json`. */
 	art: InstanceArt_Serialize | null,
 };

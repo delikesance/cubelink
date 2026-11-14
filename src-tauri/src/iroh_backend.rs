@@ -30,6 +30,8 @@ use p2p_lib::friend_proto::{self, FriendConfig, FriendEvent, FriendService};
 use p2p_lib::friends_db::{FriendsDb, PeerAddr};
 use p2p_lib::manifest_channel::{fetch_manifest as p2p_fetch_manifest, ManifestServer};
 use p2p_lib::invite::{send_invite as p2p_send_invite, InviteHandler, InviteMessage, INVITE_ALPN};
+use p2p_lib::join_request::{send_join_request as p2p_send_join_request, Decision, JoinAnswer, JoinPolicy, JoinRequestEvent, JoinRequestHandler, JOIN_REQUEST_ALPN};
+use p2p_lib::presence::PeerKey;
 use p2p_lib::presence::{ping_reach, PresenceConfig, PresenceService, PRESENCE_ALPN};
 use p2p_lib::reach::Reach;
 use p2p_lib::relay::{self, PathKind, PathObserver, RelayChoice, RelaySettings};
@@ -37,6 +39,7 @@ use p2p_lib::transfer::plan::Plan;
 use p2p_lib::transfer::recv::RecvOptions;
 use p2p_lib::transfer::resume::{ResumableReceive, ResumeConfig};
 use p2p_lib::transfer::send::{BlobTransport, FetchRequest, Host, IrohTransport, ServeIndex, ServeLimits, CONTROL_ALPN};
+use p2p_lib::hearth::proto::{HearthHandler, HEARTH_ALPN, HEARTH_BLOBS_ALPN};
 use p2p_lib::tunnel::{GuestTunnel, HostTunnel, TunnelAuthorizer, TunnelConfig, TUNNEL_ALPN};
 
 use crate::authz::FriendsAuthz;
@@ -364,10 +367,11 @@ impl AddrBook {
 }
 
 /// Autorisation du manifeste côté hôte : comme `FriendsAuthz`, mais avec la RAISON du refus
-/// (pas ami, ou partage de mods désactivé), annoncée à l'invité.
+/// (pas ami, partage de mods désactivé, ou rien de partagé), annoncée à l'invité.
 struct HostAuthz {
     authz: Arc<FriendsAuthz>,
     share_mods: Arc<dyn Fn() -> bool + Send + Sync>,
+    share: Arc<ShareState>,
 }
 
 impl p2p_lib::transfer::send::PeerAuthorizer for HostAuthz {
@@ -375,11 +379,36 @@ impl p2p_lib::transfer::send::PeerAuthorizer for HostAuthz {
         p2p_lib::transfer::send::PeerAuthorizer::is_allowed(self.authz.as_ref(), public_key)
     }
     fn denial(&self, public_key: &str) -> Reach {
-        if self.authz.is_friend_hex(&public_key.to_lowercase()) && !(self.share_mods)() {
+        if !self.authz.is_friend_hex(&public_key.to_lowercase()) {
+            Reach::NotFriend
+        } else if !(self.share_mods)() {
             Reach::SharingOff
+        } else if self.share.current().is_none() {
+            Reach::NothingShared
         } else {
+            // Ami, mais pas invité pour cette partie : il doit demander à rejoindre (message neutre, voir Reach).
             Reach::NotFriend
         }
+    }
+}
+
+/// Règle de jonction vue par le protocole de demande : une partie est partagée tant que l'hôte sert un manifeste ;
+/// l'accès accordé va dans `SessionAccess`.
+struct HostJoinPolicy {
+    share: Arc<ShareState>,
+    authz: Arc<FriendsAuthz>,
+}
+
+impl JoinPolicy for HostJoinPolicy {
+    fn is_sharing(&self) -> bool {
+        // Un serveur de groupe n'accepte pas de demande à rejoindre : seuls ses membres y entrent (docs/hearth.md § 2).
+        self.share.current().is_some() && !self.authz.access().serving_group()
+    }
+    fn is_allowed(&self, key: &PeerKey) -> bool {
+        self.authz.may_join(key)
+    }
+    fn grant(&self, key: &PeerKey) {
+        self.authz.access().allow_friend(key);
     }
 }
 
@@ -406,6 +435,8 @@ pub struct IrohBackend {
     store_root: PathBuf,
     settings: Arc<Mutex<Settings>>,
     authz: Arc<FriendsAuthz>,
+    join_requests: JoinRequestHandler,
+    hearth: Arc<crate::hearth::HearthRuntime>,
     opts: IrohOptions,
     advertise: bool,
     cut_at: Arc<Mutex<Option<usize>>>,
@@ -442,7 +473,7 @@ impl IrohBackend {
         // Découverte publique (pkarr + DNS n0) : réglage `discovery`, jamais en mode « sans réseau » des tests.
         let address_lookup = discovery && opts.relay != RelayChoice::Disabled;
         let rs = RelaySettings { mode: opts.relay.clone(), relay_only, allow_relay, address_lookup };
-        let alpns: Vec<Vec<u8>> = [friend_proto::ALPN, PRESENCE_ALPN, INVITE_ALPN, CONTROL_ALPN, iroh_blobs::ALPN, MANIFEST_ALPN, TUNNEL_ALPN]
+        let alpns: Vec<Vec<u8>> = [friend_proto::ALPN, PRESENCE_ALPN, INVITE_ALPN, JOIN_REQUEST_ALPN, CONTROL_ALPN, iroh_blobs::ALPN, MANIFEST_ALPN, TUNNEL_ALPN, HEARTH_ALPN, HEARTH_BLOBS_ALPN]
             .iter()
             .map(|a| a.to_vec())
             .collect();
@@ -452,7 +483,7 @@ impl IrohBackend {
 
         let settings = st.settings.clone();
         let share_mods: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new(move || lock(&settings).share_mods);
-        let authz = Arc::new(FriendsAuthz::new(st.friends.clone(), share_mods));
+        let authz = Arc::new(FriendsAuthz::new(st.friends.clone(), share_mods, st.access.clone()));
         let share = Arc::new(ShareState::default());
 
         // Amis.
@@ -509,7 +540,7 @@ impl IrohBackend {
             let settings = st.settings.clone();
             Arc::new(move || lock(&settings).share_mods)
         };
-        let manifest_srv = ManifestServer::new(Arc::new(HostAuthz { authz: authz.clone(), share_mods: share_for_manifest }));
+        let manifest_srv = ManifestServer::new(Arc::new(HostAuthz { authz: authz.clone(), share_mods: share_for_manifest, share: share.clone() }));
         let tunnel_authz: Arc<dyn TunnelAuthorizer> = authz.clone();
         let tunnel = HostTunnel::attach(tunnel_authz, TunnelConfig::default());
         let peers: Arc<Mutex<HashMap<String, EndpointAddr>>> = Arc::new(Mutex::new(stored.iter().cloned().collect()));
@@ -530,15 +561,55 @@ impl IrohBackend {
             }
         });
         let invite_handler = InviteHandler::new(authz.clone(), invite_sink);
+        // Demandes à rejoindre reçues : file de l'état + événements `friend://join_request(s)`.
+        let weak_st = Arc::downgrade(st);
+        let join_sink: p2p_lib::join_request::JoinRequestSink = Arc::new(move |ev| {
+            if let Some(st) = weak_st.upgrade() {
+                match ev {
+                    JoinRequestEvent::Received(k) => st.join_request_received(&hex::encode(k)),
+                    JoinRequestEvent::Ended(k) => st.join_request_ended(&hex::encode(k)),
+                }
+            }
+        });
+        let join_policy = Arc::new(HostJoinPolicy { share: share.clone(), authz: authz.clone() });
+        let join_requests = JoinRequestHandler::new(authz.clone(), join_policy, join_sink);
+        // Serveurs de groupe : protocole `cubelink/hearth/1` et blobs des mondes (magasin dédié, accès réservé aux membres).
+        let hearth = st.hearth.clone();
+        let world = p2p_lib::hearth::sync::WorldStore::open(st.paths.root.join("hearth").join("blobs"), hearth.clone())
+            .await
+            .map_err(|e| e.to_string())?;
+        let hearth_handler = HearthHandler::new(endpoint.clone(), hearth.clone());
         let router = Router::builder(endpoint.clone())
             .accept(friend_proto::ALPN, friends_svc.handler())
             .accept(PRESENCE_ALPN, presence.handler())
             .accept(INVITE_ALPN, invite_handler)
+            .accept(JOIN_REQUEST_ALPN, join_requests.clone())
             .accept(CONTROL_ALPN, control)
             .accept(iroh_blobs::ALPN, blobs)
             .accept(MANIFEST_ALPN, manifest_srv.handler())
             .accept(TUNNEL_ALPN, tunnel.handler())
+            .accept(HEARTH_ALPN, hearth_handler)
+            .accept(HEARTH_BLOBS_ALPN, world.blobs_handler())
             .spawn();
+        let addr_peers = peers.clone();
+        let addr_of: crate::hearth::AddrOf = Arc::new(move |k| {
+            if let Some(a) = lock(&addr_peers).get(&hex::encode(k)) {
+                return Some(a.clone());
+            }
+            EndpointId::from_bytes(k).ok().map(EndpointAddr::new)
+        });
+        hearth.attach(crate::hearth::HearthNet { endpoint: endpoint.clone(), addr_of }, world);
+        // Un serveur de groupe qui s'arrête tout seul (plantage) passe par la même fin de partie qu'un arrêt demandé :
+        // publication, bail relâché, partage fermé, accès retiré, état de lancement remis à zéro.
+        let app = Arc::downgrade(st);
+        hearth.set_end_hook(Arc::new(move |gid| {
+            let app = app.clone();
+            Box::pin(async move {
+                if let Some(st) = app.upgrade() {
+                    st.hearth_stop_inner(gid).await;
+                }
+            })
+        }));
 
         let be = Arc::new_cyclic(|me| Self {
             endpoint,
@@ -558,6 +629,8 @@ impl IrohBackend {
             store_root: st.paths.store.clone(),
             settings: st.settings.clone(),
             authz,
+            join_requests,
+            hearth: st.hearth.clone(),
             opts,
             advertise,
             cut_at: Arc::default(),
@@ -625,6 +698,7 @@ impl IrohBackend {
     }
 
     pub async fn shutdown(&self) {
+        self.hearth.shutdown().await;
         self.close_guest_tunnel().await;
         self.presence.stop().await;
         let _ = self.router.shutdown().await;
@@ -708,6 +782,9 @@ impl IrohBackend {
 
     pub fn host_stop_sharing_impl(&self) {
         self.share.set(None);
+        // L'accès (invités, demandes acceptées, membres) ne survit pas à la partie ; les demandes en attente tombent.
+        self.authz.access().clear();
+        self.join_requests.cancel_all();
         let _ = self.manifest_srv.set(None);
         *lock(&self.current_share) = None;
         self.tunnel.set_world_port(0);
@@ -769,6 +846,32 @@ impl IrohBackend {
     }
 }
 
+
+impl IrohBackend {
+    /// Ouvre le tunnel invité vers `key` ; `check_reach` : sonde d'abord la présence de l'ami (échec rapide et message clair).
+    async fn open_tunnel_impl(&self, key: String, check_reach: bool) -> std::result::Result<u16, String> {
+        self.close_guest_tunnel().await;
+        if check_reach {
+            self.ensure_reachable(&key).await?;
+        }
+        let t = self.join_tunnel(&key).await?;
+        let port = t.local_port;
+        // Événement `tunnel://state` `{state: "ok" | "reconnecting" | "lost"}` à chaque changement de liaison.
+        let (mut rx, emit) = (t.subscribe(), self.emit.clone());
+        tokio::spawn(async move {
+            while rx.changed().await.is_ok() {
+                let state = *rx.borrow_and_update();
+                emit("tunnel://state", serde_json::json!({ "state": state.as_str() }));
+                if state == p2p_lib::tunnel::TunnelState::Lost {
+                    break;
+                }
+            }
+        });
+        *self.guest_tunnel.lock().await = Some(t);
+        Ok(port)
+    }
+}
+
 impl P2pBackend for IrohBackend {
     fn net_test(&self) -> BoxFuture<'_, Result<NetTest, String>> {
         Box::pin(async move { Ok(self.net_test_impl().await) })
@@ -813,6 +916,19 @@ impl P2pBackend for IrohBackend {
             let addr = self.addr_for(&public_key)?;
             p2p_send_invite(&self.endpoint, addr, &msg).await
         })
+    }
+
+    fn send_join_request(&self, public_key: String) -> BoxFuture<'_, std::result::Result<JoinAnswer, String>> {
+        Box::pin(async move {
+            self.ensure_reachable(&public_key).await?;
+            let addr = self.addr_for(&public_key)?;
+            p2p_send_join_request(&self.endpoint, addr).await
+        })
+    }
+
+    fn answer_join_request(&self, public_key: &str, accept: bool) -> bool {
+        let Some(key) = hex::decode(public_key).ok().and_then(|b| <[u8; 32]>::try_from(b).ok()) else { return false };
+        self.join_requests.answer(&key, if accept { Decision::Accept } else { Decision::Refuse })
     }
 
     fn accept_request(&self, public_key: String) -> BoxFuture<'_, std::result::Result<Option<Friend>, String>> {
@@ -948,25 +1064,12 @@ impl P2pBackend for IrohBackend {
     }
 
     fn join_open_tunnel(&self, key: String) -> BoxFuture<'_, std::result::Result<u16, String>> {
-        Box::pin(async move {
-            self.close_guest_tunnel().await;
-            self.ensure_reachable(&key).await?;
-            let t = self.join_tunnel(&key).await?;
-            let port = t.local_port;
-            // Événement `tunnel://state` `{state: "ok" | "reconnecting" | "lost"}` à chaque changement de liaison.
-            let (mut rx, emit) = (t.subscribe(), self.emit.clone());
-            tokio::spawn(async move {
-                while rx.changed().await.is_ok() {
-                    let state = *rx.borrow_and_update();
-                    emit("tunnel://state", serde_json::json!({ "state": state.as_str() }));
-                    if state == p2p_lib::tunnel::TunnelState::Lost {
-                        break;
-                    }
-                }
-            });
-            *self.guest_tunnel.lock().await = Some(t);
-            Ok(port)
-        })
+        Box::pin(async move { self.open_tunnel_impl(key, true).await })
+    }
+
+    fn hearth_open_tunnel(&self, key: String) -> BoxFuture<'_, std::result::Result<u16, String>> {
+        // Un membre du groupe n'est pas forcément notre ami : pas de sonde de présence, le tunnel dit lui-même s'il est refusé.
+        Box::pin(async move { self.open_tunnel_impl(key, false).await })
     }
 
     fn join_close_tunnel(&self) -> BoxFuture<'_, ()> {

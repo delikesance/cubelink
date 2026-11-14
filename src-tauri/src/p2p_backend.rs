@@ -13,6 +13,7 @@ use core_lib::types::{Error, Friend, Manifest, ManifestFile, Presence, TransferP
 use p2p_lib::transfer::plan::Plan;
 use p2p_lib::friend_code::FriendCodePayload;
 use p2p_lib::invite::InviteMessage;
+use p2p_lib::join_request::JoinAnswer;
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 pub type ProgressFn = Arc<dyn Fn(TransferProgress) + Send + Sync>;
@@ -130,6 +131,15 @@ pub trait P2pBackend: Send + Sync {
     fn send_invite(&self, _public_key: String, _msg: InviteMessage) -> BoxFuture<'_, Result<(), String>> {
         Box::pin(async { Ok(()) })
     }
+    /// Invité : demande à l'ami (clé hex) de rejoindre sa partie ; attend sa décision (au plus ~2 min).
+    fn send_join_request(&self, _public_key: String) -> BoxFuture<'_, Result<JoinAnswer, String>> {
+        Box::pin(async { Err(UNAVAILABLE.to_string()) })
+    }
+    /// Hôte : décide de la demande en attente de l'ami (clé hex). Accepter ouvre l'accès à la partie en cours.
+    /// Faux si aucune demande n'attend, ou si rien n'est partagé.
+    fn answer_join_request(&self, _public_key: &str, _accept: bool) -> bool {
+        false
+    }
     /// Récupère le manifeste du monde de l'ami.
     fn fetch_manifest(&self, friend_public_key: String) -> BoxFuture<'_, Result<HostManifest, String>>;
     /// Invité, APRÈS réception : mods (chemins) hors Modrinth, calculés sur les sha1 locaux des jars reçus.
@@ -151,6 +161,11 @@ pub trait P2pBackend: Send + Sync {
     /// Invité : ouvre un tunnel local vers le monde de l'ami ; renvoie le port local (127.0.0.1) pour Minecraft.
     fn join_open_tunnel(&self, _friend_public_key: String) -> BoxFuture<'_, Result<u16, String>> {
         Box::pin(async { Err(UNAVAILABLE.to_string()) })
+    }
+    /// Membre d'un groupe Hearth : ouvre un tunnel local vers le serveur du membre `holder` (clé hex) sans exiger
+    /// qu'il soit notre ami. Par défaut comme `join_open_tunnel`.
+    fn hearth_open_tunnel(&self, holder: String) -> BoxFuture<'_, Result<u16, String>> {
+        self.join_open_tunnel(holder)
     }
     /// Invité : ferme le tunnel ouvert (sans effet s'il n'y en a pas).
     fn join_close_tunnel(&self) -> BoxFuture<'_, ()> {

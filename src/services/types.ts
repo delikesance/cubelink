@@ -77,6 +77,16 @@ export interface Invite {
   received_at: number;
   expires_at: number;
 }
+/** Demande à rejoindre reçue d'un ami (hôte), en attente de sa décision. Timestamps en secondes Unix. */
+export interface JoinRequest {
+  public_key: string;
+  name: string;
+  received_at: number;
+  /** Fin de la fenêtre de réponse (~2 min) : au-delà, le demandeur est prévenu que sa demande a expiré. */
+  expires_at: number;
+}
+/** Réponse de l'hôte à ma demande à rejoindre. */
+export type JoinAnswer = "accepted" | "refused" | "expired";
 export interface FriendRequest {
   public_key: string;
   name: string;
@@ -119,6 +129,8 @@ export interface Settings {
   overlay_hotkey: string;
   /** Jeu intégré (Windows) : le jeu s'affiche dans la fenêtre de Cubelink. Pris en compte au prochain lancement. Défaut true. */
   embedded_game: boolean;
+  /** Inviter automatiquement tous mes amis en ligne quand mon monde s'ouvre. Défaut false : invitations et demandes seulement. */
+  open_to_all_friends: boolean;
 }
 
 // Entrées / sorties de commandes
@@ -228,6 +240,131 @@ export interface UpdateState {
   url?: string | null;
 }
 
+
+// ---------------------------------------------------------------------------
+// Serveurs de groupe (Hearth) : miroir de core/src/types.rs, voir docs/contrats.md.
+// ---------------------------------------------------------------------------
+
+export type HearthStateKind =
+  | "idle" | "hosted" | "syncing" | "blocked" | "unclean" | "fork" | "launching" | "hosting" | "pack_missing";
+
+export interface HearthMemberLite { public_key: string; name: string; online: boolean }
+export interface HearthUnclean { holder: HearthMemberLite; checkpoint_at: number | null }
+
+export interface HearthCard {
+  id: string;
+  name: string;
+  minecraft: string;
+  loader: string;
+  state: HearthStateKind;
+  host: HearthMemberLite | null;
+  players: number;
+  progress: number | null;
+  step: string | null;
+  step_index: number | null;
+  step_count: number;
+  unclean: HearthUnclean | null;
+  members_online: HearthMemberLite[];
+  members_total: number;
+  is_creator: boolean;
+  can_host: boolean;
+  instance_id: string | null;
+  version: number | null;
+}
+
+export interface HearthInvite {
+  group_id: string;
+  name: string;
+  from: HearthMemberLite;
+  members: number;
+  minecraft: string;
+  loader: string;
+  received_at: number;
+}
+
+export interface HearthWorld { name: string; size_bytes: number }
+
+export interface HearthMember {
+  public_key: string;
+  name: string;
+  online: boolean;
+  is_me: boolean;
+  is_creator: boolean;
+  sync: "ok" | "behind" | "unknown";
+  version: number | null;
+  unseen_days: number | null;
+}
+
+export interface HearthVersion {
+  id: string;
+  number: number;
+  kind: "session" | "checkpoint" | "restore";
+  author: string;
+  author_name: string;
+  created_at: number;
+  played_secs: number;
+  total_size: number;
+  is_head: boolean;
+  side_branch: boolean;
+}
+
+export interface HearthProposal {
+  id: string;
+  kind: "continue_without" | "add_member" | "remove_member" | "pack_update" | "set_governance" | "leave";
+  subject: HearthMemberLite | null;
+  approvals: number;
+  needed: number;
+  i_voted: boolean;
+  can_vote: boolean;
+}
+
+export interface HearthBlocker { member: HearthMemberLite; days: number }
+
+export interface HearthBranch {
+  version_id: string;
+  number: number;
+  author_name: string;
+  created_at: number;
+  played_secs: number;
+  total_size: number;
+}
+
+export interface HearthSettings {
+  keep_background: boolean;
+  disk_bytes: number;
+  outbox_pending: number;
+  instance_name: string | null;
+}
+
+export interface HearthDetail {
+  card: HearthCard;
+  members: HearthMember[];
+  versions: HearthVersion[];
+  proposals: HearthProposal[];
+  blocker: HearthBlocker | null;
+  fork: HearthBranch[];
+  settings: HearthSettings;
+}
+
+export interface HearthHandover { group_id: string; name: string; from_name: string }
+export interface HearthHostPrompt { group_id: string; name: string; players: number }
+export interface HearthEula { accepted: boolean; url: string }
+
+export interface HearthCreateInput {
+  name: string;
+  instanceId: string;
+  /** Nom du monde existant de l'instance ; null : nouveau monde. */
+  world: string | null;
+  /** Clés publiques des amis invités. */
+  members: string[];
+}
+
+/** Choix après une partie mal terminée : attendre l'hôte, reprendre au point de reprise ou à la dernière version. */
+export type HearthUncleanChoice = "wait" | "checkpoint" | "last";
+
+/** Erreur renvoyée par `hearthPlay` tant que le contrat d'utilisation de Minecraft n'est pas accepté. */
+export const HEARTH_EULA_REQUIRED = "eula_required";
+
 export interface Services {
   authStatus(): Promise<Profile | null>;
   authBeginLogin(): Promise<DeviceCode>;
@@ -282,6 +419,12 @@ export interface Services {
   /** Invitations reçues en attente. */
   friendInvites(): Promise<Invite[]>;
   friendInviteDismiss(id: string): Promise<void>;
+  /** Invité : demande à un ami de rejoindre sa partie ; attend sa décision (au plus ~2 min). */
+  friendJoinRequest(publicKey: string): Promise<JoinAnswer>;
+  /** Hôte : accepte (ouvre l'accès à la partie en cours) ou refuse la demande d'un ami. Rejette si elle n'est plus valable. */
+  friendJoinRequestAnswer(publicKey: string, accept: boolean): Promise<void>;
+  /** Hôte : demandes à rejoindre en attente de décision. */
+  friendJoinRequests(): Promise<JoinRequest[]>;
   /** Ferme le jeu en cours puis lance l'instance. */
   gameSwitch(instanceId: string): Promise<void>;
   /** Instance du jeu en cours (en préparation ou lancé), `null` sinon. */
@@ -343,6 +486,42 @@ export interface Services {
   onFriendInvite(cb: (i: Invite) => void): Unsubscribe;
   /** Liste complète des invitations à chaque changement. */
   onFriendInvites(cb: (l: Invite[]) => void): Unsubscribe;
+  /** Hôte : une demande à rejoindre vient d'arriver. */
+  onFriendJoinRequest(cb: (r: JoinRequest) => void): Unsubscribe;
+  /** Hôte : liste complète des demandes en attente, à chaque changement. */
+  onFriendJoinRequests(cb: (l: JoinRequest[]) => void): Unsubscribe;
+  // --- serveurs de groupe (Hearth) ---
+  hearthList(): Promise<HearthCard[]>;
+  hearthDetail(id: string): Promise<HearthDetail>;
+  /** Mondes existants d'une instance, proposés à la création. */
+  hearthWorlds(instanceId: string): Promise<HearthWorld[]>;
+  hearthCreate(input: HearthCreateInput): Promise<HearthCard>;
+  hearthInvites(): Promise<HearthInvite[]>;
+  hearthInviteAccept(groupId: string): Promise<void>;
+  hearthInviteDismiss(groupId: string): Promise<void>;
+  /** Le bouton unique de la carte : jouer ou rejoindre selon l'état. Rejette avec `eula_required` au premier hébergement. */
+  hearthPlay(id: string): Promise<void>;
+  hearthStop(id: string): Promise<void>;
+  hearthUncleanChoice(id: string, choice: HearthUncleanChoice): Promise<void>;
+  /** Associe le modpack du groupe à une instance locale. */
+  hearthSetInstance(id: string, instanceId: string): Promise<void>;
+  hearthAddMember(id: string, publicKey: string): Promise<void>;
+  hearthRemoveMember(id: string, publicKey: string): Promise<void>;
+  hearthLeave(id: string): Promise<void>;
+  hearthVote(id: string, proposalId: string): Promise<void>;
+  hearthContinueWithout(id: string, publicKey: string): Promise<void>;
+  hearthPackUpdate(id: string, instanceId: string): Promise<void>;
+  hearthRestore(id: string, versionId: string): Promise<void>;
+  hearthResolveFork(id: string, versionId: string): Promise<void>;
+  hearthSetBackground(id: string, on: boolean): Promise<void>;
+  hearthEula(): Promise<HearthEula>;
+  hearthEulaAccept(): Promise<void>;
+  /** Liste complète des cartes à chaque changement. */
+  onHearthState(cb: (l: HearthCard[]) => void): Unsubscribe;
+  /** Liste complète des invitations de groupe en attente. */
+  onHearthInvites(cb: (l: HearthInvite[]) => void): Unsubscribe;
+  onHearthHandover(cb: (e: HearthHandover) => void): Unsubscribe;
+  onHearthHostPrompt(cb: (e: HearthHostPrompt) => void): Unsubscribe;
   onUnknownMods(cb: (e: UnknownModsEvent) => void): Unsubscribe;
   onTransferErrorDetails(cb: (e: TransferErrorDetails) => void): Unsubscribe;
   onBrowseProgress(cb: (e: BrowseProgressEvent) => void): Unsubscribe;

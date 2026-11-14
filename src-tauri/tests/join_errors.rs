@@ -7,7 +7,7 @@ use cubelink_app::p2p_backend::P2pBackend;
 use p2p_lib::reach::Reach;
 
 mod common;
-use common::{befriend, world, Node};
+use common::{allow, befriend, world, Node};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn raisons_distinctes_cote_invite() {
@@ -16,6 +16,8 @@ async fn raisons_distinctes_cote_invite() {
     let guest = Node::start(db.path(), "Invite").await;
     befriend(&guest, &host).await;
     let hk = host.key();
+    // Règle de jonction : l'invité est invité pour cette partie (sinon il n'obtient rien, voir join_rule.rs).
+    allow(&host, &guest);
 
     // 1. Hôte en ligne mais rien d'ouvert : message dédié, pour le plan comme pour le tunnel.
     let e = guest.st.join_plan(&hk).await.unwrap_err();

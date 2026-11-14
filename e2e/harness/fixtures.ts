@@ -166,6 +166,23 @@ export async function invoke<T = unknown>(page: Page, cmd: string, args: Record<
   ) as Promise<T>;
 }
 
+/** Règle de jonction (docs/hearth.md § 2) : un ami n'entre dans la partie de l'hôte que s'il est invité ou si sa demande
+ *  est acceptée. Invite chaque ami de l'hôte (le monde doit être ouvert au réseau local : `world_port` non nul). */
+export async function inviteAllFriends(host: Pick<App, 'page'>): Promise<string[]> {
+  const friends = await invoke<{ friend: { public_key: string } }[]>(host.page, 'friend_list');
+  const keys = friends.map((f) => f.friend.public_key);
+  for (const k of keys) await invoke(host.page, 'friend_invite', { public_key: k });
+  return keys;
+}
+
+/** Comme `inviteAllFriends`, par la demande à rejoindre (monde sans port ouvert) : l'invité demande, l'hôte accepte. */
+export async function grantByRequest(host: Pick<App, 'page'>, guest: Pick<App, 'page'>, hostKey: string, guestKey: string): Promise<void> {
+  const answer = invoke<string>(guest.page, 'friend_join_request', { public_key: hostKey });
+  await expect.poll(async () => (await invoke<{ public_key: string }[]>(host.page, 'friend_join_requests')).some((r) => r.public_key === guestKey), { timeout: 30_000 }).toBe(true);
+  await invoke(host.page, 'friend_join_request_answer', { public_key: guestKey, accept: true });
+  expect(await answer).toBe('accepted');
+}
+
 /** Rejoindre comme l'écran « Rejoindre » : plan, puis `join_start` avec le hash du manifeste montré et la case de
  *  confiance cochée (exigée par le backend s'il y a des mods inconnus ou non vérifiés). */
 export async function joinStart(page: Page, friendPublicKey: string): Promise<void> {

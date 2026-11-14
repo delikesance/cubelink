@@ -11,10 +11,13 @@ import { ICONS, Icon } from "../../ui";
 import { WorldIcon } from "../../ui";
 import { lastSeenText } from "../Friends/lastSeen";
 import { canInviteFrom, useInvites } from "../../app/useInvites";
+import { ASK_LABEL, useJoinAsk } from "../../app/useJoinRequests";
 import { AccountSwitcher, NameHead } from "../../app/AccountSwitcher";
 import { useContextMenu, type MenuItem } from "../../app/useContextMenu";
 import { useModCheckGate } from "../../app/useModCheck";
 import { Modal } from "./Modal";
+import { HearthSection } from "../Hearth/HearthSection";
+import { HearthMoments } from "../Hearth/Moments";
 
 const LOADERS: Record<string, string> = {
   vanilla: "Vanilla", neoforge: "NeoForge", fabric: "Fabric", quilt: "Quilt", forge: "Forge",
@@ -57,6 +60,7 @@ export default function Main() {
   const [tab, setTab] = useState(2);
   const [query, setQuery] = useState("");
   const invites = useInvites(services);
+  const { states: askStates, ask: askJoin } = useJoinAsk(services);
   const ctx = useContextMenu();
   /** Modpack dont la suppression attend confirmation (clic droit > Supprimer). */
   const [toDelete, setToDelete] = useState<Instance | null>(null);
@@ -161,6 +165,7 @@ export default function Main() {
   const openFriendTab = (k: number) => { setQuery(""); setTab(k); };
   const copy = (text: string) => { void navigator.clipboard?.writeText(text).catch(() => {}); };
   const invite = (key: string) => { setActionError(null); services.friendInvite(key).catch((e: unknown) => setActionError(errMsg(e))); };
+  const ask = (key: string) => { setActionError(null); askJoin(key).catch((e: unknown) => setActionError(errMsg(e))); };
 
   // Clic droit : mêmes actions que les boutons et la page du modpack, au plus près.
   const tileMenu = (i: Instance): MenuItem[] => {
@@ -185,7 +190,9 @@ export default function Main() {
     const g = sessionOf(key);
     const on = f.presence === "online" || !!g;
     const items: MenuItem[] = [];
-    if (on) items.push({ key: "join", label: g ? `Rejoindre ${g.world_name}` : "Rejoindre", icon: <Icon d={ICONS.play} />, onSelect: () => join(key) });
+    const asked = askStates[key];
+    if (on && (g || asked === "accepted")) items.push({ key: "join", label: g ? `Rejoindre ${g.world_name}` : "Rejoindre", icon: <Icon d={ICONS.play} />, onSelect: () => join(key) });
+    else if (on) items.push({ key: "ask", label: asked ? ASK_LABEL[asked] : "Demander à rejoindre", icon: <Icon d={ICONS.play} />, disabled: asked === "pending", onSelect: () => ask(key) });
     if (on && inviteOk && !g) items.push({ key: "invite", label: "Inviter dans ma partie", icon: <Icon d={ICONS.userPlus} />, onSelect: () => invite(key) });
     items.push({ key: "copy", label: "Copier le pseudo", icon: <Icon d={ICONS.copy} />, separator: items.length > 0, onSelect: () => copy(f.friend.name) });
     items.push({ key: "manage", label: "Gérer mes amis", icon: <Icon d={ICONS.friends} />, onSelect: () => navigate("settings", { tab: "amis" }) });
@@ -283,6 +290,8 @@ export default function Main() {
           )}
         </section>
 
+        <HearthSection services={services} navigate={navigate} />
+
         <section className="home-packs" aria-label="Mes modpacks">
           <div className="home-head is-small">
             <h2>Mes modpacks {instances && <span className="home-count">{instances.length}</span>}</h2>
@@ -358,6 +367,7 @@ export default function Main() {
               const g = sessionOf(f.friend.public_key);
               const on = f.presence === "online" || !!g;
               const seen = on ? null : lastSeenText(f.last_seen, nowSec);
+              const asked = askStates[f.friend.public_key];
               return (
                 <li key={f.friend.public_key} className={`side-row${on ? "" : " is-off"}`} onContextMenu={ctx.bind(`Actions pour ${f.friend.name}`, () => friendMenu(f))}>
                   <span className="side-head">
@@ -370,6 +380,7 @@ export default function Main() {
                       {g ? `Joue à ${g.pack ?? g.world_name}` : on ? "En ligne" : "Hors ligne"}
                     </span>
                     {seen && <span className="s">{seen}</span>}
+                    {!g && (asked === "refused" || asked === "expired") && <span className="s">{ASK_LABEL[asked]}</span>}
                   </span>
                   {on && inviteOk && !g && (
                     <Button
@@ -377,8 +388,14 @@ export default function Main() {
                       onClick={() => invite(f.friend.public_key)}
                     >Inviter</Button>
                   )}
-                  {on && (
+                  {on && (g || asked === "accepted") && (
                     <Button variant={g ? "primary" : "secondary"} aria-label={`Rejoindre ${f.friend.name}`} onClick={() => join(f.friend.public_key)}>Rejoindre</Button>
+                  )}
+                  {on && !g && asked !== "accepted" && (
+                    <Button
+                      variant="secondary" aria-label={`Demander à rejoindre ${f.friend.name}`} loading={asked === "pending"}
+                      onClick={() => ask(f.friend.public_key)}
+                    >{asked === "pending" ? ASK_LABEL.pending : "Demander"}</Button>
                   )}
                 </li>
               );
@@ -398,6 +415,7 @@ export default function Main() {
       </aside>
       {ctx.menu}
       {gate.modal}
+      <HearthMoments services={services} />
       {toDelete && (
         <Modal title="Supprimer l'instance ?" role="alertdialog" onClose={() => setToDelete(null)}>
           <p className="home-modal-text">L'instance « {toDelete.name} » et ses fichiers (mondes, configuration) seront supprimés définitivement.</p>

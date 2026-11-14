@@ -1,13 +1,14 @@
 // Panneau « en jeu » : bande à droite du jeu (la fenêtre du jeu y est découpée, le launcher apparaît dessous).
-// Invitations reçues, amis (inviter / rejoindre) et changement de modpack.
+// Demandes à rejoindre (hôte), invitations reçues, amis (inviter / demander / rejoindre) et changement de modpack.
 import { useCallback, useEffect, useRef, useState } from "react";
 import "./overlay.css";
 import "../Friends/avatar.css";
 import { useServices } from "../../app/context";
 import { canInviteFrom, hostingKeys, useHostState, useInvites } from "../../app/useInvites";
+import { ASK_LABEL, useJoinAsk, useJoinRequests } from "../../app/useJoinRequests";
 import { Badge, Button } from "../../ui";
 import { Avatar } from "../Friends/Avatar";
-import type { FriendWithPresence, Instance, Invite } from "../../services/types";
+import type { FriendWithPresence, Instance, Invite, JoinRequest } from "../../services/types";
 import { setStagePanel } from "../../app/stage";
 
 type Confirm =
@@ -37,6 +38,8 @@ export default function InGamePanel({ open = true }: { open?: boolean }) {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState("");
   const invites = useInvites(services);
+  const joinRequests = useJoinRequests(services);
+  const { states: askStates, ask: askJoin } = useJoinAsk(services);
   const host = useHostState(services);
   const canInvite = canInviteFrom(host);
   const hosting = hostingKeys(invites);
@@ -125,6 +128,9 @@ export default function InGamePanel({ open = true }: { open?: boolean }) {
   const dismiss = (i: Invite) => run(`dismiss-${i.id}`, () => services.friendInviteDismiss(i.id), `Invitation de ${i.name} ignorée.`);
   const invite = (f: FriendWithPresence) =>
     run(`invite-${f.friend.public_key}`, () => services.friendInvite(f.friend.public_key), `Invitation envoyée à ${f.friend.name}.`);
+  const ask = (f: FriendWithPresence) => run(`ask-${f.friend.public_key}`, () => askJoin(f.friend.public_key));
+  const decide = (r: JoinRequest, accept: boolean) =>
+    run(`req-${r.public_key}`, () => services.friendJoinRequestAnswer(r.public_key, accept), accept ? `${r.name} peut rejoindre ta partie.` : `Demande de ${r.name} refusée.`);
   const launch = (inst: Instance) => {
     if (running) setConfirm({ kind: "switch", instance: inst });
     else void run(`switch-${inst.id}`, () => services.gameSwitch(inst.id));
@@ -155,6 +161,27 @@ export default function InGamePanel({ open = true }: { open?: boolean }) {
       <div className="ov-body">
         {error && <p className="ov-error" role="alert">{error}</p>}
 
+        {joinRequests.length > 0 && (
+          <section className="ov-sec" aria-labelledby="ov-req">
+            <h2 id="ov-req">Demandes à rejoindre · {joinRequests.length}</h2>
+            <ul className="ov-list" aria-label="Demandes à rejoindre">
+              {joinRequests.map((r) => (
+                <li key={r.public_key} className="ov-row ov-row-inv">
+                  <Avatar name={r.name} size={36} services={services} />
+                  <div className="ov-who">
+                    <span className="ov-name"><span>{r.name}</span></span>
+                    <span className="ov-sub">Veut rejoindre ta partie</span>
+                  </div>
+                  <div className="ov-actions">
+                    <Button aria-label={`Accepter la demande de ${r.name}`} loading={busy === `req-${r.public_key}`} onClick={() => { void decide(r, true); }}>Accepter</Button>
+                    <Button variant="secondary" aria-label={`Refuser la demande de ${r.name}`} disabled={busy === `req-${r.public_key}`} onClick={() => { void decide(r, false); }}>Refuser</Button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
+
         <section className="ov-sec" aria-labelledby="ov-inv">
           <h2 id="ov-inv">Invitations{invites.length > 0 ? ` · ${invites.length}` : ""}</h2>
           {invites.length === 0 ? <p className="ov-empty">Aucune invitation en attente.</p> : (
@@ -183,6 +210,8 @@ export default function InGamePanel({ open = true }: { open?: boolean }) {
               {[...online, ...offline].map((f) => {
                 const on = f.presence === "online";
                 const pk = f.friend.public_key;
+                const asked = askStates[pk];
+                const canJoin = on && (hosting.has(pk) || asked === "accepted");
                 return (
                   <li key={pk} className="ov-row">
                     <Avatar name={f.friend.name} size={36} services={services} presence={on ? "online" : "offline"} />
@@ -191,11 +220,16 @@ export default function InGamePanel({ open = true }: { open?: boolean }) {
                         <span>{f.friend.name}</span>
                         {hosting.has(pk) && on && <Badge tone="accent">Héberge</Badge>}
                       </span>
-                      <span className="ov-sub">{on ? "En ligne" : "Hors ligne"}</span>
+                      <span className="ov-sub">{on ? (!hosting.has(pk) && asked && asked !== "accepted" ? ASK_LABEL[asked] : "En ligne") : "Hors ligne"}</span>
                     </div>
                     <div className="ov-actions">
-                      {on && hosting.has(pk) && (
+                      {canJoin && (
                         <Button aria-label={`Rejoindre ${f.friend.name}`} loading={busy === `join-${pk}`} onClick={() => join(pk, f.friend.name)}>Rejoindre</Button>
+                      )}
+                      {on && !canJoin && (
+                        <Button variant="secondary" aria-label={`Demander à rejoindre ${f.friend.name}`} loading={asked === "pending"} onClick={() => { void ask(f); }}>
+                          {asked === "pending" ? ASK_LABEL.pending : "Demander"}
+                        </Button>
                       )}
                       {on && canInvite && (
                         <Button variant="secondary" aria-label={`Inviter ${f.friend.name}`} loading={busy === `invite-${pk}`} onClick={() => { void invite(f); }}>Inviter</Button>

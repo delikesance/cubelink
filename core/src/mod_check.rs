@@ -14,7 +14,7 @@ use crate::mods;
 use crate::types::Result;
 use crate::version_range::{self as vr, Flavor};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, specta::Type)]
 pub struct ModIssue {
     /// Nom du fichier jar concerné, tel que listé par `mods::list`.
     pub file: String,
@@ -28,7 +28,7 @@ pub struct ModIssue {
     pub related: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, specta::Type)]
 pub struct ModCheck {
     pub issues: Vec<ModIssue>,
     /// Nombre de jars activés analysés.

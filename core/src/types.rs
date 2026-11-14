@@ -29,7 +29,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Hash SHA-256 en hexadécimal minuscule (64 caractères). C'est le hash du manifeste.
 pub type Sha256Hex = String;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "lowercase")]
 pub enum Loader {
     Vanilla,
@@ -39,7 +39,7 @@ pub enum Loader {
     Forge,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct LoaderSpec {
     pub loader: Loader,
     /// Version exacte du loader (ex. "21.1.77"). Vide pour Vanilla.
@@ -47,14 +47,14 @@ pub struct LoaderSpec {
 }
 
 /// Profil de jeu. `Offline` sert aux tests E2E (drapeau de test, absent de l'interface publique).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Profile {
     Online { name: String, uuid: String },
     Offline { name: String, uuid: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct Instance {
     pub id: String,
     pub name: String,
@@ -68,13 +68,17 @@ pub struct Instance {
     /// Arguments JVM supplémentaires, séparés par des espaces.
     #[serde(default)]
     pub jvm_args: String,
+    /// Commande d'enrobage (Linux) : programme et arguments placés devant Java, séparés par des espaces
+    /// (ex. `gamemoderun`, `mangohud`, `prime-run`). Vide : Java est lancé directement. Ignorée sous Windows.
+    #[serde(default)]
+    pub wrapper: String,
     /// Illustrations du modpack (icône, captures, couleur). Absent des anciens `instance.json`.
     #[serde(default)]
     pub art: Option<InstanceArt>,
 }
 
 /// Illustrations d'une instance. Les fichiers sont dans `<dossier de l'instance>/art/`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct InstanceArt {
     /// "curseforge", "modrinth" ou "custom".
     pub source: String,
@@ -96,7 +100,7 @@ pub struct InstanceArt {
 }
 
 /// Un fichier du manifeste hôte.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct ManifestFile {
     /// Chemin relatif dans l'instance, avec `/` (ex. "mods/create.jar").
     pub path: String,
@@ -112,7 +116,7 @@ pub struct ManifestFile {
     pub cf_fingerprint: Option<u32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct Manifest {
     pub name: String,
     pub minecraft: String,
@@ -122,21 +126,21 @@ pub struct Manifest {
 }
 
 /// Code ami (`mcl1-…`) : chaîne opaque. Le format est défini par `p2p::friend_code` (tâche N3).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct FriendCode(pub String);
 
 /// Code de vérification : 4 groupes de 4 caractères hexadécimaux majuscules (ex. "3F9A · C21B · 77D0 · 5E14").
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct VerifyCode(pub String);
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "lowercase")]
 pub enum TrustLevel {
     Ask,
     Always,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct Friend {
     /// Clé publique ed25519, hex.
     pub public_key: String,
@@ -146,7 +150,7 @@ pub struct Friend {
     pub added_at: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct FriendRequest {
     pub public_key: String,
     pub name: String,
@@ -156,7 +160,7 @@ pub struct FriendRequest {
 
 /// Invitation reçue d'un ami à rejoindre son monde (file en mémoire, jamais persistée).
 /// Dates en secondes depuis l'epoch Unix.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct Invite {
     pub id: String,
     pub public_key: String,
@@ -173,14 +177,212 @@ pub struct Invite {
     pub world_icon: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+// ---------- Hearth : serveurs de groupe (docs/hearth.md, docs/contrats.md) ----------
+
+/// État visible d'un serveur de groupe (carte de l'accueil).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "snake_case")]
+pub enum HearthStateKind {
+    /// Personne ne joue.
+    Idle,
+    /// Un autre membre héberge : on peut le rejoindre.
+    Hosted,
+    /// Le monde se met à jour sur ce PC (`progress` en pour cent).
+    Syncing,
+    /// Aucun membre joignable : le jeu hors ligne est interdit sur un serveur de groupe.
+    Blocked,
+    /// La partie d'un membre ne s'est pas terminée proprement : le groupe choisit.
+    Unclean,
+    /// Deux versions du monde existent : le groupe en choisit une.
+    Fork,
+    /// Lancement en cours (`step`, `step_index`).
+    Launching,
+    /// Ce PC héberge le serveur.
+    Hosting,
+    /// Le modpack du groupe n'est pas installé sur ce PC.
+    PackMissing,
+}
+
+/// Un membre d'un groupe, tel que l'interface l'affiche.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+pub struct HearthMemberLite {
+    pub public_key: String,
+    pub name: String,
+    pub online: bool,
+}
+
+/// Partie mal terminée : qui, et jusqu'où on peut reprendre.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+pub struct HearthUnclean {
+    pub holder: HearthMemberLite,
+    /// Date (secondes Unix) de son dernier point de reprise connu de nous ; `None` : aucun.
+    pub checkpoint_at: Option<i64>,
+}
+
+/// Carte d'un serveur de groupe sur l'accueil (événement `hearth://state`, commande `hearth_list`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+pub struct HearthCard {
+    /// Identifiant du groupe (32 caractères hexadécimaux).
+    pub id: String,
+    pub name: String,
+    pub minecraft: String,
+    pub loader: String,
+    pub state: HearthStateKind,
+    /// Titulaire du bail (état `hosted` ou `hosting`).
+    pub host: Option<HearthMemberLite>,
+    /// Joueurs connectés au serveur (nous compris quand c'est notre serveur).
+    pub players: u32,
+    /// Avancement de la mise à jour du monde, en pour cent (état `syncing`).
+    pub progress: Option<u8>,
+    /// Étape du lancement (état `launching`) : libellé et rang (0 à `step_count - 1`).
+    pub step: Option<String>,
+    pub step_index: Option<u8>,
+    pub step_count: u8,
+    pub unclean: Option<HearthUnclean>,
+    /// Membres en ligne autres que nous.
+    pub members_online: Vec<HearthMemberLite>,
+    pub members_total: u32,
+    pub is_creator: bool,
+    /// Le modpack du groupe est installé ici (on peut héberger).
+    pub can_host: bool,
+    /// Instance locale du modpack du groupe.
+    pub instance_id: Option<String>,
+    /// Numéro de la version du monde la plus récente connue.
+    pub version: Option<u64>,
+}
+
+/// Invitation à un groupe reçue d'un ami (événement `hearth://invites`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+pub struct HearthInvite {
+    pub group_id: String,
+    pub name: String,
+    pub from: HearthMemberLite,
+    pub members: u32,
+    pub minecraft: String,
+    pub loader: String,
+    pub received_at: i64,
+}
+
+/// Monde d'une instance, proposé à la création d'un groupe.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+pub struct HearthWorld {
+    pub name: String,
+    pub size_bytes: u64,
+}
+
+/// Membre sur la page du serveur.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+pub struct HearthMember {
+    pub public_key: String,
+    pub name: String,
+    pub online: bool,
+    pub is_me: bool,
+    pub is_creator: bool,
+    /// `ok` (a la version la plus récente), `behind` (en retard), `unknown` (pas encore sondé).
+    pub sync: String,
+    /// Numéro de la version la plus récente qu'il dit avoir.
+    pub version: Option<u64>,
+    /// Jours depuis qu'on l'a vu en ligne (`None` : jamais vu, ou en ligne).
+    pub unseen_days: Option<u32>,
+}
+
+/// Version du monde (historique).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+pub struct HearthVersion {
+    pub id: String,
+    pub number: u64,
+    /// `session`, `checkpoint` ou `restore`.
+    pub kind: String,
+    pub author: String,
+    pub author_name: String,
+    pub created_at: i64,
+    pub played_secs: u64,
+    pub total_size: u64,
+    pub is_head: bool,
+    /// Branche mise de côté (époque révolue) : restaurable, jamais tête.
+    pub side_branch: bool,
+}
+
+/// Décision du groupe en attente de votes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+pub struct HearthProposal {
+    pub id: String,
+    /// `continue_without`, `add_member`, `remove_member`, `pack_update` ou `leave`.
+    pub kind: String,
+    pub subject: Option<HearthMemberLite>,
+    pub approvals: u32,
+    pub needed: u32,
+    pub i_voted: bool,
+    pub can_vote: bool,
+}
+
+/// Bannière « X avait la version la plus récente et n'est pas revenu depuis N jours ».
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+pub struct HearthBlocker {
+    pub member: HearthMemberLite,
+    pub days: u32,
+}
+
+/// Une des deux versions d'une fourche.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+pub struct HearthBranch {
+    pub version_id: String,
+    pub number: u64,
+    pub author_name: String,
+    pub created_at: i64,
+    pub played_secs: u64,
+    pub total_size: u64,
+}
+
+/// Réglages d'un groupe pour ce PC.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+pub struct HearthSettings {
+    /// Garder le serveur ouvert quand mon jeu se ferme.
+    pub keep_background: bool,
+    /// Place prise par le groupe sur ce disque (octets).
+    pub disk_bytes: u64,
+    /// Versions en attente d'envoi chez les autres membres.
+    pub outbox_pending: u32,
+    /// Nom de l'instance locale du modpack.
+    pub instance_name: Option<String>,
+}
+
+/// Page du serveur (commande `hearth_detail`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+pub struct HearthDetail {
+    pub card: HearthCard,
+    pub members: Vec<HearthMember>,
+    pub versions: Vec<HearthVersion>,
+    pub proposals: Vec<HearthProposal>,
+    pub blocker: Option<HearthBlocker>,
+    pub fork: Vec<HearthBranch>,
+    pub settings: HearthSettings,
+}
+
+/// Événement `hearth://handover` : l'hôte vient d'arrêter le serveur pendant que nous jouions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+pub struct HearthHandover {
+    pub group_id: String,
+    pub name: String,
+    pub from_name: String,
+}
+
+/// Événement `hearth://host_prompt` : notre jeu s'est fermé alors que d'autres joueurs sont encore sur notre serveur.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+pub struct HearthHostPrompt {
+    pub group_id: String,
+    pub name: String,
+    pub players: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "lowercase")]
 pub enum Presence {
     Online,
     Offline,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "lowercase")]
 pub enum TransferPhase {
     Preparing,
@@ -192,7 +394,7 @@ pub enum TransferPhase {
     Done,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct TransferProgress {
     pub phase: TransferPhase,
     pub files_done: u32,
@@ -209,7 +411,7 @@ pub struct TransferProgress {
 }
 
 /// Paramètres de l'application (écran Paramètres). Forme alignée sur `src/services/types.ts`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct Settings {
     pub language: String,
     pub default_ram_mb: u32,
@@ -240,6 +442,14 @@ pub struct Settings {
     /// ouvert n'est pas touché. `true` par défaut (fichiers de réglages anciens : `true`).
     #[serde(default = "default_embedded_game")]
     pub embedded_game: bool,
+    /// Inviter automatiquement tous mes amis en ligne quand mon monde s'ouvre (voir docs/hearth.md § 2). `false` par
+    /// défaut : seuls les amis invités un par un, ou dont la demande à rejoindre est acceptée, peuvent entrer.
+    #[serde(default)]
+    pub open_to_all_friends: bool,
+    /// Lancer Cubelink (en fond, sans fenêtre) à l'ouverture de session, pour rester joignable par ses amis.
+    /// `true` par défaut (fichiers de réglages anciens : `true`).
+    #[serde(default = "default_start_with_os")]
+    pub start_with_os: bool,
 }
 
 pub const DEFAULT_OVERLAY_HOTKEY: &str = "Ctrl+Shift+C";
@@ -264,6 +474,10 @@ fn default_embedded_game() -> bool {
     true
 }
 
+fn default_start_with_os() -> bool {
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -273,9 +487,11 @@ mod tests {
         let old = r#"{"language":"fr","default_ram_mb":4096,"java_path":null,"trust_default":"ask","allow_relay":true,"close_on_launch":false,"relay_only":false,"share_mods":true}"#;
         let s: Settings = serde_json::from_str(old).unwrap();
         assert!(s.overlay_enabled);
+        assert!(!s.open_to_all_friends, "anciens réglages : pas d'invitation automatique de tous les amis");
         assert_eq!(s.overlay_hotkey, "Ctrl+Shift+C");
         assert!(s.discovery && s.lan_auto);
         assert!(s.embedded_game);
+        assert!(s.start_with_os);
     }
 
     #[test]

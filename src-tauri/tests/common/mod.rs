@@ -103,3 +103,10 @@ pub fn world(host: &Node) -> String {
     std::fs::write(gd.join("mods/a.jar"), vec![7u8; 5000]).unwrap();
     inst.id
 }
+
+/// L'hôte ouvre à `guest` l'accès à sa partie en cours (comme une invitation ou une demande acceptée) : sans cela, un
+/// ami n'obtient ni manifeste, ni fichiers, ni tunnel. Vidé par `host_stop_sharing`.
+pub fn allow(host: &Node, guest: &Node) {
+    let key: [u8; 32] = hex::decode(guest.key()).unwrap().try_into().unwrap();
+    host.st.access.allow_friend(&key);
+}

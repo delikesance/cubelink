@@ -98,6 +98,65 @@ test('invitation : refusee sans monde ouvert (francais) ; ignorer supprime l\'in
   expect(await invitesOf(appB.page)).toEqual([]);
 });
 
+test('regle de jonction : un ami non invite est refuse ; sa demande refusee est limitee, acceptee elle ouvre l\'acces ; l\'arret du partage le retire', async ({ appA, appB }) => {
+  const { host, keyA, keyB } = await setupPair({ appA, appB });
+  await record(appA.page, 'friend://join_request');
+  await record(appA.page, 'friend://join_requests');
+  await openWorld(appA, host.id);
+
+  // Ami non invite : ni plan, ni (donc) tunnel ; l'UI de B propose « Demander » et non « Rejoindre ».
+  expect(await invokeErr(appB.page, 'join_plan', { friend_public_key: keyA }), 'plan refuse sans invitation').not.toBeNull();
+  await appB.page.evaluate(() => { window.location.hash = '#/friends'; });
+  await appB.page.waitForSelector('main[data-route="main"]');
+  await expect(appB.page.getByRole('button', { name: /^Demander à rejoindre / })).toBeVisible({ timeout: 15_000 });
+  await expect(appB.page.getByRole('button', { name: /^Rejoindre / })).toHaveCount(0);
+
+  // Demande refusee : A la voit (evenement + liste), la refuse ; B recoit « refused ».
+  const asked = invoke<string>(appB.page, 'friend_join_request', { public_key: keyA });
+  const ev = await until('evenement friend://join_request sur A', async () => (await recorded<{ public_key: string; name: string; expires_at: number; received_at: number }>(appA.page, 'friend://join_request'))[0]);
+  expect(ev.public_key).toBe(keyB);
+  expect(ev.name).toBeTruthy();
+  expect(ev.expires_at - ev.received_at).toBe(120);
+  expect(await invoke<unknown[]>(appA.page, 'friend_join_requests')).toHaveLength(1);
+  expect(await invokeErr(appB.page, 'friend_join_request', { public_key: keyA }), 'une seule demande en attente').toMatch(/déjà/);
+  await invoke(appA.page, 'friend_join_request_answer', { public_key: keyB, accept: false });
+  expect(await asked).toBe('refused');
+  await until('file des demandes videe chez A', async () => (await invoke<unknown[]>(appA.page, 'friend_join_requests')).length === 0);
+  expect(await invokeErr(appB.page, 'join_plan', { friend_public_key: keyA }), 'toujours refuse apres un refus').not.toBeNull();
+  // Redemande avant 10 min : refus immediat, A n'est pas derange.
+  expect(await invoke<string>(appB.page, 'friend_join_request', { public_key: keyA })).toBe('refused');
+  expect(await recorded(appA.page, 'friend://join_request')).toHaveLength(1);
+  // Decider d'une demande qui n'existe plus : erreur claire.
+  expect(await invokeErr(appA.page, 'friend_join_request_answer', { public_key: keyB, accept: true })).toMatch(/plus valable/);
+
+  // Une invitation n'est pas limitee par le refus : elle ouvre l'acces, et l'UI de B propose « Rejoindre ».
+  expect(await invokeErr(appA.page, 'friend_invite', { public_key: keyB })).toBeNull();
+  expect(await invokeErr(appB.page, 'join_plan', { friend_public_key: keyA }), 'plan accorde a l\'invite').toBeNull();
+  await invoke(appA.page, 'host_stop_sharing');
+
+  // L'arret du partage retire l'acces de l'invite.
+  expect(await invokeErr(appB.page, 'join_plan', { friend_public_key: keyA })).not.toBeNull();
+});
+
+test('regle de jonction : demande acceptee (monde ouvert) ouvre l\'acces de la partie en cours seulement', async ({ appA, appB }) => {
+  const { host, keyA, keyB } = await setupPair({ appA, appB });
+  await openWorld(appA, host.id);
+  const asked = invoke<string>(appB.page, 'friend_join_request', { public_key: keyA });
+  await until('demande chez A', async () => (await invoke<unknown[]>(appA.page, 'friend_join_requests')).length === 1);
+  expect(await invokeErr(appB.page, 'join_plan', { friend_public_key: keyA }), 'pas d\'acces avant la reponse').not.toBeNull();
+  await invoke(appA.page, 'friend_join_request_answer', { public_key: keyB, accept: true });
+  expect(await asked).toBe('accepted');
+  expect(await invokeErr(appB.page, 'join_plan', { friend_public_key: keyA }), 'plan accorde apres acceptation').toBeNull();
+  await appB.page.evaluate(() => { window.location.hash = '#/friends'; });
+  await appB.page.waitForSelector('main[data-route="main"]');
+  await expect(appB.page.getByRole('button', { name: /^Rejoindre / })).toBeVisible({ timeout: 15_000 });
+  // Fin de partie : l'acces tombe ; la partie suivante repart de zero.
+  await invoke(appA.page, 'host_stop_sharing');
+  expect(await invokeErr(appB.page, 'join_plan', { friend_public_key: keyA })).not.toBeNull();
+  await openWorld(appA, host.id);
+  expect(await invokeErr(appB.page, 'join_plan', { friend_public_key: keyA }), 'acces non reconduit').not.toBeNull();
+});
+
 test('panneau en jeu : raccourci valide a l\'enregistrement ; hors Scene (mode test) stage_state reste au repos et stage_panel ne fait rien, meme avec un jeu simule', async ({ appA, appB }) => {
   // Le panneau « en jeu » est la bande de droite de la Scene (fenetre du jeu adoptee) : il n'existe pas de fenetre #/overlay.
   // Le mode test n'active pas la Scene (CUBELINK_STAGE_TEST), on verifie donc le contrat hors Scene ; l'incrustation reelle
@@ -109,16 +168,16 @@ test('panneau en jeu : raccourci valide a l\'enregistrement ; hors Scene (mode t
   const s = await invoke<Record<string, any>>(page, 'settings_get');
   expect(s.overlay_enabled).toBe(true);
   for (const bad of ['Ctrl+Shift+', 'Ctrl+Shift+Banane', 'C', '']) {
-    const e = await invokeErr(page, 'settings_set', { ...s, overlay_hotkey: bad });
+    const e = await invokeErr(page, 'settings_set', { settings: { ...s, overlay_hotkey: bad } });
     expect(e, `raccourci « ${bad} » refuse`).not.toBeNull();
     expect(e!).toMatch(/raccourci/i);
   }
   expect((await invoke<Record<string, any>>(page, 'settings_get')).overlay_hotkey, 'le raccourci invalide n\'a pas ete enregistre').toBe(TEST_HOTKEY);
-  const saved = await invoke<Record<string, any>>(page, 'settings_set', { ...s, overlay_hotkey: 'Ctrl+Alt+Shift+F10' });
+  const saved = await invoke<Record<string, any>>(page, 'settings_set', { settings: { ...s, overlay_hotkey: 'Ctrl+Alt+Shift+F10' } });
   expect(saved.overlay_hotkey).toBe('Ctrl+Alt+Shift+F10');
   expect((await invoke<Record<string, any>>(page, 'settings_get')).overlay_hotkey).toBe('Ctrl+Alt+Shift+F10');
-  expect((await invoke<Record<string, any>>(page, 'settings_set', { ...s, overlay_hotkey: 'F9' })).overlay_hotkey).toBe('F9');
-  await invoke(page, 'settings_set', { ...s, overlay_hotkey: TEST_HOTKEY });
+  expect((await invoke<Record<string, any>>(page, 'settings_set', { settings: { ...s, overlay_hotkey: 'F9' } })).overlay_hotkey).toBe('F9');
+  await invoke(page, 'settings_set', { settings: { ...s, overlay_hotkey: TEST_HOTKEY } });
 
   // sans Scene : rien n'est rattache, ouvrir le panneau ne change rien
   const idle = await stageState(page);

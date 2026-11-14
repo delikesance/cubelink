@@ -1,9 +1,11 @@
 import { validateOfflineName } from "./accounts";
+import { HEARTH_EULA_REQUIRED } from "./types";
 import type {
   AccountInfo, AccountsState, BrowseHit, BrowseInstallResult, BrowseKind, BrowseProgressEvent, BrowseSource, BrowseVersion, FixPlan, FixProgressEvent, FixResult, ModCheck, ModEntry, ModIssue,
-  CreateInstanceInput, DeviceCode, HostState, Invite, ImportWarningEvent, LaunchLogEvent, FriendRequest, FriendWithPresence, Instance, InstanceArt,
+  CreateInstanceInput, DeviceCode, HostState, Invite, JoinAnswer, JoinRequest, ImportWarningEvent, LaunchLogEvent, FriendRequest, FriendWithPresence, Instance, InstanceArt,
   JoinPlan, LaunchState, Manifest, PresenceEvent, UnknownModsEvent, Profile, Services, Settings,
-  TransferProgress, Unsubscribe, UpdateState,
+  StageFallback, StageState, TransferProgress, Unsubscribe, UpdateState,
+  HearthCard, HearthDetail, HearthHandover, HearthHostPrompt, HearthInvite, HearthMember, HearthMemberLite,
 } from "./types";
 
 export interface FakeOptions {
@@ -17,6 +19,8 @@ export interface FakeOptions {
   pickedFiles?: string[];
   /** Comptes présents au départ (le premier est actif). Vide par défaut : écran Connexion. */
   accounts?: AccountInfo[];
+  /** Réponse de `stageSupported` (zone de jeu intégrée). Faux par défaut : comme dans un navigateur. */
+  stageSupported?: boolean;
 }
 
 /** Commandes de test exposées par le faux service. */
@@ -28,12 +32,44 @@ export interface FakeControls {
   emitHostState(e: HostState): void;
   /** Test : reçoit une invitation (friend://invite + friend://invites). */
   emitInvite(i: Partial<Invite> & { public_key: string }): Invite;
+  /** Test : un ami demande à rejoindre ma partie (friend://join_request + friend://join_requests). */
+  emitJoinRequest(p: Partial<JoinRequest> & { public_key: string }): JoinRequest;
+  /** Test : réponse de l'hôte à `friendJoinRequest` ; `"hold"` la laisse en attente jusqu'à `resolveJoinRequest`. Défaut `"accepted"`. */
+  setJoinAnswer(a: JoinAnswer | "hold"): void;
+  /** Test : résout la demande en attente (`"hold"`) envoyée à cet ami. */
+  resolveJoinRequest(publicKey: string, a: JoinAnswer): void;
+  /** Test : demandes envoyées (`ask`) et décisions prises (`answer`). */
+  readonly joinRequestCalls: Array<{ kind: "ask" | "answer"; arg: string; accept?: boolean }>;
   /** Test : appels de commandes de jeu enregistrés (switch, join, invite). */
   readonly gameCalls: Array<{ kind: "switch" | "join" | "invite" | "close"; arg: string; instanceId?: string }>;
   /** Test : fusionne `patch` dans l'état de mise à jour et émet update://state (ex. available, downloading, ready). */
   emitUpdateState(patch: Partial<UpdateState>): void;
   /** Test : état (fusionné) auquel aboutit la prochaine updateCheck ; par défaut up_to_date. */
   setUpdateCheckResult(patch: Partial<UpdateState>): void;
+  /** Test : ajoute un serveur de groupe (état « idle » par défaut) et émet hearth://state. */
+  seedHearth(g: Partial<HearthCard> & { id: string; name: string }, detail?: Partial<Omit<HearthDetail, "card">>): HearthCard;
+  /** Test : fusionne `patch` dans la carte d'un groupe et émet hearth://state. */
+  setHearthCard(id: string, patch: Partial<HearthCard>): void;
+  /** Test : fusionne `patch` dans la page d'un groupe (membres, versions, propositions, bannière, fourche, réglages). */
+  setHearthDetail(id: string, patch: Partial<Omit<HearthDetail, "card">>): void;
+  /** Test : reçoit une invitation de groupe (hearth://invites). */
+  emitHearthInvite(i: Partial<HearthInvite> & { group_id: string }): HearthInvite;
+  /** Test : émet hearth://handover. */
+  emitHearthHandover(e: HearthHandover): void;
+  /** Test : émet hearth://host_prompt. */
+  emitHearthHostPrompt(e: HearthHostPrompt): void;
+  /** Test : le contrat d'utilisation de Minecraft est déjà accepté (ou non). Défaut : non. */
+  setHearthEula(accepted: boolean): void;
+  /** Test : commandes Hearth reçues, dans l'ordre (nom sans préfixe `hearth`, arguments). */
+  readonly hearthCalls: Array<{ kind: string; args: unknown[] }>;
+  /** Test : fusionne `patch` dans l'état de la zone de jeu et émet stage://state. */
+  emitStageState(patch: Partial<StageState>): void;
+  /** Test : émet stage://fallback (charge utile brute, comme Rust). */
+  emitStageFallback(f: unknown): void;
+  /** Test : émet stage://fullscreen. */
+  emitStageFullscreen(on: boolean): void;
+  /** Test : appels enregistrés de stageView, stagePanel, stageLayout et setFullscreen, dans l'ordre. */
+  readonly stageCalls: Array<{ cmd: "view" | "panel" | "layout" | "fullscreen"; arg: unknown }>;
 }
 
 /** Hash du manifeste simulé, renvoyé par `joinPlan` et exigé par `joinStart`. */
@@ -186,16 +222,21 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
   let settings: Settings = {
     language: "fr", default_ram_mb: 4096, java_path: null,
     trust_default: "ask", allow_relay: true, close_on_launch: false, relay_only: false, share_mods: true, discovery: true, lan_auto: true,
-    overlay_enabled: true, overlay_hotkey: "Ctrl+Shift+C", embedded_game: true,
+    overlay_enabled: true, overlay_hotkey: "Ctrl+Shift+C", embedded_game: true, start_with_os: true, open_to_all_friends: false,
   };
+  // Champs que Rust renvoie toujours (voir `Instance` dans bindings.ts), vides par défaut.
+  const noExtras = { java_path: null, jvm_args: "", wrapper: "", art: null } satisfies Partial<Instance>;
   const instances: Instance[] = [{
+    ...noExtras,
     id: "inst-aeronautics", name: "Create: Aeronautics", minecraft: "1.21.1",
     loader: { loader: "neoforge", version: "21.1.77" }, ram_mb: 6144, mod_count: 94,
   }, {
+    ...noExtras,
     id: "inst-atm10", name: "All the Mods 10", minecraft: "1.21.1",
     loader: { loader: "neoforge", version: "21.1.77" }, ram_mb: 8192, mod_count: 420,
     art: makeArt("atm10", "All the Mods 10", "ATM Team", "#2f6fed", "curseforge"),
   }, {
+    ...noExtras,
     id: "inst-prominence", name: "Prominence II", minecraft: "1.20.1",
     loader: { loader: "fabric", version: "0.15.11" }, ram_mb: 6144, mod_count: 310,
     art: makeArt("prominence", "Prominence II", "Moosniffer", "#c0392b", "modrinth"),
@@ -203,12 +244,16 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
   const artOf = (id: string) => need(id);
   let requests: FriendRequest[] = Array.from({ length: requestCount }, (_, i) => makeRequest(i));
   const friends: FriendWithPresence[] = [
-    { friend: { public_key: hex(1, 64), name: "Alex", trust: "ask", added_at: NOW - 86400 }, presence: "online" },
+    { friend: { public_key: hex(1, 64), name: "Alex", trust: "ask", added_at: NOW - 86400 }, presence: "online", last_seen: null },
     { friend: { public_key: hex(2, 64), name: "Noor", trust: "always", added_at: NOW - 172800 }, presence: "offline", last_seen: NOW - 3 * 3600 },
   ];
 
   let invites: Invite[] = [];
   let inviteN = 0;
+  let joinRequests: JoinRequest[] = [];
+  let joinAnswer: JoinAnswer | "hold" = "accepted";
+  const joinHeld = new Map<string, (a: JoinAnswer) => void>();
+  const joinRequestCalls: Array<{ kind: "ask" | "answer"; arg: string; accept?: boolean }> = [];
   const gameCalls: Array<{ kind: "switch" | "join" | "invite" | "close"; arg: string; instanceId?: string }> = [];
 
   const listeners = {
@@ -227,9 +272,21 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     host: new Set<(e: HostState) => void>(),
     invite: new Set<(i: Invite) => void>(),
     invites: new Set<(l: Invite[]) => void>(),
+    joinRequest: new Set<(r: JoinRequest) => void>(),
+    joinRequests: new Set<(l: JoinRequest[]) => void>(),
     update: new Set<(s: UpdateState) => void>(),
+    hearthState: new Set<(l: HearthCard[]) => void>(),
+    hearthInvites: new Set<(l: HearthInvite[]) => void>(),
+    hearthHandover: new Set<(e: HearthHandover) => void>(),
+    hearthHostPrompt: new Set<(e: HearthHostPrompt) => void>(),
+    stage: new Set<(s: StageState) => void>(),
+    stageFallback: new Set<(f: StageFallback) => void>(),
+    stageFullscreen: new Set<(on: boolean) => void>(),
   };
-  let updateSt: UpdateState = { phase: "idle", current: "0.1.0", version: null, notes: null, downloaded: 0, total: null, message: null };
+  let stageSt: StageState = { attached: false, game: false, panel: false };
+  const stageCalls: FakeControls["stageCalls"] = [];
+  const setStage = (patch: Partial<StageState>) => { stageSt = { ...stageSt, ...patch }; emit(listeners.stage, { ...stageSt }); };
+  let updateSt: UpdateState = { phase: "idle", current: "0.1.0", version: null, notes: null, downloaded: 0, total: null, message: null, url: null };
   let updateCheckPatch: Partial<UpdateState> = { phase: "up_to_date" };
   const setUpdate = (patch: Partial<UpdateState>) => { updateSt = { ...updateSt, ...patch }; emit(listeners.update, { ...updateSt }); };
   function sub<T>(set: Set<(v: T) => void>, cb: (v: T) => void): Unsubscribe {
@@ -243,6 +300,81 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
   const commitAccounts = () => {
     emit(listeners.auth, profileOf(accounts.find((a) => a.id === active)));
     emit(listeners.accounts, accountsState());
+  };
+
+
+  // --- serveurs de groupe (Hearth) simulés ---
+  const ME: HearthMemberLite = { public_key: hex(9, 64), name: "Moi", online: true };
+  const hearthGroups = new Map<string, HearthDetail>();
+  let hearthInvs: HearthInvite[] = [];
+  let hearthEula = false;
+  /** Le faux service part avec Hearth activé (le vrai réglage est coupé par défaut) ; `hearthSetEnabled` le change. */
+  let hearthOn = true;
+  let hearthN = 0;
+  const hearthCalls: Array<{ kind: string; args: unknown[] }> = [];
+  const liteOf = (pk: string): HearthMemberLite => {
+    const f = friends.find((x) => x.friend.public_key === pk);
+    return { public_key: pk, name: f?.friend.name ?? "Ami", online: f?.presence === "online" };
+  };
+  const hearthCard = (id: string): HearthDetail => {
+    const g = hearthGroups.get(id);
+    if (!g) throw new Error("groupe introuvable");
+    return g;
+  };
+  const hearthCards = () => [...hearthGroups.values()].map((g) => ({ ...g.card }));
+  const hearthEmit = () => emit(listeners.hearthState, hearthCards());
+  /** Recalcule les compteurs de la carte à partir des membres. */
+  const hearthSync = (g: HearthDetail) => {
+    g.card.members_total = g.members.length;
+    g.card.members_online = g.members.filter((m) => !m.is_me && m.online).map((m) => ({ public_key: m.public_key, name: m.name, online: true }));
+  };
+  const hearthPatch = (id: string, patch: Partial<HearthCard>) => {
+    const g = hearthCard(id);
+    g.card = { ...g.card, ...patch };
+    hearthEmit();
+  };
+  const newVersion = (g: HearthDetail, kind: "session" | "checkpoint" | "restore") => {
+    const number = (g.versions[0]?.number ?? 0) + 1;
+    g.versions = [
+      { id: `v-${g.card.id}-${number}`, number, kind, author: ME.public_key, author_name: ME.name, created_at: Math.floor(Date.now() / 1000), played_secs: 1800, total_size: 410_000_000, is_head: true, side_branch: false },
+      ...g.versions.map((v) => ({ ...v, is_head: false })),
+    ];
+    g.card.version = number;
+  };
+  const makeHearth = (p: Partial<HearthCard> & { id: string; name: string }, d: Partial<Omit<HearthDetail, "card">> = {}): HearthDetail => {
+    const members: HearthMember[] = d.members ?? [
+      { ...ME, is_me: true, is_creator: true, sync: "ok", version: 1, unseen_days: null },
+      ...friends.map((f): HearthMember => ({
+        public_key: f.friend.public_key, name: f.friend.name, online: f.presence === "online", is_me: false, is_creator: false,
+        sync: "ok", version: 1, unseen_days: f.presence === "online" ? null : 2,
+      })),
+    ];
+    const card: HearthCard = {
+      minecraft: "1.21.1", loader: "NeoForge", state: "idle", host: null, players: 0, progress: null, step: null, step_index: null,
+      step_count: 3, unclean: null, members_online: [], members_total: members.length, is_creator: true, can_host: true,
+      instance_id: "inst-aeronautics", version: 1, ...p,
+    };
+    const g: HearthDetail = {
+      card, members, proposals: [], blocker: null, fork: [],
+      versions: [{ id: `v-${p.id}-1`, number: 1, kind: "session", author: ME.public_key, author_name: ME.name, created_at: NOW - 86400, played_secs: 5400, total_size: 380_000_000, is_head: true, side_branch: false }],
+      settings: { keep_background: false, disk_bytes: 380_000_000, outbox_pending: 0, instance_name: "Create: Aeronautics" },
+      ...d,
+    };
+    g.card = card;
+    hearthSync(g);
+    if (p.members_online) g.card.members_online = p.members_online;
+    return g;
+  };
+  /** Déroule les étapes d'un lancement simulé, puis `done`. Sans minuterie (tickMs = 0) : immédiat. */
+  const hearthLaunch = (id: string, steps: string[], done: Partial<HearthCard>) => {
+    if (tickMs <= 0) { hearthPatch(id, { step: null, step_index: null, ...done }); return; }
+    steps.forEach((label, i) => {
+      setTimeout(() => {
+        if (!hearthGroups.has(id)) return;
+        hearthPatch(id, { state: "launching", step: label, step_index: i, step_count: steps.length });
+      }, i * tickMs);
+    });
+    setTimeout(() => { if (hearthGroups.has(id)) hearthPatch(id, { step: null, step_index: null, ...done }); }, steps.length * tickMs);
   };
 
   // --- jeu simulé : logs et lancement ---
@@ -394,7 +526,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     instancesList: async () => instances.map((i) => ({ ...i })),
     instancesCreate: async (input: CreateInstanceInput) => {
       if (!input.name.trim()) throw new Error("Le nom de l'instance est obligatoire.");
-      const inst: Instance = { id: `inst-${instances.length + 1}`, ...input, mod_count: 0 };
+      const inst: Instance = { ...noExtras, id: `inst-${instances.length + 1}`, ...input, mod_count: 0 };
       instances.push(inst);
       return { ...inst };
     },
@@ -402,7 +534,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
       if (!/\.(mrpack|zip)$/i.test(path)) throw new Error("Fichier .mrpack ou .zip attendu.");
       if (/manquant|missing/i.test(path)) emit(listeners.warning, { missing: ["sodium", "iris"] });
       const inst: Instance = {
-        id: `inst-${instances.length + 1}`, name: "Pack importé", minecraft: "1.21.1",
+        ...noExtras, id: `inst-${instances.length + 1}`, name: "Pack importé", minecraft: "1.21.1",
         loader: { loader: "fabric", version: "0.16.5" }, ram_mb: 4096, mod_count: 12,
       };
       instances.push(inst);
@@ -442,6 +574,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
       if (patch.ram_mb !== undefined) inst.ram_mb = patch.ram_mb;
       if (patch.java_path !== undefined) inst.java_path = patch.java_path;
       if (patch.jvm_args !== undefined) inst.jvm_args = patch.jvm_args;
+      if (patch.wrapper !== undefined) inst.wrapper = patch.wrapper;
       return { ...inst };
     },
     instancesArtImage: async (id, file) => {
@@ -484,11 +617,197 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
       if (!friends.some((f) => f.friend.public_key === pk)) throw new Error("Ami introuvable.");
       gameCalls.push({ kind: "invite", arg: pk });
     },
+    hearthList: async () => hearthCards(),
+    hearthDetail: async (id) => structuredClone(hearthCard(id)),
+    hearthWorlds: async (instanceId) => {
+      need(instanceId);
+      return instanceId === "inst-aeronautics"
+        ? [{ name: "Monde de survie", size_bytes: 412_000_000 }, { name: "Test créatif", size_bytes: 38_000_000 }]
+        : [];
+    },
+    hearthCreate: async (input) => {
+      hearthCalls.push({ kind: "Create", args: [input] });
+      const inst = need(input.instanceId);
+      const name = input.name.trim();
+      if (!name) throw new Error("Donne un nom au serveur.");
+      hearthN += 1;
+      const picked = input.members.filter((pk) => friends.some((f) => f.friend.public_key === pk));
+      const members: HearthMember[] = [
+        { ...ME, is_me: true, is_creator: true, sync: "ok", version: 1, unseen_days: null },
+        ...picked.map((pk): HearthMember => ({ ...liteOf(pk), is_me: false, is_creator: false, sync: "unknown", version: null, unseen_days: null })),
+      ];
+      const g = makeHearth({ id: `grp-${hearthN}`, name, minecraft: inst.minecraft, loader: inst.loader.loader, instance_id: inst.id }, { members });
+      hearthGroups.set(g.card.id, g);
+      hearthEmit();
+      return { ...g.card };
+    },
+    hearthInvites: async () => hearthInvs.map((i) => ({ ...i })),
+    hearthInviteAccept: async (id) => {
+      hearthCalls.push({ kind: "InviteAccept", args: [id] });
+      const inv = hearthInvs.find((i) => i.group_id === id);
+      if (!inv) throw new Error("Cette invitation n'est plus valable.");
+      hearthInvs = hearthInvs.filter((i) => i.group_id !== id);
+      emit(listeners.hearthInvites, hearthInvs.map((i) => ({ ...i })));
+      const g = makeHearth({ id, name: inv.name, minecraft: inv.minecraft, loader: inv.loader, is_creator: false, can_host: false, instance_id: null, state: "pack_missing" });
+      hearthGroups.set(id, g);
+      hearthEmit();
+    },
+    hearthInviteDismiss: async (id) => {
+      hearthCalls.push({ kind: "InviteDismiss", args: [id] });
+      hearthInvs = hearthInvs.filter((i) => i.group_id !== id);
+      emit(listeners.hearthInvites, hearthInvs.map((i) => ({ ...i })));
+    },
+    hearthPlay: async (id) => {
+      hearthCalls.push({ kind: "Play", args: [id] });
+      const g = hearthCard(id);
+      const st = g.card.state;
+      if (st === "idle" || st === "unclean") {
+        if (!hearthEula) throw new Error(HEARTH_EULA_REQUIRED);
+        hearthLaunch(id, ["Mise à jour du monde", "Démarrage du serveur", "Ouverture de Minecraft"], { state: "hosting", host: { ...ME }, players: 1, unclean: null });
+      } else if (st === "hosted") {
+        hearthLaunch(id, ["Connexion à l'hôte", "Ouverture de Minecraft"], { state: "hosted", players: g.card.players + 1 });
+      } else {
+        throw new Error("Ce serveur ne peut pas être lancé pour l'instant.");
+      }
+    },
+    hearthStop: async (id) => {
+      hearthCalls.push({ kind: "Stop", args: [id] });
+      hearthCard(id);
+      hearthPatch(id, { state: "idle", host: null, players: 0 });
+    },
+    hearthUncleanChoice: async (id, choice) => {
+      hearthCalls.push({ kind: "UncleanChoice", args: [id, choice] });
+      hearthCard(id);
+      if (choice === "wait") return;
+      if (!hearthEula) throw new Error(HEARTH_EULA_REQUIRED);
+      hearthLaunch(id, ["Mise à jour du monde", "Démarrage du serveur", "Ouverture de Minecraft"], { state: "hosting", host: { ...ME }, players: 1, unclean: null });
+    },
+    hearthSetInstance: async (id, instanceId) => {
+      hearthCalls.push({ kind: "SetInstance", args: [id, instanceId] });
+      const inst = need(instanceId);
+      const g = hearthCard(id);
+      g.settings.instance_name = inst.name;
+      hearthPatch(id, { instance_id: instanceId, can_host: true, state: g.card.state === "pack_missing" ? "idle" : g.card.state });
+    },
+    hearthAddMember: async (id, pk) => {
+      hearthCalls.push({ kind: "AddMember", args: [id, pk] });
+      const g = hearthCard(id);
+      if (g.members.some((m) => m.public_key === pk)) throw new Error("Déjà dans le groupe.");
+      if (!friends.some((f) => f.friend.public_key === pk)) throw new Error("Ami introuvable.");
+      g.members = [...g.members, { ...liteOf(pk), is_me: false, is_creator: false, sync: "unknown", version: null, unseen_days: null }];
+      hearthSync(g);
+      hearthEmit();
+    },
+    hearthRemoveMember: async (id, pk) => {
+      hearthCalls.push({ kind: "RemoveMember", args: [id, pk] });
+      const g = hearthCard(id);
+      g.members = g.members.filter((m) => m.public_key !== pk);
+      hearthSync(g);
+      hearthEmit();
+    },
+    hearthLeave: async (id) => {
+      hearthCalls.push({ kind: "Leave", args: [id] });
+      hearthCard(id);
+      hearthGroups.delete(id);
+      hearthEmit();
+    },
+    hearthVote: async (id, proposalId) => {
+      hearthCalls.push({ kind: "Vote", args: [id, proposalId] });
+      const g = hearthCard(id);
+      const p = g.proposals.find((x) => x.id === proposalId);
+      if (!p) throw new Error("Cette décision n'existe plus.");
+      p.approvals += 1;
+      p.i_voted = true;
+      if (p.approvals >= p.needed) {
+        g.proposals = g.proposals.filter((x) => x.id !== proposalId);
+        if (p.kind === "continue_without") g.blocker = null;
+      }
+      hearthEmit();
+    },
+    hearthContinueWithout: async (id, pk) => {
+      hearthCalls.push({ kind: "ContinueWithout", args: [id, pk] });
+      const g = hearthCard(id);
+      g.proposals = [...g.proposals, { id: `prop-${++hearthN}`, kind: "continue_without", subject: liteOf(pk), approvals: 1, needed: Math.floor(g.members.length / 2) + 1, i_voted: true, can_vote: true }];
+      hearthEmit();
+    },
+    hearthPackUpdate: async (id, instanceId) => {
+      hearthCalls.push({ kind: "PackUpdate", args: [id, instanceId] });
+      need(instanceId);
+      const g = hearthCard(id);
+      g.proposals = [...g.proposals, { id: `prop-${++hearthN}`, kind: "pack_update", subject: null, approvals: 1, needed: Math.floor(g.members.length / 2) + 1, i_voted: true, can_vote: true }];
+      hearthEmit();
+    },
+    hearthRestore: async (id, versionId) => {
+      hearthCalls.push({ kind: "Restore", args: [id, versionId] });
+      const g = hearthCard(id);
+      if (!g.versions.some((v) => v.id === versionId)) throw new Error("Version introuvable.");
+      newVersion(g, "restore");
+      hearthEmit();
+    },
+    hearthResolveFork: async (id, versionId) => {
+      hearthCalls.push({ kind: "ResolveFork", args: [id, versionId] });
+      const g = hearthCard(id);
+      if (!g.fork.some((b) => b.version_id === versionId)) throw new Error("Version introuvable.");
+      g.fork = [];
+      hearthPatch(id, { state: "idle" });
+    },
+    hearthSetBackground: async (id, on) => {
+      hearthCalls.push({ kind: "SetBackground", args: [id, on] });
+      hearthCard(id).settings.keep_background = on;
+      hearthEmit();
+    },
+    hearthEula: async () => ({ accepted: hearthEula, url: "https://aka.ms/MinecraftEULA" }),
+    hearthEulaAccept: async () => { hearthCalls.push({ kind: "EulaAccept", args: [] }); hearthEula = true; },
+    hearthEnabled: async () => hearthOn,
+    hearthSetEnabled: async (enabled) => { hearthCalls.push({ kind: "SetEnabled", args: [enabled] }); hearthOn = enabled; hearthEmit(); },
+    onHearthState: (cb) => sub(listeners.hearthState, cb),
+    onHearthInvites: (cb) => sub(listeners.hearthInvites, cb),
+    onHearthHandover: (cb) => sub(listeners.hearthHandover, cb),
+    onHearthHostPrompt: (cb) => sub(listeners.hearthHostPrompt, cb),
+    seedHearth: (p, d) => {
+      const g = makeHearth(p, d);
+      hearthGroups.set(g.card.id, g);
+      hearthEmit();
+      return { ...g.card };
+    },
+    setHearthCard: (id, patch) => hearthPatch(id, patch),
+    setHearthDetail: (id, patch) => {
+      const g = hearthCard(id);
+      Object.assign(g, patch);
+      if (patch.members) hearthSync(g);
+      hearthEmit();
+    },
+    emitHearthInvite: (p) => {
+      const inv: HearthInvite = {
+        name: "Serveur des potes", from: liteOf(friends[0]!.friend.public_key), members: 3, minecraft: "1.21.1", loader: "NeoForge",
+        received_at: Math.floor(Date.now() / 1000), ...p,
+      };
+      hearthInvs = [...hearthInvs.filter((i) => i.group_id !== inv.group_id), inv];
+      emit(listeners.hearthInvites, hearthInvs.map((i) => ({ ...i })));
+      return { ...inv };
+    },
+    emitHearthHandover: (e) => emit(listeners.hearthHandover, e),
+    emitHearthHostPrompt: (e) => emit(listeners.hearthHostPrompt, e),
+    setHearthEula: (a) => { hearthEula = a; },
+    hearthCalls,
     friendInvites: async () => invites.map((i) => ({ ...i })),
     friendInviteDismiss: async (id) => {
       invites = invites.filter((i) => i.id !== id);
       emit(listeners.invites, invites.map((i) => ({ ...i })));
     },
+    friendJoinRequest: async (pk) => {
+      if (!friends.some((f) => f.friend.public_key === pk)) throw new Error("Ami introuvable.");
+      joinRequestCalls.push({ kind: "ask", arg: pk });
+      if (joinAnswer !== "hold") return joinAnswer;
+      return new Promise<JoinAnswer>((resolve) => { joinHeld.set(pk, resolve); });
+    },
+    friendJoinRequestAnswer: async (pk, accept) => {
+      joinRequestCalls.push({ kind: "answer", arg: pk, accept });
+      if (!joinRequests.some((r) => r.public_key === pk)) throw new Error("Cette demande n'est plus valable.");
+      joinRequests = joinRequests.filter((r) => r.public_key !== pk);
+      emit(listeners.joinRequests, joinRequests.map((r) => ({ ...r })));
+    },
+    friendJoinRequests: async () => joinRequests.map((r) => ({ ...r })),
     gameSwitch: async (id) => { need(id); gameCalls.push({ kind: "switch", arg: id }); },
     gameCurrent: async () => current,
     gameClose: async () => {
@@ -514,7 +833,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
       requests = requests.filter((x) => x !== r);
       friends.push({
         friend: { public_key: r.public_key, name: r.name, trust: "ask", added_at: NOW },
-        presence: "offline",
+        presence: "offline", last_seen: null,
       });
     },
     friendRefuse: async (pk) => {
@@ -525,7 +844,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
 
     joinPlan: async (): Promise<JoinPlan> => ({
       manifest: makeManifest(), manifest_hash: FAKE_MANIFEST_HASH, cached: 91, to_receive: 3, to_receive_bytes: bytes_total,
-      unknown_mods: ["mods/mod-maison.jar"],
+      unknown_mods: ["mods/mod-maison.jar"], unknown_unchecked: [], unknown_scripts: [], unknown_trusted: [],
     }),
     joinPlay: async () => {},
     // Comme le backend : refuse un autre manifeste, et des mods inconnus sans la case de confiance.
@@ -568,7 +887,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
       }
       if (input.kind === "modpack") {
         const inst: Instance = {
-          id: `inst-${instances.length + 1}`, name: hit.name, minecraft: "1.21.1",
+          ...noExtras, id: `inst-${instances.length + 1}`, name: hit.name, minecraft: "1.21.1",
           loader: { loader: "neoforge", version: "21.1.77" }, ram_mb: 4096, mod_count: 24,
         };
         inst.art = makeArt(`${hit.source}-${hit.id}`, hit.name, hit.author, hit.source === "modrinth" ? "#1bd96a" : "#f16436", hit.source);
@@ -669,13 +988,29 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
       const f = friends.find((x) => x.friend.public_key === p.public_key);
       const inv: Invite = {
         id: `inv-${inviteN}`, name: f?.friend.name ?? "Ami", world_name: "Monde de survie", minecraft: "1.21.1",
-        received_at: Math.floor(Date.now() / 1000), expires_at: Math.floor(Date.now() / 1000) + 600, ...p,
+        received_at: Math.floor(Date.now() / 1000), expires_at: Math.floor(Date.now() / 1000) + 600, pack: null, world_icon: null, ...p,
       };
       invites = [...invites, inv];
       emit(listeners.invite, { ...inv });
       emit(listeners.invites, invites.map((i) => ({ ...i })));
       return { ...inv };
     },
+    emitJoinRequest: (p) => {
+      const f = friends.find((x) => x.friend.public_key === p.public_key);
+      const now = Math.floor(Date.now() / 1000);
+      const r: JoinRequest = { name: f?.friend.name ?? "Ami", received_at: now, expires_at: now + 120, ...p };
+      joinRequests = [...joinRequests.filter((x) => x.public_key !== r.public_key), r];
+      emit(listeners.joinRequest, { ...r });
+      emit(listeners.joinRequests, joinRequests.map((x) => ({ ...x })));
+      return { ...r };
+    },
+    setJoinAnswer: (a) => { joinAnswer = a; },
+    resolveJoinRequest: (pk, a) => {
+      const res = joinHeld.get(pk);
+      joinHeld.delete(pk);
+      res?.(a);
+    },
+    joinRequestCalls,
     gameCalls,
     emitUpdateState: (patch) => setUpdate(patch),
     setUpdateCheckResult: (patch) => { updateCheckPatch = patch; },
@@ -703,10 +1038,26 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     onFriendRequest: (cb) => sub(listeners.request, cb),
     onFriendInvite: (cb) => sub(listeners.invite, cb),
     onFriendInvites: (cb) => sub(listeners.invites, cb),
+    onFriendJoinRequest: (cb) => sub(listeners.joinRequest, cb),
+    onFriendJoinRequests: (cb) => sub(listeners.joinRequests, cb),
     onUnknownMods: (cb) => sub(listeners.unknown, cb),
     onTransferErrorDetails: () => () => {},
     onBrowseProgress: (cb) => sub(listeners.browse, cb),
     onModsFixProgress: (cb) => sub(listeners.fix, cb),
     onFilesDropped: (cb) => sub(listeners.drop, cb),
+
+    stageSupported: async () => opts.stageSupported === true,
+    stageState: async () => ({ ...stageSt }),
+    stageView: async (game) => { stageCalls.push({ cmd: "view", arg: game }); if (stageSt.attached) setStage({ game }); },
+    stagePanel: async (open) => { stageCalls.push({ cmd: "panel", arg: open }); if (stageSt.attached) setStage({ panel: open }); },
+    stageLayout: async (l) => { stageCalls.push({ cmd: "layout", arg: { ...l } }); },
+    setFullscreen: async (on) => { stageCalls.push({ cmd: "fullscreen", arg: on }); },
+    onStageState: (cb) => sub(listeners.stage, cb),
+    onStageFallback: (cb) => sub(listeners.stageFallback, cb),
+    onStageFullscreen: (cb) => sub(listeners.stageFullscreen, cb),
+    emitStageState: (patch) => setStage(patch),
+    emitStageFallback: (f) => emit(listeners.stageFallback, f as StageFallback),
+    emitStageFullscreen: (on) => emit(listeners.stageFullscreen, on),
+    stageCalls,
   };
 }

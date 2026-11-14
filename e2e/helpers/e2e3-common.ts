@@ -1,5 +1,5 @@
 // Helpers E2E-3 (T5 mod inconnu, T6 echecs) : amitie par commandes, partage hote, evenements, redemarrage de l'hote.
-import { ROOT, expect, invoke, loginOffline, makeHostInstance, startFakeWorld, testState, type App, type World } from '../harness/fixtures';
+import { ROOT, expect, inviteAllFriends, invoke, loginOffline, makeHostInstance, startFakeWorld, testState, type App, type World } from '../harness/fixtures';
 import { spawn } from 'node:child_process';
 import { chromium } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
@@ -49,6 +49,8 @@ export async function hostShare(a: App, opts: { bigMb?: number } = {}) {
   }
   const world = await startFakeWorld(a);
   await invoke(a.page, 'host_start_sharing', { instance_id: host.id, world_port: world.lanPort });
+  // Règle de jonction : les amis déjà ajoutés sont invités pour cette partie.
+  await inviteAllFriends(a);
   return { host, world };
 }
 

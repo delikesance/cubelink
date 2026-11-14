@@ -1,5 +1,5 @@
 // T2 : B (ami accepte) ouvre « Rejoindre » depuis l'ecran Amis ; plan, mod inconnu, case de confiance, annulation.
-import { test, expect, invoke, makeHostInstance, startFakeWorld, testState } from './harness/fixtures';
+import { test, expect, invoke, inviteAllFriends, makeHostInstance, startFakeWorld, testState } from './harness/fixtures';
 import { NAME_A, closeOpened, countFiles, gotoRoute, keyOfCode, loginBoth, makeFriends, readMyCode } from './helpers/e2e1-common';
 
 const HOME_MOD = 'mods/homebrew-mod-0.0.1.jar';
@@ -27,6 +27,8 @@ test('T2 : plan affiche, mod maison inconnu, confiance requise, non-ami refuse, 
   // Amitie, puis presence en ligne cote B.
   await makeFriends(appA, appB);
   await expect.poll(async () => (await invoke<{ presence: string }[]>(appB.page, 'friend_list'))[0]?.presence, { timeout: 60_000 }).toBe('online');
+  // Règle de jonction : un ami n'entre que s'il est invité pour cette partie (ou si sa demande est acceptée).
+  await inviteAllFriends(appA);
 
   // Etat du disque de B avant : aucune instance, rien dans le magasin.
   const st = await testState(appB.page);

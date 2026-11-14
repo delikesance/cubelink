@@ -40,7 +40,7 @@ pub const MAX_FALLBACK_STREAK: u8 = 2;
 const REASON_REQUESTED: &str = "requested";
 
 /// Etat publie a l'interface (`stage://state`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default, specta::Type)]
 pub struct StageState {
     /// Un jeu est rattache a la fenetre du launcher.
     pub attached: bool,
@@ -468,7 +468,10 @@ impl Stage {
     /// Transmet a l'hote la preference systeme « afficher les animations » (relue a chaque lancement : pas besoin de
     /// surveiller les changements de reglages de Windows).
     fn refresh_calm(&self, h: &dyn HostApi, first: bool) {
-        let calm = reduced_motion();
+        #[cfg(any(windows, target_os = "linux"))]
+        let calm = cubelink_host::system::reduced_motion();
+        #[cfg(not(any(windows, target_os = "linux")))]
+        let calm = false;
         if self.core.calm.swap(calm, Ordering::SeqCst) != calm || first {
             h.set_calm(calm);
             self.note(if calm { "mouvement reduit : rideau sans animation" } else { "animations du rideau actives" });
@@ -552,7 +555,7 @@ impl Stage {
             if open {
                 #[cfg(any(windows, target_os = "linux"))]
                 if let Some(handle) = own_handle(window) {
-                    crate::foreground::focus_own_window(handle);
+                    cubelink_host::foreground::focus_own_window(handle);
                 }
                 let _ = window.set_focus();
             }
@@ -618,6 +621,11 @@ impl Stage {
     /// Le launcher se ferme : plus aucun `reveal`.
     pub fn forbid_reveal(&self) {
         self.core.no_reveal.store(true, Ordering::SeqCst);
+    }
+
+    /// Inverse de [`Self::forbid_reveal`] : le launcher n'a pas quitté (masqué en fond), un prochain jeu pourra être montré.
+    pub fn allow_reveal(&self) {
+        self.core.no_reveal.store(false, Ordering::SeqCst);
     }
 
     /// Attend (brievement) que le journal soit ecrit, avant de quitter le processus.
@@ -726,51 +734,14 @@ impl Stage {
     }
 }
 
-/// Preference systeme « afficher les animations dans Windows » desactivee : le rideau ne doit pas s'animer. Illisible :
-/// animations gardees (comportement par defaut de Windows).
-#[cfg(windows)]
-fn reduced_motion() -> bool {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{SystemParametersInfoW, SPI_GETCLIENTAREAANIMATION};
-    let mut animations: i32 = 1;
-    // SAFETY : `SPI_GETCLIENTAREAANIMATION` ecrit un BOOL (i32) a l'adresse fournie, valide pendant l'appel.
-    let ok = unsafe { SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, (&mut animations as *mut i32).cast(), 0) };
-    ok != 0 && animations == 0
-}
-
-#[cfg(not(any(windows, target_os = "linux")))]
-fn reduced_motion() -> bool {
-    false
-}
-
-/// Linux : reglage GNOME « animations » desactive (`gsettings get org.gnome.desktop.interface enable-animations` rend
-/// `false`). Illisible (pas de gsettings, autre bureau) : animations gardees.
+/// Linux : la Scene peut servir sur ce poste. Un serveur X11 est joignable (`DISPLAY`, XWayland compris) et rien ne la coupe
+/// (`CUBELINK_NO_STAGE`, mode test sans `CUBELINK_STAGE_TEST`). Le launcher n'est pas forcement en X11 a cet instant : avec
+/// « Jeu integre » coupe au demarrage, il garde le Wayland natif (voir `lib.rs`), et le reglage doit rester visible pour etre
+/// reactive (pris en compte au prochain demarrage).
 #[cfg(target_os = "linux")]
-fn reduced_motion() -> bool {
-    let out = std::process::Command::new("gsettings")
-        .args(["get", "org.gnome.desktop.interface", "enable-animations"])
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output();
-    out.is_ok_and(|o| o.status.success() && animations_off(&String::from_utf8_lossy(&o.stdout)))
-}
-
-/// Pur : sortie de `gsettings get ... enable-animations` -> animations desactivees ?
-#[cfg(any(target_os = "linux", test))]
-fn animations_off(gsettings_out: &str) -> bool {
-    gsettings_out.trim() == "false"
-}
-
-/// Linux : la session graphique effective est X11 (`GDK_BACKEND=x11` pose par `lib.rs` avant la fenetre, `DISPLAY` present),
-/// condition pour adopter la fenetre du jeu.
-#[cfg(target_os = "linux")]
-pub fn x11_session() -> bool {
-    x11_session_of(std::env::var("GDK_BACKEND").ok().as_deref(), std::env::var_os("DISPLAY").is_some_and(|d| !d.is_empty()))
-}
-
-/// Pur : `GDK_BACKEND` (si defini) et presence de `DISPLAY` -> session X11 ?
-#[cfg(any(target_os = "linux", test))]
-fn x11_session_of(gdk_backend: Option<&str>, display: bool) -> bool {
-    display && gdk_backend.is_some_and(|b| b.split(',').next().is_some_and(|f| f.trim() == "x11"))
+pub fn x11_reachable() -> bool {
+    let allowed = !crate::test_hooks::hooks().test_mode || std::env::var_os("CUBELINK_STAGE_TEST").is_some();
+    std::env::var_os("DISPLAY").is_some_and(|d| !d.is_empty()) && std::env::var_os("CUBELINK_NO_STAGE").is_none() && allowed
 }
 
 /// Identifiant natif de la fenetre du launcher : HWND (Windows).
@@ -790,7 +761,7 @@ fn own_handle(window: &tauri::WebviewWindow) -> Option<isize> {
     }
 }
 
-/// Pur : la Scene existe-t-elle sur cette plateforme ? Windows toujours ; Linux seulement en session X11 effective.
+/// Pur : la Scene existe-t-elle sur cette plateforme ? Windows toujours ; Linux seulement avec un serveur X11 joignable.
 fn stage_supported_on(windows: bool, linux: bool, x11: bool) -> bool {
     windows || (linux && x11)
 }
@@ -804,26 +775,31 @@ impl Stage {
 
 /// Bascule entre le jeu et le launcher (bouton de la barre de titre), avec l'animation de rideau.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub fn stage_view(state: State<'_, Arc<AppState>>, game: bool) {
     state.stage.set_view(game);
 }
 
+/// État de la zone de jeu intégrée (rattachée, jeu visible, panneau ouvert).
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub fn stage_state(state: State<'_, Arc<AppState>>) -> StageState {
     state.stage.state()
 }
 
 /// Zone de jeu mesuree par l'interface (element reserve du DOM), en pixels physiques dans la zone cliente de la fenetre.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub fn stage_layout(state: State<'_, Arc<AppState>>, window: tauri::WebviewWindow, x: i32, y: i32, w: i32, h: i32, panel_w: i32) {
     state.stage.set_layout(&window, x, y, w, h, panel_w);
 }
 
 /// La zone de jeu integree existe sur cette plateforme (l'interface n'affiche le reglage « Jeu integre » que dans ce cas).
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub fn stage_supported() -> bool {
     #[cfg(target_os = "linux")]
-    let x11 = x11_session();
+    let x11 = x11_reachable();
     #[cfg(not(target_os = "linux"))]
     let x11 = false;
     stage_supported_on(cfg!(windows), cfg!(target_os = "linux"), x11)
@@ -831,6 +807,7 @@ pub fn stage_supported() -> bool {
 
 /// Ouvre (`true`) ou ferme (`false`) le panneau « en jeu » (Echap, bouton Fermer).
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub fn stage_panel(state: State<'_, Arc<AppState>>, window: tauri::WebviewWindow, open: bool) {
     state.stage.set_panel(&window, open);
 }
@@ -1133,23 +1110,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn scene_linux_seulement_en_session_x11() {
+    fn scene_linux_seulement_avec_x11() {
         assert!(stage_supported_on(true, false, false));
         assert!(stage_supported_on(false, true, true));
         assert!(!stage_supported_on(false, true, false));
         assert!(!stage_supported_on(false, false, true));
-        assert!(x11_session_of(Some("x11"), true));
-        assert!(x11_session_of(Some("x11,wayland"), true));
-        assert!(!x11_session_of(Some("wayland"), true));
-        assert!(!x11_session_of(Some("x11"), false));
-        assert!(!x11_session_of(None, true));
-    }
-
-    #[test]
-    fn animations_gnome() {
-        assert!(animations_off("false\n"));
-        assert!(!animations_off("true\n"));
-        assert!(!animations_off(""));
     }
 
     type Events = Arc<Mutex<Vec<(String, serde_json::Value)>>>;

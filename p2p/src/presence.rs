@@ -102,7 +102,7 @@ pub type AddrSink = Arc<dyn Fn(EndpointAddr) + Send + Sync>;
 type SharedSink = Arc<Mutex<Option<AddrSink>>>;
 
 fn notify(slot: &SharedSink, addr: EndpointAddr) {
-    let sink = slot.lock().unwrap_or_else(|p| p.into_inner()).clone();
+    let sink = crate::util::lock(slot).clone();
     if let Some(s) = sink {
         s(addr);
     }
@@ -153,7 +153,7 @@ impl Inner {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<PeerKey, PeerState>> {
-        self.states.lock().unwrap_or_else(|p| p.into_inner())
+        crate::util::lock(&self.states)
     }
 
     /// Applique un résultat de sonde ; émet un événement uniquement si l'état change.
@@ -233,7 +233,7 @@ impl PresenceService {
         let slot2 = Arc::clone(&slot);
         let pinger: PingFn = Arc::new(move |key| {
             let endpoint = endpoint.clone();
-            let hint = addrs2.lock().unwrap_or_else(|p| p.into_inner()).get(&key).cloned();
+            let hint = crate::util::lock(&addrs2).get(&key).cloned();
             let slot = Arc::clone(&slot2);
             Box::pin(async move { iroh_ping(&endpoint, key, hint, &slot).await })
         });
@@ -277,12 +277,12 @@ impl PresenceService {
 
     /// Indique comment joindre un ami (sans découverte réseau, p. ex. adresses directes).
     pub fn add_addr(&self, addr: EndpointAddr) {
-        self.addrs.lock().unwrap_or_else(|p| p.into_inner()).insert(*addr.id.as_bytes(), addr);
+        crate::util::lock(&self.addrs).insert(*addr.id.as_bytes(), addr);
     }
 
     /// Destinataire des adresses observées (sonde réussie, connexion entrante d'un ami) : à persister.
     pub fn set_addr_sink(&self, sink: AddrSink) {
-        *self.sink.lock().unwrap_or_else(|p| p.into_inner()) = Some(sink);
+        *crate::util::lock(&self.sink) = Some(sink);
     }
 
     /// Serveur : à enregistrer dans le `Router` sous `PRESENCE_ALPN`.
@@ -315,7 +315,7 @@ impl PresenceService {
     pub async fn stop(&self) {
         self.stopped.store(true, Ordering::SeqCst);
         let _ = self.stop.send(true);
-        let task = self.task.lock().unwrap_or_else(|p| p.into_inner()).take();
+        let task = crate::util::lock(&self.task).take();
         if let Some(t) = task {
             let _ = t.await;
         }
@@ -325,7 +325,7 @@ impl PresenceService {
 impl Drop for PresenceService {
     fn drop(&mut self) {
         if !self.stopped.load(Ordering::SeqCst) {
-            if let Some(t) = self.task.lock().unwrap_or_else(|p| p.into_inner()).take() {
+            if let Some(t) = crate::util::lock(&self.task).take() {
                 t.abort();
             }
         }

@@ -15,7 +15,6 @@ serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 sha2.workspace = true
-blake3.workspace = true
 rusqlite.workspace = true
 ed25519-dalek.workspace = true
 data-encoding.workspace = true

@@ -16,6 +16,8 @@ use std::sync::{Arc, Mutex};
 use core_lib::manifest::validate_manifest;
 use core_lib::types::{Error, Manifest, Result};
 
+use super::lock;
+
 /// Identifiant d'un pair : sa clé publique, en texte (z-base32/hex selon le transport).
 pub type PeerId = String;
 
@@ -129,11 +131,11 @@ impl Host {
     /// Appelé quand un fichier du jeu ne correspond plus à son empreinte annoncée (le manifeste est périmé) :
     /// l'application recalcule alors le manifeste pour que le « Réessayer » de l'invité reparte d'un état frais.
     pub fn set_on_drift(&self, f: Arc<dyn Fn() + Send + Sync>) {
-        *self.on_drift.lock().unwrap_or_else(|p| p.into_inner()) = Some(f);
+        *lock(&self.on_drift) = Some(f);
     }
 
     fn drift(&self) {
-        let f = self.on_drift.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        let f = lock(&self.on_drift).clone();
         if let Some(f) = f {
             f();
         }
@@ -163,7 +165,7 @@ impl Host {
                 file.size, self.limits.max_file_bytes
             )));
         }
-        let mut peers = self.peers.lock().unwrap_or_else(|p| p.into_inner());
+        let mut peers = lock(&self.peers);
         let st = peers.entry(peer.to_string()).or_default();
         if st.active >= self.limits.max_concurrent_per_peer {
             return Err(Error::Network("trop de requêtes simultanées pour ce pair".into()));
@@ -196,7 +198,7 @@ impl Permit {
 
 impl Drop for Permit {
     fn drop(&mut self) {
-        let mut peers = self.host.peers.lock().unwrap_or_else(|p| p.into_inner());
+        let mut peers = lock(&self.host.peers);
         if let Some(st) = peers.get_mut(&self.peer) {
             st.active = st.active.saturating_sub(1);
         }
@@ -261,28 +263,18 @@ pub struct MemTransport {
     id: PeerId,
     /// Coupure simulée : nombre d'octets servis dans un `fetch` avant `Error::Network`.
     cut_after: Mutex<Option<u64>>,
-    /// Vrai : la coupure ne se produit qu'une fois (puis le transport redevient normal).
-    cut_once: bool,
     /// Octets réellement transférés (hors préfixe déjà présent), tous `fetch` confondus.
     transferred: AtomicU64,
 }
 
 impl MemTransport {
     pub fn new(net: Arc<MemNetwork>, id: impl Into<PeerId>) -> Self {
-        Self { net, id: id.into(), cut_after: Mutex::new(None), cut_once: true, transferred: AtomicU64::new(0) }
+        Self { net, id: id.into(), cut_after: Mutex::new(None), transferred: AtomicU64::new(0) }
     }
 
     /// Mode test : le prochain `fetch` échoue en `Error::Network` après `n` octets (une seule fois).
     pub fn with_cut_after(mut self, n: u64) -> Self {
         *self.cut_after.get_mut().unwrap_or_else(|p| p.into_inner()) = Some(n);
-        self.cut_once = true;
-        self
-    }
-
-    /// Comme `with_cut_after`, mais chaque `fetch` est coupé après `n` octets.
-    pub fn with_cut_after_always(mut self, n: u64) -> Self {
-        *self.cut_after.get_mut().unwrap_or_else(|p| p.into_inner()) = Some(n);
-        self.cut_once = false;
         self
     }
 
@@ -296,7 +288,7 @@ const MEM_CHUNK: usize = 64 * 1024;
 
 impl BlobTransport for MemTransport {
     async fn serve(&self, host: Arc<Host>) -> Result<()> {
-        self.net.hosts.lock().unwrap_or_else(|p| p.into_inner()).insert(self.id.clone(), host);
+        lock(&self.net.hosts).insert(self.id.clone(), host);
         Ok(())
     }
 
@@ -311,11 +303,7 @@ impl BlobTransport for MemTransport {
         use std::sync::atomic::Ordering;
         use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
-        let host = self
-            .net
-            .hosts
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
+        let host = lock(&self.net.hosts)
             .get(peer)
             .cloned()
             .ok_or_else(|| Error::Network(format!("pair injoignable : {peer}")))?;
@@ -344,10 +332,7 @@ impl BlobTransport for MemTransport {
         } else {
             tokio::fs::File::create(&req.dest).await?
         };
-        let limit = {
-            let mut g = self.cut_after.lock().unwrap_or_else(|p| p.into_inner());
-            if self.cut_once { g.take() } else { *g }
-        };
+        let limit = lock(&self.cut_after).take();
         let mut buf = vec![0u8; MEM_CHUNK];
         let mut total = offset;
         let mut sent = 0u64;
@@ -445,7 +430,7 @@ mod iroh_impl {
         }
 
         fn cached(&self, peer: &str, alpn: &'static [u8]) -> Option<Connection> {
-            let conns = self.conns.lock().unwrap_or_else(|p| p.into_inner());
+            let conns = lock(&self.conns);
             conns.get(&(peer.to_string(), alpn)).filter(|c| c.close_reason().is_none()).cloned()
         }
 
@@ -460,13 +445,13 @@ mod iroh_impl {
             }
             let c = self.endpoint.connect(addr.clone(), alpn).await.map_err(net)?;
             self.opened.fetch_add(1, Ordering::Relaxed);
-            self.conns.lock().unwrap_or_else(|p| p.into_inner()).insert((peer.to_string(), alpn), c.clone());
+            lock(&self.conns).insert((peer.to_string(), alpn), c.clone());
             Ok(c)
         }
 
         /// Oublie une connexion en échec (la suivante sera rouverte), si c'est bien celle en cache.
         fn forget(&self, peer: &str, alpn: &'static [u8], c: &Connection) {
-            let mut conns = self.conns.lock().unwrap_or_else(|p| p.into_inner());
+            let mut conns = lock(&self.conns);
             let key = (peer.to_string(), alpn);
             if conns.get(&key).is_some_and(|x| x.stable_id() == c.stable_id()) {
                 conns.remove(&key);
@@ -506,7 +491,7 @@ mod iroh_impl {
             // de concurrence de ce fichier jusque-là (lâché sur erreur, le flux se termine tout seul).
             let conn = self.conn(peer, addr, iroh_blobs::ALPN).await?;
             let relayed = conn.paths().iter().any(|p| p.is_selected() && p.is_relay());
-            self.relayed.lock().unwrap_or_else(|p| p.into_inner()).insert(peer.to_string(), relayed);
+            lock(&self.relayed).insert(peer.to_string(), relayed);
             let r = self.get_blob(&conn, hash, req, on_bytes, cancel).await;
             if matches!(r, Err(Error::Network(_))) || conn.close_reason().is_some() {
                 self.forget(peer, iroh_blobs::ALPN, &conn);
@@ -569,7 +554,7 @@ mod iroh_impl {
         /// Oublie (sans les fermer) les connexions en cache vers `peer` : les prochains fichiers en rouvrent de
         /// neuves, ceux en vol finissent sur les anciennes. Après un silence, la connexion est peut-être morte.
         pub fn forget_peer(&self, peer: &str) {
-            self.conns.lock().unwrap_or_else(|p| p.into_inner()).retain(|(p, _), _| p != peer);
+            lock(&self.conns).retain(|(p, _), _| p != peer);
         }
 
         /// Nombre de connexions sortantes ouvertes pour des transferts depuis la création.
@@ -579,7 +564,7 @@ mod iroh_impl {
 
         /// Fin d'un transfert : ferme les connexions réutilisées vers `peer`.
         pub fn close_peer(&self, peer: &str) {
-            let mut conns = self.conns.lock().unwrap_or_else(|p| p.into_inner());
+            let mut conns = lock(&self.conns);
             conns.retain(|(p, _), c| {
                 if p == peer {
                     c.close(0u32.into(), b"done");
@@ -601,11 +586,11 @@ mod iroh_impl {
         /// Enregistre comment joindre un pair ; renvoie son `PeerId`.
         pub fn add_peer(&self, addr: EndpointAddr) -> PeerId {
             let id = addr.id.to_string();
-            let old = self.peers.lock().unwrap_or_else(|p| p.into_inner()).insert(id.clone(), addr.clone());
+            let old = lock(&self.peers).insert(id.clone(), addr.clone());
             // Adresse changée (hôte redémarré, re-résolution après un silence) : les connexions en cache sont
             // peut-être mortes sans le savoir ; les suivantes seront rouvertes vers la nouvelle adresse.
             if old.is_some_and(|o| o != addr) {
-                self.conns.lock().unwrap_or_else(|p| p.into_inner()).retain(|(p, _), _| *p != id);
+                lock(&self.conns).retain(|(p, _), _| *p != id);
             }
             id
         }
@@ -627,7 +612,7 @@ mod iroh_impl {
 
         /// Arrête le routeur (hôte).
         pub async fn shutdown(&self) {
-            let r = self.router.lock().unwrap_or_else(|p| p.into_inner()).take();
+            let r = lock(&self.router).take();
             if let Some(r) = r {
                 let _ = r.shutdown().await;
             }
@@ -667,7 +652,7 @@ mod iroh_impl {
     /// Échec d'une requête de contrôle : refus (autorisation…) ou fichier modifié depuis le manifeste.
     #[derive(Debug)]
     enum AnswerErr {
-        Refused(#[allow(dead_code)] Error),
+        Refused,
         Changed,
     }
 
@@ -676,22 +661,18 @@ mod iroh_impl {
             match e {
                 // Contenu absent du manifeste de l'hôte : l'hôte l'a recalculé depuis (ou le manifeste de l'invité est périmé).
                 Error::NotFound(_) => AnswerErr::Changed,
-                e => AnswerErr::Refused(e),
+                _ => AnswerErr::Refused,
             }
         }
     }
 
     impl ControlHandler {
         async fn answer(&self, peer: &str, sha: &str) -> std::result::Result<(Permit, Hash), AnswerErr> {
-            self.answer_inner(peer, sha).await
-        }
-
-        async fn answer_inner(&self, peer: &str, sha: &str) -> std::result::Result<(Permit, Hash), AnswerErr> {
             let host = (self.host)().ok_or_else(|| Error::Auth("rien n'est partagé".into()))?;
             let permit = host.authorize(peer, sha)?;
             // Empreinte prise AVANT l'import : si le fichier change pendant, l'entrée sera périmée au prochain appel.
             let now = stamp(&permit.file().path);
-            let cached = self.known.lock().unwrap_or_else(|p| p.into_inner()).get(sha).copied();
+            let cached = lock(&self.known).get(sha).copied();
             let hash = match cached {
                 Some((h, st)) if now.is_some() && Some(st) == now => h,
                 _ => {
@@ -713,7 +694,7 @@ mod iroh_impl {
                         })
                         .await
                         .map_err(net)?;
-                    let mut known = self.known.lock().unwrap_or_else(|p| p.into_inner());
+                    let mut known = lock(&self.known);
                     match now {
                         Some(st) => known.insert(sha.to_string(), (tag.hash, st)),
                         None => known.remove(sha),
@@ -792,7 +773,7 @@ mod iroh_impl {
                 .accept(CONTROL_ALPN, control)
                 .accept(iroh_blobs::ALPN, blobs)
                 .spawn();
-            *self.router.lock().unwrap_or_else(|p| p.into_inner()) = Some(router);
+            *lock(&self.router) = Some(router);
             Ok(())
         }
 
@@ -803,10 +784,7 @@ mod iroh_impl {
             on_bytes: &(dyn Fn(u64) + Send + Sync),
             cancel: &AtomicBool,
         ) -> Result<()> {
-            let addr = self
-                .peers
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
+            let addr = lock(&self.peers)
                 .get(peer)
                 .cloned()
                 .ok_or_else(|| Error::Network(format!("pair inconnu : {peer}")))?;
@@ -824,7 +802,7 @@ mod iroh_impl {
         }
 
         fn via_relay(&self, peer: &str) -> bool {
-            self.relayed.lock().unwrap_or_else(|p| p.into_inner()).get(peer).copied().unwrap_or(false)
+            lock(&self.relayed).get(peer).copied().unwrap_or(false)
         }
     }
 
@@ -884,12 +862,13 @@ mod iroh_impl {
 pub use iroh_impl::{ControlHandler, GatedBlobsHandler, HostProvider, IrohTransport};
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use core_lib::types::{Loader, LoaderSpec, ManifestFile};
     use sha2::{Digest, Sha256};
 
-    pub fn sha(data: &[u8]) -> String {
+    /// SHA-256 hexadécimal (aussi utilisé par les tests de `recv` et `resume`).
+    pub(crate) fn sha(data: &[u8]) -> String {
         hex::encode(Sha256::digest(data))
     }
 

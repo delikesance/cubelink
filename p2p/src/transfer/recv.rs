@@ -240,13 +240,9 @@ mod tests {
     use crate::transfer::send::{
         AllowList, BlobTransport, Host, IrohTransport, MemNetwork, MemTransport, ServeIndex, ServeLimits,
     };
+    use crate::transfer::send::tests::sha;
     use core_lib::types::{Loader, LoaderSpec, Manifest};
-    use sha2::{Digest, Sha256};
     use std::sync::{Arc, Mutex};
-
-    fn sha(data: &[u8]) -> String {
-        hex::encode(Sha256::digest(data))
-    }
 
     struct Fixture {
         game: tempfile::TempDir,

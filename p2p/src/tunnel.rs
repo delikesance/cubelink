@@ -403,7 +403,7 @@ struct GuestShared {
 
 impl GuestShared {
     fn conn(&self) -> Connection {
-        self.conn.lock().unwrap_or_else(|p| p.into_inner()).clone()
+        crate::util::lock(&self.conn).clone()
     }
 }
 
@@ -476,7 +476,7 @@ impl GuestTunnel {
                 sh.state.send_replace(TunnelState::Reconnecting);
                 match redial(&ep, &h, &cfg).await {
                     Some(n) => {
-                        *sh.conn.lock().unwrap_or_else(|p| p.into_inner()) = n;
+                        *crate::util::lock(&sh.conn) = n;
                         sh.state.send_replace(TunnelState::Ok);
                     }
                     None => {

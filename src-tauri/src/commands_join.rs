@@ -13,7 +13,7 @@ use crate::error::{sanitize, user_msg};
 use crate::p2p_backend::{HostManifest, ProgressFn, TransferControl};
 use crate::state::{lock, AppState, JoinSession};
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, specta::Type)]
 pub struct JoinPlan {
     pub manifest: Manifest,
     /// Hash canonique du manifeste montré : à renvoyer tel quel à `join_start`, qui refuse un manifeste différent.
@@ -401,12 +401,16 @@ impl AppState {
     }
 }
 
+/// Plan du « Rejoindre » d'un ami : manifeste, fichiers à recevoir, fichiers à accepter et hash du manifeste montré.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn join_plan(state: State<'_, Arc<AppState>>, friend_public_key: String) -> Result<JoinPlan, String> {
     state.join_plan(&friend_public_key).await
 }
 
+/// Démarre le transfert du plan montré (`manifest_hash`) ; `accept_unknown` exigé s'il y a des fichiers à accepter. Progression par `transfer://progress`.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn join_start(
     state: State<'_, Arc<AppState>>,
     friend_public_key: String,
@@ -417,27 +421,37 @@ pub async fn join_start(
     state.inner().join_start(&friend_public_key, ram_mb, &manifest_hash, accept_unknown.unwrap_or(false)).await
 }
 
+/// Met le transfert en pause.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub fn join_pause(state: State<'_, Arc<AppState>>) -> Result<(), String> {
     state.join_pause()
 }
 
+/// Reprend le transfert.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub fn join_resume(state: State<'_, Arc<AppState>>) -> Result<(), String> {
     state.join_resume()
 }
 
+/// Annule le transfert.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub fn join_cancel(state: State<'_, Arc<AppState>>) -> Result<(), String> {
     state.join_cancel()
 }
 
+/// Ouvre un tunnel local vers le monde LAN de l'ami ; renvoie le port de `127.0.0.1`. Un seul tunnel à la fois.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn join_open_tunnel(state: State<'_, Arc<AppState>>, friend_public_key: String) -> Result<u16, String> {
     state.join_open_tunnel(&friend_public_key).await
 }
 
+/// Ouvre le tunnel, lance l'instance invitée avec connexion automatique, referme le tunnel à la fin du jeu. `instance_id` vide : l'instance du dernier transfert.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn join_play(state: State<'_, Arc<AppState>>, friend_public_key: String, instance_id: String) -> Result<(), String> {
     // Vide = l'instance invitée que le dernier transfert vient de préparer (elle n'apparaît pas dans `instances_list`).
     let id = if instance_id.is_empty() {
@@ -448,7 +462,9 @@ pub async fn join_play(state: State<'_, Arc<AppState>>, friend_public_key: Strin
     state.inner().join_play(&friend_public_key, &id).await
 }
 
+/// Ferme le tunnel invité.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn join_close_tunnel(state: State<'_, Arc<AppState>>) -> Result<(), String> {
     state.join_close_tunnel().await;
     Ok(())

@@ -43,22 +43,30 @@ impl AppState {
     }
 }
 
+/// Data URL d'un fichier d'illustration (`icon` ou une capture), réduit à `max_px` de côté (512 par défaut).
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub fn instances_art_image(state: State<'_, Arc<AppState>>, instance_id: String, file: String, max_px: Option<u32>) -> Result<String, String> {
     state.instances_art_image(&instance_id, &file, max_px)
 }
 
+/// Remplace l'icône ou la bannière (`role` : "icon" ou "banner") par une image choisie par le joueur.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub fn instances_art_set(state: State<'_, Arc<AppState>>, instance_id: String, path: String, role: String) -> Result<Instance, String> {
     state.instances_art_set(&instance_id, &path, &role)
 }
 
+/// Description longue du modpack, en HTML déjà nettoyé ; `None` sans projet d'origine.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn instances_description(state: State<'_, Arc<AppState>>, instance_id: String) -> Result<Option<String>, String> {
     state.instances_description(&instance_id).await
 }
 
+/// Cherche l'illustration du modpack et l'applique. `auto` : recherche silencieuse de l'accueil (nom identique seulement).
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn instances_art_lookup(state: State<'_, Arc<AppState>>, instance_id: String, auto: Option<bool>) -> Result<Instance, String> {
     state.instances_art_lookup(&instance_id, auto.unwrap_or(false)).await
 }

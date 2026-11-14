@@ -3,14 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Shell } from "../../app/shell";
 import { createFakeServices } from "../../services/fake";
 
-// La réponse de Rust (`stage_supported`) est simulée : vrai sous Windows, faux ailleurs.
-const platform = vi.hoisted(() => ({ supported: true }));
-vi.mock("../../app/stage", async (original) => ({
-  ...(await original<typeof import("../../app/stage")>()),
-  useStageSupported: () => platform.supported,
-}));
-
-beforeEach(() => { window.location.hash = "#/settings"; platform.supported = true; });
+// La réponse de Rust (`stage_supported`) vient du faux service : vrai sous Windows, faux ailleurs.
+beforeEach(() => { window.location.hash = "#/settings"; });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 async function openTab() {
@@ -22,7 +16,7 @@ async function openTab() {
 
 describe("Réglage « Jeu intégré »", () => {
   it("sous Windows : coché par défaut, phrase d'aide, enregistré sans écraser les autres réglages", async () => {
-    const svc = createFakeServices({ tickMs: 0 });
+    const svc = createFakeServices({ tickMs: 0, stageSupported: true });
     const set = vi.spyOn(svc, "settingsSet");
     render(<Shell services={svc} />);
     await openTab();
@@ -39,7 +33,7 @@ describe("Réglage « Jeu intégré »", () => {
   });
 
   it("jeu intégré décoché : le raccourci du panneau est grisé, avec la raison ; recoché, il redevient modifiable", async () => {
-    const svc = createFakeServices({ tickMs: 0 });
+    const svc = createFakeServices({ tickMs: 0, stageSupported: true });
     render(<Shell services={svc} />);
     await openTab();
     const input = screen.getByLabelText(/Raccourci du panneau/) as HTMLInputElement;
@@ -57,7 +51,7 @@ describe("Réglage « Jeu intégré »", () => {
   });
 
   it("ancien réglage sans le champ : affiché coché (activé par défaut)", async () => {
-    const svc = createFakeServices({ tickMs: 0 });
+    const svc = createFakeServices({ tickMs: 0, stageSupported: true });
     const full = await svc.settingsGet();
     const { embedded_game: _dropped, ...old } = full;
     vi.spyOn(svc, "settingsGet").mockResolvedValue(old as typeof full);
@@ -67,8 +61,7 @@ describe("Réglage « Jeu intégré »", () => {
   });
 
   it("ailleurs que sous Windows : le réglage n'est pas montré", async () => {
-    platform.supported = false;
-    render(<Shell services={createFakeServices({ tickMs: 0 })} />);
+    render(<Shell services={createFakeServices({ tickMs: 0, stageSupported: false })} />);
     await openTab();
     expect(screen.queryByLabelText(/Jeu intégré/)).toBeNull();
     expect(screen.queryByText(/Le jeu s'affiche dans la fenêtre de Cubelink/)).toBeNull();

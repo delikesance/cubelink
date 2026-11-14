@@ -98,7 +98,7 @@ fn log_message(line: &str) -> &str {
 }
 
 /// État du partage hôte (événement `host://state`, commande `host_state`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, specta::Type)]
 pub struct HostState {
     pub instance_id: String,
     pub sharing: bool,
@@ -259,17 +259,23 @@ impl Drop for HostAuto {
     }
 }
 
+/// Partage le monde LAN avec les amis (`world_port` 0 : fichiers seulement). Normalement automatique.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn host_start_sharing(state: State<'_, Arc<AppState>>, instance_id: String, world_port: u32) -> Result<(), String> {
     state.host_start_sharing(&instance_id, world_port).await
 }
 
+/// État du partage hôte, `None` si rien n'est partagé.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub fn host_state(state: State<'_, Arc<AppState>>) -> Result<Option<HostState>, String> {
     Ok(state.host_state())
 }
 
+/// Arrête le partage hôte.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub fn host_stop_sharing(state: State<'_, Arc<AppState>>) -> Result<(), String> {
     state.host_stop_sharing();
     Ok(())

@@ -18,7 +18,7 @@ const FIRST_CHECK_DELAY: Duration = Duration::from_secs(10);
 const CHECK_EVERY: Duration = Duration::from_secs(6 * 3600);
 const PROGRESS_EVERY: Duration = Duration::from_millis(250);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, specta::Type)]
 #[serde(rename_all = "snake_case")]
 pub enum UpdatePhase {
     Idle,
@@ -96,7 +96,7 @@ fn appimage_writable(appimage: &str) -> bool {
 }
 
 /// Contrat avec le front (`UpdateState` dans `src/services/types.ts`).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, specta::Type)]
 pub struct UpdateState {
     pub phase: UpdatePhase,
     pub current: String,
@@ -283,17 +283,23 @@ pub fn start_background_checks(app: &AppHandle, ctl: Arc<UpdateCtl>) {
     });
 }
 
+/// État de la mise à jour automatique du launcher.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub fn update_state(ctl: State<'_, Arc<UpdateCtl>>) -> UpdateState {
     ctl.snapshot()
 }
 
+/// Vérifie s'il existe une mise à jour ; si oui, le téléchargement démarre en arrière-plan.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn update_check(app: AppHandle, ctl: State<'_, Arc<UpdateCtl>>) -> Result<UpdateState, String> {
     Ok(check(&app, ctl.inner(), true).await)
 }
 
+/// Redémarre et installe la mise à jour téléchargée (refusé si une partie est en cours).
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn update_install(app: AppHandle, ctl: State<'_, Arc<UpdateCtl>>, st: State<'_, Arc<AppState>>) -> Result<(), String> {
     if lock(&st.game).is_some() {
         return Err("Une partie est en cours : ferme Minecraft avant d'installer la mise à jour.".into());

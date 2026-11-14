@@ -681,13 +681,17 @@ impl AppState {
     }
 }
 
+/// Instances installées.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub fn instances_list(state: State<'_, Arc<AppState>>) -> Result<Vec<Instance>, String> {
     // Les modpacks reçus d'un ami (instances d'invité) restent hors de la liste : ils ne sont lancés que via « Rejoindre ».
     Ok(state.instances_list().into_iter().filter(|i| !core_lib::guest::is_guest_instance(&state.instances, &i.id)).collect())
 }
 
+/// Crée une instance vide.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn instances_create(
     state: State<'_, Arc<AppState>>,
     name: String,
@@ -698,7 +702,9 @@ pub async fn instances_create(
     state.instances_create(name, minecraft, loader, ram_mb).await
 }
 
+/// Importe un .mrpack, un zip CurseForge ou un zip brut (les champs facultatifs ne servent qu'au zip brut). Avertissements par `import://warning`.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn instances_import_mrpack(
     state: State<'_, Arc<AppState>>,
     path: String,
@@ -710,12 +716,16 @@ pub async fn instances_import_mrpack(
     state.instances_import_mrpack(&path, name, minecraft, loader, ram_mb).await
 }
 
+/// Lance l'instance. Progression par `launch://state`, sortie du jeu par `launch://log`.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn instances_launch(state: State<'_, Arc<AppState>>, id: String) -> Result<(), String> {
     state.inner().instances_launch(&id).await
 }
 
+/// Versions de Minecraft disponibles.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn minecraft_versions(state: State<'_, Arc<AppState>>) -> Result<Vec<String>, String> {
     state.minecraft_versions().await
 }

@@ -2,24 +2,25 @@ import { act, cleanup, render, screen, fireEvent, waitFor } from "@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { StageNotice, STAGE_NOTICE_MS } from "./StageNotice";
 import { stageFallbackMessage } from "./stage";
+import { createFakeServices } from "../services/fake";
 
-// Écouteurs enregistrés par le composant, déclenchés à la main (aucun vrai Tauri).
-const bus = vi.hoisted(() => ({ handlers: new Map<string, Set<(e: { payload: unknown }) => void>>() }));
-vi.mock("@tauri-apps/api/event", () => ({
-  listen: async (name: string, cb: (e: { payload: unknown }) => void) => {
-    const set = bus.handlers.get(name) ?? new Set();
-    set.add(cb);
-    bus.handlers.set(name, set);
-    return () => { set.delete(cb); };
-  },
-}));
+// Faux service : les événements stage://fallback sont émis à la main ; on compte les abonnements actifs.
+let svc: ReturnType<typeof createFakeServices>;
+let active = 0;
+const listeners = () => active;
+const fallback = (payload: unknown) => act(() => { svc.emitStageFallback(payload); });
 
-const w = window as unknown as { __TAURI_INTERNALS__?: unknown };
-const listeners = () => bus.handlers.get("stage://fallback")?.size ?? 0;
-const fallback = (payload: unknown) => act(() => { bus.handlers.get("stage://fallback")?.forEach((cb) => cb({ payload })); });
-
-beforeEach(() => { bus.handlers.clear(); w.__TAURI_INTERNALS__ = {}; });
-afterEach(() => { cleanup(); vi.useRealTimers(); delete w.__TAURI_INTERNALS__; });
+beforeEach(() => {
+  svc = createFakeServices({ tickMs: 0 });
+  active = 0;
+  const subscribe = svc.onStageFallback;
+  svc.onStageFallback = (cb) => {
+    active += 1;
+    const off = subscribe(cb);
+    return () => { active -= 1; off(); };
+  };
+});
+afterEach(() => { cleanup(); vi.useRealTimers(); });
 
 describe("stageFallbackMessage", () => {
   it("phrase simple, sans la raison technique", () => {
@@ -37,13 +38,13 @@ describe("stageFallbackMessage", () => {
 
 describe("StageNotice : repli de la zone de jeu", () => {
   it("rien tant qu'aucun repli n'est annoncé", async () => {
-    render(<StageNotice />);
+    render(<StageNotice services={svc} />);
     await waitFor(() => expect(listeners()).toBe(1));
     expect(screen.queryByRole("status")).toBeNull();
   });
 
   it("affiche le message au repli, le bouton Fermer l'écarte", async () => {
-    render(<StageNotice />);
+    render(<StageNotice services={svc} />);
     await waitFor(() => expect(listeners()).toBe(1));
     fallback({ reason: "no_window", session_off: false });
     expect(screen.getByRole("status").textContent).toContain("Le jeu s'est ouvert dans sa propre fenêtre.");
@@ -53,7 +54,7 @@ describe("StageNotice : repli de la zone de jeu", () => {
   });
 
   it("le message simple disparaît tout seul, l'annonce « jusqu'au redémarrage » reste", async () => {
-    render(<StageNotice />);
+    render(<StageNotice services={svc} />);
     await waitFor(() => expect(listeners()).toBe(1));
     vi.useFakeTimers();
     fallback({ reason: "adoption_failed", session_off: false });
@@ -67,20 +68,16 @@ describe("StageNotice : repli de la zone de jeu", () => {
   });
 
   it("charge utile incomplète : message simple, pas d'erreur", async () => {
-    render(<StageNotice />);
+    render(<StageNotice services={svc} />);
     await waitFor(() => expect(listeners()).toBe(1));
     fallback(undefined);
     expect(screen.getByRole("status").textContent).toContain("Le jeu s'est ouvert dans sa propre fenêtre.");
   });
 
-  it("se désabonne au démontage ; hors Tauri n'écoute rien", async () => {
-    const { unmount } = render(<StageNotice />);
+  it("se désabonne au démontage", async () => {
+    const { unmount } = render(<StageNotice services={svc} />);
     await waitFor(() => expect(listeners()).toBe(1));
     unmount();
-    expect(listeners()).toBe(0);
-    delete w.__TAURI_INTERNALS__;
-    render(<StageNotice />);
-    await new Promise((r) => setTimeout(r, 20));
     expect(listeners()).toBe(0);
   });
 });

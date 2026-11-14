@@ -106,7 +106,7 @@ describe("Main", () => {
 
   it("plus de quatre parties : trois cartes et « +N autres parties » sélectionne l'onglet En partie", async () => {
     const now = Math.floor(Date.now() / 1000);
-    const inv = (k: number) => ({ id: `i${k}`, public_key: `k${k}`, name: `Ami${k}`, world_name: `Monde ${k}`, minecraft: "1.21.1", received_at: now - k, expires_at: now + 600 });
+    const inv = (k: number) => ({ id: `i${k}`, public_key: `k${k}`, name: `Ami${k}`, world_name: `Monde ${k}`, minecraft: "1.21.1", received_at: now - k, expires_at: now + 600, pack: null, world_icon: null });
     setup({ friendInvites: async () => [1, 2, 3, 4, 5, 6].map(inv) });
     const list = await screen.findByRole("list", { name: "Parties en cours" });
     await waitFor(() => expect(within(list).getAllByRole("button", { name: /^Rejoindre / }).length).toBe(3));

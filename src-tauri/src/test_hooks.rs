@@ -16,7 +16,7 @@ use crate::state::AppState;
 
 pub const TEST_MODE_VAR: &str = "CUBELINK_TEST_MODE";
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, specta::Type)]
 pub enum RelayMode {
     Disabled,
     Default,
@@ -261,7 +261,7 @@ pub fn validate_world_port(p: u32) -> Result<u16, String> {
     u16::try_from(p).ok().filter(|p| *p >= 1024).ok_or_else(|| "le port du monde doit être compris entre 1024 et 65535".to_string())
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, specta::Type)]
 pub struct TestStateInfo {
     pub test_mode: bool,
     pub data_dir: String,
@@ -309,6 +309,7 @@ impl AppState {
 
 /// Enregistrée dans le gestionnaire d'invocation uniquement si `CUBELINK_TEST_MODE=1`.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub fn test_state(state: State<'_, Arc<AppState>>) -> Result<TestStateInfo, String> {
     if !hooks().test_mode {
         return Err("commande indisponible hors mode test".into());
@@ -319,6 +320,7 @@ pub fn test_state(state: State<'_, Arc<AppState>>) -> Result<TestStateInfo, Stri
 /// Coupe de force la connexion iroh du tunnel invité (test de reconnexion) ; mode test uniquement,
 /// jamais enregistrée ni exposée en production. Renvoie faux s'il n'y a pas de tunnel ouvert.
 #[tauri::command]
+#[specta::specta]
 pub async fn test_cut_guest_connection(state: State<'_, Arc<AppState>>) -> Result<bool, String> {
     if !hooks().test_mode {
         return Err("commande indisponible hors mode test".into());

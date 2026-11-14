@@ -1,6 +1,7 @@
 import { cleanup, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { stageFullscreen, stageLayout, useStageLayout } from "./stage";
+import { stageFullscreen, stageLayout, useStageLayout, type StageLayout } from "./stage";
+import { createFakeServices } from "../services/fake";
 
 describe("stageFullscreen : plein écran du launcher pour le jeu", () => {
   const st = (attached: boolean, game: boolean) => ({ attached, game, panel: false });
@@ -52,11 +53,9 @@ describe("stageLayout : px CSS vers pixels physiques", () => {
 
 describe("useStageLayout : publication à Rust", () => {
   type Rect = { left: number; top: number; width: number; height: number };
-  type Internals = { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
-  const w = window as unknown as { __TAURI_INTERNALS__?: Internals };
-
-  // Le vrai `invoke` de @tauri-apps/api/core délègue à window.__TAURI_INTERNALS__.invoke : on le remplace ici.
-  const invoke = vi.fn<Internals["invoke"]>();
+  // Faux service avec zone de jeu ; `stageLayout` est espionné (c'est lui qui appelle la commande `stage_layout`).
+  let svc: ReturnType<typeof createFakeServices>;
+  const invoke = vi.fn<(l: StageLayout) => Promise<void>>();
   let rect: Rect;
   let observers: { cb: () => void; observe: ReturnType<typeof vi.fn>; disconnect: ReturnType<typeof vi.fn> }[];
   let media: { query: string; listeners: Set<() => void> }[];
@@ -67,7 +66,7 @@ describe("useStageLayout : publication à Rust", () => {
     return { current: el as HTMLElement | null };
   }
   const setDpr = (v: number) => Object.defineProperty(window, "devicePixelRatio", { value: v, configurable: true });
-  const calls = () => invoke.mock.calls.filter(([cmd]) => cmd === "stage_layout").map(([, args]) => args);
+  const calls = () => invoke.mock.calls.map(([l]) => l);
   const sent = (n: number) => vi.waitFor(() => expect(calls()).toHaveLength(n));
 
   beforeEach(() => {
@@ -93,19 +92,19 @@ describe("useStageLayout : publication à Rust", () => {
         removeEventListener: (_: string, fn: () => void) => { m.listeners.delete(fn); },
       };
     });
-    w.__TAURI_INTERNALS__ = { invoke };
+    svc = createFakeServices({ tickMs: 0, stageSupported: true });
+    svc.stageLayout = invoke;
   });
 
   afterEach(() => {
     cleanup();
-    delete w.__TAURI_INTERNALS__;
     document.documentElement.style.removeProperty("--panel-w");
     vi.unstubAllGlobals();
   });
 
   it("publie une fois au montage, avec les noms d'arguments attendus par Rust", async () => {
     const ref = slot();
-    renderHook(() => useStageLayout(ref));
+    renderHook(() => useStageLayout(svc, ref));
     await sent(1);
     expect(calls()[0]).toEqual({ x: 0, y: 36, w: 1100, h: 684, panel_w: 380 });
     expect(observers).toHaveLength(1);
@@ -114,7 +113,7 @@ describe("useStageLayout : publication à Rust", () => {
 
   it("ne republie pas une mise en page identique, republie quand le rectangle change", async () => {
     const ref = slot();
-    renderHook(() => useStageLayout(ref));
+    renderHook(() => useStageLayout(svc, ref));
     await sent(1);
     // Mêmes mesures : ni l'observateur ni « resize » ne déclenchent d'envoi.
     observers[0].cb();
@@ -131,7 +130,7 @@ describe("useStageLayout : publication à Rust", () => {
 
   it("changement d'échelle : republie en pixels physiques et réarme l'écoute", async () => {
     const ref = slot();
-    renderHook(() => useStageLayout(ref));
+    renderHook(() => useStageLayout(svc, ref));
     await sent(1);
     expect(media).toHaveLength(1);
     expect(media[0].query).toBe("(resolution: 1dppx)");
@@ -147,7 +146,7 @@ describe("useStageLayout : publication à Rust", () => {
   it("lit la largeur du panneau dans --panel-w", async () => {
     document.documentElement.style.setProperty("--panel-w", "420px");
     const ref = slot();
-    renderHook(() => useStageLayout(ref));
+    renderHook(() => useStageLayout(svc, ref));
     await sent(1);
     expect(calls()[0]).toMatchObject({ panel_w: 420 });
   });
@@ -155,7 +154,7 @@ describe("useStageLayout : publication à Rust", () => {
   it("échec de l'envoi : avalé, puis retenté au changement suivant", async () => {
     invoke.mockRejectedValueOnce(new Error("commande absente"));
     const ref = slot();
-    renderHook(() => useStageLayout(ref));
+    renderHook(() => useStageLayout(svc, ref));
     await sent(1);
     await vi.waitFor(() => { window.dispatchEvent(new Event("resize")); expect(calls()).toHaveLength(2); });
     expect(calls()[1]).toEqual(calls()[0]);
@@ -163,7 +162,7 @@ describe("useStageLayout : publication à Rust", () => {
 
   it("démontage : plus d'écoute ni d'envoi", async () => {
     const ref = slot();
-    const { unmount } = renderHook(() => useStageLayout(ref));
+    const { unmount } = renderHook(() => useStageLayout(svc, ref));
     await sent(1);
     unmount();
     expect(observers[0].disconnect).toHaveBeenCalled();
@@ -171,18 +170,17 @@ describe("useStageLayout : publication à Rust", () => {
     rect = { left: 0, top: 36, width: 640, height: 400 };
     window.dispatchEvent(new Event("resize"));
     observers[0].cb();
-    await import("@tauri-apps/api/core");
     await Promise.resolve();
     expect(calls()).toHaveLength(1);
   });
 
-  it("hors Tauri : ne mesure rien et n'envoie rien", async () => {
-    delete w.__TAURI_INTERNALS__;
+  it("sans zone de jeu (navigateur, système non pris en charge) : ne mesure rien et n'envoie rien", async () => {
+    svc = createFakeServices({ tickMs: 0, stageSupported: false });
+    svc.stageLayout = invoke;
     const ref = slot();
-    renderHook(() => useStageLayout(ref));
+    renderHook(() => useStageLayout(svc, ref));
     window.dispatchEvent(new Event("resize"));
-    await import("@tauri-apps/api/core");
-    await Promise.resolve();
+    await new Promise((r) => setTimeout(r, 20));
     expect(invoke).not.toHaveBeenCalled();
     expect(observers).toHaveLength(0);
     expect(media).toHaveLength(0);

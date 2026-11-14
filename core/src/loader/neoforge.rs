@@ -274,7 +274,7 @@ fn open_checked(path: &Path) -> Result<zip::ZipArchive<std::fs::File>> {
     for i in 0..ar.len() {
         let entry = ar.by_index(i).map_err(|e| Error::Invalid(format!("installeur corrompu : {e}")))?;
         if entry.enclosed_name().is_none() {
-            return Err(Error::Invalid(format!("installeur : entrée dangereuse « {} »", entry.name())));
+            return Err(Error::Invalid(format!("installeur : entrée dangereuse « {} »", String::from_utf8_lossy(entry.name_raw()))));
         }
     }
     Ok(ar)

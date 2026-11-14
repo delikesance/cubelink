@@ -90,7 +90,10 @@ fn extract_with_limits(
             let mut entry = zip
                 .by_index(i)
                 .map_err(|e| invalid(format!("archive {} : {e}", lib.name)))?;
-            let name = entry.name().to_string();
+            let name = entry
+                .name()
+                .map_err(|e| invalid(format!("archive {} : nom d'entrée illisible : {e}", lib.name)))?
+                .into_owned();
             let rel = safe_relative(&name)?;
             if let Some(mode) = entry.unix_mode() {
                 if mode & 0o170000 == 0o120000 {

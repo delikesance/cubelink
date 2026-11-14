@@ -314,13 +314,13 @@ fn extract_zip(archive: &Path, dest: &Path, cancel: &AtomicBool) -> Result<PathB
         let mut entry = zip.by_index(i).map_err(|e| Error::Invalid(format!("zip invalide : {e}")))?;
         let rel = entry
             .enclosed_name()
-            .ok_or_else(|| Error::Invalid(format!("chemin dangereux dans l'archive : {}", entry.name())))?;
+            .ok_or_else(|| Error::Invalid(format!("chemin dangereux dans l'archive : {}", String::from_utf8_lossy(entry.name_raw()))))?;
         if rel.is_absolute() || rel.has_root() {
-            return Err(Error::Invalid(format!("chemin absolu dans l'archive : {}", entry.name())));
+            return Err(Error::Invalid(format!("chemin absolu dans l'archive : {}", String::from_utf8_lossy(entry.name_raw()))));
         }
         if let Some(mode) = entry.unix_mode() {
             if mode & 0o170000 == 0o120000 {
-                return Err(Error::Invalid(format!("lien symbolique refusé : {}", entry.name())));
+                return Err(Error::Invalid(format!("lien symbolique refusé : {}", String::from_utf8_lossy(entry.name_raw()))));
             }
         }
         let out = dest.join(&rel);

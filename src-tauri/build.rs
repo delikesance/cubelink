@@ -15,6 +15,14 @@ fn main() {
   </dependency>
 </assembly>
 "#;
+    // Ce manifeste n'est lié qu'aux exécutables (`rustc-link-arg-bins`), pas au binaire des tests unitaires de la lib.
+    // Celui-ci référence les commandes (test des liaisons générées), donc `TaskDialogIndirect` de Common Controls 6 :
+    // sans manifeste, Windows refuse de le charger (STATUS_ENTRYPOINT_NOT_FOUND). Chargement différé de comctl32 :
+    // la fonction n'est résolue qu'au premier appel, que les tests ne font jamais ; l'application, elle, a le manifeste.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") && std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        println!("cargo:rustc-link-arg=/DELAYLOAD:comctl32.dll");
+        println!("cargo:rustc-link-arg=delayimp.lib");
+    }
     let windows = tauri_build::WindowsAttributes::new().app_manifest(manifest);
     tauri_build::try_build(tauri_build::Attributes::new().windows_attributes(windows)).expect("tauri build");
 }

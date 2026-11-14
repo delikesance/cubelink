@@ -28,6 +28,8 @@ data-encoding = "2"
 hex = "0.4"
 futures-util = "0.3"
 tracing = "0.1"
+# Types et liaisons TypeScript générés depuis Rust (src/services/bindings.ts).
+specta = { version = "=2.0.0-rc.28", features = ["derive"] }
 # dev
 tempfile = "3"
 wiremock = "0.6"

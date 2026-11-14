@@ -20,7 +20,7 @@ const grid = () => screen.getByRole("group", { name: "Instances" });
 const AERO = "Create: Aeronautics";
 
 const withArt = (art: Partial<NonNullable<Instance["art"]>>): Instance => ({
-  id: "inst-aeronautics", name: AERO, minecraft: "1.21.1", loader: { loader: "neoforge", version: "21.1.77" }, ram_mb: 6144, mod_count: 94,
+  id: "inst-aeronautics", name: AERO, minecraft: "1.21.1", loader: { loader: "neoforge", version: "21.1.77" }, ram_mb: 6144, mod_count: 94, java_path: null, jvm_args: "",
   art: { source: "modrinth", project_id: "p", title: "Pack", author: "Zed", summary: "Résumé trouvé", color: "#27ae60", icon: null, screenshots: [], page_url: null, ...art },
 });
 

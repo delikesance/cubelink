@@ -84,7 +84,7 @@ pub struct HostManifest {
 }
 
 /// Résultat du test « Ta connexion avec tes amis » (Paramètres).
-#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize, specta::Type)]
 pub struct NetTest {
     /// Connecté à un relais (secours quand la connexion directe échoue).
     pub relay_connected: bool,

@@ -155,7 +155,7 @@ describe("Page modpack : menu ⋯", () => {
 
   it("Définir l'icône : pickFiles puis instancesArtSet icon ; annulation sans appel", async () => {
     const withArt = (): Instance => ({
-      id: "inst-aeronautics", name: AERO, minecraft: "1.21.1", loader: { loader: "neoforge", version: "21.1.1" }, ram_mb: 8192, mod_count: 94,
+      id: "inst-aeronautics", name: AERO, minecraft: "1.21.1", loader: { loader: "neoforge", version: "21.1.1" }, ram_mb: 8192, mod_count: 94, java_path: null, jvm_args: "",
       art: { source: "custom", project_id: "p", title: "t", author: "a", summary: "", color: null, icon: "icon.png", screenshots: [], page_url: null },
     });
     const set = vi.fn(async () => withArt());
@@ -276,7 +276,7 @@ describe("Page modpack : onglet Mods", () => {
 describe("Page modpack : onglet Réglages", () => {
   it("enregistre nom, RAM, Java et JVM via instancesUpdate et reste sur la page", async () => {
     const update = vi.fn(async (id: string, patch: object) => ({
-      id, name: "Renommé", minecraft: "1.21.1", loader: { loader: "neoforge" as const, version: "1" }, ram_mb: 8192, mod_count: 94, ...patch,
+      id, name: "Renommé", minecraft: "1.21.1", loader: { loader: "neoforge" as const, version: "1" }, ram_mb: 8192, mod_count: 94, java_path: null, jvm_args: "", art: null, ...patch,
     }));
     setup({ instancesUpdate: update });
     await ready();

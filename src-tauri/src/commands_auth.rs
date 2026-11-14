@@ -16,7 +16,7 @@ use tauri::State;
 use crate::error::user_msg;
 use crate::state::{lock, now_secs, AppState};
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, specta::Type)]
 pub struct DeviceCodeInfo {
     pub user_code: String,
     pub verification_uri: String,
@@ -341,12 +341,16 @@ impl AppState {
     }
 }
 
+/// Profil du compte actif, `None` sans session.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn auth_status(state: State<'_, Arc<AppState>>) -> Result<Option<Profile>, String> {
     Ok(state.auth_status_refresh().await)
 }
 
+/// Comptes enregistrés et identifiant du compte actif.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub fn auth_accounts(state: State<'_, Arc<AppState>>) -> Result<AccountsState, String> {
     Ok(state.auth_accounts())
 }
@@ -354,6 +358,7 @@ pub fn auth_accounts(state: State<'_, Arc<AppState>>) -> Result<AccountsState, S
 /// Tête du skin (PNG 8×8 en data URL) d'un compte Microsoft, `None` si elle est indisponible (hors ligne, pas de
 /// skin). Mise en cache pour la session : un seul appel réseau par compte.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn auth_skin_head(uuid: String) -> Result<Option<String>, String> {
     use base64::Engine;
     use std::collections::HashMap;
@@ -376,6 +381,7 @@ pub async fn auth_skin_head(uuid: String) -> Result<Option<String>, String> {
 /// Tête du skin (data URL PNG 8×8) du joueur au pseudo `name`, pour la liste d'amis. `None` si le pseudo est inconnu
 /// de Mojang (compte hors ligne) ou le réseau indisponible. Mise en cache pour la session.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn skin_head_by_name(name: String) -> Result<Option<String>, String> {
     use base64::Engine;
     use std::collections::HashMap;
@@ -397,32 +403,44 @@ pub async fn skin_head_by_name(name: String) -> Result<Option<String>, String> {
     Ok(head)
 }
 
+/// Rend le compte actif et renvoie son profil.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub fn auth_switch(state: State<'_, Arc<AppState>>, id: String) -> Result<Profile, String> {
     state.auth_switch(&id)
 }
 
+/// Retire un compte enregistré.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub fn auth_remove(state: State<'_, Arc<AppState>>, id: String) -> Result<(), String> {
     state.auth_remove(&id)
 }
 
+/// Démarre la connexion Microsoft (code d'appareil à saisir sur la page de vérification).
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn auth_begin_login(state: State<'_, Arc<AppState>>) -> Result<DeviceCodeInfo, String> {
     state.auth_begin_login().await
 }
 
+/// Attend la validation du code d'appareil et renvoie le profil connecté.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn auth_poll_login(state: State<'_, Arc<AppState>>) -> Result<Profile, String> {
     state.auth_poll_login().await
 }
 
+/// Déconnecte le compte actif.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub fn auth_logout(state: State<'_, Arc<AppState>>) -> Result<(), String> {
     state.auth_logout()
 }
 
+/// Crée ou reprend un compte hors ligne au pseudo donné.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub fn auth_offline_login(state: State<'_, Arc<AppState>>, name: String) -> Result<Profile, String> {
     state.auth_offline_login(&name)
 }

@@ -35,6 +35,9 @@ anyhow.workspace = true
 dotenvy = "0.15"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-notification = "2"
+specta.workspace = true
+tauri-specta = { version = "=2.0.0-rc.29", features = ["derive", "typescript"] }
+specta-typescript = "=0.0.15"
 
 [target.'cfg(any(windows, target_os = "linux"))'.dependencies]
 cubelink-host = { path = "../host" }

@@ -63,7 +63,7 @@ fn fix_plans() -> &'static FixPlans {
     PLANS.get_or_init(Default::default)
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, specta::Type)]
 pub struct BrowseInstallResult {
     pub instance: Instance,
     /// Noms des fichiers posés dans l'instance (modpack : vide).
@@ -301,12 +301,16 @@ fn uuid_like() -> String {
     format!("{n:x}-{}", std::process::id())
 }
 
+/// Recherche dans le catalogue (Modrinth ou CurseForge).
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn browse_search(state: State<'_, Arc<AppState>>, query: BrowseQuery) -> Result<BrowsePage, String> {
     state.browse_search(query).await
 }
 
+/// Versions d'un projet du catalogue, filtrées par version de Minecraft et loader.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn browse_versions(
     state: State<'_, Arc<AppState>>,
     source: String,
@@ -318,57 +322,79 @@ pub async fn browse_versions(
     state.browse_versions(&source, &id, &kind, minecraft.as_deref(), loader.as_deref()).await
 }
 
+/// Installe un projet du catalogue (nouvelle instance pour un modpack). Progression par `browse://progress`.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn browse_install(state: State<'_, Arc<AppState>>, input: BrowseInstallInput) -> Result<BrowseInstallResult, String> {
     state.browse_install(input).await
 }
 
+/// Mods d'une instance (activés ou non).
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn mods_list(state: State<'_, Arc<AppState>>, instance_id: String) -> Result<Vec<ModEntry>, String> {
     state.mods_list(&instance_id).await
 }
 
+/// Icône d'un mod lue dans son jar (data URL 64 px), `None` s'il n'en a pas.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn mods_icon(state: State<'_, Arc<AppState>>, instance_id: String, file: String) -> Result<Option<String>, String> {
     state.mods_icon(&instance_id, &file).await
 }
 
+/// Vérifie la compatibilité des mods installés (dépendances, incompatibilités, version, loader, doublons).
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn mods_check(state: State<'_, Arc<AppState>>, instance_id: String) -> Result<ModCheck, String> {
     state.mods_check(&instance_id).await
 }
 
+/// Compatibilité d'un mod du catalogue avec une instance (mods seulement ; autres types : résultat vide).
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn browse_check(state: State<'_, Arc<AppState>>, source: String, id: String, kind: String, instance_id: String, version_id: Option<String>) -> Result<ContentCheck, String> {
     state.browse_check(&source, &id, &kind, &instance_id, version_id.as_deref()).await
 }
 
+/// Calcule les corrections possibles des problèmes de mods, sans rien modifier.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn mods_fix_plan(state: State<'_, Arc<AppState>>, instance_id: String) -> Result<FixPlan, String> {
     state.mods_fix_plan(&instance_id).await
 }
 
+/// Applique les actions choisies du plan ; les fichiers remplacés sont sauvegardés (annulable). Progression par `mods-fix://progress`.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn mods_fix_apply(state: State<'_, Arc<AppState>>, instance_id: String, plan_id: String, action_ids: Vec<String>) -> Result<FixResult, String> {
     state.mods_fix_apply(&instance_id, &plan_id, action_ids).await
 }
 
+/// Annule une correction à partir de sa sauvegarde.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn mods_fix_undo(state: State<'_, Arc<AppState>>, instance_id: String, backup_id: String) -> Result<ModCheck, String> {
     state.mods_fix_undo(&instance_id, &backup_id).await
 }
 
+/// Active ou désactive un mod (`.disabled`).
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn mods_toggle(state: State<'_, Arc<AppState>>, instance_id: String, file: String, enabled: bool) -> Result<(), String> {
     state.mods_toggle(&instance_id, &file, enabled).await
 }
 
+/// Supprime un mod de l'instance.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn mods_remove(state: State<'_, Arc<AppState>>, instance_id: String, file: String) -> Result<(), String> {
     state.mods_remove(&instance_id, &file).await
 }
 
+/// Ajoute un jar à l'instance (chemin absolu).
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn mods_add(state: State<'_, Arc<AppState>>, instance_id: String, path: String) -> Result<ModEntry, String> {
     state.mods_add(&instance_id, &path).await
 }

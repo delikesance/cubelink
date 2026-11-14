@@ -19,7 +19,7 @@ export function initials(name: string): string {
   return (words[0] ?? "?").slice(0, 1).toUpperCase();
 }
 
-export const sourceLabel = (s: "curseforge" | "modrinth" | "custom") =>
+export const sourceLabel = (s: string) =>
   s === "curseforge" ? "CurseForge" : s === "modrinth" ? "Modrinth" : null;
 
 /** Icône du modpack, sinon initiales sur fond de la couleur de l'instance. */

@@ -79,7 +79,7 @@ export async function setupHostAndGuest(world: Pick<World, 'appA' | 'appB' | 'se
   for (const app of [appA, appB]) {
     await waitForRoute(app.page, 'login');
     const s = await invoke<Record<string, unknown>>(app.page, 'settings_get');
-    await invoke(app.page, 'settings_set', { ...s, close_on_launch: false });
+    await invoke(app.page, 'settings_set', { settings: { ...s, close_on_launch: false } });
     if (Object.keys(extraEnv).length) browsers.push(await restartApp(app, world, 'disabled', extraEnv));
   }
   await waitForRoute(appA.page, 'login'); await waitForRoute(appB.page, 'login');

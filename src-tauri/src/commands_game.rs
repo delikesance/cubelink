@@ -388,22 +388,30 @@ impl AppState {
     }
 }
 
+/// Instance du jeu en cours (en préparation ou lancé), `None` sinon.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub fn game_current(state: State<'_, Arc<AppState>>) -> Option<String> {
     state.game_current()
 }
 
+/// Ferme le jeu en cours sans rien relancer (dans la zone intégrée : fermeture propre, le monde est enregistré).
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn game_close(state: State<'_, Arc<AppState>>) -> Result<(), String> {
     state.inner().game_close().await
 }
 
+/// Ferme le jeu en cours puis lance l'instance.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn game_switch(state: State<'_, Arc<AppState>>, instance_id: String) -> Result<(), String> {
     state.inner().game_switch(&instance_id).await
 }
 
+/// Ferme le jeu si besoin puis rejoint l'ami (plan, transfert, jeu). Échoue s'il y a des fichiers à accepter.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn game_join_friend(
     state: State<'_, Arc<AppState>>,
     public_key: String,
@@ -412,17 +420,23 @@ pub async fn game_join_friend(
     state.inner().game_join_friend(&public_key, instance_id.as_deref()).await
 }
 
+/// Arrête le jeu de l'instance.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn instances_kill(state: State<'_, Arc<AppState>>, id: String) -> Result<(), String> {
     state.instances_kill(&id).await
 }
 
+/// Supprime l'instance (refusé si elle est en lancement ou en jeu).
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub fn instances_delete(state: State<'_, Arc<AppState>>, id: String) -> Result<(), String> {
     state.instances_delete(&id)
 }
 
+/// Modifie les champs donnés d'une instance (les autres restent).
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub fn instances_update(
     state: State<'_, Arc<AppState>>,
     id: String,
@@ -434,12 +448,16 @@ pub fn instances_update(
     state.instances_update(&id, name, ram_mb, java_path, jvm_args)
 }
 
+/// Ouvre le dossier de l'instance dans le gestionnaire de fichiers.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub fn instances_open_folder(state: State<'_, Arc<AppState>>, id: String) -> Result<(), String> {
     state.instances_open_folder(&id)
 }
 
+/// Fin de `latest.log` (ou `latest.log.old`) de l'instance.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub fn instances_logs(state: State<'_, Arc<AppState>>, id: String) -> Result<String, String> {
     state.instances_logs(&id)
 }

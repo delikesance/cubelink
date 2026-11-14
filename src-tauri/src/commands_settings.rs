@@ -73,46 +73,59 @@ impl AppState {
     }
 }
 
+/// Réglages.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub fn settings_get(state: State<'_, Arc<AppState>>) -> Result<Settings, String> {
     Ok(state.settings_get())
 }
 
-/// Le front envoie les champs de `Settings` à plat.
+/// Entrée de `settings_set` : les champs de `Settings` ; les plus récents sont facultatifs (absents : valeur actuelle gardée).
+#[derive(Debug, Clone, serde::Deserialize, specta::Type)]
+pub struct SettingsInput {
+    pub language: String,
+    pub default_ram_mb: u32,
+    #[serde(default)]
+    pub java_path: Option<String>,
+    pub trust_default: TrustLevel,
+    pub allow_relay: bool,
+    pub close_on_launch: bool,
+    #[serde(default)]
+    pub relay_only: Option<bool>,
+    #[serde(default)]
+    pub share_mods: Option<bool>,
+    #[serde(default)]
+    pub discovery: Option<bool>,
+    #[serde(default)]
+    pub lan_auto: Option<bool>,
+    #[serde(default)]
+    pub overlay_enabled: Option<bool>,
+    #[serde(default)]
+    pub overlay_hotkey: Option<String>,
+    #[serde(default)]
+    pub embedded_game: Option<bool>,
+}
+
+/// Le front envoie les réglages dans `{ settings }`.
 #[tauri::command(rename_all = "snake_case")]
-#[allow(clippy::too_many_arguments)]
-pub fn settings_set(
-    state: State<'_, Arc<AppState>>,
-    language: String,
-    default_ram_mb: u32,
-    java_path: Option<String>,
-    trust_default: TrustLevel,
-    allow_relay: bool,
-    close_on_launch: bool,
-    relay_only: Option<bool>,
-    share_mods: Option<bool>,
-    discovery: Option<bool>,
-    lan_auto: Option<bool>,
-    overlay_enabled: Option<bool>,
-    overlay_hotkey: Option<String>,
-    embedded_game: Option<bool>,
-    app: tauri::AppHandle,
-) -> Result<Settings, String> {
+#[specta::specta(rename_all = "snake_case")]
+pub fn settings_set(state: State<'_, Arc<AppState>>, settings: SettingsInput, app: tauri::AppHandle) -> Result<Settings, String> {
+    let i = settings;
     let cur = state.settings_get();
     let saved = state.settings_set(Settings {
-        language,
-        default_ram_mb,
-        java_path: java_path.filter(|j| !j.trim().is_empty()),
-        trust_default,
-        allow_relay,
-        close_on_launch,
-        relay_only: relay_only.unwrap_or(cur.relay_only),
-        share_mods: share_mods.unwrap_or(cur.share_mods),
-        discovery: discovery.unwrap_or(cur.discovery),
-        lan_auto: lan_auto.unwrap_or(cur.lan_auto),
-        overlay_enabled: overlay_enabled.unwrap_or(cur.overlay_enabled),
-        overlay_hotkey: overlay_hotkey.map(|h| h.trim().to_string()).unwrap_or(cur.overlay_hotkey),
-        embedded_game: embedded_game.unwrap_or(cur.embedded_game),
+        language: i.language,
+        default_ram_mb: i.default_ram_mb,
+        java_path: i.java_path.filter(|j| !j.trim().is_empty()),
+        trust_default: i.trust_default,
+        allow_relay: i.allow_relay,
+        close_on_launch: i.close_on_launch,
+        relay_only: i.relay_only.unwrap_or(cur.relay_only),
+        share_mods: i.share_mods.unwrap_or(cur.share_mods),
+        discovery: i.discovery.unwrap_or(cur.discovery),
+        lan_auto: i.lan_auto.unwrap_or(cur.lan_auto),
+        overlay_enabled: i.overlay_enabled.unwrap_or(cur.overlay_enabled),
+        overlay_hotkey: i.overlay_hotkey.map(|h| h.trim().to_string()).unwrap_or(cur.overlay_hotkey),
+        embedded_game: i.embedded_game.unwrap_or(cur.embedded_game),
     })?;
     crate::hotkey::apply_settings(&app);
     Ok(saved)

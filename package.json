@@ -8,6 +8,7 @@
     "build": "tsc --noEmit && vite build",
     "lint": "tsc --noEmit",
     "test:front": "vitest run --passWithNoTests",
+    "bindings": "CUBELINK_WRITE_BINDINGS=1 cargo test -p cubelink --lib bindings::",
     "test:rust": "cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings",
     "test": "npm run test:rust && npm run lint && npm run test:front",
     "e2e": "playwright test --config e2e/playwright.config.ts"

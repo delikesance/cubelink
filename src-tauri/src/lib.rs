@@ -1,6 +1,7 @@
 //! Coque Tauri. Propriété : tâche U13 (commandes), selon docs/contrats.md.
 
 pub mod authz;
+pub mod bindings;
 pub mod commands_art;
 pub mod commands_auth;
 pub mod commands_browse;
@@ -30,9 +31,10 @@ use std::sync::Arc;
 use tauri::{Emitter, Manager};
 
 /// Commandes enregistrées dans les deux modes ; `$extra` ajoute celles propres à un mode.
-macro_rules! handlers {
-    ($($extra:path),* $(,)?) => {
-        tauri::generate_handler![
+/// Source unique : le gestionnaire d'invocation et les liaisons TypeScript (`src/services/bindings.ts`) en sortent.
+macro_rules! commands {
+    ($($extra:tt)*) => {
+        tauri_specta::collect_commands![
             commands_auth::auth_status,
             commands_auth::auth_accounts,
             commands_auth::auth_skin_head,
@@ -104,9 +106,23 @@ macro_rules! handlers {
             stage::stage_panel,
             stage::stage_layout,
             stage::stage_supported,
-            $($extra),*
+            $($extra)*
         ]
     };
+}
+
+/// Commandes du mode normal : ce sont elles que décrivent `src/services/bindings.ts` et `docs/contrats.md`.
+pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
+    tauri_specta::Builder::<tauri::Wry>::new().commands(commands![
+        commands_update::update_state,
+        commands_update::update_check,
+        commands_update::update_install,
+    ])
+}
+
+/// Commandes du mode test (`CUBELINK_TEST_MODE=1`) : sans la mise à jour, avec les crochets de test. Jamais exportées.
+fn test_builder() -> tauri_specta::Builder<tauri::Wry> {
+    tauri_specta::Builder::<tauri::Wry>::new().commands(commands![test_hooks::test_state, test_hooks::test_cut_guest_connection])
 }
 
 /// `test_state` n'existe dans le gestionnaire d'invocation qu'en mode test.
@@ -265,11 +281,7 @@ pub fn run() {
             });
             Ok(())
         })
-        .invoke_handler(select_handler(
-            test_mode,
-            handlers![commands_update::update_state, commands_update::update_check, commands_update::update_install],
-            handlers![test_hooks::test_state, test_hooks::test_cut_guest_connection],
-        ))
+        .invoke_handler(select_handler(test_mode, specta_builder().invoke_handler(), test_builder().invoke_handler()))
         .run(tauri::generate_context!())
         .expect("erreur au lancement de Cubelink");
 }

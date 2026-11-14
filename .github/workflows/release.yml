@@ -1,5 +1,5 @@
 # Build + release automatiques : chaque merge dans `main` produit un nouveau tag `vMAJEUR.MINEUR.<run>` et une release GitHub
-# avec l'installeur Windows (.msi), l'AppImage Linux et latest.json (lu par l'updater du launcher).
+# avec l'installeur Windows (.msi), l'AppImage Linux, le paquet .rpm (Fedora) et latest.json (lu par l'updater du launcher).
 # Flux de travail : les PR sont fusionnées dans `canary`, puis `canary` est fusionnée dans `main` (voir docs/release.md).
 # `workflow_dispatch` (depuis n'importe quelle branche) construit tout SANS publier, pour vérifier les builds.
 # Windows : .msi (updater) + paquet .msix à téléverser dans le Microsoft Store (qui le signe).
@@ -142,13 +142,16 @@ jobs:
         run: node scripts/release-version.mjs "$GITHUB_RUN_NUMBER" --write
       - name: Agent LAN (jar Java)
         run: JAVA_HOME="$JAVA_HOME_17_X64" bash core/resources/lan-agent/build.sh
-      - name: AppImage
-        run: npx tauri build --bundles appimage
+      - name: AppImage + RPM
+        run: npx tauri build --bundles appimage,rpm
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           CUBELINK_CF_API_KEY: ${{ secrets.CUBELINK_CF_API_KEY }}
           CUBELINK_MS_CLIENT_ID: ${{ secrets.CUBELINK_MS_CLIENT_ID }}
+      # Le .rpm s'installe avec dnf sur un vrai Fedora et le launcher démarre.
+      - name: RPM sur Fedora (dnf install + démarrage)
+        run: bash scripts/rpm-smoke.sh target/release/bundle/rpm fedora:latest
       # libgcrypt est embarquée mais linuxdeploy exclut libgpg-error, dont elle dépend : sur une distribution qui
       # ne l'a pas, le launcher ne démarre pas (« libgpg-error.so.0: cannot open shared object file »).
       # tauri.linux.conf.json l'ajoute ; on vérifie que toute bibliothèque embarquée trouve ses dépendances.
@@ -164,6 +167,10 @@ jobs:
           path: |
             target/release/bundle/appimage/*.AppImage
             target/release/bundle/appimage/*.AppImage.sig
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: linux-rpm
+          path: target/release/bundle/rpm/*.rpm
 
   release:
     needs: [version, build-windows, build-linux]
@@ -198,6 +205,7 @@ jobs:
             artifacts/windows-msi/*.msi artifacts/windows-msi/*.msi.sig \
             artifacts/windows-msix/*.msix \
             artifacts/linux-appimage/*.AppImage artifacts/linux-appimage/*.AppImage.sig \
+            artifacts/linux-rpm/*.rpm \
             artifacts/latest.json
       - name: Paquet Nix (artefact de release, non bloquant)
         # Aucun push dans le depot : package.nix mis a jour est seulement joint a la release.

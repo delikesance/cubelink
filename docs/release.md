@@ -2,8 +2,8 @@
 
 ## Flux de travail
 1. Chaque sujet a sa branche, partie de **`canary`**, et une pull request vers `canary`. Le workflow `ci` tourne sur chaque PR et chaque push vers `canary` et `main` : tsc et vitest, agent LAN sous Java 8 et 17, clippy et tests Rust sous Windows et sous Linux (scénarios X11 sous Xvfb), E2E Playwright simulés sous Windows, `cargo deny` (licences, sources) et les alertes RustSec.
-2. Après une fusion dans `canary`, si les vérifications de `ci` passent, `ci` appelle `canary.yml`, qui publie une **pré-version** Linux (`v<x.y.z+1>-canary.<run>`, AppImage seule, jamais « Latest », sans `latest.json` : les launchers installés ne la reçoivent pas). Les alertes RustSec et, pour l'instant, les E2E Windows (19 scénarios à remettre à jour) ne bloquent pas cette publication.
-3. Pour une release, le mainteneur fusionne `canary` dans **`main`** par une pull request. Le merge dans `main` déclenche `release` : nouveau tag **`vMAJEUR.MINEUR.<n° de run>`**, build du **.msi** (Windows) et de l'**AppImage** (Linux), signature des mises à jour, release GitHub avec `latest.json`.
+2. Après une fusion dans `canary`, si les vérifications de `ci` passent, `ci` appelle `canary.yml`, qui publie une **pré-version** Linux (`v<x.y.z+1>-canary.<run>`, AppImage et paquet `.rpm` pour Fedora, jamais « Latest », sans `latest.json` : les launchers installés ne la reçoivent pas). Les alertes RustSec et, pour l'instant, les E2E Windows (19 scénarios à remettre à jour) ne bloquent pas cette publication.
+3. Pour une release, le mainteneur fusionne `canary` dans **`main`** par une pull request. Le merge dans `main` déclenche `release` : nouveau tag **`vMAJEUR.MINEUR.<n° de run>`**, build du **.msi** (Windows), de l'**AppImage** et du **.rpm** (Linux), signature des mises à jour, release GitHub avec `latest.json`.
 
 Majeur/mineur : champ `version` de `src-tauri/tauri.conf.json` (changer à la main pour 0.2, 1.0…). Le patch est le numéro de run CI,
 écrit dans `tauri.conf.json` seulement pendant le build (rien n'est commité). Lancement manuel sans publier : Actions → release → Run workflow (`publish` décoché).
@@ -38,5 +38,6 @@ Les secrets ne sont donnés qu'aux étapes `tauri build` (jamais dans l'environn
 
 ## Limites connues
 - MSI : installation « par machine » (demande les droits administrateur) ; l'ancien NSIS s'installait par utilisateur.
+- Linux (.rpm) : construit en CI avec l'AppImage, puis installé par `dnf` dans un conteneur Fedora où le launcher doit tenir 20 s sous Xvfb (`scripts/rpm-smoke.sh`). Installation : `sudo dnf install ./Cubelink-<version>-1.x86_64.rpm`. Le launcher installé ainsi ne se met pas à jour seul : il signale la nouvelle version, on réinstalle le .rpm suivant.
 - Linux : l'AppImage est construite en CI ; non testée sur une vraie machine Linux (l'agent LAN, le lancement du jeu et la mise à jour y sont non éprouvés).
 - Le .msi des releases GitHub n'est pas signé Authenticode : SmartScreen avertit. La voie sans alerte est le paquet MSIX du Store, que Microsoft signe ; il se téléverse à la main dans le Partner Center (artefact `windows-msix`). Installé via le Store, le launcher coupe son updater interne.

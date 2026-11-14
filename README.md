@@ -49,7 +49,7 @@ Pas de compte Cubelink, pas de serveur à louer, pas de téléchargement manuel.
 | Plateforme | État | Comment |
 |---|---|---|
 | **Windows 10/11** | Plateforme principale | Paquet MSIX du **Microsoft Store** (signé par Microsoft, sans alerte SmartScreen), ou `.msi` sur les [releases](https://github.com/delikesance/cubelink/releases/latest) |
-| **Linux** | AppImage construite en CI, **pas encore éprouvée sur une vraie machine** | [Releases](https://github.com/delikesance/cubelink/releases/latest) — les retours sont très bienvenus |
+| **Linux** | AppImage et paquet .rpm (Fedora, `sudo dnf install ./Cubelink-*.rpm`) construits en CI, **pas encore éprouvés sur une vraie machine** | [Releases](https://github.com/delikesance/cubelink/releases/latest) — les retours sont très bienvenus |
 | **macOS** | Non pris en charge | — |
 
 Cubelink fonctionne **sous Windows et Linux seulement**. Sous Linux, la Scène passe par X11 : avec « Jeu intégré » actif, Cubelink s'ouvre en XWayland ; coupe ce réglage pour garder le Wayland natif (le jeu s'ouvre alors dans sa propre fenêtre).

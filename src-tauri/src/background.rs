@@ -5,6 +5,9 @@
 //! (`quit_requested` / `quit_game`). Fermer la fenêtre pendant qu'un jeu y est intégré l'arrête de la même façon (le
 //! masquer cacherait aussi le jeu), puis masque Cubelink au lieu de le quitter.
 //!
+//! Exceptions, où fermer quitte comme avant : le mode test (les E2E ferment l'application par WM_CLOSE) et l'absence
+//! d'icône (Linux sans bibliothèque d'icône : la fenêtre masquée serait introuvable).
+//!
 //! Rien ici ne doit empêcher l'application de démarrer : une icône ou un démarrage automatique impossible est seulement
 //! noté dans la console.
 
@@ -31,6 +34,13 @@ const MENU_QUIT: &str = "cubelink-quit";
 
 /// Une sortie (ou un masquage après arrêt du jeu) est déjà en cours : un second clic ne relance rien.
 static CLOSING: AtomicBool = AtomicBool::new(false);
+/// « Quitter Cubelink » demandé pendant un masquage en cours : la sortie a lieu à la fin de celui-ci.
+static EXIT_PENDING: AtomicBool = AtomicBool::new(false);
+/// L'icône de notification existe. Sans elle, masquer la fenêtre la rendrait introuvable : fermer quitte alors.
+static TRAY_OK: AtomicBool = AtomicBool::new(false);
+
+/// Attente maximale de la fin d'un lancement abandonné (préparation, création du processus) avant de rouvrir les lancements.
+const SETTLE_MAX: Duration = Duration::from_secs(30 * 60);
 
 /// Pur : Cubelink a-t-il été lancé par le démarrage automatique ?
 pub fn started_in_background<I: IntoIterator<Item = S>, S: AsRef<str>>(args: I) -> bool {
@@ -71,29 +81,46 @@ fn hide_main(app: &AppHandle, st: &AppState) {
 }
 
 /// Fermeture de la fenêtre (croix, Alt+F4, barre de titre) : masque au lieu de quitter. Appelée sur `CloseRequested`,
-/// après `prevent_close`.
+/// après `prevent_close`. En mode test (les E2E ferment l'application par WM_CLOSE) ou sans icône : quitte, comme avant.
 pub fn on_close_requested(app: &AppHandle, st: &Arc<AppState>) {
+    if crate::test_hooks::hooks().test_mode || !TRAY_OK.load(Ordering::SeqCst) {
+        return quit_app(app, st);
+    }
     if CLOSING.load(Ordering::SeqCst) {
         return;
     }
-    if st.quit_requested() {
-        // Un jeu est intégré à la fenêtre (ou y démarre) : l'arrêter comme avant, puis masquer au lieu de quitter.
-        CLOSING.store(true, Ordering::SeqCst);
-        let (st, app) = (st.clone(), app.clone());
-        tauri::async_runtime::spawn(async move {
-            st.quit_game(Duration::from_secs(60)).await;
-            st.cancel_quit();
-            hide_main(&app, &st);
-            CLOSING.store(false, Ordering::SeqCst);
-        });
-    } else {
-        hide_main(app, st);
+    // Rien dans la zone intégrée (ni préparation, ni démarrage, ni jeu) : masquer suffit, sans toucher à l'état de sortie.
+    if !st.stage.staged() && !st.quit.spawning() {
+        return hide_main(app, st);
     }
+    // Un jeu est intégré à la fenêtre, y démarre ou s'y prépare : masquer cacherait aussi le jeu. On l'arrête comme une
+    // sortie (abandon du lancement, ou fermeture propre), puis on masque au lieu de quitter.
+    CLOSING.store(true, Ordering::SeqCst);
+    hide_main(app, st);
+    let (st, app) = (st.clone(), app.clone());
+    tauri::async_runtime::spawn(async move {
+        if st.quit_requested() {
+            st.quit_game(Duration::from_secs(60)).await;
+        }
+        // Le lancement abandonné doit être terminé (plus de création de processus, zone libérée) avant de rouvrir les
+        // lancements : sinon il passerait le contrôle de sortie et démarrerait un jeu dans une fenêtre masquée.
+        let deadline = tokio::time::Instant::now() + SETTLE_MAX;
+        while (st.quit.spawning() || st.stage.staged()) && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        st.cancel_quit();
+        CLOSING.store(false, Ordering::SeqCst);
+        if EXIT_PENDING.load(Ordering::SeqCst) {
+            app.exit(0);
+        }
+    });
 }
 
 /// Quitter vraiment (menu de l'icône) : arrête un jeu intégré comme avant, puis sort.
 pub fn quit_app(app: &AppHandle, st: &Arc<AppState>) {
     if CLOSING.swap(true, Ordering::SeqCst) {
+        // Un masquage arrête déjà le jeu : sortir à sa fin.
+        EXIT_PENDING.store(true, Ordering::SeqCst);
         return;
     }
     let (st, app) = (st.clone(), app.clone());
@@ -130,7 +157,19 @@ pub fn setup_tray(app: &AppHandle, st: Arc<AppState>) -> tauri::Result<()> {
         b = b.icon(icon.clone());
     }
     b.build(app)?;
+    TRAY_OK.store(true, Ordering::SeqCst);
     Ok(())
+}
+
+/// Comme [`setup_tray`], mais une bibliothèque d'icône absente (Linux sans `libayatana-appindicator`) fait paniquer le
+/// crate système au lieu de renvoyer une erreur : rattrapé ici, Cubelink démarre sans icône (fermer quitte alors).
+pub fn try_setup_tray(app: &AppHandle, st: Arc<AppState>) {
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| setup_tray(app, st)));
+    match res {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => eprintln!("[Cubelink] icone de la zone de notification : {e}"),
+        Err(_) => eprintln!("[Cubelink] icone de la zone de notification indisponible : fermer la fenetre quittera Cubelink"),
+    }
 }
 
 /// Aligne le démarrage avec la session sur le réglage `start_with_os`. Jamais en mode test (pas d'entrée laissée sur

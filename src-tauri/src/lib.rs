@@ -166,7 +166,12 @@ pub fn run() {
     // Une seule instance (hors mode test : les E2E lancent plusieurs applications en parallele, chacune son dossier) :
     // relancer Cubelink alors qu'il tourne en fond montre la fenetre existante au lieu d'ouvrir un second noeud P2P.
     if !test_mode {
-        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| background::show_main(app)));
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            // Un démarrage de session alors que Cubelink tourne déjà ne fait pas surgir la fenêtre.
+            if !background::started_in_background(&args) {
+                background::show_main(app);
+            }
+        }));
     }
     builder
         .plugin(tauri_plugin_autostart::init(
@@ -199,9 +204,7 @@ pub fn run() {
             }
             app.manage(st.clone());
             // Fond : icone de notification, demarrage avec la session, fenetre montree sauf lancement automatique.
-            if let Err(e) = background::setup_tray(app.handle(), st.clone()) {
-                eprintln!("[Cubelink] icone de la zone de notification : {e}");
-            }
+            background::try_setup_tray(app.handle(), st.clone());
             background::apply_autostart(app.handle());
             if !background::started_in_background(std::env::args()) {
                 background::show_main(app.handle());

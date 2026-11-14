@@ -33,6 +33,12 @@ wait_for "! kill -0 $P2 2>/dev/null" && ok "seconde instance sortie" || { ko "se
 wait_for mapped && ok "fenetre existante remontree" || ko "fenetre pas remontree"
 [ "$(pgrep -fc "^$BIN$")" = "1" ] && ok "un seul processus Cubelink" || ko "plusieurs processus: $(pgrep -fa cubelink)"
 
+# 3 bis. Masquer puis relancer en --background (demarrage de session) : la fenetre reste masquee
+wmctrl -c Cubelink; sleep 2
+$BIN --background > /tmp/app2b.log 2>&1 & P2B=$!
+wait_for "! kill -0 $P2B 2>/dev/null" && ok "seconde instance --background sortie" || { ko "seconde instance --background vivante"; kill $P2B; }
+sleep 1; mapped && ko "fenetre remontree par un demarrage de session" || ok "fenetre toujours masquee apres demarrage de session"
+
 # 4. Arret, reglage start_with_os=false, relance en --background
 kill $P1; wait $P1 2>/dev/null
 python3 - "$DATA/settings.json" <<'PY'
@@ -48,4 +54,11 @@ kill -0 $P3 2>/dev/null && ok "lancement --background vivant" || ko "lancement -
 mapped && ko "fenetre visible en --background" || ok "fenetre non montree en --background"
 ls $AUTO/*.desktop >/dev/null 2>&1 && ko "entree autostart encore la" || ok "entree autostart retiree (start_with_os=false)"
 kill $P3; wait $P3 2>/dev/null
+# 5. Mode test (E2E Windows : fermeture par WM_CLOSE) : fermer quitte, comme avant
+TD=$(mktemp -d)
+CUBELINK_TEST_MODE=1 CUBELINK_DATA_DIR=$TD $BIN > /tmp/app4.log 2>&1 & P4=$!
+wait_for mapped && ok "mode test : fenetre montree" || ko "mode test : fenetre non montree"
+wmctrl -c Cubelink
+wait_for "! kill -0 $P4 2>/dev/null" && ok "mode test : fermer quitte" || { ko "mode test : processus encore vivant"; kill $P4; }
+rm -rf "$TD"
 echo "ECHECS: $FAILS"; rm -rf "$HOME"

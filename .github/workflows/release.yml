@@ -149,6 +149,9 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           CUBELINK_CF_API_KEY: ${{ secrets.CUBELINK_CF_API_KEY }}
           CUBELINK_MS_CLIENT_ID: ${{ secrets.CUBELINK_MS_CLIENT_ID }}
+      # Le .rpm s'installe avec dnf sur un vrai Fedora et le launcher démarre.
+      - name: RPM sur Fedora (dnf install + démarrage)
+        run: bash scripts/rpm-smoke.sh target/release/bundle/rpm fedora:latest
       # libgcrypt est embarquée mais linuxdeploy exclut libgpg-error, dont elle dépend : sur une distribution qui
       # ne l'a pas, le launcher ne démarre pas (« libgpg-error.so.0: cannot open shared object file »).
       # tauri.linux.conf.json l'ajoute ; on vérifie que toute bibliothèque embarquée trouve ses dépendances.

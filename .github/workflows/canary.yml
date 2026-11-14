@@ -63,11 +63,21 @@ jobs:
           GH_TOKEN: ${{ github.token }}
       - name: Agent LAN (jar Java)
         run: JAVA_HOME="$JAVA_HOME_17_X64" bash core/resources/lan-agent/build.sh
-      - name: AppImage + RPM
-        run: npx tauri build --bundles appimage,rpm
+      - name: AppImage
+        run: npx tauri build --bundles appimage
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+      # RPM refuse le « - » dans une version : `0.1.18-canary.12` devient version 0.1.18, release 0.canary.12
+      # (convention Fedora des pré-versions : passe avant la vraie 0.1.18-1). Même binaire que l'AppImage, réempaqueté.
+      - name: RPM (Fedora)
+        run: |
+          set -euo pipefail
+          v="${{ steps.v.outputs.version }}"
+          npx tauri bundle --bundles rpm --config "{\"version\":\"${v%%-*}\",\"bundle\":{\"createUpdaterArtifacts\":false,\"linux\":{\"rpm\":{\"release\":\"0.${v#*-}\"}}}}"
+      # Le .rpm s'installe avec dnf sur un vrai Fedora et le launcher démarre.
+      - name: RPM sur Fedora (dnf install + démarrage)
+        run: bash scripts/rpm-smoke.sh target/release/bundle/rpm fedora:latest
       - name: AppImage autonome
         run: |
           cd "$(mktemp -d)"

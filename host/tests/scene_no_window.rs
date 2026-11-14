@@ -1,20 +1,24 @@
-//! Scene, delai de garde : un jeu qui tourne mais n'affiche jamais de fenetre ne laisse pas le rideau ferme sur le launcher.
-//! Le delai de production (4 minutes) est remplace par un delai court (`GameHost::set_guards`). Voir `common`.
-#![cfg(windows)]
+//! Scene, delai de garde, MEME scenario sous Windows et sous X11 (voir `harness`) : un jeu qui tourne mais n'affiche jamais de
+//! fenetre ne laisse pas le rideau ferme sur le launcher. Le delai de production (4 minutes) est remplace par un delai court
+//! (`GameHost::set_guards`).
+#![cfg(any(windows, target_os = "linux"))]
 
-mod common;
+mod harness;
 
 use std::time::{Duration, Instant};
 
-use common::*;
+use harness::*;
 use cubelink_host::{FallbackReason, GameHost, Guards};
 
 const T: Duration = Duration::from_secs(15);
 
 #[test]
 fn aucune_fenetre_le_rideau_se_rouvre() {
+    if !available() {
+        return;
+    }
     let parent = Parent::new();
-    let host = GameHost::embed(parent.hwnd).expect("embed");
+    let host = GameHost::embed(parent.id()).expect("embed");
     let events = Events::default();
     host.set_observer(events.observer());
     let (cw, ch) = parent.client_size();

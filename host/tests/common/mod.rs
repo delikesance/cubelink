@@ -62,6 +62,11 @@ impl Parent {
         }
     }
 
+    /// Identifiant natif a passer a `GameHost::embed` (meme nom que sous X11).
+    pub fn id(&self) -> isize {
+        self.hwnd
+    }
+
     pub fn client_size(&self) -> (i32, i32) {
         unsafe {
             let mut r: RECT = std::mem::zeroed();

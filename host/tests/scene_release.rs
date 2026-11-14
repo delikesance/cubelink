@@ -1,20 +1,23 @@
-//! Scene, repli demande (`GameHost::release`) : la fenetre adoptee est RENDUE au jeu (visible, cadre, sans proprietaire, a
-//! l'ecran), `Fallback` est emis une seule fois, et rien ne retouche la fenetre ensuite. Voir `common`.
-#![cfg(windows)]
+//! Scene, repli demande (`GameHost::release`), MEME scenario sous Windows et sous X11 (voir `harness`) : la fenetre adoptee est
+//! RENDUE au jeu (visible, a l'ecran, sans marque de la Scene), `Fallback` est emis une seule fois, et rien ne la retouche ensuite.
+#![cfg(any(windows, target_os = "linux"))]
 
-mod common;
+mod harness;
 
 use std::time::Duration;
 
-use common::*;
 use cubelink_host::{FallbackReason, GameHost};
+use harness::*;
 
 const T: Duration = Duration::from_secs(15);
 
 #[test]
 fn release_rend_la_fenetre_au_jeu() {
+    if !available() {
+        return;
+    }
     let parent = Parent::new();
-    let host = GameHost::embed(parent.hwnd).expect("embed");
+    let host = GameHost::embed(parent.id()).expect("embed");
     let events = Events::default();
     host.set_observer(events.observer());
     let (cw, ch) = parent.client_size();
@@ -27,7 +30,7 @@ fn release_rend_la_fenetre_au_jeu() {
     pump_for(Duration::from_millis(100));
     assert!(events.fallbacks().is_empty() && host.staged());
 
-    // ---- un jeu dans la Scene, joueur dans le jeu, panneau ouvert (fenetre decoupee)
+    // ---- un jeu dans la Scene, joueur dans le jeu, panneau ouvert
     host.begin("Modpack de test", "Lancement", None, None);
     let mut game = FakeGame::spawn(&["SDL_app", "300"]);
     host.watch(game.pid());
@@ -36,8 +39,8 @@ fn release_rend_la_fenetre_au_jeu() {
     host.reveal();
     wait_until("dans le jeu", T, || host.in_game() && !visible(curtain) && rect(win) == parent.to_screen(zone));
     assert!(host.set_panel(true, 200));
-    wait_until("decoupe du panneau", T, || panel_cut(win));
-    assert!(!framed(win) && owner(win) == parent.hwnd);
+    wait_until("panneau applique", T, || panel_applied(win, zone, 200));
+    assert!(in_scene(&parent, win), "le jeu est tenu par la Scene");
 
     // ---- repli demande
     host.release("demande par le test");
@@ -48,7 +51,8 @@ fn release_rend_la_fenetre_au_jeu() {
     // a l'instant de l'evenement la fenetre EST rendue
     assert_given_back(win);
     let (x, y, w, h) = rect(win);
-    assert_eq!((w, h), (870, 520), "taille d'origine du faux jeu retrouvee");
+    assert_eq!((w, h), fake_game_size(), "taille d'origine du faux jeu retrouvee");
+    assert!(scene_withdrawn(), "la scene est retiree");
     assert_ne!((x, y), (parent.to_screen(zone).0, parent.to_screen(zone).1), "la fenetre a quitte la zone de jeu");
     assert!(host.is_ready(Duration::from_secs(1), Duration::from_secs(90)), "plus rien a attendre de la Scene");
 
@@ -66,9 +70,9 @@ fn release_rend_la_fenetre_au_jeu() {
     events.assert_logged("repli decide (requested)");
     events.assert_logged("1 fenetre(s) rendue(s)");
 
-    // ---- le launcher peut toujours fermer proprement le jeu rendu ; sa fin ne rejoue aucun rideau
+    // ---- le launcher peut toujours fermer proprement le jeu rendu (croix de la fenetre) ; sa fin ne rejoue aucun rideau
     host.request_close();
-    wait_until("le jeu rendu se ferme sur WM_CLOSE", T, || game.exited());
+    wait_until("le jeu rendu se ferme sur la demande de fermeture", T, || game.exited());
     host.run_finished();
     assert!(!visible(curtain), "la fin d'un jeu rendu ne referme pas le rideau");
     pump_for(Duration::from_millis(300));
@@ -79,19 +83,17 @@ fn release_rend_la_fenetre_au_jeu() {
     assert!(host.staged(), "`begin` remet le lancement dans la Scene");
     let slow = FakeGame::spawn(&["GLFW30", "60000"]);
     host.watch(slow.pid());
-    wait_until("fenetre cachee adoptee", T, || slow.window("GLFW30").is_some_and(|w| owner(w) == parent.hwnd));
+    wait_until("fenetre cachee adoptee", T, || slow.window("GLFW30").is_some_and(|w| in_scene(&parent, w)));
     let hidden = slow.window("GLFW30").unwrap();
-    assert!(!visible(hidden) && !on_screen(hidden), "fenetre pas encore affichee : garee hors ecran");
+    assert!(not_shown_yet(hidden), "fenetre pas encore affichee par le jeu");
     host.release("avant affichage");
     wait_until("second Fallback", T, || events.fallbacks().len() == 2);
     // elle n'est PAS montree a la place du jeu (il l'affichera lui-meme), mais elle est de nouveau la sienne, a sa place d'origine
-    assert!(!visible(hidden), "une fenetre que le jeu n'a pas affichee reste cachee");
-    assert_eq!(owner(hidden), 0);
-    assert!(framed(hidden) && on_screen(hidden));
+    assert!(hidden_given_back(hidden), "fenetre cachee rendue au jeu, sans etre montree");
     assert_eq!(rect(hidden), (200, 150, 870, 520), "position et taille d'origine du faux jeu");
     wait_until("rideau rouvert sur le launcher", T, || !visible(curtain));
     pump_for(Duration::from_millis(2000));
     assert_eq!(rect(hidden), (200, 150, 870, 520));
-    assert_eq!(owner(hidden), 0);
+    assert!(hidden_given_back(hidden));
     assert_eq!(events.adopted().len(), 1, "pas d'Adopted pour une fenetre jamais affichee");
 }

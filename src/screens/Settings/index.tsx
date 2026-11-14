@@ -397,7 +397,7 @@ export default function Settings({ testConnection, clearCache }: SettingsProps =
         <Card as="section" aria-label="Raccourci jeu et launcher" className="set-field">
           {stageSupported && (
             <label className="set-row" style={{ cursor: "pointer" }}>
-              <div className="set-txt"><b>Jeu intégré</b><span>Le jeu s'affiche dans la fenêtre de Cubelink. Désactive si le jeu ne s'affiche pas correctement. Appliqué au prochain lancement du jeu.</span></div>
+              <div className="set-txt"><b>Jeu intégré</b><span>Le jeu s'affiche dans la fenêtre de Cubelink. Désactive si le jeu ne s'affiche pas correctement. Appliqué au prochain lancement du jeu, et sous Linux au prochain démarrage de Cubelink.</span></div>
               <input type="checkbox" className="set-check" disabled={dis} checked={settings?.embedded_game !== false} onChange={(e) => void update({ embedded_game: e.target.checked })} />
             </label>
           )}

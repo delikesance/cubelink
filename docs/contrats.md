@@ -18,7 +18,7 @@ Toute commande renvoie `Result<T, String>` (message d'erreur affichable, en fran
 | instances | `minecraft_versions` | — | `string[]` |
 | instances | `instances_kill` | `{ id }` | — (arrête le jeu en cours) |
 | instances | `instances_delete` | `{ id }` | — (refusé si l'instance est en lancement ou en jeu) |
-| instances | `instances_update` | `{ id, name?, ram_mb?, java_path?, jvm_args? }` | `Instance` |
+| instances | `instances_update` | `{ id, name?, ram_mb?, java_path?, jvm_args?, wrapper? }` (`wrapper` : commande d'enrobage placée devant Java, Linux seulement ; chaîne vide = aucune) | `Instance` |
 | instances | `instances_open_folder` | `{ id }` | — |
 | instances | `instances_logs` | `{ id }` | `string` (fin de `latest.log`, ou `latest.log.old`) |
 | art | `instances_art_image` | `{ instance_id, file }` | `string` (data URL) |

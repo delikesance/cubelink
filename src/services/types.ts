@@ -38,6 +38,8 @@ export interface Instance {
   mod_count: number;
   java_path?: string | null;
   jvm_args?: string;
+  /** Commande d'enrobage placée devant Java (Linux), vide si aucune. */
+  wrapper?: string;
   art?: InstanceArt | null;
 }
 
@@ -45,7 +47,7 @@ export interface Instance {
 export interface InstanceArt { source: "curseforge" | "modrinth" | "custom"; project_id: string; title: string; author: string; summary: string; color: string | null; icon: string | null; screenshots: string[]; page_url: string | null }
 
 /** Champs modifiables d'une instance (instances_update). */
-export interface InstancePatch { name?: string; ram_mb?: number; java_path?: string | null; jvm_args?: string }
+export interface InstancePatch { name?: string; ram_mb?: number; java_path?: string | null; jvm_args?: string; wrapper?: string }
 
 export interface ManifestFile { path: string; size: number; sha256: Sha256Hex }
 export interface Manifest {

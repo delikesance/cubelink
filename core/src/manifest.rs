@@ -451,6 +451,7 @@ mod tests {
             mod_count: 2,
             java_path: None,
             jvm_args: String::new(),
+            wrapper: String::new(),
             art: None,
         }
     }

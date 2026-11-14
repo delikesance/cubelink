@@ -69,6 +69,9 @@ pub struct RunOptions {
     /// Linux : le jeu est dans la Scène (fenêtre adoptée via X11) ; il doit créer sa fenêtre en X11/XWayland et non en
     /// Wayland natif (inadoptable). Sans effet hors Linux.
     pub force_x11: bool,
+    /// Commande d'enrobage placée devant Java (Linux : `gamemoderun`, `mangohud`...), déjà découpée. Vide : Java direct.
+    /// Ignorée sous Windows (elle empêcherait de cacher la première fenêtre du jeu).
+    pub wrapper: Vec<String>,
 }
 
 impl Default for RunOptions {
@@ -79,6 +82,7 @@ impl Default for RunOptions {
             max_log_bytes: 2 * 1024 * 1024,
             output_lines_per_sec: 200,
             force_x11: false,
+            wrapper: Vec::new(),
         }
     }
 }
@@ -133,10 +137,12 @@ pub async fn spawn_with(cmd: &LaunchCommand, log_dir: &Path, opts: RunOptions) -
         .filter(|(a, r)| a != r)
         .map(|(a, _)| a.clone())
         .collect();
+    let (program, args, shown_args, wrapped) = wrap(&opts.wrapper, &cmd.program, &cmd.args, redacted);
     start(Plan {
-        program: cmd.program.clone(),
-        args: cmd.args.clone(),
-        shown_args: redacted,
+        program,
+        args,
+        shown_args,
+        wrapped,
         cwd: cmd.cwd.clone(),
         hide_first_window: cmd.hide_first_window,
         force_x11: opts.force_x11,
@@ -147,10 +153,41 @@ pub async fn spawn_with(cmd: &LaunchCommand, log_dir: &Path, opts: RunOptions) -
     .await
 }
 
+/// Place la commande d'enrobage devant Java : `wrapper[0]` devient le programme, Java son argument. Rend le programme, les
+/// arguments, les arguments affichés (secrets masqués) et si l'enrobage s'applique. Sans effet sous Windows.
+fn wrap(wrapper: &[String], java: &Path, args: &[String], shown: Vec<String>) -> (PathBuf, Vec<String>, Vec<String>, bool) {
+    // Forme courante `VAR=valeur commande` (ex. `__NV_PRIME_RENDER_OFFLOAD=1 mangohud`) : passe par `env`, comme un shell.
+    let with_env: Vec<String>;
+    let wrapper = if wrapper.first().is_some_and(|w| is_env_assignment(w)) {
+        with_env = std::iter::once("env".to_string()).chain(wrapper.iter().cloned()).collect();
+        &with_env[..]
+    } else {
+        wrapper
+    };
+    match wrapper.split_first() {
+        Some((first, rest)) if !cfg!(windows) => {
+            let head: Vec<String> = rest.iter().cloned().chain(std::iter::once(java.to_string_lossy().into_owned())).collect();
+            let all = head.iter().cloned().chain(args.iter().cloned()).collect();
+            let shown = head.into_iter().chain(shown).collect();
+            (PathBuf::from(first), all, shown, true)
+        }
+        _ => (java.to_path_buf(), args.to_vec(), shown, false),
+    }
+}
+
+/// `NOM=valeur` avec un nom de variable valide (lettres, chiffres, `_`, pas de chiffre en tête).
+fn is_env_assignment(w: &str) -> bool {
+    w.split_once('=').is_some_and(|(k, _)| {
+        !k.is_empty() && !k.starts_with(|c: char| c.is_ascii_digit()) && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    })
+}
+
 struct Plan {
     program: PathBuf,
     args: Vec<String>,
     shown_args: Vec<String>,
+    /// `program` est la commande d'enrobage, et non Java.
+    wrapped: bool,
     cwd: PathBuf,
     #[cfg_attr(not(windows), allow(dead_code))]
     hide_first_window: bool,
@@ -170,6 +207,34 @@ enum Proc {
     Tokio(Child),
     #[cfg(windows)]
     Hidden(crate::hidden_spawn::Process),
+}
+
+/// Le processus du jeu et ce qui permet d'arrêter tous ses descendants : son groupe de processus sous Linux (créé au
+/// lancement, d'identifiant le PID), un Job Object sous Windows.
+struct Game {
+    proc: Proc,
+    #[cfg(windows)]
+    job: Option<crate::win_job::Job>,
+}
+
+impl Game {
+    #[cfg(not(windows))]
+    fn new(proc: Proc) -> Self {
+        Self { proc }
+    }
+
+    /// Windows : place le processus dans un Job Object (sans `KILL_ON_JOB_CLOSE` : un jeu dans sa propre fenêtre
+    /// survit à la fermeture du launcher). Échec (processus déjà fini...) : arrêt par `taskkill /T` seulement.
+    #[cfg(windows)]
+    fn new(proc: Proc) -> Self {
+        let handle = match &proc {
+            Proc::Tokio(c) => c.raw_handle().map(|h| h as windows_sys::Win32::Foundation::HANDLE),
+            Proc::Hidden(p) => Some(p.raw_handle()),
+        };
+        // SAFETY : le handle vient du processus `proc`, vivant et possédé ici pendant l'appel.
+        let job = handle.and_then(|h| unsafe { crate::win_job::Job::for_process(h) });
+        Self { proc, job }
+    }
 }
 
 impl Proc {
@@ -193,42 +258,61 @@ impl Proc {
 }
 
 /// Linux : le jeu ne doit pas hériter de l'environnement du launcher (webview GTK, AppImage), qui perturbe LWJGL/GLFW.
-/// On retire ce qui est propre au launcher ; `LD_LIBRARY_PATH` est conservé hors dossiers de l'AppImage (sous NixOS il
-/// donne l'accès aux pilotes GL), et le dossier des pilotes NixOS est ajouté s'il existe.
+/// On retire ce qui est propre au launcher ; `LD_LIBRARY_PATH` et `LD_PRELOAD` sont conservés hors dossiers de l'AppImage
+/// (le premier donne l'accès aux pilotes GL sous NixOS, le second porte les outils du joueur : MangoHud, gamemode...), et le
+/// dossier des pilotes NixOS est ajouté s'il existe.
 #[cfg(target_os = "linux")]
 fn clean_linux_env(command: &mut Command) {
     let vars: std::collections::HashMap<String, String> = std::env::vars().collect();
-    let (remove, ld) = linux_game_env(&vars, std::path::Path::new("/run/opengl-driver/lib").is_dir());
-    for k in remove {
+    let env = linux_game_env(&vars, std::path::Path::new("/run/opengl-driver/lib").is_dir());
+    for k in env.remove {
         command.env_remove(k);
     }
-    match ld {
-        Some(v) => command.env("LD_LIBRARY_PATH", v),
-        None => command.env_remove("LD_LIBRARY_PATH"),
-    };
+    for (k, v) in [("LD_LIBRARY_PATH", env.ld_library_path), ("LD_PRELOAD", env.ld_preload)] {
+        match v {
+            Some(v) => command.env(k, v),
+            None => command.env_remove(k),
+        };
+    }
 }
 
-/// Décision pure : variables à retirer et nouvelle valeur de `LD_LIBRARY_PATH`.
+/// Environnement du jeu sous Linux : variables à retirer, nouvelles valeurs de `LD_LIBRARY_PATH` et `LD_PRELOAD`
+/// (`None` : variable retirée).
 #[cfg(any(target_os = "linux", test))]
-fn linux_game_env(vars: &std::collections::HashMap<String, String>, nixos_gl: bool) -> (Vec<String>, Option<String>) {
+#[derive(Debug, PartialEq, Eq)]
+struct LinuxGameEnv {
+    remove: Vec<String>,
+    ld_library_path: Option<String>,
+    ld_preload: Option<String>,
+}
+
+/// Décision pure, voir [`LinuxGameEnv`]. Hors AppImage (`APPDIR` absent), `LD_LIBRARY_PATH` et `LD_PRELOAD` sont gardés tels quels.
+#[cfg(any(target_os = "linux", test))]
+fn linux_game_env(vars: &std::collections::HashMap<String, String>, nixos_gl: bool) -> LinuxGameEnv {
     let mut remove: Vec<String> = vars
         .keys()
-        .filter(|k| {
-            ["GDK_", "GTK_", "WEBKIT_", "APPDIR", "APPIMAGE", "ARGV0", "OWD", "GIO_", "GSETTINGS_SCHEMA_DIR"].iter().any(|p| k.starts_with(p))
-                || *k == "LD_PRELOAD"
-        })
+        .filter(|k| ["GDK_", "GTK_", "WEBKIT_", "APPDIR", "APPIMAGE", "ARGV0", "OWD", "GIO_", "GSETTINGS_SCHEMA_DIR"].iter().any(|p| k.starts_with(p)))
         .cloned()
         .collect();
     remove.sort();
-    let appdir = vars.get("APPDIR").filter(|a| !a.is_empty());
-    let mut parts: Vec<&str> = vars
-        .get("LD_LIBRARY_PATH")
-        .map(|v| v.split(':').filter(|p| !p.is_empty() && appdir.is_none_or(|a| !p.starts_with(a.as_str()))).collect())
-        .unwrap_or_default();
+    let appdir = vars.get("APPDIR").map(|a| a.trim_end_matches('/')).filter(|a| !a.is_empty());
+    // Une entrée vient de l'AppImage si elle est sous `$APPDIR` (le dossier lui-même ou un sous-chemin, pas un voisin au préfixe commun).
+    let outside_appdir = |p: &str| appdir.is_none_or(|a| !(p == a || p.strip_prefix(a).is_some_and(|r| r.starts_with('/'))));
+    let mut parts: Vec<&str> =
+        vars.get("LD_LIBRARY_PATH").map(|v| v.split(':').filter(|p| !p.is_empty() && outside_appdir(p)).collect()).unwrap_or_default();
     if nixos_gl && !parts.contains(&"/run/opengl-driver/lib") {
         parts.push("/run/opengl-driver/lib");
     }
-    (remove, if parts.is_empty() { None } else { Some(parts.join(":")) })
+    // `LD_PRELOAD` : liste séparée par des espaces ou des deux-points (ld.so accepte les deux).
+    let preload: Vec<&str> = vars
+        .get("LD_PRELOAD")
+        .map(|v| v.split([' ', ':']).filter(|p| !p.is_empty() && outside_appdir(p)).collect())
+        .unwrap_or_default();
+    LinuxGameEnv {
+        remove,
+        ld_library_path: (!parts.is_empty()).then(|| parts.join(":")),
+        ld_preload: (!preload.is_empty()).then(|| preload.join(" ")),
+    }
 }
 
 /// Variables qui forcent le jeu en X11/XWayland (Minecraft 1.21 : LWJGL 3.4 / SDL3 crée sinon une fenêtre Wayland native,
@@ -239,13 +323,13 @@ fn x11_forced_env() -> [(&'static str, &'static str); 3] {
 }
 
 /// Crée le processus et branche ses sorties sur `lines`. Rend le processus et son PID.
-fn launch(plan: &Plan, lines: &mpsc::Sender<String>) -> std::io::Result<(Proc, u32)> {
+fn launch(plan: &Plan, lines: &mpsc::Sender<String>) -> std::io::Result<(Game, u32)> {
     #[cfg(windows)]
     if plan.hide_first_window {
         let (process, out) = crate::hidden_spawn::spawn(&plan.program, &plan.args, &plan.cwd)?;
         let pid = process.pid();
         tokio::spawn(read_lines(tokio::fs::File::from_std(out), lines.clone()));
-        return Ok((Proc::Hidden(process), pid));
+        return Ok((Game::new(Proc::Hidden(process)), pid));
     }
     let mut command = Command::new(&plan.program);
     command
@@ -257,6 +341,9 @@ fn launch(plan: &Plan, lines: &mpsc::Sender<String>) -> std::io::Result<(Proc, u
         .kill_on_drop(true);
     #[cfg(windows)]
     command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    // Linux : groupe de processus propre au jeu (PGID = PID), pour arrêter aussi ses descendants (`killpg`).
+    #[cfg(unix)]
+    command.process_group(0);
     #[cfg(target_os = "linux")]
     {
         clean_linux_env(&mut command);
@@ -272,7 +359,7 @@ fn launch(plan: &Plan, lines: &mpsc::Sender<String>) -> std::io::Result<(Proc, u
     if let Some(err) = child.stderr.take() {
         tokio::spawn(read_lines(err, lines.clone()));
     }
-    Ok((Proc::Tokio(child), pid))
+    Ok((Game::new(Proc::Tokio(child)), pid))
 }
 
 async fn start(plan: Plan) -> Result<RunningGame> {
@@ -286,7 +373,12 @@ async fn start(plan: Plan) -> Result<RunningGame> {
     let started_at = SystemTime::now();
     let (line_tx, line_rx) = mpsc::channel::<String>(256);
     let (child, pid) = launch(&plan, &line_tx).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
+        if e.kind() == std::io::ErrorKind::NotFound && plan.wrapped {
+            Error::NotFound(format!(
+                "commande d'enrobage introuvable : {} (vérifiez le réglage de l'instance)",
+                plan.program.display()
+            ))
+        } else if e.kind() == std::io::ErrorKind::NotFound {
             Error::NotFound(format!(
                 "Java introuvable : {} (installez Java ou vérifiez le chemin dans les réglages)",
                 plan.program.display()
@@ -432,7 +524,7 @@ async fn rotate(path: &Path) {
 
 #[allow(clippy::too_many_arguments)]
 async fn supervise(
-    mut child: Proc,
+    mut child: Game,
     pid: u32,
     mut lines: mpsc::Receiver<String>,
     mut kill_rx: mpsc::Receiver<bool>,
@@ -457,7 +549,7 @@ async fn supervise(
                 killed = true;
                 break terminate(&mut child, pid, req.unwrap_or(false), opts.kill_grace).await;
             }
-            st = child.wait() => break st,
+            st = child.proc.wait() => break st,
         }
     };
     // Vide ce qui reste dans les tuyaux (sans attendre indéfiniment un petit-enfant).
@@ -481,38 +573,77 @@ async fn supervise(
     let _ = ev_tx.send(event).await;
 }
 
-async fn terminate(child: &mut Proc, pid: u32, graceful: bool, grace: Duration) -> std::io::Result<ExitStatus> {
+async fn terminate(game: &mut Game, pid: u32, graceful: bool, grace: Duration) -> std::io::Result<ExitStatus> {
     if graceful {
         request_stop(pid).await;
-        if let Ok(st) = tokio::time::timeout(grace, child.wait()).await {
+        if let Ok(st) = tokio::time::timeout(grace, game.proc.wait()).await {
+            // Le jeu s'est arrêté : ses descendants restants (qui ignoraient la demande) ne lui survivent pas.
+            kill_leftovers(game, pid).await;
             return st;
         }
     }
-    force_kill_tree(pid).await;
-    child.start_kill();
-    child.wait().await
+    force_kill_tree(game, pid).await;
+    game.proc.start_kill();
+    game.proc.wait().await
 }
 
+/// Demande d'arrêt propre : `taskkill /T` (Windows), `SIGTERM` au groupe du jeu (Linux, voir `launch`).
 async fn request_stop(pid: u32) {
-    let mut c = Command::new(if cfg!(windows) { "taskkill" } else { "kill" });
-    if cfg!(windows) {
-        c.args(["/PID", &pid.to_string(), "/T"]);
-    } else {
-        c.args(["-TERM", &pid.to_string()]);
-    }
     #[cfg(windows)]
-    c.creation_flags(0x0800_0000);
-    let _ = c.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().await;
+    {
+        let mut c = Command::new("taskkill");
+        c.args(["/PID", &pid.to_string(), "/T"]).creation_flags(0x0800_0000);
+        let _ = c.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().await;
+    }
+    #[cfg(not(windows))]
+    signal_group("-TERM", pid).await;
 }
 
-/// Sous Windows, tue aussi les processus enfants (évite les orphelins).
-async fn force_kill_tree(pid: u32) {
-    if cfg!(windows) {
+/// Après la fin du processus principal : tue ce qui reste de son groupe (Linux) ou de son Job Object (Windows). Pas de
+/// `taskkill /T` ici : le PID, libéré, pourrait déjà désigner un autre processus.
+async fn kill_leftovers(game: &Game, pid: u32) {
+    #[cfg(windows)]
+    {
+        let _ = pid;
+        if let Some(job) = &game.job {
+            job.terminate();
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = game;
+        // Le groupe garde son identifiant tant qu'il a un membre. Vide, son numéro ne peut désigner un autre groupe que si le PID
+        // a été recyclé en chef de groupe dans les quelques millisecondes écoulées : risque négligeable, accepté.
+        signal_group("-KILL", pid).await;
+    }
+}
+
+/// Unix : envoie `sig` au groupe de processus du jeu (PGID = PID, voir `launch`). Jamais au groupe 0, qui serait celui du
+/// launcher.
+#[cfg(not(windows))]
+async fn signal_group(sig: &str, pid: u32) {
+    if pid == 0 {
+        return;
+    }
+    let _ = Command::new("kill").args([sig, "--", &format!("-{pid}")]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().await;
+}
+
+/// Tue le jeu et tous ses descendants (aucun orphelin) : `taskkill /T /F` puis le Job Object (Windows), `SIGKILL` au
+/// groupe du jeu (Linux).
+async fn force_kill_tree(game: &Game, pid: u32) {
+    #[cfg(windows)]
+    {
         let mut c = Command::new("taskkill");
-        c.args(["/PID", &pid.to_string(), "/T", "/F"]);
-        #[cfg(windows)]
-        c.creation_flags(0x0800_0000);
+        c.args(["/PID", &pid.to_string(), "/T", "/F"]).creation_flags(0x0800_0000);
         let _ = c.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().await;
+        if let Some(job) = &game.job {
+            job.terminate();
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = game;
+        signal_group("-KILL", pid).await;
     }
 }
 
@@ -599,6 +730,7 @@ mod tests {
             shown_args: args.iter().map(|a| secrets.iter().fold(a.clone(), |a, s| a.replace(s, MASK))).collect(),
             args,
             cwd,
+            wrapped: false,
             hide_first_window: false,
             force_x11: false,
             secrets: secrets.iter().map(|s| s.to_string()).collect(),
@@ -726,6 +858,41 @@ mod tests {
         assert!(matches!(last, Some(LaunchEvent::Exited { .. })), "{last:?}");
     }
 
+    /// P1 : arrêter le jeu arrête aussi ses descendants (groupe de processus), même s'ils ignorent `SIGTERM`.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn kill_stops_descendants_too() {
+        fn alive(pid: &str) -> bool {
+            // Zombie (`Z`) : déjà mort, en attente d'être ramassé par init.
+            std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|st| st.rsplit(')').next().is_some_and(|r| !r.trim_start().starts_with('Z')))
+        }
+        for graceful in [false, true] {
+            let d = tempfile::tempdir().unwrap();
+            let pidfile = d.path().join("child.pid");
+            let script = format!("sh -c 'trap \"\" TERM; sleep 60' & echo $! > {}; wait", pidfile.display());
+            let g = start(plan(&[&script], d.path(), &[], fast())).await.unwrap();
+            let t = Instant::now();
+            let child = loop {
+                if let Some(p) = std::fs::read_to_string(&pidfile).ok().map(|p| p.trim().to_string()).filter(|p| !p.is_empty()) {
+                    break p;
+                }
+                assert!(t.elapsed() < Duration::from_secs(10), "le petit-enfant n'a pas démarré");
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            };
+            assert!(alive(&child));
+            if graceful {
+                g.kill().await.unwrap();
+            } else {
+                g.kill_now().await;
+            }
+            let t = Instant::now();
+            while alive(&child) && t.elapsed() < Duration::from_secs(5) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            assert!(!alive(&child), "descendant {child} encore vivant (arrêt propre : {graceful})");
+        }
+    }
+
     #[tokio::test]
     async fn drop_kills_the_process() {
         let d = tempfile::tempdir().unwrap();
@@ -825,8 +992,61 @@ mod linux_env_tests {
         .into_iter()
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect();
-        let (remove, ld) = linux_game_env(&vars, true);
-        assert_eq!(remove, ["APPDIR", "GDK_BACKEND", "WEBKIT_DISABLE_DMABUF_RENDERER"]);
-        assert_eq!(ld.as_deref(), Some("/opt/gl:/run/opengl-driver/lib"));
+        let env = linux_game_env(&vars, true);
+        assert_eq!(env.remove, ["APPDIR", "GDK_BACKEND", "WEBKIT_DISABLE_DMABUF_RENDERER"]);
+        assert_eq!(env.ld_library_path.as_deref(), Some("/opt/gl:/run/opengl-driver/lib"));
+        assert_eq!(env.ld_preload, None);
+    }
+
+    fn vars(list: &[(&str, &str)]) -> std::collections::HashMap<String, String> {
+        list.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    #[test]
+    fn ld_preload_keeps_player_tools_and_drops_appimage_entries() {
+        let env = linux_game_env(
+            &vars(&[
+                ("APPDIR", "/tmp/.mount_x/"),
+                ("LD_PRELOAD", "/tmp/.mount_x/usr/lib/libhook.so:/usr/lib/libMangoHud.so /tmp/.mount_xy/libgamemode.so"),
+            ]),
+            false,
+        );
+        assert_eq!(env.ld_preload.as_deref(), Some("/usr/lib/libMangoHud.so /tmp/.mount_xy/libgamemode.so"));
+        assert!(!env.remove.contains(&"LD_PRELOAD".to_string()));
+    }
+
+    #[test]
+    fn ld_preload_only_appimage_entries_is_removed() {
+        let env = linux_game_env(&vars(&[("APPDIR", "/a"), ("LD_PRELOAD", "/a/lib/x.so")]), false);
+        assert_eq!(env.ld_preload, None);
+    }
+
+    #[test]
+    fn outside_appimage_ld_vars_are_kept() {
+        let env = linux_game_env(&vars(&[("LD_PRELOAD", "libfoo.so"), ("LD_LIBRARY_PATH", "/opt/a:/opt/b")]), false);
+        assert_eq!(env.ld_preload.as_deref(), Some("libfoo.so"));
+        assert_eq!(env.ld_library_path.as_deref(), Some("/opt/a:/opt/b"));
+        assert!(env.remove.is_empty());
+    }
+
+    #[test]
+    fn wrapper_goes_in_front_of_java() {
+        let shown = vec!["-Xmx2G".to_string(), "***".to_string()];
+        let w = vec!["gamemoderun".to_string(), "mangohud".to_string()];
+        let (prog, args, shown, wrapped) = wrap(&w, Path::new("/jdk/bin/java"), &["-Xmx2G".into(), "tok".into()], shown.clone());
+        if cfg!(windows) {
+            assert!(!wrapped);
+            return;
+        }
+        assert!(wrapped);
+        assert_eq!(prog, PathBuf::from("gamemoderun"));
+        assert_eq!(args, ["mangohud", "/jdk/bin/java", "-Xmx2G", "tok"]);
+        assert_eq!(shown, ["mangohud", "/jdk/bin/java", "-Xmx2G", "***"]);
+        let env = vec!["__NV_PRIME_RENDER_OFFLOAD=1".to_string(), "mangohud".to_string()];
+        let (prog, args, _, _) = wrap(&env, Path::new("java"), &[], vec![]);
+        assert_eq!((prog, args), (PathBuf::from("env"), vec!["__NV_PRIME_RENDER_OFFLOAD=1".to_string(), "mangohud".into(), "java".into()]));
+        assert!(!is_env_assignment("/opt/a=b/run") && !is_env_assignment("=x") && !is_env_assignment("1A=b"));
+        let (prog, args, _, wrapped) = wrap(&[], Path::new("java"), &["a".into()], vec!["a".into()]);
+        assert_eq!((prog, args, wrapped), (PathBuf::from("java"), vec!["a".to_string()], false));
     }
 }

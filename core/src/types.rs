@@ -240,6 +240,10 @@ pub struct Settings {
     /// ouvert n'est pas touché. `true` par défaut (fichiers de réglages anciens : `true`).
     #[serde(default = "default_embedded_game")]
     pub embedded_game: bool,
+    /// Lancer Cubelink (en fond, sans fenêtre) à l'ouverture de session, pour rester joignable par ses amis.
+    /// `true` par défaut (fichiers de réglages anciens : `true`).
+    #[serde(default = "default_start_with_os")]
+    pub start_with_os: bool,
 }
 
 pub const DEFAULT_OVERLAY_HOTKEY: &str = "Ctrl+Shift+C";
@@ -264,6 +268,10 @@ fn default_embedded_game() -> bool {
     true
 }
 
+fn default_start_with_os() -> bool {
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -276,6 +284,7 @@ mod tests {
         assert_eq!(s.overlay_hotkey, "Ctrl+Shift+C");
         assert!(s.discovery && s.lan_auto);
         assert!(s.embedded_game);
+        assert!(s.start_with_os);
     }
 
     #[test]

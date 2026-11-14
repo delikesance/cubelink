@@ -162,6 +162,11 @@ impl QuitGate {
         self.spawning()
     }
 
+    /// La fermeture n'a pas quitté l'application (Cubelink masqué en fond) : les lancements suivants sont de nouveau permis.
+    pub fn cancel_quit(&self) {
+        self.quitting.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
     pub fn quitting(&self) -> bool {
         self.quitting.load(std::sync::atomic::Ordering::SeqCst)
     }
@@ -348,6 +353,7 @@ pub fn default_settings() -> Settings {
         overlay_enabled: true,
         overlay_hotkey: core_lib::types::DEFAULT_OVERLAY_HOTKEY.into(),
         embedded_game: true,
+        start_with_os: true,
     }
 }
 

@@ -119,6 +119,8 @@ export interface Settings {
   overlay_hotkey: string;
   /** Jeu intégré (Windows) : le jeu s'affiche dans la fenêtre de Cubelink. Pris en compte au prochain lancement. Défaut true. */
   embedded_game: boolean;
+  /** Lancer Cubelink en fond à l'ouverture de session (rester joignable par ses amis). Défaut true. */
+  start_with_os: boolean;
 }
 
 // Entrées / sorties de commandes

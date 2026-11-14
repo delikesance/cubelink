@@ -96,6 +96,7 @@ pub fn settings_set(
     overlay_enabled: Option<bool>,
     overlay_hotkey: Option<String>,
     embedded_game: Option<bool>,
+    start_with_os: Option<bool>,
     app: tauri::AppHandle,
 ) -> Result<Settings, String> {
     let cur = state.settings_get();
@@ -113,8 +114,10 @@ pub fn settings_set(
         overlay_enabled: overlay_enabled.unwrap_or(cur.overlay_enabled),
         overlay_hotkey: overlay_hotkey.map(|h| h.trim().to_string()).unwrap_or(cur.overlay_hotkey),
         embedded_game: embedded_game.unwrap_or(cur.embedded_game),
+        start_with_os: start_with_os.unwrap_or(cur.start_with_os),
     })?;
     crate::hotkey::apply_settings(&app);
+    crate::background::apply_autostart(&app);
     Ok(saved)
 }
 

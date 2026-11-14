@@ -1,7 +1,7 @@
 // T1 : « Rejoindre et jouer » (join_play) : tunnel ouvert, jeu lance avec --quickPlayMultiplayer, tunnel referme a la fin.
 import fs from 'node:fs';
 import path from 'node:path';
-import { test, expect, invoke, testState, startFakeWorld } from './harness/fixtures';
+import { test, expect, invoke, joinStart, testState, startFakeWorld } from './harness/fixtures';
 import { setupHostAndGuest, sleep, recordEvents, events, waitProgress, guestInstance } from './helpers/e2e2-common';
 
 test.describe.configure({ mode: 'serial' });
@@ -15,7 +15,7 @@ async function installed(world: any) {
   const { appB } = world;
   await recordEvents(appB.page, 'transfer://progress');
   await recordEvents(appB.page, 'launch://state');
-  await invoke(appB.page, 'join_start', { friend_public_key: ctx.keyA });
+  await joinStart(appB.page, ctx.keyA);
   await waitProgress(appB.page, (p) => p.phase === 'done', 90_000, 'installation terminee');
   const guest = await guestInstance(appB);
   expect(guest).not.toBeNull();

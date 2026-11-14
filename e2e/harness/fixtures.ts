@@ -166,6 +166,13 @@ export async function invoke<T = unknown>(page: Page, cmd: string, args: Record<
   ) as Promise<T>;
 }
 
+/** Rejoindre comme l'écran « Rejoindre » : plan, puis `join_start` avec le hash du manifeste montré et la case de
+ *  confiance cochée (exigée par le backend s'il y a des mods inconnus ou non vérifiés). */
+export async function joinStart(page: Page, friendPublicKey: string): Promise<void> {
+  const plan = await invoke<{ manifest_hash: string }>(page, 'join_plan', { friend_public_key: friendPublicKey });
+  await invoke(page, 'join_start', { friend_public_key: friendPublicKey, manifest_hash: plan.manifest_hash, accept_unknown: true });
+}
+
 export async function testState(page: Page): Promise<any> { return invoke(page, 'test_state'); }
 
 /** Attend que le routeur (hash) affiche la route : `<main data-route=...>`. */

@@ -513,6 +513,44 @@ mod tests {
         let _ = router.shutdown().await;
     }
 
+    /// S5 : un hôte qui sert un blob plus gros que la taille du manifeste est coupé dès que la taille est dépassée,
+    /// sans rien écrire dans `dest`.
+    #[tokio::test]
+    async fn hostile_iroh_host_sending_more_than_announced_is_cut() {
+        use iroh::endpoint::presets;
+        use iroh::protocol::Router;
+        use iroh::{Endpoint, RelayMode};
+
+        let dir = tempfile::tempdir().unwrap();
+        let evil_dir = dir.path().join("evil");
+        std::fs::create_dir_all(&evil_dir).unwrap();
+        let small = b"petit mod".to_vec();
+        let big: Vec<u8> = (0..4_000_000u32).map(|i| (i % 253) as u8).collect();
+        std::fs::write(evil_dir.join(sha(&small)), &big).unwrap();
+        let ep_a = Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled).bind().await.unwrap();
+        let ep_b = Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled).bind().await.unwrap();
+        let store = iroh_blobs::store::fs::FsStore::load(dir.path().join("host-blobs")).await.unwrap();
+        let router = Router::builder(ep_a.clone())
+            .accept(crate::transfer::send::CONTROL_ALPN, HostileControl { store: store.clone(), evil_dir })
+            .accept(iroh_blobs::ALPN, iroh_blobs::BlobsProtocol::new(&store, None))
+            .spawn();
+        let b = IrohTransport::new(ep_b, dir.path().join("b")).await.unwrap();
+        let peer = b.add_peer(ep_a.addr());
+        let dest = dir.path().join("dest.jar");
+        let req = FetchRequest { sha256: sha(&small), size: small.len() as u64, dest: dest.clone(), resume_from: 0 };
+        let seen = std::sync::atomic::AtomicU64::new(0);
+        let on = |n: u64| {
+            seen.fetch_add(n, Ordering::Relaxed);
+        };
+        let r = tokio::time::timeout(std::time::Duration::from_secs(60), b.fetch(&peer, &req, &on, &AtomicBool::new(false)))
+            .await
+            .expect("délai dépassé");
+        assert!(matches!(r, Err(Error::Invalid(_))), "{r:?}");
+        assert!(seen.load(Ordering::Relaxed) <= small.len() as u64);
+        assert!(!dest.exists(), "rien n'est exporté");
+        let _ = router.shutdown().await;
+    }
+
     /// Pack de `n` mods de `size` octets servi par un vrai hôte iroh local ; renvoie (durée, invité).
     async fn iroh_pack(n: usize, size: usize) -> (std::time::Duration, IrohTransport, tempfile::TempDir) {
         use iroh::endpoint::presets;

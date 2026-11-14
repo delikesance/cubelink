@@ -3,6 +3,7 @@ name = "cubelink-host"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 description = "La Scene Cubelink : le jeu tourne dans la fenetre du launcher (Windows), un rideau couvre lancements et changements de modpack."
 
 [lib]

@@ -2,7 +2,7 @@
 import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
-import { test, expect, invoke, testState, startFakeWorld } from './harness/fixtures';
+import { test, expect, invoke, joinStart, testState, startFakeWorld } from './harness/fixtures';
 import {
   setupHostAndGuest, sleep, recordEvents, events, waitProgress, guestInstance, walk,
 } from './helpers/e2e2-common';
@@ -19,7 +19,7 @@ async function installed(world: any, env: Record<string, string> = {}) {
   const { appB } = world;
   await recordEvents(appB.page, 'transfer://progress');
   await recordEvents(appB.page, 'launch://state');
-  await invoke(appB.page, 'join_start', { friend_public_key: ctx.keyA });
+  await joinStart(appB.page, ctx.keyA);
   await waitProgress(appB.page, (p) => p.phase === 'done', 90_000, 'installation terminee');
   const g = await guestInstance(appB);
   expect(g).not.toBeNull();

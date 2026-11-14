@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createFakeServices } from "./fake";
+import { createFakeServices, FAKE_MANIFEST_HASH } from "./fake";
 import type { TransferProgress } from "./types";
 
 const svc = () => createFakeServices({ tickMs: 0, loginDelayMs: 0 });
@@ -66,11 +66,18 @@ describe("faux service", () => {
     expect(plan.unknown_mods.length).toBe(1);
   });
 
+  it("joinStart refuse un autre manifeste, et des mods inconnus sans la case de confiance", async () => {
+    const s = svc();
+    const plan = await s.joinPlan("k");
+    await expect(s.joinStart("k", plan.manifest_hash, false)).rejects.toThrow(/accord/);
+    await expect(s.joinStart("k", "0".repeat(64), true)).rejects.toThrow(/changé/);
+  });
+
   it("transfert simulé de 0 à 100 % puis pause/annulation", async () => {
     const s = createFakeServices({ tickMs: 5 });
     const events: TransferProgress[] = [];
     s.onTransferProgress((e) => events.push(e));
-    await s.joinStart("k");
+    await s.joinStart("k", FAKE_MANIFEST_HASH, true);
     for (let n = 0; n < 200 && events[events.length - 1]?.phase !== "done"; n++) {
       await new Promise((r) => setTimeout(r, 10));
     }
@@ -80,7 +87,7 @@ describe("faux service", () => {
     expect(last.bytes_done).toBe(last.bytes_total);
 
     events.length = 0;
-    await s.joinStart("k");
+    await s.joinStart("k", FAKE_MANIFEST_HASH, true);
     await s.joinPause();
     await s.joinCancel();
     expect(events.map((e) => e.phase)).toEqual(["preparing", "paused", "failed"]);

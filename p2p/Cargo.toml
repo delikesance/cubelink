@@ -2,6 +2,8 @@
 name = "cubelink-p2p"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+publish = false
 
 [lib]
 name = "p2p_lib"

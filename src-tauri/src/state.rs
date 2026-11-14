@@ -102,8 +102,9 @@ pub struct AppState {
     pub last_seen: Arc<crate::last_seen::LastSeen>,
     /// Mods inconnus déjà acceptés (par sha256) : la case de confiance ne les redemande pas.
     pub trusted_mods: Arc<crate::trusted_mods::TrustedMods>,
-    /// Par ami : sha256 des mods inconnus montrés par le dernier `join_plan`, acceptés au `join_start`.
-    pub pending_trust: Mutex<std::collections::HashMap<String, Vec<String>>>,
+    /// Par ami : le dernier `join_plan` montré (hash du manifeste, sha256 des fichiers qui demandent l'accord), vérifié
+    /// au `join_start`.
+    pub pending_trust: Mutex<std::collections::HashMap<String, crate::commands_join::PendingConsent>>,
     pub settings: Arc<Mutex<Settings>>,
     pub profile: Mutex<Option<Profile>>,
     pub pending_login: Mutex<Option<DeviceCode>>,

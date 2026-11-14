@@ -2,7 +2,7 @@
 
 <img src="docs/images/banner.svg" alt="Cubelink : clique sur un ami, tu as ses mods, tu es dans sa partie" width="100%" />
 
-[![CI](https://github.com/delikesance/cubelink/actions/workflows/ci.yml/badge.svg?branch=development)](https://github.com/delikesance/cubelink/actions/workflows/ci.yml)
+[![CI](https://github.com/delikesance/cubelink/actions/workflows/ci.yml/badge.svg?branch=canary)](https://github.com/delikesance/cubelink/actions/workflows/ci.yml)
 [![Licence MIT](https://img.shields.io/badge/licence-MIT-4FC3E8.svg)](LICENSE)
 ![Tauri 2](https://img.shields.io/badge/Tauri-2-24C8DB)
 ![Rust](https://img.shields.io/badge/Rust-2021-orange)
@@ -80,7 +80,7 @@ Pour aller plus loin : [`docs/architecture.md`](docs/architecture.md) (décision
 
 ### Prérequis
 
-- [Rust](https://rustup.rs/) (stable) et [Node.js](https://nodejs.org/) 22
+- [Rust](https://rustup.rs/) (la version de `rust-toolchain.toml`, installée d'elle-même par rustup) et [Node.js](https://nodejs.org/) 22
 - Les [prérequis système de Tauri 2](https://tauri.app/start/prerequisites/) (WebView2 et Build Tools C++ sous Windows)
 - Un **JDK 17**, pour compiler l'agent LAN (`core/resources/cubelink-lan-agent.jar`, non versionné)
 
@@ -89,7 +89,7 @@ Pour aller plus loin : [`docs/architecture.md`](docs/architecture.md) (décision
 ```bash
 git clone https://github.com/delikesance/cubelink.git
 cd cubelink
-git switch development
+git switch canary
 
 npm ci
 JAVA_HOME=/chemin/vers/jdk17 bash core/resources/lan-agent/build.sh   # une fois, produit l'agent LAN
@@ -133,14 +133,14 @@ Pas sûr que ton idée rentre dans le projet ? Ouvre une issue pour en discuter 
 
 ### Le flux, en quatre étapes
 
-1. **Une branche par sujet**, depuis `development` : `git fetch && git switch -c <type>/<sujet-court> origin/development`. Types : `feat`, `fix`, `chore`, `docs`, `refactor`.
+1. **Une branche par sujet**, depuis `canary` : `git fetch && git switch -c <type>/<sujet-court> origin/canary`. Types : `feat`, `fix`, `chore`, `docs`, `refactor`.
 2. **Reste ciblé** : un changement = un sujet. Teste en local avec les commandes ci-dessus, puis lance une fois clippy, `cargo test --workspace` et `npx vitest run`.
-3. **Ouvre une pull request vers `development`** (jamais directement vers `main`). Titre et description **en français** : ce qui change, comment c'est vérifié, ce qui reste à faire.
-4. **Relecture et fusion** par le mainteneur. Pas de push forcé. `development` est fusionné dans `main` par le mainteneur au moment d'une release.
+3. **Ouvre une pull request vers `canary`** (jamais directement vers `main`). Titre et description **en français** : ce qui change, comment c'est vérifié, ce qui reste à faire.
+4. **Relecture et fusion** par le mainteneur. Pas de push forcé. Chaque fusion dans `canary` publie une pré-version de test ; `canary` est fusionnée dans `main` par le mainteneur au moment d'une release.
 
 ### Règles de la maison
 
-- **Pas de logique sans test** : un correctif de bug vient avec le test qui l'aurait attrapé. La CI exécute clippy en `-D warnings`, les tests Rust (Windows), `tsc`, vitest et un `cargo check` Linux.
+- **Pas de logique sans test** : un correctif de bug vient avec le test qui l'aurait attrapé. La CI exécute clippy en `-D warnings` et les tests Rust sous Windows et Linux, `tsc`, vitest, les E2E Playwright simulés et `cargo deny`.
 - **Pas de réseau réel dans les tests** : Microsoft, Mojang et Modrinth sont simulés ; le P2P se teste entre deux nœuds locaux.
 - **Pas d'entrée réelle non plus** : un test ne pilote jamais la vraie souris, le vrai clavier ou le focus de ta machine ; on simule dans l'application.
 - **Touche peu aux fichiers partagés** (`Cargo.toml`, `Cargo.lock`, `package.json`, `core/src/types.rs`, `docs/contrats.md`) et mentionne-le dans la PR si tu le fais : ce sont eux qui créent des conflits.

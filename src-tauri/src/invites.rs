@@ -39,7 +39,7 @@ const MAX_QUEUE: usize = 50;
 static SEQ: AtomicU64 = AtomicU64::new(1);
 
 /// Demande à rejoindre reçue d'un ami, en attente de la décision de l'hôte (événement `friend://join_request`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, specta::Type)]
 pub struct JoinRequest {
     pub public_key: String,
     pub name: String,
@@ -286,33 +286,44 @@ fn icon_data_url(b64: &str) -> Option<String> {
     core_lib::world::is_valid_icon(&bytes).then(|| format!("data:image/png;base64,{}", B64.encode(&bytes)))
 }
 
+/// Invite un ami dans mon monde ouvert (refusé si aucun monde n'est ouvert).
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn friend_invite(state: State<'_, Arc<AppState>>, public_key: String) -> Result<(), String> {
     state.friend_invite(&public_key).await
 }
 
+/// Demandes à rejoindre mon monde reçues d'amis, en attente de réponse.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub fn friend_join_requests(state: State<'_, Arc<AppState>>) -> Result<Vec<JoinRequest>, String> {
     Ok(state.friend_join_requests())
 }
 
+/// Accepte ou refuse la demande à rejoindre d'un ami.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub fn friend_join_request_answer(state: State<'_, Arc<AppState>>, public_key: String, accept: bool) -> Result<(), String> {
     state.friend_join_request_answer(&public_key, accept)
 }
 
-/// Renvoie `accepted`, `refused` ou `expired`.
+/// Demande à un ami de rejoindre son monde ; renvoie `accepted`, `refused` ou `expired`.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn friend_join_request(state: State<'_, Arc<AppState>>, public_key: String) -> Result<JoinAnswer, String> {
     state.friend_join_request(&public_key).await
 }
 
+/// Invitations reçues en attente.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub fn friend_invites(state: State<'_, Arc<AppState>>) -> Result<Vec<Invite>, String> {
     Ok(state.friend_invites())
 }
 
+/// Écarte une invitation reçue.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub fn friend_invite_dismiss(state: State<'_, Arc<AppState>>, id: String) -> Result<(), String> {
     state.friend_invite_dismiss(&id);
     Ok(())

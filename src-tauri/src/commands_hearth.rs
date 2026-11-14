@@ -28,7 +28,7 @@ use crate::state::AppState;
 const MAX_NAME: usize = 64;
 
 /// Réponse de `hearth_eula`.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, specta::Type)]
 pub struct HearthEula {
     pub accepted: bool,
     pub url: String,
@@ -632,22 +632,30 @@ fn dir_bytes(root: &std::path::Path) -> u64 {
 
 type S<'a> = State<'a, Arc<AppState>>;
 
+/// Serveurs de groupe de ce PC (cartes de l'accueil).
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub fn hearth_list(state: S<'_>) -> Vec<HearthCard> {
     state.hearth_list()
 }
 
+/// Page d'un serveur de groupe : membres, versions du monde, votes, réglages.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn hearth_detail(state: S<'_>, id: String) -> Result<HearthDetail, String> {
     state.hearth_detail(&id).await
 }
 
+/// Mondes d'une instance, proposés à la création d'un groupe.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn hearth_worlds(state: S<'_>, instance_id: String) -> Result<Vec<HearthWorld>, String> {
     state.hearth_worlds(&instance_id).await
 }
 
+/// Crée un serveur de groupe à partir d'une instance (et d'un de ses mondes) et invite les amis donnés.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn hearth_create(
     state: S<'_>,
     name: String,
@@ -658,102 +666,142 @@ pub async fn hearth_create(
     state.inner().hearth_create(&name, &instance_id, world, members).await
 }
 
+/// Invitations à des groupes reçues d'amis.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub fn hearth_invites(state: S<'_>) -> Vec<HearthInvite> {
     state.hearth_invites()
 }
 
+/// Accepte une invitation à un groupe.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub fn hearth_invite_accept(state: S<'_>, id: String) -> Result<(), String> {
     state.hearth_invite_accept(&id)
 }
 
+/// Écarte une invitation à un groupe.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub fn hearth_invite_dismiss(state: S<'_>, id: String) -> Result<(), String> {
     state.hearth_invite_dismiss(&id)
 }
 
+/// Joue sur le serveur du groupe : le rejoint s'il est hébergé, sinon l'héberge sur ce PC.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn hearth_play(state: S<'_>, id: String) -> Result<(), String> {
     state.inner().hearth_play(&id).await
 }
 
+/// Arrête le serveur du groupe hébergé sur ce PC (monde publié, bail relâché).
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn hearth_stop(state: S<'_>, id: String) -> Result<(), String> {
     state.inner().hearth_stop(&id).await
 }
 
+/// Choix du groupe après une partie mal terminée.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn hearth_unclean_choice(state: S<'_>, id: String, choice: String) -> Result<(), String> {
     state.inner().hearth_unclean_choice(&id, &choice).await
 }
 
+/// Associe l'instance locale du modpack au groupe.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn hearth_set_instance(state: S<'_>, id: String, instance_id: String) -> Result<(), String> {
     state.hearth_set_instance(&id, &instance_id).await
 }
 
+/// Propose d'ajouter un ami au groupe.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn hearth_add_member(state: S<'_>, id: String, public_key: String) -> Result<(), String> {
     state.hearth_add_member(&id, &public_key).await
 }
 
+/// Propose de retirer un membre du groupe.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn hearth_remove_member(state: S<'_>, id: String, public_key: String) -> Result<(), String> {
     state.hearth_remove_member(&id, &public_key).await
 }
 
+/// Quitte le groupe.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn hearth_leave(state: S<'_>, id: String) -> Result<(), String> {
     state.inner().hearth_leave(&id).await
 }
 
+/// Approuve une décision du groupe en attente.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn hearth_vote(state: S<'_>, id: String, proposal_id: String) -> Result<(), String> {
     state.hearth_vote(&id, &proposal_id).await
 }
 
+/// Propose de continuer sans la version d'un membre absent.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn hearth_continue_without(state: S<'_>, id: String, public_key: String) -> Result<(), String> {
     state.hearth_continue_without(&id, &public_key).await
 }
 
+/// Propose de passer le groupe à une nouvelle version du modpack.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn hearth_pack_update(state: S<'_>, id: String, instance_id: String) -> Result<(), String> {
     state.hearth_pack_update(&id, &instance_id).await
 }
 
+/// Restaure une version du monde.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn hearth_restore(state: S<'_>, id: String, version_id: String) -> Result<(), String> {
     state.hearth_restore(&id, &version_id).await
 }
 
+/// Choisit la version gardée quand le monde a deux versions.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn hearth_resolve_fork(state: S<'_>, id: String, version_id: String) -> Result<(), String> {
     state.hearth_resolve_fork(&id, &version_id).await
 }
 
+/// Garde le serveur ouvert quand le jeu de ce PC se ferme.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub fn hearth_set_background(state: S<'_>, id: String, on: bool) -> Result<(), String> {
     state.hearth_set_background(&id, on)
 }
 
+/// État de l'acceptation du CLUF Minecraft (serveur dédié) et son adresse.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub fn hearth_eula(state: S<'_>) -> HearthEula {
     state.hearth_eula()
 }
 
+/// Serveurs de groupe activés (fonction expérimentale).
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub fn hearth_enabled(state: S<'_>) -> bool {
     state.hearth_enabled()
 }
 
+/// Active ou coupe les serveurs de groupe.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub fn hearth_set_enabled(state: S<'_>, enabled: bool) {
     state.hearth_set_enabled(enabled);
 }
 
+/// Accepte le CLUF Minecraft pour le serveur dédié.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub fn hearth_eula_accept(state: S<'_>) {
     state.hearth_eula_accept();
 }

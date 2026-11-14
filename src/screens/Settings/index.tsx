@@ -201,7 +201,7 @@ export default function Settings({ testConnection, clearCache }: SettingsProps =
   // Interrupteur de sécurité des serveurs de groupe : `null` tant qu'il n'est pas lu.
   const [hearthOn, setHearthOn] = useState<boolean | null>(null);
   // Le jeu intégré n'existe que sous Windows et Linux (X11) : ailleurs le réglage n'aurait aucun effet, il n'est pas montré.
-  const stageSupported = useStageSupported();
+  const stageSupported = useStageSupported(services);
   // Sans jeu intégré il n'y a pas de panneau « en jeu » : son raccourci ne sert à rien, on le dit plutôt que de le laisser modifiable.
   const embeddedOff = stageSupported && settings?.embedded_game === false;
 
@@ -417,11 +417,15 @@ export default function Settings({ testConnection, clearCache }: SettingsProps =
             <div className="set-txt"><b>Serveurs de groupe (expérimental)</b><span>Des mondes partagés qui vivent même quand tu es hors ligne. Pas encore éprouvé avec de vrais serveurs : désactivé par défaut.</span></div>
             <input type="checkbox" className="set-check" disabled={dis || hearthOn === null} checked={!!hearthOn} onChange={(e) => void toggleHearth(e.target.checked)} />
           </label>
+          <label className="set-row" style={{ cursor: "pointer" }}>
+            <div className="set-txt"><b>Lancer Cubelink au démarrage de l'ordinateur</b><span>Cubelink démarre en arrière-plan pour que tes amis puissent toujours te rejoindre. Fermer la fenêtre le garde ouvert dans la zone de notification&nbsp;; pour le quitter, clic droit sur son icône puis «&nbsp;Quitter Cubelink&nbsp;».</span></div>
+            <input type="checkbox" className="set-check" disabled={dis} checked={settings?.start_with_os !== false} onChange={(e) => void update({ start_with_os: e.target.checked })} />
+          </label>
         </Card>
         <Card as="section" aria-label="Raccourci jeu et launcher" className="set-field">
           {stageSupported && (
             <label className="set-row" style={{ cursor: "pointer" }}>
-              <div className="set-txt"><b>Jeu intégré</b><span>Le jeu s'affiche dans la fenêtre de Cubelink. Désactive si le jeu ne s'affiche pas correctement. Appliqué au prochain lancement du jeu.</span></div>
+              <div className="set-txt"><b>Jeu intégré</b><span>Le jeu s'affiche dans la fenêtre de Cubelink. Désactive si le jeu ne s'affiche pas correctement. Appliqué au prochain lancement du jeu, et sous Linux au prochain démarrage de Cubelink.</span></div>
               <input type="checkbox" className="set-check" disabled={dis} checked={settings?.embedded_game !== false} onChange={(e) => void update({ embedded_game: e.target.checked })} />
             </label>
           )}

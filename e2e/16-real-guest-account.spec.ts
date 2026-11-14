@@ -57,7 +57,7 @@ async function boot(binary: string, root: string, name: string, instanceId: stri
     await invoke(app.page, 'auth_offline_login', { name });
   }
   const s = await invoke<Record<string, unknown>>(app.page, 'settings_get');
-  await invoke(app.page, 'settings_set', { ...s, close_on_launch: false });
+  await invoke(app.page, 'settings_set', { settings: { ...s, close_on_launch: false } });
   return app;
 }
 

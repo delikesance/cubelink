@@ -16,7 +16,12 @@ export interface SettingsDialogProps {
   onDelete: () => void;
 }
 
-/** Panneau « Paramètres » d'une instance (A5) : nom, mémoire, Java, arguments JVM, dossier, zone dangereuse. */
+/** Système Linux (interface WebKitGTK) : seul système où la commande d'enrobage s'applique. */
+export function isLinuxHost(ua: string = typeof navigator === "undefined" ? "" : navigator.userAgent): boolean {
+  return /\bLinux\b/.test(ua) && !/Android/i.test(ua);
+}
+
+/** Panneau « Paramètres » d'une instance (A5) : nom, mémoire, Java, arguments JVM, commande d'enrobage (Linux), dossier, zone dangereuse. */
 export function SettingsDialog({ instance, onSave, onClose, onOpenFolder, onDelete }: SettingsDialogProps) {
   const uid = useId();
   const [name, setName] = useState(instance.name);
@@ -24,6 +29,8 @@ export function SettingsDialog({ instance, onSave, onClose, onOpenFolder, onDele
   const defaultRam = useDefaultRam(useServices());
   const [java, setJava] = useState(instance.java_path ?? "");
   const [jvm, setJvm] = useState(instance.jvm_args ?? "");
+  const [linux] = useState(() => isLinuxHost());
+  const [wrapper, setWrapper] = useState(instance.wrapper ?? "");
   const [nameError, setNameError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -40,7 +47,9 @@ export function SettingsDialog({ instance, onSave, onClose, onOpenFolder, onDele
     setSaved(false);
     setBusy(true);
     try {
-      await onSave({ name: name.trim(), ram_mb: ram, java_path: java.trim() || null, jvm_args: jvm.trim() });
+      const patch: InstancePatch = { name: name.trim(), ram_mb: ram, java_path: java.trim() || null, jvm_args: jvm.trim() };
+      if (linux) patch.wrapper = wrapper.trim();
+      await onSave(patch);
       // En tiroir le parent se ferme ; en page on reste là et on le dit.
       if (!onClose) { setBusy(false); setSaved(true); }
     } catch (err) {
@@ -66,6 +75,11 @@ export function SettingsDialog({ instance, onSave, onClose, onOpenFolder, onDele
         <Field label="Arguments JVM" id={`${uid}-jvm`}>
           {(p) => <Input {...p} type="text" value={jvm} autoComplete="off" placeholder="-XX:+UseG1GC" onChange={(e) => setJvm(e.target.value)} />}
         </Field>
+        {linux && (
+          <Field label="Commande d'enrobage (facultatif)" id={`${uid}-wrapper`} hint="Lancée devant Java, par exemple gamemoderun, mangohud ou __NV_PRIME_RENDER_OFFLOAD=1 mangohud. Vide : Java est lancé directement.">
+            {(p) => <Input {...p} type="text" value={wrapper} autoComplete="off" spellCheck={false} placeholder="gamemoderun" onChange={(e) => setWrapper(e.target.value)} />}
+          </Field>
+        )}
 
         <div className="dr-folder">
           <span className="cl-label">Dossier du jeu</span>

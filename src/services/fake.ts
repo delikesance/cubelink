@@ -4,7 +4,7 @@ import type {
   AccountInfo, AccountsState, BrowseHit, BrowseInstallResult, BrowseKind, BrowseProgressEvent, BrowseSource, BrowseVersion, FixPlan, FixProgressEvent, FixResult, ModCheck, ModEntry, ModIssue,
   CreateInstanceInput, DeviceCode, HostState, Invite, JoinAnswer, JoinRequest, ImportWarningEvent, LaunchLogEvent, FriendRequest, FriendWithPresence, Instance, InstanceArt,
   JoinPlan, LaunchState, Manifest, PresenceEvent, UnknownModsEvent, Profile, Services, Settings,
-  TransferProgress, Unsubscribe, UpdateState,
+  StageFallback, StageState, TransferProgress, Unsubscribe, UpdateState,
   HearthCard, HearthDetail, HearthHandover, HearthHostPrompt, HearthInvite, HearthMember, HearthMemberLite,
 } from "./types";
 
@@ -19,6 +19,8 @@ export interface FakeOptions {
   pickedFiles?: string[];
   /** Comptes présents au départ (le premier est actif). Vide par défaut : écran Connexion. */
   accounts?: AccountInfo[];
+  /** Réponse de `stageSupported` (zone de jeu intégrée). Faux par défaut : comme dans un navigateur. */
+  stageSupported?: boolean;
 }
 
 /** Commandes de test exposées par le faux service. */
@@ -60,6 +62,14 @@ export interface FakeControls {
   setHearthEula(accepted: boolean): void;
   /** Test : commandes Hearth reçues, dans l'ordre (nom sans préfixe `hearth`, arguments). */
   readonly hearthCalls: Array<{ kind: string; args: unknown[] }>;
+  /** Test : fusionne `patch` dans l'état de la zone de jeu et émet stage://state. */
+  emitStageState(patch: Partial<StageState>): void;
+  /** Test : émet stage://fallback (charge utile brute, comme Rust). */
+  emitStageFallback(f: unknown): void;
+  /** Test : émet stage://fullscreen. */
+  emitStageFullscreen(on: boolean): void;
+  /** Test : appels enregistrés de stageView, stagePanel, stageLayout et setFullscreen, dans l'ordre. */
+  readonly stageCalls: Array<{ cmd: "view" | "panel" | "layout" | "fullscreen"; arg: unknown }>;
 }
 
 /** Hash du manifeste simulé, renvoyé par `joinPlan` et exigé par `joinStart`. */
@@ -212,16 +222,21 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
   let settings: Settings = {
     language: "fr", default_ram_mb: 4096, java_path: null,
     trust_default: "ask", allow_relay: true, close_on_launch: false, relay_only: false, share_mods: true, discovery: true, lan_auto: true,
-    overlay_enabled: true, overlay_hotkey: "Ctrl+Shift+C", embedded_game: true, open_to_all_friends: false,
+    overlay_enabled: true, overlay_hotkey: "Ctrl+Shift+C", embedded_game: true, start_with_os: true, open_to_all_friends: false,
   };
+  // Champs que Rust renvoie toujours (voir `Instance` dans bindings.ts), vides par défaut.
+  const noExtras = { java_path: null, jvm_args: "", wrapper: "", art: null } satisfies Partial<Instance>;
   const instances: Instance[] = [{
+    ...noExtras,
     id: "inst-aeronautics", name: "Create: Aeronautics", minecraft: "1.21.1",
     loader: { loader: "neoforge", version: "21.1.77" }, ram_mb: 6144, mod_count: 94,
   }, {
+    ...noExtras,
     id: "inst-atm10", name: "All the Mods 10", minecraft: "1.21.1",
     loader: { loader: "neoforge", version: "21.1.77" }, ram_mb: 8192, mod_count: 420,
     art: makeArt("atm10", "All the Mods 10", "ATM Team", "#2f6fed", "curseforge"),
   }, {
+    ...noExtras,
     id: "inst-prominence", name: "Prominence II", minecraft: "1.20.1",
     loader: { loader: "fabric", version: "0.15.11" }, ram_mb: 6144, mod_count: 310,
     art: makeArt("prominence", "Prominence II", "Moosniffer", "#c0392b", "modrinth"),
@@ -229,7 +244,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
   const artOf = (id: string) => need(id);
   let requests: FriendRequest[] = Array.from({ length: requestCount }, (_, i) => makeRequest(i));
   const friends: FriendWithPresence[] = [
-    { friend: { public_key: hex(1, 64), name: "Alex", trust: "ask", added_at: NOW - 86400 }, presence: "online" },
+    { friend: { public_key: hex(1, 64), name: "Alex", trust: "ask", added_at: NOW - 86400 }, presence: "online", last_seen: null },
     { friend: { public_key: hex(2, 64), name: "Noor", trust: "always", added_at: NOW - 172800 }, presence: "offline", last_seen: NOW - 3 * 3600 },
   ];
 
@@ -264,8 +279,14 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     hearthInvites: new Set<(l: HearthInvite[]) => void>(),
     hearthHandover: new Set<(e: HearthHandover) => void>(),
     hearthHostPrompt: new Set<(e: HearthHostPrompt) => void>(),
+    stage: new Set<(s: StageState) => void>(),
+    stageFallback: new Set<(f: StageFallback) => void>(),
+    stageFullscreen: new Set<(on: boolean) => void>(),
   };
-  let updateSt: UpdateState = { phase: "idle", current: "0.1.0", version: null, notes: null, downloaded: 0, total: null, message: null };
+  let stageSt: StageState = { attached: false, game: false, panel: false };
+  const stageCalls: FakeControls["stageCalls"] = [];
+  const setStage = (patch: Partial<StageState>) => { stageSt = { ...stageSt, ...patch }; emit(listeners.stage, { ...stageSt }); };
+  let updateSt: UpdateState = { phase: "idle", current: "0.1.0", version: null, notes: null, downloaded: 0, total: null, message: null, url: null };
   let updateCheckPatch: Partial<UpdateState> = { phase: "up_to_date" };
   const setUpdate = (patch: Partial<UpdateState>) => { updateSt = { ...updateSt, ...patch }; emit(listeners.update, { ...updateSt }); };
   function sub<T>(set: Set<(v: T) => void>, cb: (v: T) => void): Unsubscribe {
@@ -505,7 +526,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     instancesList: async () => instances.map((i) => ({ ...i })),
     instancesCreate: async (input: CreateInstanceInput) => {
       if (!input.name.trim()) throw new Error("Le nom de l'instance est obligatoire.");
-      const inst: Instance = { id: `inst-${instances.length + 1}`, ...input, mod_count: 0 };
+      const inst: Instance = { ...noExtras, id: `inst-${instances.length + 1}`, ...input, mod_count: 0 };
       instances.push(inst);
       return { ...inst };
     },
@@ -513,7 +534,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
       if (!/\.(mrpack|zip)$/i.test(path)) throw new Error("Fichier .mrpack ou .zip attendu.");
       if (/manquant|missing/i.test(path)) emit(listeners.warning, { missing: ["sodium", "iris"] });
       const inst: Instance = {
-        id: `inst-${instances.length + 1}`, name: "Pack importé", minecraft: "1.21.1",
+        ...noExtras, id: `inst-${instances.length + 1}`, name: "Pack importé", minecraft: "1.21.1",
         loader: { loader: "fabric", version: "0.16.5" }, ram_mb: 4096, mod_count: 12,
       };
       instances.push(inst);
@@ -553,6 +574,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
       if (patch.ram_mb !== undefined) inst.ram_mb = patch.ram_mb;
       if (patch.java_path !== undefined) inst.java_path = patch.java_path;
       if (patch.jvm_args !== undefined) inst.jvm_args = patch.jvm_args;
+      if (patch.wrapper !== undefined) inst.wrapper = patch.wrapper;
       return { ...inst };
     },
     instancesArtImage: async (id, file) => {
@@ -811,7 +833,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
       requests = requests.filter((x) => x !== r);
       friends.push({
         friend: { public_key: r.public_key, name: r.name, trust: "ask", added_at: NOW },
-        presence: "offline",
+        presence: "offline", last_seen: null,
       });
     },
     friendRefuse: async (pk) => {
@@ -822,7 +844,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
 
     joinPlan: async (): Promise<JoinPlan> => ({
       manifest: makeManifest(), manifest_hash: FAKE_MANIFEST_HASH, cached: 91, to_receive: 3, to_receive_bytes: bytes_total,
-      unknown_mods: ["mods/mod-maison.jar"],
+      unknown_mods: ["mods/mod-maison.jar"], unknown_unchecked: [], unknown_scripts: [], unknown_trusted: [],
     }),
     joinPlay: async () => {},
     // Comme le backend : refuse un autre manifeste, et des mods inconnus sans la case de confiance.
@@ -865,7 +887,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
       }
       if (input.kind === "modpack") {
         const inst: Instance = {
-          id: `inst-${instances.length + 1}`, name: hit.name, minecraft: "1.21.1",
+          ...noExtras, id: `inst-${instances.length + 1}`, name: hit.name, minecraft: "1.21.1",
           loader: { loader: "neoforge", version: "21.1.77" }, ram_mb: 4096, mod_count: 24,
         };
         inst.art = makeArt(`${hit.source}-${hit.id}`, hit.name, hit.author, hit.source === "modrinth" ? "#1bd96a" : "#f16436", hit.source);
@@ -966,7 +988,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
       const f = friends.find((x) => x.friend.public_key === p.public_key);
       const inv: Invite = {
         id: `inv-${inviteN}`, name: f?.friend.name ?? "Ami", world_name: "Monde de survie", minecraft: "1.21.1",
-        received_at: Math.floor(Date.now() / 1000), expires_at: Math.floor(Date.now() / 1000) + 600, ...p,
+        received_at: Math.floor(Date.now() / 1000), expires_at: Math.floor(Date.now() / 1000) + 600, pack: null, world_icon: null, ...p,
       };
       invites = [...invites, inv];
       emit(listeners.invite, { ...inv });
@@ -1023,5 +1045,19 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     onBrowseProgress: (cb) => sub(listeners.browse, cb),
     onModsFixProgress: (cb) => sub(listeners.fix, cb),
     onFilesDropped: (cb) => sub(listeners.drop, cb),
+
+    stageSupported: async () => opts.stageSupported === true,
+    stageState: async () => ({ ...stageSt }),
+    stageView: async (game) => { stageCalls.push({ cmd: "view", arg: game }); if (stageSt.attached) setStage({ game }); },
+    stagePanel: async (open) => { stageCalls.push({ cmd: "panel", arg: open }); if (stageSt.attached) setStage({ panel: open }); },
+    stageLayout: async (l) => { stageCalls.push({ cmd: "layout", arg: { ...l } }); },
+    setFullscreen: async (on) => { stageCalls.push({ cmd: "fullscreen", arg: on }); },
+    onStageState: (cb) => sub(listeners.stage, cb),
+    onStageFallback: (cb) => sub(listeners.stageFallback, cb),
+    onStageFullscreen: (cb) => sub(listeners.stageFullscreen, cb),
+    emitStageState: (patch) => setStage(patch),
+    emitStageFallback: (f) => emit(listeners.stageFallback, f as StageFallback),
+    emitStageFullscreen: (on) => emit(listeners.stageFullscreen, on),
+    stageCalls,
   };
 }

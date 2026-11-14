@@ -8,6 +8,8 @@ pub mod launch_args;
 pub mod launch_run;
 #[cfg(windows)]
 pub mod hidden_spawn;
+#[cfg(windows)]
+pub mod win_job;
 pub mod mrpack;
 pub mod manifest;
 pub mod guest;

@@ -53,7 +53,7 @@ const EXPIRED: u8 = 3;
 const CLOSE_BAD: u32 = 2;
 
 /// Réponse de l'hôte à une demande.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "snake_case")]
 pub enum JoinAnswer {
     Accepted,

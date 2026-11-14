@@ -595,7 +595,12 @@ impl AppState {
         };
         // Le jeu reste vivant (via `game_handle`) jusqu'à la fin de la boucle : le lâcher l'arrêterait.
         // Linux : un jeu de la Scene est force en X11/XWayland (Wayland natif non adoptable), voir `RunOptions::force_x11`.
-        let run_opts = launch_run::RunOptions { force_x11: self.stage.force_x11(), ..Default::default() };
+        // Commande d'enrobage de l'instance (Linux : gamemoderun, mangohud...), placee devant Java.
+        let run_opts = launch_run::RunOptions {
+            force_x11: self.stage.force_x11(),
+            wrapper: core_lib::instance::split_jvm_args(&inst.wrapper),
+            ..Default::default()
+        };
         let mut game = match launch_run::spawn_with(&cmd, &log_dir, run_opts).await {
             Ok(g) => g,
             Err(e) => return self.emit_state(&id, LaunchPhase::Failed, Some(user_msg(&e))),
@@ -611,8 +616,9 @@ impl AppState {
         };
         let game = Arc::new(game);
         // Invité : Dynamic FPS (et autres) bride le rendu hors premier plan et retarde le quickPlay (voir `foreground`).
+        #[cfg(any(windows, target_os = "linux"))]
         if join_server.is_some() {
-            crate::foreground::bring_game_to_front(game.pid);
+            cubelink_host::foreground::bring_game_to_front(game.pid);
         }
         *lock(&self.game_handle) = Some((id.clone(), game.clone()));
         // `stage.staged()` est relu a chaque usage : un repli en cours de lancement rend sa fenetre au jeu, et tout le pilotage
@@ -681,13 +687,17 @@ impl AppState {
     }
 }
 
+/// Instances installées.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub fn instances_list(state: State<'_, Arc<AppState>>) -> Result<Vec<Instance>, String> {
     // Les modpacks reçus d'un ami (instances d'invité) restent hors de la liste : ils ne sont lancés que via « Rejoindre ».
     Ok(state.instances_list().into_iter().filter(|i| !core_lib::guest::is_guest_instance(&state.instances, &i.id)).collect())
 }
 
+/// Crée une instance vide.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn instances_create(
     state: State<'_, Arc<AppState>>,
     name: String,
@@ -698,7 +708,9 @@ pub async fn instances_create(
     state.instances_create(name, minecraft, loader, ram_mb).await
 }
 
+/// Importe un .mrpack, un zip CurseForge ou un zip brut (les champs facultatifs ne servent qu'au zip brut). Avertissements par `import://warning`.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn instances_import_mrpack(
     state: State<'_, Arc<AppState>>,
     path: String,
@@ -710,12 +722,16 @@ pub async fn instances_import_mrpack(
     state.instances_import_mrpack(&path, name, minecraft, loader, ram_mb).await
 }
 
+/// Lance l'instance. Progression par `launch://state`, sortie du jeu par `launch://log`.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn instances_launch(state: State<'_, Arc<AppState>>, id: String) -> Result<(), String> {
     state.inner().instances_launch(&id).await
 }
 
+/// Versions de Minecraft disponibles.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn minecraft_versions(state: State<'_, Arc<AppState>>) -> Result<Vec<String>, String> {
     state.minecraft_versions().await
 }

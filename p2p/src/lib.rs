@@ -9,6 +9,7 @@ pub mod presence;
 pub mod invite;
 pub mod tunnel;
 pub mod relay;
+pub mod portmap;
 pub mod transfer;
 pub mod manifest_channel;
 pub mod reach;

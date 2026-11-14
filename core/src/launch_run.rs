@@ -231,7 +231,8 @@ impl Game {
             Proc::Tokio(c) => c.raw_handle().map(|h| h as windows_sys::Win32::Foundation::HANDLE),
             Proc::Hidden(p) => Some(p.raw_handle()),
         };
-        let job = handle.and_then(crate::win_job::Job::for_process);
+        // SAFETY : le handle vient du processus `proc`, vivant et possédé ici pendant l'appel.
+        let job = handle.and_then(|h| unsafe { crate::win_job::Job::for_process(h) });
         Self { proc, job }
     }
 }

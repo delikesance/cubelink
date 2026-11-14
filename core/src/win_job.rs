@@ -12,8 +12,11 @@ unsafe impl Send for Job {}
 unsafe impl Sync for Job {}
 
 impl Job {
-    /// Crée un Job Object et y place `process` (handle valide pendant l'appel). `None` en cas d'échec.
-    pub fn for_process(process: HANDLE) -> Option<Self> {
+    /// Crée un Job Object et y place `process`. `None` en cas d'échec.
+    ///
+    /// # Safety
+    /// `process` doit être un handle de processus valide pendant l'appel.
+    pub unsafe fn for_process(process: HANDLE) -> Option<Self> {
         // SAFETY : pas d'attributs de sécurité ni de nom : deux pointeurs nuls sont acceptés.
         let h = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
         if h.is_null() {

@@ -270,8 +270,28 @@ pub fn run() {
             handlers![commands_update::update_state, commands_update::update_check, commands_update::update_install],
             handlers![test_hooks::test_state, test_hooks::test_cut_guest_connection],
         ))
-        .run(tauri::generate_context!())
+        .run(context(test_mode))
         .expect("erreur au lancement de Cubelink");
+}
+
+/// Contexte Tauri. En mode test, les arguments de `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` (port CDP du harnais E2E) sont
+/// AJOUTES a ceux de la fenetre. Depuis que tauri.conf.json fixe `additionalBrowserArgs`, la variable seule ne suffit plus :
+/// en CI, WebView2 n'ouvrait jamais le port de debogage (« CDP indisponible » sur tous les scenarios).
+fn context(test_mode: bool) -> tauri::Context<tauri::Wry> {
+    let mut ctx = tauri::generate_context!();
+    if test_mode {
+        let extra = std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").ok();
+        for w in &mut ctx.config_mut().app.windows {
+            w.additional_browser_args = merge_browser_args(w.additional_browser_args.take(), extra.as_deref());
+        }
+    }
+    ctx
+}
+
+/// Arguments de la fenetre suivis de ceux de l'environnement (les deux facultatifs, les blancs ignores).
+fn merge_browser_args(window: Option<String>, env: Option<&str>) -> Option<String> {
+    let parts: Vec<&str> = [window.as_deref(), env].into_iter().flatten().map(str::trim).filter(|s| !s.is_empty()).collect();
+    (!parts.is_empty()).then(|| parts.join(" "))
 }
 
 #[cfg(test)]
@@ -280,6 +300,19 @@ mod tests {
 
     fn hooks(test_mode: bool, relay: Option<test_hooks::RelayMode>) -> test_hooks::Hooks {
         test_hooks::Hooks { test_mode, relay, ..Default::default() }
+    }
+
+    #[test]
+    fn arguments_webview_de_l_environnement_ajoutes_a_ceux_de_la_fenetre() {
+        let w = Some("--disable-features=msWebOOUI".to_string());
+        assert_eq!(
+            merge_browser_args(w.clone(), Some("--remote-debugging-port=9222 --remote-allow-origins=*")).as_deref(),
+            Some("--disable-features=msWebOOUI --remote-debugging-port=9222 --remote-allow-origins=*")
+        );
+        assert_eq!(merge_browser_args(w.clone(), None), w);
+        assert_eq!(merge_browser_args(w.clone(), Some("  ")), w);
+        assert_eq!(merge_browser_args(None, Some("--x")).as_deref(), Some("--x"));
+        assert_eq!(merge_browser_args(None, None), None);
     }
 
     #[test]

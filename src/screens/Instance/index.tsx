@@ -15,7 +15,7 @@ import { sessionsFrom } from "../Main/index";
 import { LogsPanel } from "../Main/LogsPanel";
 import { Modal } from "../Main/Modal";
 import { ModsPanel } from "../Main/ModsPanel";
-import { ICONS, Icon } from "../Main/Panel";
+import { ICONS, Icon } from "../../ui";
 import { SettingsDialog } from "../Main/SettingsDialog";
 import { Viewer } from "../Main/Viewer";
 

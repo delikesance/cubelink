@@ -3,7 +3,8 @@ import { Button, Field, Input, RamPicker, useDefaultRam } from "../../ui";
 import { useServices } from "../../app/context";
 import { validateName } from "../Create";
 import type { Instance, InstancePatch } from "../../services";
-import { ICONS, Icon, Panel } from "./Panel";
+import { ICONS, Icon } from "../../ui";
+import { Panel } from "./Panel";
 
 export interface SettingsDialogProps {
   instance: Instance;

@@ -1,5 +1,5 @@
 //! Faux hote pour les tests : aucune fenetre, mais le VRAI deroulement du rideau (`cubelink_host::flow::Machine`, la machine
-//! pure que pilote `GameHost`), avec la meme correspondance appel -> evenement que `host/src/win/mod.rs` et une horloge
+//! pure que pilote `GameHost`), avec la meme correspondance appel -> evenement que `host/src/scene.rs` (`GameHost`) et une horloge
 //! simulee. Ce qu'il prouve : apres chaque chemin du launcher, le rideau finit retire.
 
 use super::*;

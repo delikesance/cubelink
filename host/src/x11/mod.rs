@@ -9,7 +9,7 @@
 //! rogne) ; le rideau est une fenetre ARGB `override-redirect`, traversee par la souris. Repli si le reparentage est refuse :
 //! `WM_TRANSIENT_FOR` + `_MOTIF_WM_HINTS` sans decoration + `SKIP_TASKBAR`.
 //!
-//! * `mod.rs`            : API publique ([`GameHost`]), etat partage, execution des effets, repli, gardes.
+//! * `mod.rs`            : `Backend` de la Scene commune (`crate::scene`, ou vit l'API publique), etat propre a X11, execution des effets, repli, gardes.
 //! * `embedded.rs`       : scene et rideau (fenetres), adoption, calage, pose, plein ecran, restitution au bureau.
 //! * `watch.rs`          : fil des evenements X11 (detection des fenetres du jeu), balayage de secours.
 //! * `curtain_window.rs` : contenu, rendu et minuteur du rideau.

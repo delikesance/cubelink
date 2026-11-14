@@ -3,7 +3,7 @@
 //! Couche MINCE : elle traduit ce qui se passe en [`Event`], les passe a la machine [`crate::flow`] sous le verrou d'etat, puis
 //! execute les [`Effect`] rendus une fois le verrou relache.
 //!
-//! * `mod.rs`            : API publique ([`GameHost`]), etat partage, execution des effets, repli.
+//! * `mod.rs`            : `Backend` de la Scene commune (`crate::scene`, ou vit l'API publique), etat propre a Windows, execution des effets, repli.
 //! * `embedded.rs`       : zone de jeu et rideau dans la fenetre du launcher ; adoption et calage de la fenetre du jeu.
 //! * `game_window.rs`    : fil unique des appels synchrones vers la fenetre du jeu (adoption, styles, decoupe, restitution).
 //! * `watch.rs`          : surveillance des fenetres du processus de jeu (hooks WinEvent, balayage de secours).

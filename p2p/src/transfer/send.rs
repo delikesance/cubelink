@@ -798,10 +798,9 @@ mod iroh_impl {
                         .await
                         .map_err(net)?;
                     let mut known = lock(&self.known);
-                    match now {
-                        Some(st) => known.insert(sha.to_string(), (tag.hash, st)),
-                        None => known.remove(sha),
-                    };
+                    // Toujours inscrit (le blob reste protégé du ramasse-miettes jusqu'au fetch de l'invité). Sans
+                    // empreinte lisible, l'entrée ne sera jamais réutilisée (`now` absent) : nouvel import au prochain appel.
+                    known.insert(sha.to_string(), (tag.hash, now.unwrap_or((u64::MAX, None))));
                     tag.hash
                 }
             };

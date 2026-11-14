@@ -116,6 +116,20 @@ describe("Join", () => {
     expect(screen.getByRole("status").textContent).toBe("Préparation en cours");
   });
 
+  it("Réessayer après un changement chez l'ami : nouveau plan, et retour au plan s'il y a des fichiers à accepter", async () => {
+    const base = createFakeServices({ tickMs: 0 });
+    const start = vi.fn(async () => {});
+    const plan = vi.fn(() => base.joinPlan("x"));
+    const { emit } = setup({ joinStart: start, joinPlan: plan });
+    await startJoin();
+    plan.mockImplementation(async () => ({ ...(await base.joinPlan("x")), manifest_hash: "e".repeat(64) }));
+    emit(P({ phase: "failed", error: "Un fichier a changé chez ton ami pendant le transfert : réessaie dans un instant" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Réessayer" }));
+    expect(await screen.findByText(/a changé : vérifie le nouveau plan/)).toBeTruthy();
+    expect(start).toHaveBeenCalledTimes(1);
+    expect((screen.getByRole("checkbox", { name: /confiance/ }) as HTMLInputElement).checked).toBe(false);
+  });
+
   it("échec inconnu : message réel, Retour à l'accueil", async () => {
     const { navigate, emit } = setup();
     await startJoin();

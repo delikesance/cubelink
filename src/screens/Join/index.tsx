@@ -154,7 +154,24 @@ export default function Join() {
     autoPlayed.current = false;
     const c = started.current;
     if (!c) throw new Error("Recharge le plan avant de réessayer.");
-    await services.joinStart(friend, c.hash, c.accept, ram);
+    // Un fichier a pu changer chez l'ami (son manifeste est recalculé) : plan frais. S'il n'y a rien à accepter, on
+    // repart dessus ; sinon retour au plan, à revérifier.
+    const fresh = await services.joinPlan(friend);
+    let hash = c.hash;
+    if (fresh.manifest_hash !== c.hash) {
+      const pending = fresh.unknown_mods.length + (fresh.unknown_unchecked?.length ?? 0) + (fresh.unknown_scripts?.length ?? 0);
+      if (pending > 0) {
+        setState({ kind: "ready", plan: fresh });
+        setTrusted(false);
+        setStarting(false);
+        setStage("plan");
+        setStartError(`La partie de ${peerName.current || "ton ami"} a changé : vérifie le nouveau plan avant de rejoindre.`);
+        return;
+      }
+      hash = fresh.manifest_hash;
+    }
+    await services.joinStart(friend, hash, c.accept, ram);
+    started.current = { hash, accept: c.accept };
   }, "Impossible de relancer le transfert.");
 
   // Cause identifiable d'un échec : textes partagés avec l'écran Erreur (pas ceux de la connexion Microsoft ni Java).

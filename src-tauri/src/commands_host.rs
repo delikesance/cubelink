@@ -23,6 +23,13 @@ use crate::test_hooks::{set_tunnel_port, validate_world_port};
 /// Sans cela, un joueur pourrait faire relayer le tunnel vers un autre service local de l'hôte.
 pub fn parse_world_port(line: &str) -> Option<u16> {
     let msg = log_message(line.trim_end());
+    // L'agent LAN écrit sur la sortie standard, que certaines versions journalisent en `[STDOUT]: …` (ou
+    // `[STDOUT]: [Classe:méthode:ligne]: …`). Un joueur ne fabrique pas ce jeton : son message commence par `<Pseudo>`.
+    let msg = msg.strip_prefix("[STDOUT]:").map(str::trim_start).unwrap_or(msg);
+    let msg = match msg.strip_prefix('[').and_then(|r| r.split_once("]: ")) {
+        Some((inner, rest)) if inner.contains(':') && !inner.contains(' ') => rest,
+        _ => msg,
+    };
     let msg = msg.strip_prefix("[Cubelink] LAN: ").unwrap_or(msg);
     for marker in ["Started serving on", "Local game hosted on port", "Published LAN server on port"] {
         let Some(rest) = msg.strip_prefix(marker) else { continue };
@@ -47,6 +54,22 @@ pub fn parse_world_port(line: &str) -> Option<u16> {
 /// un en-tête que s'il contient `/` ou n'est qu'une heure : `[CHAT]`, `[Not Secure]` ou `[Bob]` arrêtent la lecture
 /// et restent dans le message. Un pseudo ne contient ni `/`, ni crochets, ni parenthèses : un joueur ne forge pas
 /// d'en-tête, et son message commence toujours par `<Pseudo>`, `[CHAT]` ou `[Pseudo]`.
+/// Heure d'un en-tête de journal : `HH:MM:SS`, éventuellement suivie de `.mmm`. Un pseudo numérique (`[1234]`) n'en
+/// est pas une.
+fn is_clock(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() >= 8
+        && b[2] == b':'
+        && b[5] == b':'
+        && [0, 1, 3, 4, 6, 7].iter().all(|&i| b[i].is_ascii_digit())
+        && (b.len() == 8 || (b[8] == b'.' && b.len() > 9 && b[9..].iter().all(u8::is_ascii_digit)))
+}
+
+/// Fin du serveur intégré (monde quitté) : un monde rouvert ensuite au réseau local aura un nouveau port.
+fn is_server_stop(line: &str) -> bool {
+    log_message(line.trim_end()).starts_with("Stopping server")
+}
+
 fn log_message(line: &str) -> &str {
     let mut s = line.trim_start();
     loop {
@@ -59,7 +82,7 @@ fn log_message(line: &str) -> &str {
         let inner = &s[1..end];
         let header = !inner.is_empty()
             && if close == ']' {
-                inner.contains('/') || inner.chars().all(|c| c.is_ascii_digit() || c == ':' || c == '.')
+                inner.contains('/') || is_clock(inner)
             } else {
                 inner.chars().all(|c| c.is_ascii_alphanumeric() || "_.$-".contains(c))
             };
@@ -199,10 +222,15 @@ impl HostAuto {
         Self { st: st.clone(), id: instance_id.to_string(), share: Some(share), port: None, announce: Some(announce) }
     }
 
-    /// Une ligne de sortie du jeu : détecte l'ouverture du monde au réseau local. Le premier port détecté est
-    /// définitif pour toute la partie : une ligne plus tardive (même forgée) ne détourne pas le tunnel.
+    /// Une ligne de sortie du jeu : détecte l'ouverture du monde au réseau local. Le port détecté est définitif tant
+    /// que ce monde tourne : une ligne plus tardive (même forgée) ne détourne pas le tunnel. Après l'arrêt du serveur
+    /// intégré (`Stopping server`, monde quitté), le monde suivant ouvert au réseau local donne le nouveau port.
     pub fn on_line(&mut self, line: &str) {
         if self.port.is_some() {
+            // Monde quitté (serveur intégré arrêté) : le prochain monde ouvert au réseau local pourra donner son port.
+            if is_server_stop(line) {
+                self.port = None;
+            }
             return;
         }
         if let Some(p) = parse_world_port(line) {
@@ -276,6 +304,12 @@ mod tests {
         assert_eq!(parse_world_port(l), Some(54321));
         assert_eq!(parse_world_port("[12:00:01] [Server thread/INFO] (Minecraft) Started serving on 54321"), Some(54321));
         assert_eq!(parse_world_port("[Cubelink] LAN: Published LAN server on port 54321"), Some(54321));
+        assert_eq!(parse_world_port("[12:00:01] [Render thread/INFO]: [STDOUT]: [Cubelink] LAN: Published LAN server on port 54321"), Some(54321));
+        assert_eq!(
+            parse_world_port("[12:00:01] [Client thread/INFO] [STDOUT]: [app.cubelink.agent.LanAgent:log:150]: [Cubelink] LAN: Published LAN server on port 54321"),
+            Some(54321)
+        );
+        assert_eq!(parse_world_port("[12:00:01.123] [Server thread/INFO]: Started serving on 54321"), Some(54321));
         assert_eq!(parse_world_port("Local game hosted on port  1024"), Some(1024));
         assert_eq!(parse_world_port("Started serving on 54321\r"), Some(54321));
         assert_eq!(parse_world_port("[Server thread/INFO]: Started serving on 127.0.0.1:41234"), Some(41234));
@@ -303,6 +337,14 @@ mod tests {
         }
     }
 
+    #[test]
+    fn arret_du_serveur_integre() {
+        assert!(is_server_stop("[12:00:01] [Server thread/INFO] [minecraft/MinecraftServer]: Stopping server"));
+        assert!(is_server_stop("[12:00:01] [Server thread/INFO] (Minecraft) Stopping server"));
+        assert!(!is_server_stop("[12:00:01] [Server thread/INFO]: <Bob> Stopping server"));
+        assert!(!is_server_stop("[12:00:01] [Render thread/INFO]: [CHAT] <Bob> Stopping server"));
+    }
+
     /// S2 : une ligne de chat (ou de `/say`) ne fournit jamais le port du tunnel, quel que soit le format du journal.
     #[test]
     fn parse_port_ignore_le_chat() {
@@ -314,6 +356,9 @@ mod tests {
             "[12:00:01] [Server thread/INFO] (Minecraft) <Bob> Started serving on 5432",
             "[12:00:01] [Server thread/INFO]: [Not Secure] <Bob> Started serving on 5432",
             "[12:00:01] [Server thread/INFO]: [Bob] Started serving on 5432",
+            "[12:00:01] [Server thread/INFO]: [1234] Started serving on 5432",
+            "[12:00:01] [Server thread/INFO]: [12:34] Started serving on 5432",
+            "[12:00:01] [Server thread/INFO]: <Bob> [STDOUT]: [Cubelink] LAN: Published LAN server on port 5432",
             "[12:00:01] [Server thread/INFO]: <Bob> ]: Started serving on 5432",
             "[12:00:01] [Server thread/INFO]: <Bob> [Cubelink] LAN: Published LAN server on port 5432",
             "[12:00:01] [Server thread/INFO]: * Bob Started serving on 5432",
@@ -370,6 +415,8 @@ mod tests {
         auto.on_line("[Render thread/INFO]: [CHAT] Local game hosted on port 54321"); // doublon ignoré
         // S2 : le port est définitif une fois le monde ouvert, même face à une ligne valide plus tardive.
         auto.on_line("[Server thread/INFO] [minecraft/IntegratedServer]: Started serving on 5432");
+        auto.on_line("[Server thread/INFO]: <Bob> Stopping server"); // chat : le port reste
+        auto.on_line("[Server thread/INFO] [minecraft/IntegratedServer]: Started serving on 5433");
         let want = Some(HostState { instance_id: inst.id.clone(), sharing: true, world_port: Some(54321) });
         for _ in 0..100 {
             if st.host_state() == want {

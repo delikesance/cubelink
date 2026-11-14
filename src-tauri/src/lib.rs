@@ -6,6 +6,7 @@ pub mod commands_auth;
 pub mod commands_browse;
 pub mod commands_friends;
 pub mod commands_game;
+pub mod commands_hearth;
 pub mod commands_host;
 pub mod commands_instances;
 pub mod commands_join;
@@ -18,6 +19,7 @@ pub mod last_seen;
 pub mod trusted_mods;
 pub mod install;
 pub mod invites;
+pub mod hearth;
 pub mod hotkey;
 pub mod p2p_backend;
 pub mod stage;
@@ -95,6 +97,33 @@ macro_rules! handlers {
             invites::friend_invite,
             invites::friend_invites,
             invites::friend_invite_dismiss,
+            invites::friend_join_requests,
+            invites::friend_join_request_answer,
+            invites::friend_join_request,
+            commands_hearth::hearth_list,
+            commands_hearth::hearth_detail,
+            commands_hearth::hearth_worlds,
+            commands_hearth::hearth_create,
+            commands_hearth::hearth_invites,
+            commands_hearth::hearth_invite_accept,
+            commands_hearth::hearth_invite_dismiss,
+            commands_hearth::hearth_play,
+            commands_hearth::hearth_stop,
+            commands_hearth::hearth_unclean_choice,
+            commands_hearth::hearth_set_instance,
+            commands_hearth::hearth_add_member,
+            commands_hearth::hearth_remove_member,
+            commands_hearth::hearth_leave,
+            commands_hearth::hearth_vote,
+            commands_hearth::hearth_continue_without,
+            commands_hearth::hearth_pack_update,
+            commands_hearth::hearth_restore,
+            commands_hearth::hearth_resolve_fork,
+            commands_hearth::hearth_set_background,
+            commands_hearth::hearth_eula,
+            commands_hearth::hearth_eula_accept,
+            commands_hearth::hearth_enabled,
+            commands_hearth::hearth_set_enabled,
             commands_game::game_switch,
             commands_game::game_current,
             commands_game::game_close,
@@ -137,6 +166,24 @@ pub(crate) fn iroh_options(h: &test_hooks::Hooks) -> iroh_backend::IrohOptions {
         };
     }
     o
+}
+
+
+/// Fermeture de la fenetre pendant qu'un serveur de groupe tourne : la fermeture est retenue le temps de l'arret propre
+/// (monde publie, bail relache), puis l'application sort. Sans serveur actif, ne fait rien.
+fn hold_close_for_hearth(st: &Arc<state::AppState>, h: &tauri::AppHandle, api: &tauri::CloseRequestApi) {
+    static STOPPING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if st.hearth.active_groups().is_empty() {
+        return;
+    }
+    api.prevent_close();
+    if !STOPPING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        let (st, h) = (st.clone(), h.clone());
+        tauri::async_runtime::spawn(async move {
+            st.hearth_stop_all().await;
+            h.exit(0);
+        });
+    }
 }
 
 pub fn run() {
@@ -221,11 +268,14 @@ pub fn run() {
                                     let (st3, h3) = (st2.clone(), h2.clone());
                                     tauri::async_runtime::spawn(async move {
                                         st3.quit_game(std::time::Duration::from_secs(60)).await;
+                                        // Un serveur de groupe encore actif est arrêté proprement (monde publié, bail relâché).
+                                        st3.hearth_stop_all().await;
                                         h3.exit(0);
                                     });
                                 }
                             } else {
                                 st2.stage.flush_log();
+                                hold_close_for_hearth(&st2, &h2, api);
                             }
                         }
                         // Focus retrouve (retour par Alt+Tab) : l'hote rouvre un jeu en plein ecran que GLFW a reduit en perdant le focus.
@@ -233,6 +283,18 @@ pub fn run() {
                             if let Some(w) = h2.get_webview_window("main") {
                                 st2.stage.relayout(&w);
                             }
+                        }
+                    });
+                }
+            }
+            // Sans zone de jeu integree, la fermeture de la fenetre ne passe pas par le gestionnaire ci-dessus : un serveur de
+            // groupe encore actif est quand meme arrete proprement avant la sortie.
+            if std::env::var_os("CUBELINK_NO_STAGE").is_some() || !stage_allowed {
+                if let Some(w) = app.get_webview_window("main") {
+                    let (st4, h4) = (st.clone(), app.handle().clone());
+                    w.on_window_event(move |e| {
+                        if let tauri::WindowEvent::CloseRequested { api, .. } = e {
+                            hold_close_for_hearth(&st4, &h4, api);
                         }
                     });
                 }

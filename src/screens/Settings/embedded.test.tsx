@@ -74,3 +74,32 @@ describe("Réglage « Jeu intégré »", () => {
     expect(screen.queryByText(/Le jeu s'affiche dans la fenêtre de Cubelink/)).toBeNull();
   });
 });
+
+describe("Réglages « Serveurs de groupe » et « mes amis rejoignent sans invitation »", () => {
+  it("serveurs de groupe : décoché par défaut ; l'interrupteur appelle hearthSetEnabled", async () => {
+    const svc = createFakeServices({ tickMs: 0 });
+    await svc.hearthSetEnabled(false);
+    const set = vi.spyOn(svc, "hearthSetEnabled");
+    render(<Shell services={svc} />);
+    await openTab();
+    const box = await screen.findByLabelText(/Serveurs de groupe \(expérimental\)/, { selector: "input" }) as HTMLInputElement;
+    await waitFor(() => expect(box.disabled).toBe(false));
+    expect(box.checked).toBe(false);
+    fireEvent.click(box);
+    await waitFor(() => expect(set).toHaveBeenCalledWith(true));
+    await waitFor(() => expect(box.checked).toBe(true));
+  });
+
+  it("amis : l'interrupteur enregistre open_to_all_friends sans écraser le reste", async () => {
+    const svc = createFakeServices({ tickMs: 0 });
+    const set = vi.spyOn(svc, "settingsSet");
+    render(<Shell services={svc} />);
+    await openTab();
+    const box = screen.getByLabelText(/Laisser tous mes amis rejoindre mes mondes solo sans invitation/, { selector: "input" }) as HTMLInputElement;
+    expect(box.checked).toBe(false);
+    fireEvent.click(box);
+    await waitFor(() => expect(set).toHaveBeenCalledTimes(1));
+    expect(set.mock.calls[0][0]).toMatchObject({ open_to_all_friends: true, lan_auto: true });
+    await waitFor(() => expect(box.checked).toBe(true));
+  });
+});

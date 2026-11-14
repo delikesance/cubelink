@@ -2,7 +2,8 @@
 //!
 //! En usage réel, le partage est automatique : `HostAuto` partage l'instance (manifeste, sans port) dès que le jeu
 //! tourne, détecte l'ouverture au réseau local dans la sortie du jeu, invite alors automatiquement les amis en ligne
-//! (invitations renouvelées tant que le jeu tourne, annulées à la fin), puis arrête le partage à la fin du jeu.
+//! SI `Settings.open_to_all_friends` (sinon, seuls les amis invités ou acceptés entrent ; invitations renouvelées tant
+//! que le jeu tourne, annulées à la fin), puis arrête le partage à la fin du jeu.
 
 use std::sync::Arc;
 
@@ -151,6 +152,9 @@ impl AppState {
     pub fn host_stop_sharing(&self) {
         self.backend().host_stop_sharing();
         set_tunnel_port(0);
+        // L'accès donné pour cette partie (invités, demandes acceptées) tombe avec elle ; les demandes en attente aussi.
+        self.access.clear();
+        self.join_requests_clear();
         // Les invitations envoyées ne valent plus rien : on prévient les amis invités (au mieux).
         self.invites_revoke_sent();
         let prev = lock(&self.host).take();
@@ -180,6 +184,11 @@ impl AppState {
     /// Sans effet tant que le monde n'est pas ouvert et partagé.
     pub(crate) async fn announce_world(&self, sent: &mut std::collections::HashMap<String, std::time::Instant>) {
         if self.host_state().and_then(|h| h.world_port).is_none() {
+            return;
+        }
+        // Règle de jonction : sans ce réglage, on n'invite que les amis choisis un à un (`friend_invite`).
+        if !lock(&self.settings).open_to_all_friends {
+            sent.clear();
             return;
         }
         let Ok(friends) = self.friend_list() else { return };

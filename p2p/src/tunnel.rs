@@ -30,6 +30,9 @@ use tokio::time::timeout;
 /// Attente du refus éventuel de l'hôte après l'établissement de la connexion.
 const SETTLE: Duration = Duration::from_millis(350);
 
+/// Période de revérification de l'autorisation d'une connexion déjà établie (révocation d'accès).
+const AUTHZ_RECHECK: Duration = Duration::from_millis(500);
+
 /// ALPN dédié au tunnel de jeu.
 pub const TUNNEL_ALPN: &[u8] = b"cubelink/tunnel/1";
 
@@ -326,12 +329,32 @@ async fn serve_conn(core: Arc<HostCore>, conn: Connection) {
     let (cfg, sem, counters) = (core.cfg, core.sem.clone(), core.counters.clone());
     let mut stop = core.stop.subscribe();
     let world = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+    let peer = *conn.remote_id().as_bytes();
     let mut streams = JoinSet::new();
+    let mut recheck = tokio::time::interval(AUTHZ_RECHECK);
+    recheck.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
             _ = stop.wait_for(|s| *s) => break,
+            // Révocation : un pair retiré (membre exclu, invité annulé, ami supprimé) perd sa connexion et ses flux
+            // en cours, sans attendre son prochain flux. Fermer la connexion abandonne aussi les relais TCP.
+            _ = recheck.tick() => {
+                if !core.authorizer.is_allowed(&peer) {
+                    conn.close(crate::reach::CLOSE_DENIED.into(), b"revoked");
+                    core.counters.rejected.fetch_add(1, Ordering::Relaxed);
+                    break;
+                }
+            }
             s = conn.accept_bi() => {
                 let Ok((mut send, mut recv)) = s else { break };
+                // Chaque nouveau flux (un TCP vers le serveur) est revérifié : jamais d'accès après révocation.
+                if !core.authorizer.is_allowed(&peer) {
+                    let _ = send.reset(crate::reach::CLOSE_DENIED.into());
+                    let _ = recv.stop(crate::reach::CLOSE_DENIED.into());
+                    conn.close(crate::reach::CLOSE_DENIED.into(), b"revoked");
+                    core.counters.rejected.fetch_add(1, Ordering::Relaxed);
+                    break;
+                }
                 let Ok(permit) = sem.clone().try_acquire_owned() else {
                     counters.rejected.fetch_add(1, Ordering::Relaxed);
                     let _ = send.reset(2u32.into());

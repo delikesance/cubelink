@@ -7,7 +7,7 @@ use core_lib::types::{TransferPhase, TransferProgress};
 use cubelink_app::p2p_backend::P2pBackend;
 
 mod common;
-use common::{befriend, world, Node};
+use common::{allow, befriend, world, Node};
 
 /// L'instance de `world` plus un fichier de config (`config/mod.json`).
 fn world_with_config(host: &Node) -> String {
@@ -41,6 +41,7 @@ async fn config_reecrite_par_le_jeu_apres_le_manifeste_ne_fait_pas_echouer() {
     befriend(&guest, &host).await;
     let id = world_with_config(&host);
     host.be.host_start_sharing(id.clone(), 0).await.unwrap();
+    allow(&host, &guest);
     // Le jeu démarre et réécrit sa config APRÈS le calcul du manifeste.
     let gd = host.st.instances.game_dir(&id).unwrap();
     std::fs::write(gd.join("config/mod.json"), b"{\"v\":2,\"window\":[1,2,3]}").unwrap();
@@ -62,6 +63,7 @@ async fn mod_remplace_apres_le_manifeste_echec_clair_puis_reessai_avec_manifeste
     befriend(&guest, &host).await;
     let id = world_with_config(&host);
     host.be.host_start_sharing(id.clone(), 0).await.unwrap();
+    allow(&host, &guest);
     let gd = host.st.instances.game_dir(&id).unwrap();
     // Un mod est mis à jour pendant que le partage est actif : le manifeste annoncé est périmé.
     std::fs::write(gd.join("mods/a.jar"), vec![9u8; 6000]).unwrap();

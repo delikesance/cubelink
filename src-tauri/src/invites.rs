@@ -6,6 +6,11 @@
 //! Une invitation disparaît à son échéance (`INVITE_TTL` au plus), quand l'ami annule (il arrête de partager,
 //! message `revoke`), ou quand l'utilisateur l'ignore. Aucune persistance.
 //!
+//! Règle de jonction (docs/hearth.md § 2) : inviter un ami (`friend_invite`) lui ouvre l'accès (`SessionAccess`) à la
+//! partie en cours, comme l'acceptation de sa demande à rejoindre. Demande reçue (hôte) : événement
+//! `friend://join_request` (JoinRequest) puis `friend://join_requests` (Vec<JoinRequest>, à chaque changement) ;
+//! décision par `friend_join_request_answer`. Demande envoyée (invité) : `friend_join_request` attend la décision.
+//!
 //! Point d'accroche pour une notification système : l'événement `friend://invite` (payload `Invite`), émis
 //! une fois par invitation reçue ; la file complète est dans `friend_invites` / `friend://invites`.
 
@@ -15,6 +20,8 @@ use std::time::{Duration, Instant};
 
 use core_lib::types::Invite;
 use p2p_lib::invite::InviteMessage;
+use p2p_lib::join_request::{JoinAnswer, ANSWER_WINDOW};
+use serde::Serialize;
 use tauri::State;
 
 use base64::Engine;
@@ -30,6 +37,23 @@ pub const SEND_MIN_INTERVAL: Duration = Duration::from_secs(10);
 const MAX_QUEUE: usize = 50;
 
 static SEQ: AtomicU64 = AtomicU64::new(1);
+
+/// Demande à rejoindre reçue d'un ami, en attente de la décision de l'hôte (événement `friend://join_request`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct JoinRequest {
+    pub public_key: String,
+    pub name: String,
+    pub received_at: i64,
+    /// Fin de la fenêtre de réponse : au-delà, le demandeur est prévenu que sa demande a expiré.
+    pub expires_at: i64,
+}
+
+fn key_bytes(hex_key: &str) -> Option<[u8; 32]> {
+    if hex_key.len() != 64 {
+        return None;
+    }
+    hex::decode(hex_key).ok()?.try_into().ok()
+}
 
 impl AppState {
     fn emit_invites(&self) {
@@ -82,6 +106,81 @@ impl AppState {
         });
     }
 
+    fn emit_join_requests(&self) {
+        let list = lock(&self.join_requests).clone();
+        self.emit_event("friend://join_requests", &list);
+    }
+
+    /// Demande à rejoindre reçue de l'ami `key` (hex) : la retient (une seule par ami) et prévient l'interface.
+    pub fn join_request_received(&self, key: &str) {
+        let Some(friend) = self.friends.get_friend(key).ok().flatten() else { return };
+        let now = now_secs();
+        let req = JoinRequest { public_key: key.to_string(), name: friend.name, received_at: now, expires_at: now + ANSWER_WINDOW.as_secs() as i64 };
+        {
+            let mut q = lock(&self.join_requests);
+            q.retain(|r| r.public_key != key);
+            q.push(req.clone());
+            let extra = q.len().saturating_sub(MAX_QUEUE);
+            q.drain(..extra);
+        }
+        self.emit_event("friend://join_request", &req);
+        self.emit_join_requests();
+    }
+
+    /// La demande de l'ami `key` n'attend plus rien (décidée, expirée, retirée ou annulée).
+    pub fn join_request_ended(&self, key: &str) {
+        let changed = {
+            let mut q = lock(&self.join_requests);
+            let before = q.len();
+            q.retain(|r| r.public_key != key);
+            q.len() != before
+        };
+        if changed {
+            self.emit_join_requests();
+        }
+    }
+
+    /// Le partage s'arrête : les demandes reçues ne valent plus rien.
+    pub(crate) fn join_requests_clear(&self) {
+        let had = {
+            let mut q = lock(&self.join_requests);
+            let had = !q.is_empty();
+            q.clear();
+            had
+        };
+        if had {
+            self.emit_join_requests();
+        }
+    }
+
+    /// Demandes à rejoindre en attente d'une décision.
+    pub fn friend_join_requests(&self) -> Vec<JoinRequest> {
+        lock(&self.join_requests).clone()
+    }
+
+    /// Hôte : accepte ou refuse la demande de l'ami `public_key`. Accepter ouvre l'accès à la partie en cours.
+    pub fn friend_join_request_answer(&self, public_key: &str, accept: bool) -> Result<(), String> {
+        self.check_friend(public_key)?;
+        let decided = self.backend().answer_join_request(public_key, accept);
+        self.join_request_ended(public_key);
+        if decided {
+            Ok(())
+        } else {
+            Err("cette demande n'est plus valable (expirée, retirée, ou rien n'est partagé)".into())
+        }
+    }
+
+    /// Invité : demande à l'ami `public_key` de rejoindre sa partie ; attend sa décision.
+    pub async fn friend_join_request(&self, public_key: &str) -> Result<JoinAnswer, String> {
+        self.check_friend(public_key)?;
+        if !lock(&self.join_requests_out).insert(public_key.to_string()) {
+            return Err("une demande est déjà en attente chez cet ami".into());
+        }
+        let res = self.backend().send_join_request(public_key.to_string()).await.map_err(|e| crate::error::sanitize(&e));
+        lock(&self.join_requests_out).remove(public_key);
+        res
+    }
+
     fn invite_remove(&self, pred: impl Fn(&Invite) -> bool) -> bool {
         let changed = {
             let mut q = lock(&self.invites);
@@ -115,6 +214,9 @@ impl AppState {
     pub async fn friend_invite(&self, public_key: &str) -> Result<(), String> {
         let host = self.host_state().filter(|h| h.world_port.is_some()).ok_or("ouvrez d'abord votre monde au réseau local pour inviter un ami")?;
         self.check_friend(public_key)?;
+        if self.access.serving_group() {
+            return Err("ce serveur est celui d'un groupe : ajoute cet ami au groupe pour qu'il y joue".into());
+        }
         let inst = self.instances.get(&host.instance_id).map_err(|e| user_msg(&e))?;
         {
             let mut sent = lock(&self.invites_sent);
@@ -138,9 +240,15 @@ impl AppState {
             pack: Some(clip(&inst.name)),
             icon,
         };
+        // L'accès précède l'invitation : l'ami qui la reçoit peut rejoindre aussitôt.
+        let key = key_bytes(public_key).ok_or("cet ami est inconnu")?;
+        let newly = self.access.allow_friend(&key);
         let res = self.backend().send_invite(public_key.to_string(), msg).await.map_err(|e| crate::error::sanitize(&e));
         if res.is_err() {
             lock(&self.invites_sent).remove(public_key);
+            if newly {
+                self.access.revoke(&key);
+            }
         }
         res
     }
@@ -181,6 +289,22 @@ fn icon_data_url(b64: &str) -> Option<String> {
 #[tauri::command(rename_all = "snake_case")]
 pub async fn friend_invite(state: State<'_, Arc<AppState>>, public_key: String) -> Result<(), String> {
     state.friend_invite(&public_key).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn friend_join_requests(state: State<'_, Arc<AppState>>) -> Result<Vec<JoinRequest>, String> {
+    Ok(state.friend_join_requests())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn friend_join_request_answer(state: State<'_, Arc<AppState>>, public_key: String, accept: bool) -> Result<(), String> {
+    state.friend_join_request_answer(&public_key, accept)
+}
+
+/// Renvoie `accepted`, `refused` ou `expired`.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn friend_join_request(state: State<'_, Arc<AppState>>, public_key: String) -> Result<JoinAnswer, String> {
+    state.friend_join_request(&public_key).await
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -402,8 +526,15 @@ mod tests {
         st.announce_world(&mut sent).await;
         assert!(rec.0.lock().unwrap().is_empty());
 
-        // Monde ouvert : chaque ami en ligne reçoit une invitation, une seule fois.
+        // Monde ouvert, mais « inviter tous mes amis » désactivé (défaut) : personne n'est invité d'office.
         *lock(&st.host) = Some(HostState { instance_id: inst.id.clone(), sharing: true, world_port: Some(54321) });
+        assert!(!lock(&st.settings).open_to_all_friends);
+        st.announce_world(&mut sent).await;
+        assert!(rec.0.lock().unwrap().is_empty());
+        assert!(!st.access.contains(&[1; 32]));
+
+        // Réglage activé : chaque ami en ligne reçoit une invitation, une seule fois.
+        lock(&st.settings).open_to_all_friends = true;
         st.announce_world(&mut sent).await;
         st.announce_world(&mut sent).await;
         let got = rec.0.lock().unwrap();
@@ -411,5 +542,61 @@ mod tests {
         keys.sort();
         assert_eq!(keys, vec![key(1), key(2)]);
         assert!(got.iter().all(|(_, m)| !m.revoke && m.pack.as_deref() == Some("ATM10 Sky")));
+    }
+
+    #[tokio::test]
+    async fn inviter_ouvre_l_acces_et_l_arret_du_partage_le_retire() {
+        let dir = tempfile::tempdir().unwrap();
+        let (st, _) = test_state(dir.path());
+        let rec = Arc::new(Rec::default());
+        st.set_backend(rec.clone());
+        add_friend(&st, 1, "Alice");
+        add_friend(&st, 2, "Bob");
+        let inst = st.instances.create("Mon Monde", "1.21.1", LoaderSpec { loader: Loader::Vanilla, version: String::new() }, 2048).unwrap();
+        *lock(&st.host) = Some(HostState { instance_id: inst.id.clone(), sharing: true, world_port: Some(54321) });
+
+        assert!(!st.access.contains(&[1; 32]));
+        st.friend_invite(&key(1)).await.unwrap();
+        assert!(st.access.contains(&[1; 32]), "l'invité a accès à la partie");
+        assert!(!st.access.contains(&[2; 32]), "les autres amis non");
+
+        // Une invitation refusée (anti-spam) ne donne rien à un autre ami ; une erreur d'envoi reprend l'accès donné.
+        assert!(st.friend_invite(&key(7)).await.is_err());
+        assert!(!st.access.contains(&[7; 32]));
+
+        st.host_stop_sharing();
+        assert!(!st.access.contains(&[1; 32]), "accès vidé à l'arrêt du partage");
+    }
+
+    #[tokio::test]
+    async fn demandes_a_rejoindre_file_evenements_et_nettoyage() {
+        let dir = tempfile::tempdir().unwrap();
+        let (st, events) = test_state(dir.path());
+        add_friend(&st, 1, "Alice");
+        add_friend(&st, 2, "Bob");
+        st.join_request_received(&key(1));
+        st.join_request_received(&key(9)); // non-ami : ignoré
+        st.join_request_received(&key(2));
+        st.join_request_received(&key(1)); // même ami : remplace
+        let q = st.friend_join_requests();
+        assert_eq!(q.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(), ["Bob", "Alice"]);
+        assert!(q.iter().all(|r| r.expires_at > r.received_at));
+        assert_eq!(names(&events, "friend://join_request"), 3);
+        let first = lock(&events).iter().find(|(n, _)| n == "friend://join_request").unwrap().1.clone();
+        for f in ["public_key", "name", "received_at", "expires_at"] {
+            assert!(first.get(f).is_some(), "champ {f}");
+        }
+        let before = names(&events, "friend://join_requests");
+        st.join_request_ended(&key(1));
+        st.join_request_ended(&key(1)); // déjà retirée : sans effet ni événement
+        assert_eq!(names(&events, "friend://join_requests"), before + 1);
+        assert_eq!(st.friend_join_requests().len(), 1);
+        st.join_requests_clear();
+        assert!(st.friend_join_requests().is_empty());
+        let last = lock(&events).iter().rev().find(|(n, _)| n == "friend://join_requests").unwrap().1.clone();
+        assert_eq!(last.as_array().unwrap().len(), 0);
+        // Sans backend réel, répondre à une demande échoue clairement ; un inconnu aussi.
+        assert!(st.friend_join_request_answer(&key(2), true).unwrap_err().contains("plus valable"));
+        assert!(st.friend_join_request_answer(&key(9), true).unwrap_err().contains("inconnu"));
     }
 }

@@ -1,6 +1,7 @@
 //! Coque Tauri. Propriété : tâche U13 (commandes), selon docs/contrats.md.
 
 pub mod authz;
+pub mod background;
 pub mod commands_art;
 pub mod commands_auth;
 pub mod commands_browse;
@@ -161,7 +162,17 @@ pub fn run() {
     if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
         std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
     }
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+    // Une seule instance (hors mode test : les E2E lancent plusieurs applications en parallele, chacune son dossier) :
+    // relancer Cubelink alors qu'il tourne en fond montre la fenetre existante au lieu d'ouvrir un second noeud P2P.
+    if !test_mode {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| background::show_main(app)));
+    }
+    builder
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec![background::BACKGROUND_ARG]),
+        ))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -187,6 +198,14 @@ pub fn run() {
                 }
             }
             app.manage(st.clone());
+            // Fond : icone de notification, demarrage avec la session, fenetre montree sauf lancement automatique.
+            if let Err(e) = background::setup_tray(app.handle(), st.clone()) {
+                eprintln!("[Cubelink] icone de la zone de notification : {e}");
+            }
+            background::apply_autostart(app.handle());
+            if !background::started_in_background(std::env::args()) {
+                background::show_main(app.handle());
+            }
             commands_update::setup(app, test_mode);
             hotkey::setup(app.handle(), test_mode);
             // Zone de jeu integree (Windows) : la fenetre du jeu est adoptee dans celle du launcher. Le joueur la coupe par le reglage
@@ -196,46 +215,40 @@ pub fn run() {
                 st.stage.open_log(&st.paths.logs);
                 st.stage.note(&format!("demarrage de Cubelink {}", env!("CARGO_PKG_VERSION")));
             }
-            if std::env::var_os("CUBELINK_NO_STAGE").is_some() {
+            let staged = if std::env::var_os("CUBELINK_NO_STAGE").is_some() {
                 st.stage.note("Scene desactivee : CUBELINK_NO_STAGE");
-            } else if stage_allowed {
-                if let Some(w) = app.get_webview_window("main") {
+                false
+            } else {
+                stage_allowed
+            };
+            if let Some(w) = app.get_webview_window("main") {
+                if staged {
                     let h = app.handle().clone();
                     let sink: state::EventSink = Arc::new(move |name, payload| {
                         let _ = h.emit(name, payload);
                     });
                     st.stage.attach(&w, sink);
-                    let (st2, h2) = (st.clone(), app.handle().clone());
-                    w.on_window_event(move |e| {
-                        // Fermer la fenetre du launcher arrete aussi le jeu de la zone integree, jamais abandonne en tache de fond
-                        // (regles dans `quit_requested` / `quit_game`) : tue net tant qu'il charge derriere le rideau, ferme
-                        // proprement (monde enregistre, force apres 60 s) une fois montre au joueur. Un jeu dans sa PROPRE fenetre
-                        // (reglage « Jeu integre » coupe, ou repli) n'est pas concerne : le launcher se ferme, le jeu continue.
-                        // Pendant la simple preparation (aucun processus) le launcher se ferme tout de suite ; le rideau, fenetre du
-                        // launcher, disparait avec lui.
-                        if let tauri::WindowEvent::CloseRequested { api, .. } = e {
-                            static CLOSING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-                            if st2.quit_requested() {
-                                api.prevent_close();
-                                if !CLOSING.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                                    let (st3, h3) = (st2.clone(), h2.clone());
-                                    tauri::async_runtime::spawn(async move {
-                                        st3.quit_game(std::time::Duration::from_secs(60)).await;
-                                        h3.exit(0);
-                                    });
-                                }
-                            } else {
-                                st2.stage.flush_log();
-                            }
-                        }
-                        // Focus retrouve (retour par Alt+Tab) : l'hote rouvre un jeu en plein ecran que GLFW a reduit en perdant le focus.
-                        if matches!(e, tauri::WindowEvent::Resized(_) | tauri::WindowEvent::Moved(_) | tauri::WindowEvent::ScaleFactorChanged { .. } | tauri::WindowEvent::Focused(true)) {
-                            if let Some(w) = h2.get_webview_window("main") {
-                                st2.stage.relayout(&w);
-                            }
-                        }
-                    });
                 }
+                let (st2, h2) = (st.clone(), app.handle().clone());
+                w.on_window_event(move |e| {
+                    // Fermer la fenetre du launcher la masque : Cubelink reste en fond (zone de notification) pour que les
+                    // amis restent joignables ; « Quitter Cubelink » dans le menu de l'icone sort vraiment. Un jeu de la
+                    // zone integree est d'abord arrete (regles dans `quit_requested` / `quit_game`, voir `background`) :
+                    // tue net tant qu'il charge derriere le rideau, ferme proprement (monde enregistre, force apres 60 s)
+                    // une fois montre au joueur. Un jeu dans sa PROPRE fenetre n'est pas concerne et continue.
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = e {
+                        api.prevent_close();
+                        background::on_close_requested(&h2, &st2);
+                    }
+                    // Focus retrouve (retour par Alt+Tab) : l'hote rouvre un jeu en plein ecran que GLFW a reduit en perdant le focus.
+                    if staged
+                        && matches!(e, tauri::WindowEvent::Resized(_) | tauri::WindowEvent::Moved(_) | tauri::WindowEvent::ScaleFactorChanged { .. } | tauri::WindowEvent::Focused(true))
+                    {
+                        if let Some(w) = h2.get_webview_window("main") {
+                            st2.stage.relayout(&w);
+                        }
+                    }
+                });
             }
             // Diagnostic : lance une instance sans clic (CUBELINK_STAGE_AUTOLAUNCH=<id>). Ignore sur une installation normale :
             // il faut le mode test ou CUBELINK_STAGE_DEBUG, pour qu'une variable d'environnement oubliee ne lance jamais un jeu.

@@ -414,6 +414,9 @@ pub struct IrohBackend {
     /// Instance actuellement partagée (pour recalculer son manifeste si un fichier dérive).
     current_share: Mutex<Option<String>>,
     resharing: AtomicBool,
+    /// Port ouvert sur la box par nous (relais coupé par l'utilisateur : Iroh ne le fait alors pas). Tenu tant que le
+    /// backend vit.
+    _portmap: Option<p2p_lib::portmap::DirectPortmap>,
     me: std::sync::Weak<IrohBackend>,
 }
 
@@ -449,6 +452,11 @@ impl IrohBackend {
         let secret = SecretKey::from_bytes(&st.identity.secret_bytes());
         let endpoint = relay::build_endpoint(secret, &rs, alpns).await.map_err(|e| user_msg(&e))?;
         let advertise = opts.advertise_addrs.unwrap_or(!allow_relay);
+        // Relais coupé par l'utilisateur : Iroh n'ouvre plus de port sur la box, on le fait (jamais dans les tests hors
+        // réseau, `RelayChoice::Disabled`, pour ne rien ouvrir sur la box de la machine de test).
+        let portmap = (!allow_relay && opts.relay != RelayChoice::Disabled)
+            .then(|| p2p_lib::portmap::DirectPortmap::spawn(endpoint.clone()))
+            .flatten();
 
         let settings = st.settings.clone();
         let share_mods: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new(move || lock(&settings).share_mods);
@@ -541,6 +549,7 @@ impl IrohBackend {
             .spawn();
 
         let be = Arc::new_cyclic(|me| Self {
+            _portmap: portmap,
             endpoint,
             router,
             friends_svc,

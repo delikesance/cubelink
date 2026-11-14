@@ -100,7 +100,7 @@ impl AccountEntry {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "lowercase")]
 pub enum AccountKind {
     Online,
@@ -108,7 +108,7 @@ pub enum AccountKind {
 }
 
 /// Compte tel que vu par l'interface (aucun secret).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct AccountInfo {
     pub id: String,
     pub kind: AccountKind,
@@ -116,7 +116,7 @@ pub struct AccountInfo {
     pub uuid: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, specta::Type)]
 pub struct AccountsState {
     pub accounts: Vec<AccountInfo>,
     pub active: Option<String>,

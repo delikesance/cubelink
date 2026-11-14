@@ -52,7 +52,7 @@ pub const MAX_FALLBACK_STREAK: u8 = 2;
 const REASON_REQUESTED: &str = "requested";
 
 /// Etat publie a l'interface (`stage://state`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default, specta::Type)]
 pub struct StageState {
     /// Un jeu est rattache a la fenetre du launcher.
     pub attached: bool,
@@ -633,6 +633,11 @@ impl Stage {
     /// Le launcher se ferme : plus aucun `reveal`.
     pub fn forbid_reveal(&self) {
         self.core.no_reveal.store(true, Ordering::SeqCst);
+    }
+
+    /// Inverse de [`Self::forbid_reveal`] : le launcher n'a pas quitté (masqué en fond), un prochain jeu pourra être montré.
+    pub fn allow_reveal(&self) {
+        self.core.no_reveal.store(false, Ordering::SeqCst);
     }
 
     /// Attend (brievement) que le journal soit ecrit, avant de quitter le processus.

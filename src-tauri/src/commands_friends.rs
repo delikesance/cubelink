@@ -10,7 +10,7 @@ use tauri::State;
 use crate::error::user_msg;
 use crate::state::{lock, now_secs, AppState};
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, specta::Type)]
 pub struct FriendWithPresence {
     pub friend: Friend,
     pub presence: Presence,
@@ -18,7 +18,7 @@ pub struct FriendWithPresence {
     pub last_seen: Option<i64>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, specta::Type)]
 pub struct RequestsPage {
     pub items: Vec<FriendRequest>,
     pub total: usize,
@@ -161,31 +161,42 @@ impl AppState {
 
 /// Test de connexion réseau (Paramètres → « Tester ma connexion »).
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn net_test(state: State<'_, Arc<AppState>>) -> Result<crate::p2p_backend::NetTest, String> {
     state.backend().net_test().await
 }
 
+/// Mon code ami (`mcl1-…`).
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub fn friend_my_code(state: State<'_, Arc<AppState>>) -> Result<FriendCode, String> {
     Ok(state.friend_my_code())
 }
 
+/// Génère un nouveau code ami (l'ancien ne marche plus).
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub fn friend_regenerate_code(state: State<'_, Arc<AppState>>) -> Result<FriendCode, String> {
     state.friend_regenerate_code()
 }
 
+/// Amis, avec leur présence et la dernière fois vus en ligne.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub fn friend_list(state: State<'_, Arc<AppState>>) -> Result<Vec<FriendWithPresence>, String> {
     state.friend_list()
 }
 
+/// Envoie une demande d'ami à partir de son code ; renvoie le code de vérification à comparer.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn friend_send_request(state: State<'_, Arc<AppState>>, code: String) -> Result<VerifyCode, String> {
     state.friend_send_request(&code).await
 }
 
+/// Demandes d'amis reçues, par page, filtrées par nom.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub fn friend_requests(
     state: State<'_, Arc<AppState>>,
     offset: usize,
@@ -195,17 +206,23 @@ pub fn friend_requests(
     state.friend_requests(offset, limit, query)
 }
 
+/// Accepte une demande d'ami.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn friend_accept(state: State<'_, Arc<AppState>>, public_key: String) -> Result<(), String> {
     state.friend_accept(&public_key).await
 }
 
+/// Refuse une demande d'ami.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn friend_refuse(state: State<'_, Arc<AppState>>, public_key: String) -> Result<(), String> {
     state.friend_refuse(&public_key).await
 }
 
+/// Refuse toutes les demandes ; renvoie leur nombre.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn friend_refuse_all(state: State<'_, Arc<AppState>>) -> Result<usize, String> {
     state.friend_refuse_all().await
 }

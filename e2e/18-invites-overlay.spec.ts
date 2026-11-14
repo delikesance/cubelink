@@ -109,16 +109,16 @@ test('panneau en jeu : raccourci valide a l\'enregistrement ; hors Scene (mode t
   const s = await invoke<Record<string, any>>(page, 'settings_get');
   expect(s.overlay_enabled).toBe(true);
   for (const bad of ['Ctrl+Shift+', 'Ctrl+Shift+Banane', 'C', '']) {
-    const e = await invokeErr(page, 'settings_set', { ...s, overlay_hotkey: bad });
+    const e = await invokeErr(page, 'settings_set', { settings: { ...s, overlay_hotkey: bad } });
     expect(e, `raccourci « ${bad} » refuse`).not.toBeNull();
     expect(e!).toMatch(/raccourci/i);
   }
   expect((await invoke<Record<string, any>>(page, 'settings_get')).overlay_hotkey, 'le raccourci invalide n\'a pas ete enregistre').toBe(TEST_HOTKEY);
-  const saved = await invoke<Record<string, any>>(page, 'settings_set', { ...s, overlay_hotkey: 'Ctrl+Alt+Shift+F10' });
+  const saved = await invoke<Record<string, any>>(page, 'settings_set', { settings: { ...s, overlay_hotkey: 'Ctrl+Alt+Shift+F10' } });
   expect(saved.overlay_hotkey).toBe('Ctrl+Alt+Shift+F10');
   expect((await invoke<Record<string, any>>(page, 'settings_get')).overlay_hotkey).toBe('Ctrl+Alt+Shift+F10');
-  expect((await invoke<Record<string, any>>(page, 'settings_set', { ...s, overlay_hotkey: 'F9' })).overlay_hotkey).toBe('F9');
-  await invoke(page, 'settings_set', { ...s, overlay_hotkey: TEST_HOTKEY });
+  expect((await invoke<Record<string, any>>(page, 'settings_set', { settings: { ...s, overlay_hotkey: 'F9' } })).overlay_hotkey).toBe('F9');
+  await invoke(page, 'settings_set', { settings: { ...s, overlay_hotkey: TEST_HOTKEY } });
 
   // sans Scene : rien n'est rattache, ouvrir le panneau ne change rien
   const idle = await stageState(page);

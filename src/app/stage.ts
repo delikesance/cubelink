@@ -1,34 +1,26 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { isTauri } from "../services";
+import type { Services, StageFallback, StageLayout, StageState } from "../services";
 
-/** Zone de jeu intégrée (Windows, Linux X11) : un jeu est rattaché, c'est lui qu'on voit, panneau « en jeu » ouvert. */
-export type StageState = { attached: boolean; game: boolean; panel: boolean };
+export type { StageFallback, StageLayout, StageState };
 
-/** Suit l'état de la zone de jeu (événement `stage://state`). Hors Tauri : jamais rattaché. */
-export function useStage(): StageState {
-  const [st, setSt] = useState<StageState>({ attached: false, game: false, panel: false });
+// Zone de jeu intégrée (Windows, Linux X11). Tout passe par `Services` (commandes `stage_*`, événements `stage://*`) :
+// le faux service n'a pas de zone de jeu, donc rien n'est rattaché hors de l'application.
+
+const DETACHED: StageState = { attached: false, game: false, panel: false };
+
+/** Suit l'état de la zone de jeu (commande `stage_state` puis événement `stage://state`). */
+export function useStage(services: Services): StageState {
+  const [st, setSt] = useState<StageState>(DETACHED);
   useEffect(() => {
-    if (!isTauri()) return;
-    let off: (() => void) | undefined;
     let dead = false;
-    void (async () => {
-      const [{ invoke }, { listen }] = await Promise.all([import("@tauri-apps/api/core"), import("@tauri-apps/api/event")]);
-      try { const s = await invoke<StageState>("stage_state"); if (!dead) setSt(s); } catch { /* best effort */ }
-      const un = await listen<StageState>("stage://state", (e) => setSt(e.payload));
-      if (dead) un(); else off = un;
-    })().catch(() => { /* best effort */ });
-    return () => { dead = true; off?.(); };
-  }, []);
+    // Un événement arrivé avant la réponse de `stage_state` est plus récent qu'elle : la réponse est alors ignorée.
+    let evented = false;
+    const off = services.onStageState((s) => { evented = true; setSt(s); });
+    services.stageState().then((s) => { if (!dead && !evented) setSt(s); }, () => { /* best effort */ });
+    return () => { dead = true; off(); };
+  }, [services]);
   return st;
 }
-
-/** Événement `stage://fallback` : le jeu n'a pas pu être affiché dans la fenêtre de Cubelink, il a gardé la sienne. */
-export type StageFallback = {
-  /** Identifiant technique de la raison (journal `stage.log`), jamais montré au joueur. */
-  reason: string;
-  /** Trop d'échecs de suite : le jeu s'ouvrira dans sa propre fenêtre jusqu'au redémarrage de Cubelink (le message dit comment revenir). */
-  session_off: boolean;
-};
 
 /** Phrase montrée au joueur après un repli : ce qu'il voit, sans jargon ni raison technique. */
 export function stageFallbackMessage(f: StageFallback): string {
@@ -37,44 +29,28 @@ export function stageFallbackMessage(f: StageFallback): string {
     : "Le jeu s'est ouvert dans sa propre fenêtre.";
 }
 
-/** Dernier repli annoncé par Rust (`stage://fallback`), jusqu'à ce qu'il soit écarté. Hors Tauri : jamais. */
-export function useStageFallback(): { notice: StageFallback | null; dismiss: () => void } {
+/** Dernier repli annoncé par Rust (`stage://fallback`), jusqu'à ce qu'il soit écarté. */
+export function useStageFallback(services: Services): { notice: StageFallback | null; dismiss: () => void } {
   const [notice, setNotice] = useState<StageFallback | null>(null);
-  useEffect(() => {
-    if (!isTauri()) return;
-    let off: (() => void) | undefined;
-    let dead = false;
-    void (async () => {
-      const { listen } = await import("@tauri-apps/api/event");
-      const un = await listen<StageFallback>("stage://fallback", (e) => {
-        setNotice({ reason: String(e.payload?.reason ?? ""), session_off: e.payload?.session_off === true });
-      });
-      if (dead) un(); else off = un;
-    })().catch(() => { /* best effort */ });
-    return () => { dead = true; off?.(); };
-  }, []);
+  useEffect(() => services.onStageFallback((p) => {
+    // Charge utile lue avec prudence : une forme inattendue donne le message simple.
+    const f = p as Partial<StageFallback> | null | undefined;
+    setNotice({ reason: String(f?.reason ?? ""), session_off: f?.session_off === true });
+  }), [services]);
   const dismiss = useCallback(() => setNotice(null), []);
   return { notice, dismiss };
 }
 
-/** La zone de jeu intégrée existe sur ce système (Windows, Linux en session X11). Hors Tauri, ou tant que Rust n'a pas répondu : non. */
-export function useStageSupported(): boolean {
+/** La zone de jeu intégrée existe sur ce système (Windows, Linux en session X11). Tant que Rust n'a pas répondu : non. */
+export function useStageSupported(services: Services): boolean {
   const [ok, setOk] = useState(false);
   useEffect(() => {
-    if (!isTauri()) return;
     let dead = false;
-    void (async () => {
-      const { invoke } = await import("@tauri-apps/api/core");
-      const v = await invoke<boolean>("stage_supported");
-      if (!dead) setOk(v === true);
-    })().catch(() => { /* réglage masqué */ });
+    services.stageSupported().then((v) => { if (!dead) setOk(v === true); }, () => { /* réglage masqué */ });
     return () => { dead = true; };
-  }, []);
+  }, [services]);
   return ok;
 }
-
-/** Rectangle de la zone de jeu et largeur du panneau, en pixels physiques (origine : coin haut-gauche de la zone cliente). */
-export type StageLayout = { x: number; y: number; w: number; h: number; panel_w: number };
 
 const PANEL_W_FALLBACK = 380;
 
@@ -108,17 +84,17 @@ function panelCssPx(): number {
 /**
  * Publie à Rust (`stage_layout`) le rectangle de l'élément réservé à la zone de jeu : le DOM est la seule
  * source de vérité pour la géométrie. Envoi au montage, puis quand l'élément, la fenêtre ou l'échelle
- * d'affichage changent ; rien n'est envoyé si la mise en page est identique à la dernière. Hors Tauri : rien.
+ * d'affichage changent ; rien n'est envoyé si la mise en page est identique à la dernière. Sans zone de jeu
+ * (`stage_supported` faux, faux service) : rien n'est mesuré.
  */
-export function useStageLayout(ref: React.RefObject<HTMLElement | null>): void {
+export function useStageLayout(services: Services, ref: React.RefObject<HTMLElement | null>): void {
+  const supported = useStageSupported(services);
   useEffect(() => {
-    if (!isTauri()) return;
+    if (!supported) return;
     const el = ref.current;
     if (!el) return;
     let dead = false;
     let last = "";
-    // Un seul chargement : les envois s'enchaînent sur cette promesse, donc dans l'ordre.
-    const core = import("@tauri-apps/api/core");
     const publish = () => {
       if (dead) return;
       const layout = stageLayout(el.getBoundingClientRect(), panelCssPx(), window.devicePixelRatio || 1);
@@ -126,7 +102,7 @@ export function useStageLayout(ref: React.RefObject<HTMLElement | null>): void {
       if (key === last) return;
       last = key;
       // Échec : on oublie l'envoi pour que le prochain changement le retente.
-      void core.then(({ invoke }) => invoke("stage_layout", layout)).catch(() => { if (last === key) last = ""; });
+      services.stageLayout(layout).catch(() => { if (last === key) last = ""; });
     };
 
     const ro = typeof ResizeObserver === "function" ? new ResizeObserver(publish) : undefined;
@@ -152,7 +128,7 @@ export function useStageLayout(ref: React.RefObject<HTMLElement | null>): void {
       window.removeEventListener("resize", publish);
       mq?.removeEventListener("change", onDpr);
     };
-  }, [ref]);
+  }, [services, ref, supported]);
 }
 
 /** Le launcher est en plein écran pour le jeu : le jeu l'a demandé (F11), il est rattaché et c'est lui qu'on voit. */
@@ -165,39 +141,18 @@ export function stageFullscreen(requested: boolean, st: StageState): boolean {
  * fenêtre du launcher qui passe en plein écran, et la zone (sans barre de titre) couvre tout l'écran. Retour au launcher :
  * plein écran suspendu ; fin du jeu : oublié. Rend vrai tant que le launcher est en plein écran pour le jeu.
  */
-export function useStageFullscreen(st: StageState): boolean {
+export function useStageFullscreen(services: Services, st: StageState): boolean {
   const [requested, setRequested] = useState(false);
-  useEffect(() => {
-    if (!isTauri()) return;
-    let off: (() => void) | undefined;
-    let dead = false;
-    void (async () => {
-      const { listen } = await import("@tauri-apps/api/event");
-      const un = await listen<boolean>("stage://fullscreen", (e) => setRequested(e.payload === true));
-      if (dead) un(); else off = un;
-    })().catch(() => { /* best effort */ });
-    return () => { dead = true; off?.(); };
-  }, []);
+  useEffect(() => services.onStageFullscreen((on) => setRequested(on === true)), [services]);
   useEffect(() => { if (!st.attached) setRequested(false); }, [st.attached]);
 
   const on = stageFullscreen(requested, st);
   // Ne rend la fenêtre (false) que si c'est nous qui l'avions mise en plein écran.
   const applied = useRef(false);
   useEffect(() => {
-    if (!isTauri() || applied.current === on) return;
+    if (applied.current === on) return;
     applied.current = on;
-    void import("@tauri-apps/api/window").then(({ getCurrentWindow }) => getCurrentWindow().setFullscreen(on)).catch(() => { /* best effort */ });
-  }, [on]);
+    services.setFullscreen(on).catch(() => { /* best effort */ });
+  }, [services, on]);
   return on;
-}
-
-export async function switchStageView(game: boolean): Promise<void> {
-  const { invoke } = await import("@tauri-apps/api/core");
-  await invoke("stage_view", { game });
-}
-
-/** Ouvre ou ferme le panneau « en jeu » (Échap, bouton Fermer). */
-export async function setStagePanel(open: boolean): Promise<void> {
-  const { invoke } = await import("@tauri-apps/api/core");
-  await invoke("stage_panel", { open });
 }

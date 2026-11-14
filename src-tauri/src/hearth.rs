@@ -404,7 +404,7 @@ pub struct HearthRuntime {
     /// Invitations reçues (ami, secondes Unix) sur les dernières 24 h : quota par ami, même si elles sont écartées.
     invite_log: Mutex<Vec<(PeerKey, i64)>>,
     outbox: Arc<Outbox>,
-    net: OnceLock<HearthNet>,
+    net: Mutex<Option<HearthNet>>,
     world: OnceLock<WorldStore>,
     runner: Mutex<Arc<dyn ServerRunner>>,
     launcher: Mutex<Arc<dyn ClientLauncher>>,
@@ -526,7 +526,7 @@ impl HearthRuntime {
             invites: Mutex::new(Vec::new()),
             invite_log: Mutex::new(Vec::new()),
             outbox,
-            net: OnceLock::new(),
+            net: Mutex::new(None),
             world: OnceLock::new(),
             runner: Mutex::new(Arc::new(RealRunner)),
             launcher: Mutex::new(Arc::new(RealLauncher)),
@@ -562,7 +562,7 @@ impl HearthRuntime {
 
     /// Branche le réseau et le magasin de blobs (au démarrage du backend) ; lance les boucles de fond.
     pub fn attach(self: &Arc<Self>, net: HearthNet, world: WorldStore) {
-        let _ = self.net.set(net);
+        *lock(&self.net) = Some(net);
         let _ = self.world.set(world);
         self.start_background();
     }
@@ -610,8 +610,8 @@ impl HearthRuntime {
         self.world.get().ok_or_else(|| "le réseau entre amis est en cours de démarrage, réessayez dans un instant".to_string())
     }
 
-    fn net(&self) -> Result<&HearthNet, String> {
-        self.net.get().ok_or_else(|| "le réseau entre amis est en cours de démarrage, réessayez dans un instant".to_string())
+    fn net(&self) -> Result<HearthNet, String> {
+        lock(&self.net).clone().ok_or_else(|| "le réseau entre amis est en cours de démarrage, réessayez dans un instant".to_string())
     }
 
     pub fn emit_json<T: Serialize>(&self, name: &str, payload: &T) {
@@ -644,6 +644,8 @@ impl HearthRuntime {
         if let Ok(w) = self.world() {
             let _ = w.shutdown().await;
         }
+        // Lâche le point de terminaison : sinon son socket UDP reste lié tant que l'état de l'app vit.
+        lock(&self.net).take();
     }
 
     // --- accès aux groupes ----------------------------------------------------------------------------
@@ -1191,7 +1193,7 @@ impl HearthRuntime {
                 rt.emit_state();
             }
         });
-        let net = self.net()?.clone();
+        let net = self.net()?;
         // Garde-fous avant le premier octet : une grande `total_size` ne coûte à l'émetteur que sa signature.
         let previous_total = v.header.parent.and_then(|p| self.version(&gid, &p)).map(|p| p.header.total_size);
         let opts = FetchOptions {

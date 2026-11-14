@@ -595,7 +595,12 @@ impl AppState {
         };
         // Le jeu reste vivant (via `game_handle`) jusqu'à la fin de la boucle : le lâcher l'arrêterait.
         // Linux : un jeu de la Scene est force en X11/XWayland (Wayland natif non adoptable), voir `RunOptions::force_x11`.
-        let run_opts = launch_run::RunOptions { force_x11: self.stage.force_x11(), ..Default::default() };
+        // Commande d'enrobage de l'instance (Linux : gamemoderun, mangohud...), placee devant Java.
+        let run_opts = launch_run::RunOptions {
+            force_x11: self.stage.force_x11(),
+            wrapper: core_lib::instance::split_jvm_args(&inst.wrapper),
+            ..Default::default()
+        };
         let mut game = match launch_run::spawn_with(&cmd, &log_dir, run_opts).await {
             Ok(g) => g,
             Err(e) => return self.emit_state(&id, LaunchPhase::Failed, Some(user_msg(&e))),
@@ -611,8 +616,9 @@ impl AppState {
         };
         let game = Arc::new(game);
         // Invité : Dynamic FPS (et autres) bride le rendu hors premier plan et retarde le quickPlay (voir `foreground`).
+        #[cfg(any(windows, target_os = "linux"))]
         if join_server.is_some() {
-            crate::foreground::bring_game_to_front(game.pid);
+            cubelink_host::foreground::bring_game_to_front(game.pid);
         }
         *lock(&self.game_handle) = Some((id.clone(), game.clone()));
         // `stage.staged()` est relu a chaque usage : un repli en cours de lancement rend sa fenetre au jeu, et tout le pilotage

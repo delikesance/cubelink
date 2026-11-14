@@ -124,10 +124,11 @@ impl AppState {
         ram_mb: Option<u32>,
         java_path: Option<String>,
         jvm_args: Option<String>,
+        wrapper: Option<String>,
     ) -> Result<Instance, String> {
         check_id(id)?;
         self.instances
-            .update(id, name.as_deref(), ram_mb, java_path.as_deref(), jvm_args.as_deref())
+            .update(id, name.as_deref(), ram_mb, java_path.as_deref(), jvm_args.as_deref(), wrapper.as_deref())
             .map_err(|e| user_msg(&e))
     }
 
@@ -430,8 +431,9 @@ pub fn instances_update(
     ram_mb: Option<u32>,
     java_path: Option<String>,
     jvm_args: Option<String>,
+    wrapper: Option<String>,
 ) -> Result<Instance, String> {
-    state.instances_update(&id, name, ram_mb, java_path, jvm_args)
+    state.instances_update(&id, name, ram_mb, java_path, jvm_args, wrapper)
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -459,10 +461,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (st, _) = test_state(dir.path());
         let i = st.instances.create("Base", "1.21.1", vanilla(), 2048).unwrap();
-        assert!(st.instances_update(&i.id, Some("a/b".into()), None, None, None).is_err());
-        assert!(st.instances_update(&i.id, None, Some(10), None, None).is_err());
-        assert!(st.instances_update("../x", None, None, None, None).is_err());
-        let u = st.instances_update(&i.id, Some("Neuf".into()), Some(3072), Some("java".into()), Some("-Xss2M".into())).unwrap();
+        assert!(st.instances_update(&i.id, Some("a/b".into()), None, None, None, None).is_err());
+        assert!(st.instances_update(&i.id, None, Some(10), None, None, None).is_err());
+        assert!(st.instances_update("../x", None, None, None, None, None).is_err());
+        let u = st.instances_update(&i.id, Some("Neuf".into()), Some(3072), Some("java".into()), Some("-Xss2M".into()), None).unwrap();
         assert_eq!((u.name.as_str(), u.ram_mb, u.java_path.as_deref(), u.jvm_args.as_str()), ("Neuf", 3072, Some("java"), "-Xss2M"));
     }
 

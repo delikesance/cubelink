@@ -4,6 +4,7 @@ import { ShellContext, type ShellContextValue } from "../../app/context";
 import { createFakeServices } from "../../services/fake";
 import type { Instance, LaunchLogEvent, LaunchState, Services } from "../../services";
 import { UNDO_MS } from "../Main/ModsPanel";
+import { isLinuxHost } from "../Main/SettingsDialog";
 import InstancePage from "./index";
 
 afterEach(cleanup);
@@ -293,6 +294,29 @@ describe("Page modpack : onglet Réglages", () => {
     }));
     expect(await screen.findByRole("heading", { level: 1, name: "Renommé" })).toBeTruthy();
     expect(await within(screen.getByRole("tabpanel")).findByText("Réglages enregistrés.")).toBeTruthy();
+  });
+
+  it("Linux : la commande d'enrobage s'enregistre avec les autres réglages (absente ailleurs)", async () => {
+    expect(isLinuxHost("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15")).toBe(true);
+    expect(isLinuxHost("Mozilla/5.0 (Windows NT 10.0; Win64; x64)")).toBe(false);
+    expect(isLinuxHost("Mozilla/5.0 (Linux; Android 14)")).toBe(false);
+    expect(screen.queryByLabelText(/Commande d'enrobage/)).toBeNull();
+    const ua = vi.spyOn(navigator, "userAgent", "get").mockReturnValue("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15");
+    try {
+      const update = vi.fn(async (id: string, patch: object) => ({
+        id, name: AERO, minecraft: "1.21.1", loader: { loader: "neoforge" as const, version: "1" }, ram_mb: 8192, mod_count: 94, ...patch,
+      }));
+      setup({ instancesUpdate: update });
+      await ready();
+      fireEvent.click(tab("Réglages"));
+      const panel = screen.getByRole("tabpanel");
+      fireEvent.change(within(panel).getByLabelText("Nom de l'instance"), { target: { value: "Aero" } });
+      fireEvent.change(within(panel).getByLabelText(/Commande d'enrobage/), { target: { value: "  gamemoderun mangohud " } });
+      fireEvent.click(within(panel).getByRole("button", { name: "Enregistrer" }));
+      await waitFor(() => expect(update).toHaveBeenCalledWith("inst-aeronautics", expect.objectContaining({ wrapper: "gamemoderun mangohud" })));
+    } finally {
+      ua.mockRestore();
+    }
   });
 
   it("valide le nom et affiche l'erreur du service", async () => {

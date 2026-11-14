@@ -680,3 +680,30 @@ b")).is_err());
         assert_eq!(v["loader"]["loader"], "neoforge");
     }
 }
+
+/// Arguments JVM par défaut hors Windows (Linux, macOS) : tas fixe et G1 réglé pour des pauses courtes, afin d'éviter les
+/// saccades dues à la croissance du tas. Ils précèdent `jvm_args` de l'instance : le dernier argument l'emporte côté JVM,
+/// l'utilisateur garde donc la main. Windows : aucun (comportement inchangé).
+pub fn default_jvm_args(windows: bool, ram_mb: u32) -> Vec<String> {
+    if windows {
+        return Vec::new();
+    }
+    let mut a = vec![format!("-Xms{ram_mb}M")];
+    a.extend(
+        ["-XX:+UseG1GC", "-XX:+ParallelRefProcEnabled", "-XX:MaxGCPauseMillis=130", "-XX:+DisableExplicitGC"].map(String::from),
+    );
+    a
+}
+
+#[cfg(test)]
+mod default_jvm_args_tests {
+    use super::*;
+
+    #[test]
+    fn windows_untouched_and_linux_fixed_heap() {
+        assert!(default_jvm_args(true, 4096).is_empty());
+        let l = default_jvm_args(false, 4096);
+        assert_eq!(l[0], "-Xms4096M");
+        assert!(l.contains(&"-XX:+UseG1GC".to_string()));
+    }
+}

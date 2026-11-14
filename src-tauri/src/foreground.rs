@@ -1,4 +1,4 @@
-//! Amène la fenêtre du jeu INVITÉ au premier plan (Windows seulement).
+//! Amène la fenêtre du jeu INVITÉ au premier plan (Windows, et Linux via X11/XWayland).
 //!
 //! Pourquoi : le mod Dynamic FPS (livré dans de nombreux packs, p. ex. Fabulously Optimized) bride le rendu du jeu tant
 //! que sa fenêtre n'est pas au premier plan ; le `--quickPlayMultiplayer` n'est alors traité qu'à ce rythme (mesuré :
@@ -130,11 +130,123 @@ mod imp {
     }
 }
 
-/// Lance (en arrière-plan) l'amenée au premier plan de la fenêtre du jeu `pid`. Sans effet hors Windows.
+#[cfg(target_os = "linux")]
+mod imp_x11 {
+    use std::time::{Duration, Instant};
+    use x11rb::connection::Connection;
+    use x11rb::protocol::xproto::{
+        AtomEnum, ClientMessageEvent, ConfigureWindowAux, ConnectionExt, EventMask, InputFocus, MapState, StackMode, Window,
+    };
+    use x11rb::rust_connection::RustConnection;
+    use x11rb::CURRENT_TIME;
+
+    fn connect() -> Option<(RustConnection, Window)> {
+        let (c, n) = RustConnection::connect(None).ok()?;
+        let root = c.setup().roots.get(n)?.root;
+        Some((c, root))
+    }
+
+    fn atom(c: &RustConnection, name: &str) -> Option<u32> {
+        Some(c.intern_atom(false, name.as_bytes()).ok()?.reply().ok()?.atom)
+    }
+
+    /// Fenetre (a la racine ou jusqu'a 3 niveaux plus bas : la Scene reparente le jeu) dont `_NET_WM_PID` est `pid` et qui est affichee.
+    fn game_window(c: &RustConnection, root: Window, pid: u32) -> Option<Window> {
+        let pid_atom = atom(c, "_NET_WM_PID")?;
+        let mut level = vec![root];
+        for _ in 0..4 {
+            let mut next = Vec::new();
+            for w in level {
+                let Ok(Ok(tree)) = c.query_tree(w).map(|t| t.reply()) else { continue };
+                for child in tree.children {
+                    let has_pid = c
+                        .get_property(false, child, pid_atom, AtomEnum::CARDINAL, 0, 1)
+                        .ok()
+                        .and_then(|r| r.reply().ok())
+                        .and_then(|r| r.value32().and_then(|mut v| v.next()))
+                        == Some(pid);
+                    let viewable = c.get_window_attributes(child).ok().and_then(|r| r.reply().ok()).is_some_and(|a| a.map_state == MapState::VIEWABLE);
+                    if has_pid && viewable {
+                        return Some(child);
+                    }
+                    next.push(child);
+                }
+            }
+            level = next;
+        }
+        None
+    }
+
+    /// Demande au gestionnaire de fenetres d'activer `w` (EWMH, source « pager » : un gestionnaire refuse d'ordinaire une
+    /// source « application » sans saisie recente) puis donne le focus clavier et remonte la fenetre. Sans effet de bord ailleurs.
+    fn front(c: &RustConnection, root: Window, w: Window) -> bool {
+        if let Some(active) = atom(c, "_NET_ACTIVE_WINDOW") {
+            let ev = ClientMessageEvent::new(32, w, active, [2, CURRENT_TIME, 0, 0, 0]);
+            let _ = c.send_event(false, root, EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY, ev);
+        }
+        let _ = c.configure_window(w, &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE));
+        let _ = c.set_input_focus(InputFocus::PARENT, w, CURRENT_TIME);
+        c.flush().is_ok() && c.get_input_focus().ok().and_then(|r| r.reply().ok()).is_some()
+    }
+
+    /// Vrai si `w` est en plein ecran : `_NET_WM_STATE_FULLSCREEN`, ou taille egale a celle de l'ecran.
+    fn fullscreen_win(c: &RustConnection, root: Window, w: Window) -> bool {
+        if let (Some(state), Some(fs)) = (atom(c, "_NET_WM_STATE"), atom(c, "_NET_WM_STATE_FULLSCREEN")) {
+            let listed = c
+                .get_property(false, w, state, AtomEnum::ATOM, 0, 32)
+                .ok()
+                .and_then(|r| r.reply().ok())
+                .and_then(|r| r.value32().map(|v| v.collect::<Vec<_>>()))
+                .is_some_and(|v| v.contains(&fs));
+            if listed {
+                return true;
+            }
+        }
+        let g = |win| c.get_geometry(win).ok().and_then(|r| r.reply().ok());
+        matches!((g(w), g(root)), (Some(a), Some(r)) if a.width == r.width && a.height == r.height)
+    }
+
+    pub fn fullscreen(pid: u32) -> bool {
+        let Some((c, root)) = connect() else { return false };
+        game_window(&c, root, pid).is_some_and(|w| fullscreen_win(&c, root, w))
+    }
+
+    pub fn focus_own(xid: isize) -> bool {
+        let Ok(w) = u32::try_from(xid) else { return false };
+        let Some((c, root)) = connect() else { return false };
+        front(&c, root, w)
+    }
+
+    pub fn bring_to_front(pid: u32) {
+        if pid == 0 {
+            return;
+        }
+        std::thread::spawn(move || {
+            let Some((c, root)) = connect() else { return };
+            let end = Instant::now() + Duration::from_secs(300);
+            let mut tries = 0;
+            while Instant::now() < end {
+                std::thread::sleep(Duration::from_millis(500));
+                let Some(w) = game_window(&c, root, pid) else { continue };
+                tries += 1;
+                let ok = front(&c, root, w);
+                eprintln!("[Cubelink] fenêtre du jeu (pid {pid}) amenée au premier plan : {}", if ok { "oui" } else { "refusé" });
+                if ok || tries >= 5 {
+                    return;
+                }
+            }
+        });
+    }
+
+}
+
+/// Lance (en arrière-plan) l'amenée au premier plan de la fenêtre du jeu `pid`. Sans effet hors Windows et Linux.
 pub fn bring_game_to_front(pid: u32) {
     #[cfg(windows)]
     imp::bring_to_front(pid);
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    imp_x11::bring_to_front(pid);
+    #[cfg(not(any(windows, target_os = "linux")))]
     let _ = pid;
 }
 
@@ -142,7 +254,9 @@ pub fn bring_game_to_front(pid: u32) {
 pub fn focus_own_window(hwnd: isize) -> bool {
     #[cfg(windows)]
     return imp::focus_own(hwnd);
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    return imp_x11::focus_own(hwnd);
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = hwnd;
         false
@@ -159,7 +273,9 @@ pub fn covers_monitor(win: (i32, i32, i32, i32), mon: (i32, i32, i32, i32), has_
 pub fn game_fullscreen(pid: u32) -> bool {
     #[cfg(windows)]
     return pid != 0 && imp::fullscreen(pid);
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    return pid != 0 && imp_x11::fullscreen(pid);
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = pid;
         false

@@ -27,6 +27,19 @@
 //!   `fake-game none`                          : aucune fenetre, le processus vit (repli « aucune fenetre »).
 //!
 //! Dans tous les cas le processus s'arrete seul au bout de deux minutes : un test interrompu ne laisse rien trainer.
+//!
+//! Variante LINUX (X11, `x11rb`, pour `tests/x11_*.rs`) : meme contrat d'arguments, sans Win32. Fenetre 870 x 520 en (200, 150),
+//! `WM_CLASS` = la classe demandee, `_NET_WM_PID`, `WM_DELETE_WINDOW` (le processus s'arrete dessus). Options reprises : `disown`
+//! (quand son parent n'est plus la racine, se reparente sur la racine), `glfwhelper` (cree AVANT sa fenetre deux fenetres d'aide
+//! minuscules, jamais affichees : `GLFW3 Helper` et `SDLHelperWindowInputCatcher`), `stall=<ms>`, `late=<ms>`. Message client
+//! `_FAKE_GAME_GRAB` : la fenetre prend d'elle-meme la taille de l'ecran (plein ecran), `_FAKE_GAME_UNGRAB` : elle reprend sa
+//! taille ; chacun incremente la propriete `_FAKE_GAME_ACKS` de la fenetre (le test sait que le jeu a obei). Pas de gestionnaire de
+//! fenetres : rien n'y est emule (cadre, barre des taches).
+//! `syncwait` (Linux) : comme SDL 3 (`SDL_SyncWindow`), toutes les 700 ms apres l'affichage il demande un deplacement ET un
+//! redimensionnement de sa fenetre puis ATTEND un `ConfigureNotify` SYNTHETIQUE (ICCCM 4.1.5 : `send_event`, coordonnees absolues en
+//! racine ; `syncmax=<n>` : s'arrete apres `n` demandes) ; sans reponse en 2 s c'est un echec (SDL : « Failed to synchronize SDL window »). Compteurs : proprietes
+//! `_FAKE_GAME_SYNC_OK` / `_FAKE_GAME_SYNC_FAIL` de la fenetre ; `_FAKE_GAME_CN` = dernier `ConfigureNotify` synthetique recu
+//! `[x, y, largeur, hauteur, nombre]`, qu'il ait ete demande ou non (le launcher deplace sans que le jeu ait rien demande).
 
 /// Duree de vie maximale.
 #[cfg(windows)]
@@ -284,6 +297,142 @@ mod imp {
     }
 }
 
+#[cfg(target_os = "linux")]
+mod imp_x11 {
+    use std::time::{Duration, Instant};
+
+    use x11rb::connection::Connection;
+    use x11rb::protocol::xproto::*;
+    use x11rb::protocol::Event;
+    use x11rb::rust_connection::RustConnection;
+    use x11rb::wrapper::ConnectionExt as _;
+
+    const LIFETIME: Duration = Duration::from_secs(120);
+
+    fn atom(c: &RustConnection, name: &str) -> u32 {
+        c.intern_atom(false, name.as_bytes()).expect("intern_atom").reply().expect("atome").atom
+    }
+
+    /// Cree une fenetre de premier niveau (cachee) de la classe `class`.
+    fn create(c: &RustConnection, root: u32, class: &str, rect: (i16, i16, u16, u16)) -> u32 {
+        let win = c.generate_id().expect("id");
+        let screen = &c.setup().roots[0];
+        let aux = CreateWindowAux::new().background_pixel(screen.white_pixel).event_mask(EventMask::STRUCTURE_NOTIFY);
+        c.create_window(0, win, root, rect.0, rect.1, rect.2, rect.3, 0, WindowClass::INPUT_OUTPUT, 0, &aux).expect("create_window");
+        let cls = format!("{class}\0{class}\0");
+        c.change_property8(PropMode::REPLACE, win, AtomEnum::WM_CLASS, AtomEnum::STRING, cls.as_bytes()).unwrap();
+        c.change_property8(PropMode::REPLACE, win, AtomEnum::WM_NAME, AtomEnum::STRING, class.as_bytes()).unwrap();
+        c.change_property32(PropMode::REPLACE, win, atom(c, "_NET_WM_PID"), AtomEnum::CARDINAL, &[std::process::id()]).unwrap();
+        c.change_property32(PropMode::REPLACE, win, atom(c, "WM_PROTOCOLS"), AtomEnum::ATOM, &[atom(c, "WM_DELETE_WINDOW")]).unwrap();
+        win
+    }
+
+    pub fn run(args: &[String]) {
+        let class = args[0].as_str();
+        let show_ms: u64 = args.get(1).and_then(|a| a.parse().ok()).unwrap_or(300);
+        let opt = |k: &str| args.iter().find_map(|a| a.strip_prefix(k)).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+        let (disown, helpers) = (args.iter().any(|a| a == "disown"), args.iter().any(|a| a == "glfwhelper"));
+        let (stall, late) = (opt("stall="), opt("late="));
+        let syncwait = args.iter().any(|a| a == "syncwait");
+        let (mut sync_ok, mut sync_fail, mut cn_count) = (0u32, 0u32, 0u32);
+        let mut pending: Option<Instant> = None;
+        let mut idle_since = Instant::now();
+        let (syncmax, mut asked) = (opt("syncmax=") as u32, 0u32);
+        let mut toggle = false;
+        let (c, n) = RustConnection::connect(None).expect("connexion X11 (DISPLAY)");
+        let root = c.setup().roots[n].root;
+        let (p_ok, p_fail, p_cn) = (atom(&c, "_FAKE_GAME_SYNC_OK"), atom(&c, "_FAKE_GAME_SYNC_FAIL"), atom(&c, "_FAKE_GAME_CN"));
+        let (grab, ungrab, acks, delete) = (atom(&c, "_FAKE_GAME_GRAB"), atom(&c, "_FAKE_GAME_UNGRAB"), atom(&c, "_FAKE_GAME_ACKS"), atom(&c, "WM_DELETE_WINDOW"));
+        // comme GLFW / SDL : `_NET_WM_STATE` (data[0] : 0 retire, 1 ajoute, 2 bascule ; data[1] : plein ecran) envoye a la RACINE
+        let (ewmh, net_state, net_fs) = ([atom(&c, "_FAKE_GAME_EWMH_REMOVE"), atom(&c, "_FAKE_GAME_EWMH_ADD"), atom(&c, "_FAKE_GAME_EWMH_TOGGLE")], atom(&c, "_NET_WM_STATE"), atom(&c, "_NET_WM_STATE_FULLSCREEN"));
+        let screen_size = (c.setup().roots[n].width_in_pixels, c.setup().roots[n].height_in_pixels);
+        let t0 = Instant::now();
+        let mut win = None;
+        let mut mapped = false;
+        let mut n_acks = 0u32;
+        let mut helper_made = false;
+        loop {
+            if t0.elapsed() > LIFETIME {
+                return;
+            }
+            if helpers && !helper_made {
+                create(&c, root, "GLFW3 Helper", (0, 0, 1, 1));
+                create(&c, root, "SDLHelperWindowInputCatcher", (0, 0, 10, 10));
+                helper_made = true;
+            }
+            if win.is_none() && t0.elapsed() >= Duration::from_millis(late) {
+                win = Some(create(&c, root, class, (200, 150, 870, 520)));
+                c.flush().unwrap();
+            }
+            if let Some(w) = win {
+                if !mapped && t0.elapsed() >= Duration::from_millis(late + show_ms) {
+                    c.map_window(w).unwrap();
+                    c.flush().unwrap();
+                    mapped = true;
+                    if stall > 0 {
+                        std::thread::sleep(Duration::from_millis(stall)); // ne pompe plus rien : comme un jeu qui charge ses mods
+                    }
+                }
+            }
+            if let (true, Some(w), true) = (syncwait, win, mapped) {
+                if pending.is_none() && (syncmax == 0 || asked < syncmax) && idle_since.elapsed() >= Duration::from_millis(700) {
+                    toggle = !toggle;
+                    asked += 1;
+                    let (x, y, cw, ch) = if toggle { (10, 12, 800, 500) } else { (14, 8, 810, 490) };
+                    c.configure_window(w, &ConfigureWindowAux::new().x(x).y(y).width(cw).height(ch)).unwrap();
+                    c.flush().unwrap();
+                    pending = Some(Instant::now());
+                } else if pending.is_some_and(|t| t.elapsed() > Duration::from_secs(2)) {
+                    sync_fail += 1;
+                    c.change_property32(PropMode::REPLACE, w, p_fail, AtomEnum::CARDINAL, &[sync_fail]).unwrap();
+                    c.flush().unwrap();
+                    pending = None;
+                    idle_since = Instant::now();
+                }
+            }
+            while let Ok(Some(ev)) = c.poll_for_event() {
+                match ev {
+                    Event::ConfigureNotify(e) if syncwait && Some(e.window) == win && e.response_type & 0x80 != 0 => {
+                        cn_count += 1;
+                        c.change_property32(PropMode::REPLACE, e.window, p_cn, AtomEnum::CARDINAL, &[e.x as i32 as u32, e.y as i32 as u32, e.width as u32, e.height as u32, cn_count]).unwrap();
+                        if pending.take().is_some() {
+                            sync_ok += 1;
+                            c.change_property32(PropMode::REPLACE, e.window, p_ok, AtomEnum::CARDINAL, &[sync_ok]).unwrap();
+                            idle_since = Instant::now();
+                        }
+                        c.flush().unwrap();
+                    }
+                    Event::ClientMessage(m) if m.type_ == grab || m.type_ == ungrab => {
+                        let Some(w) = win else { continue };
+                        let rect: (i32, i32, u32, u32) = if m.type_ == grab { (0, 0, screen_size.0 as u32, screen_size.1 as u32) } else { (200, 150, 870, 520) };
+                        let aux = ConfigureWindowAux::new().x(rect.0).y(rect.1).width(rect.2).height(rect.3);
+                        c.configure_window(w, &aux).unwrap();
+                        n_acks += 1;
+                        c.change_property32(PropMode::REPLACE, w, acks, AtomEnum::CARDINAL, &[n_acks]).unwrap();
+                        c.flush().unwrap();
+                    }
+                    Event::ClientMessage(m) if ewmh.contains(&m.type_) => {
+                        let Some(w) = win else { continue };
+                        let action = ewmh.iter().position(|a| *a == m.type_).unwrap_or(0) as u32;
+                        let msg = ClientMessageEvent::new(32, w, net_state, [action, net_fs, 0, 1, 0]);
+                        c.send_event(false, root, EventMask::SUBSTRUCTURE_NOTIFY | EventMask::SUBSTRUCTURE_REDIRECT, msg).unwrap();
+                        n_acks += 1;
+                        c.change_property32(PropMode::REPLACE, w, acks, AtomEnum::CARDINAL, &[n_acks]).unwrap();
+                        c.flush().unwrap();
+                    }
+                    Event::ClientMessage(m) if m.format == 32 && m.data.as_data32()[0] == delete => return,
+                    Event::ReparentNotify(e) if disown && Some(e.window) == win && e.parent != root => {
+                        c.reparent_window(e.window, root, 200, 150).unwrap();
+                        c.flush().unwrap();
+                    }
+                    _ => {}
+                }
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+}
+
 #[cfg(windows)]
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -301,7 +450,20 @@ fn main() {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
 fn main() {
-    eprintln!("fake-game : faux jeu des tests Win32 de la Scene, sans objet sur cette plateforme");
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.first().map(String::as_str) {
+        Some("none") => std::thread::sleep(std::time::Duration::from_secs(120)),
+        Some(_) => imp_x11::run(&args),
+        None => {
+            eprintln!("usage : fake-game <classe> <delai_ms> [disown] [glfwhelper] [stall=<ms>] [late=<ms>] | fake-game none");
+            std::process::exit(2);
+        }
+    }
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+fn main() {
+    eprintln!("fake-game : faux jeu des tests de la Scene, sans objet sur cette plateforme");
 }

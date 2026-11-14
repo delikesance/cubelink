@@ -218,6 +218,19 @@ impl Tracker {
         self.advance(Phase::Ready);
     }
 
+    /// Comme `feed_line`, pour un bruit repete : la ligne est analysee mais ne compte pas comme de l'activite (la quietude de
+    /// `looks_ready` ne repart pas de zero).
+    pub fn feed_line_quiet(&mut self, line: &str) {
+        let last = self.last_line;
+        self.feed_line(line);
+        self.last_line = last;
+    }
+
+    /// Temps ecoule depuis la derniere ligne utile.
+    pub fn silent_for(&self) -> Duration {
+        self.last_line.elapsed()
+    }
+
     /// Analyse une ligne de la sortie du jeu.
     pub fn feed_line(&mut self, line: &str) {
         self.lines += 1;
@@ -671,6 +684,36 @@ mod tests {
         t.feed_line("[04:01:14] [Server thread/INFO]: System chat: Testeur joined the game");
         assert_eq!(t.phase(), Phase::Ready);
         assert!(t.ready_marker());
+    }
+
+    /// Lignes reelles d'un lancement Linux (logs/test/latest.log) : le WARN SDL repete ne repousse pas la quietude, et analyser une
+    /// ligne en silence donne la meme etape / le meme detail que `feed_line` (les journaux Windows passent par `feed_line`, inchange).
+    #[test]
+    fn repeated_sdl_warning_does_not_reset_quiet() {
+        let real = [
+            "[20:33:30] [Render thread/INFO]: Backend library: LWJGL version 3.4.3",
+            "[20:33:31] [Render thread/INFO]: Reloading ResourceManager: vanilla",
+            "[20:33:31] [Render thread/INFO]: Created: 1024x1024x0 minecraft:textures/atlas/gui.png-atlas",
+        ];
+        let warn = "[20:33:32] [Render thread/WARN]: Failed to synchronize SDL window: ";
+        let (mut a, mut b) = (Tracker::new(0, None), Tracker::new(0, None));
+        for l in real {
+            a.feed_line(l);
+            b.feed_line(l);
+        }
+        a.feed_line(warn);
+        b.feed_line(warn);
+        assert_eq!((a.phase(), a.snapshot().detail), (b.phase(), b.snapshot().detail));
+        a.window_shown();
+        b.window_shown();
+        std::thread::sleep(Duration::from_millis(60));
+        for _ in 0..20 {
+            a.feed_line_quiet(warn); // bruit : la quietude court toujours
+            b.feed_line(warn); // activite : elle repart de zero
+        }
+        assert!(a.looks_ready(Duration::from_millis(50)), "le bruit repete ne doit pas empecher la quietude");
+        assert!(!b.looks_ready(Duration::from_millis(50)));
+        assert!(a.silent_for() >= Duration::from_millis(50));
     }
 
     #[test]

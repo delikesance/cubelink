@@ -548,6 +548,7 @@ impl AppState {
         });
         let agent_on = agent_arg.is_some();
         let lan_map = if agent_on && join_server.is_none() { lan_map_path(self, &inst, &prepared.version, &prepared.libs_dir).await } else { None };
+        let ram_mb_eff = core_lib::instance::effective_ram_mb(inst.ram_mb, self.settings_get().default_ram_mb);
         let spec = LaunchSpec {
             java_path: prepared.java,
             game_dir,
@@ -559,13 +560,14 @@ impl AppState {
             profile,
             access_token: token,
             version_type: "release".into(),
-            ram_mb: core_lib::instance::effective_ram_mb(inst.ram_mb, self.settings_get().default_ram_mb),
+            ram_mb: ram_mb_eff,
             os: Os::current(),
             arch: Arch::current(),
             launcher_name: "Cubelink".into(),
             launcher_version: env!("CARGO_PKG_VERSION").into(),
             extra_jvm_args: {
-                let mut a = core_lib::instance::split_jvm_args(&inst.jvm_args);
+                let mut a = core_lib::instance::default_jvm_args(cfg!(windows), ram_mb_eff);
+                a.extend(core_lib::instance::split_jvm_args(&inst.jvm_args));
                 a.extend(agent_arg.map(|arg| match &lan_map {
                     Some(m) => with_map(arg, m),
                     None => arg,
@@ -591,7 +593,9 @@ impl AppState {
             return self.emit_state(&id, LaunchPhase::Failed, Some("Cubelink est en train de se fermer".into()));
         };
         // Le jeu reste vivant (via `game_handle`) jusqu'à la fin de la boucle : le lâcher l'arrêterait.
-        let mut game = match launch_run::spawn(&cmd, &log_dir).await {
+        // Linux : un jeu de la Scene est force en X11/XWayland (Wayland natif non adoptable), voir `RunOptions::force_x11`.
+        let run_opts = launch_run::RunOptions { force_x11: self.stage.force_x11(), ..Default::default() };
+        let mut game = match launch_run::spawn_with(&cmd, &log_dir, run_opts).await {
             Ok(g) => g,
             Err(e) => return self.emit_state(&id, LaunchPhase::Failed, Some(user_msg(&e))),
         };

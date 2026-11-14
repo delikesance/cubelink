@@ -66,6 +66,9 @@ pub struct RunOptions {
     pub max_log_bytes: u64,
     /// Nombre maximal d'événements `Output` par seconde (le journal reçoit tout).
     pub output_lines_per_sec: u32,
+    /// Linux : le jeu est dans la Scène (fenêtre adoptée via X11) ; il doit créer sa fenêtre en X11/XWayland et non en
+    /// Wayland natif (inadoptable). Sans effet hors Linux.
+    pub force_x11: bool,
 }
 
 impl Default for RunOptions {
@@ -75,6 +78,7 @@ impl Default for RunOptions {
             kill_grace: Duration::from_secs(5),
             max_log_bytes: 2 * 1024 * 1024,
             output_lines_per_sec: 200,
+            force_x11: false,
         }
     }
 }
@@ -135,6 +139,7 @@ pub async fn spawn_with(cmd: &LaunchCommand, log_dir: &Path, opts: RunOptions) -
         shown_args: redacted,
         cwd: cmd.cwd.clone(),
         hide_first_window: cmd.hide_first_window,
+        force_x11: opts.force_x11,
         secrets,
         log_dir: log_dir.to_path_buf(),
         opts,
@@ -147,7 +152,11 @@ struct Plan {
     args: Vec<String>,
     shown_args: Vec<String>,
     cwd: PathBuf,
+    #[cfg_attr(not(windows), allow(dead_code))]
     hide_first_window: bool,
+    /// Linux : voir `RunOptions::force_x11`.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    force_x11: bool,
     secrets: Vec<String>,
     log_dir: PathBuf,
     opts: RunOptions,
@@ -183,6 +192,52 @@ impl Proc {
     }
 }
 
+/// Linux : le jeu ne doit pas hériter de l'environnement du launcher (webview GTK, AppImage), qui perturbe LWJGL/GLFW.
+/// On retire ce qui est propre au launcher ; `LD_LIBRARY_PATH` est conservé hors dossiers de l'AppImage (sous NixOS il
+/// donne l'accès aux pilotes GL), et le dossier des pilotes NixOS est ajouté s'il existe.
+#[cfg(target_os = "linux")]
+fn clean_linux_env(command: &mut Command) {
+    let vars: std::collections::HashMap<String, String> = std::env::vars().collect();
+    let (remove, ld) = linux_game_env(&vars, std::path::Path::new("/run/opengl-driver/lib").is_dir());
+    for k in remove {
+        command.env_remove(k);
+    }
+    match ld {
+        Some(v) => command.env("LD_LIBRARY_PATH", v),
+        None => command.env_remove("LD_LIBRARY_PATH"),
+    };
+}
+
+/// Décision pure : variables à retirer et nouvelle valeur de `LD_LIBRARY_PATH`.
+#[cfg(any(target_os = "linux", test))]
+fn linux_game_env(vars: &std::collections::HashMap<String, String>, nixos_gl: bool) -> (Vec<String>, Option<String>) {
+    let mut remove: Vec<String> = vars
+        .keys()
+        .filter(|k| {
+            ["GDK_", "GTK_", "WEBKIT_", "APPDIR", "APPIMAGE", "ARGV0", "OWD", "GIO_", "GSETTINGS_SCHEMA_DIR"].iter().any(|p| k.starts_with(p))
+                || *k == "LD_PRELOAD"
+        })
+        .cloned()
+        .collect();
+    remove.sort();
+    let appdir = vars.get("APPDIR").filter(|a| !a.is_empty());
+    let mut parts: Vec<&str> = vars
+        .get("LD_LIBRARY_PATH")
+        .map(|v| v.split(':').filter(|p| !p.is_empty() && appdir.is_none_or(|a| !p.starts_with(a.as_str()))).collect())
+        .unwrap_or_default();
+    if nixos_gl && !parts.contains(&"/run/opengl-driver/lib") {
+        parts.push("/run/opengl-driver/lib");
+    }
+    (remove, if parts.is_empty() { None } else { Some(parts.join(":")) })
+}
+
+/// Variables qui forcent le jeu en X11/XWayland (Minecraft 1.21 : LWJGL 3.4 / SDL3 crée sinon une fenêtre Wayland native,
+/// que la Scène ne peut pas adopter). `WAYLAND_DISPLAY` reçoit une valeur sans socket : SDL et GLFW renoncent à Wayland.
+#[cfg(any(target_os = "linux", test))]
+fn x11_forced_env() -> [(&'static str, &'static str); 3] {
+    [("SDL_VIDEO_DRIVER", "x11"), ("WAYLAND_DISPLAY", "cubelink-no-wayland"), ("XDG_SESSION_TYPE", "x11")]
+}
+
 /// Crée le processus et branche ses sorties sur `lines`. Rend le processus et son PID.
 fn launch(plan: &Plan, lines: &mpsc::Sender<String>) -> std::io::Result<(Proc, u32)> {
     #[cfg(windows)]
@@ -202,6 +257,13 @@ fn launch(plan: &Plan, lines: &mpsc::Sender<String>) -> std::io::Result<(Proc, u
         .kill_on_drop(true);
     #[cfg(windows)]
     command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    #[cfg(target_os = "linux")]
+    {
+        clean_linux_env(&mut command);
+        if plan.force_x11 {
+            command.envs(x11_forced_env());
+        }
+    }
     let mut child = command.spawn()?;
     let pid = child.id().unwrap_or(0);
     if let Some(out) = child.stdout.take() {
@@ -538,6 +600,7 @@ mod tests {
             args,
             cwd,
             hide_first_window: false,
+            force_x11: false,
             secrets: secrets.iter().map(|s| s.to_string()).collect(),
             log_dir: dir.join("logs"),
             opts,
@@ -735,5 +798,35 @@ mod tests {
         let last = states.last().unwrap();
         assert_eq!(last.state, LaunchPhase::Failed);
         assert!(last.message.as_deref().unwrap().contains("code 3"));
+    }
+}
+
+#[cfg(test)]
+mod linux_env_tests {
+    use super::*;
+
+    #[test]
+    fn x11_force_env_invalidates_wayland() {
+        let e: std::collections::HashMap<_, _> = x11_forced_env().into_iter().collect();
+        assert_eq!(e["SDL_VIDEO_DRIVER"], "x11");
+        assert_eq!(e["XDG_SESSION_TYPE"], "x11");
+        assert!(!std::path::Path::new("/run/user/0").join(e["WAYLAND_DISPLAY"]).exists());
+    }
+
+    #[test]
+    fn game_env_drops_launcher_vars_and_appdir_libs() {
+        let vars: std::collections::HashMap<String, String> = [
+            ("GDK_BACKEND", "x11"),
+            ("WEBKIT_DISABLE_DMABUF_RENDERER", "1"),
+            ("APPDIR", "/tmp/.mount_x"),
+            ("LD_LIBRARY_PATH", "/tmp/.mount_x/usr/lib:/opt/gl"),
+            ("HOME", "/h"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        let (remove, ld) = linux_game_env(&vars, true);
+        assert_eq!(remove, ["APPDIR", "GDK_BACKEND", "WEBKIT_DISABLE_DMABUF_RENDERER"]);
+        assert_eq!(ld.as_deref(), Some("/opt/gl:/run/opengl-driver/lib"));
     }
 }

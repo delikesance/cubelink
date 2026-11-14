@@ -65,6 +65,22 @@ pub fn run() {
     let _ = dotenvy::dotenv();
     let hooks = test_hooks::init().unwrap_or_else(|e| panic!("configuration de test invalide : {e}"));
     let test_mode = hooks.test_mode;
+    // Linux : la Scene adopte la fenetre du jeu par X11. Le launcher doit donc etre une fenetre X11 (XWayland sous Wayland) :
+    // a poser AVANT la creation de la fenetre (GTK lit la variable a l'initialisation), pendant que le processus n'a qu'un fil.
+    // Sans DISPLAY (Wayland pur) rien n'est force : pas de Scene, le jeu garde sa propre fenetre.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("DISPLAY").is_some_and(|d| !d.is_empty())
+        && std::env::var_os("CUBELINK_NO_STAGE").is_none()
+        && (!test_mode || std::env::var_os("CUBELINK_STAGE_TEST").is_some())
+    {
+        std::env::set_var("GDK_BACKEND", "x11");
+    }
+    // WebKitGTK + pilote NVIDIA : « Failed to create GBM buffer » (rendu DMABUF) et fenetre vide. Le rendu logiciel des tampons
+    // suffit pour l'interface ; l'utilisateur garde la main en definissant lui-meme la variable.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    }
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
@@ -96,7 +112,7 @@ pub fn run() {
             // Zone de jeu integree (Windows) : la fenetre du jeu est adoptee dans celle du launcher. Le joueur la coupe par le reglage
             // « Jeu integre » ; CUBELINK_NO_STAGE=1 est un coupe-circuit de developpement (la zone n'est meme pas creee).
             let stage_allowed = !test_mode || std::env::var_os("CUBELINK_STAGE_TEST").is_some();
-            if cfg!(windows) && stage_allowed {
+            if cfg!(any(windows, target_os = "linux")) && stage_allowed {
                 st.stage.open_log(&st.paths.logs);
                 st.stage.note(&format!("demarrage de Cubelink {}", env!("CARGO_PKG_VERSION")));
             }

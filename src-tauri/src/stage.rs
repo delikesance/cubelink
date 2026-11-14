@@ -345,6 +345,61 @@ impl HostApi for cubelink_host::GameHost {
     }
 }
 
+#[cfg(target_os = "linux")]
+impl HostApi for cubelink_host::GameHost {
+    fn relayout(&self, x: i32, y: i32, w: i32, h: i32) {
+        self.relayout(x, y, w, h)
+    }
+    fn begin(&self, title: &str, mods_dir: &Path, profile_path: &Path) {
+        self.begin(title, "Lancement", Some(mods_dir), Some(profile_path))
+    }
+    fn watch(&self, pid: u32) {
+        self.watch(pid)
+    }
+    fn feed_line(&self, line: &str) {
+        self.feed_line(line)
+    }
+    fn is_ready(&self) -> bool {
+        self.is_ready(READY_QUIET, READY_MAX)
+    }
+    fn mark_ready(&self, profile_path: &Path) {
+        self.mark_ready(Some(profile_path))
+    }
+    fn reveal(&self) {
+        self.reveal()
+    }
+    fn begin_close(&self, title: &str) {
+        self.begin_close(title)
+    }
+    fn request_close(&self) {
+        self.request_close()
+    }
+    fn cancel_close(&self) {
+        self.cancel_close()
+    }
+    fn run_finished(&self) {
+        self.run_finished()
+    }
+    fn set_view(&self, game: bool) {
+        self.set_view(game)
+    }
+    fn view(&self) -> (bool, bool) {
+        self.view()
+    }
+    fn panel(&self) -> bool {
+        self.panel()
+    }
+    fn set_panel(&self, open: bool, width_px: i32) -> bool {
+        self.set_panel(open, width_px)
+    }
+    fn set_calm(&self, calm: bool) {
+        self.set_calm(calm)
+    }
+    fn expect_hidden(&self, hidden: bool) {
+        self.expect_hidden(hidden)
+    }
+}
+
 /// Essai « fenetre jamais affichee par le jeu » : `CUBELINK_STAGE_HIDE_START=1`, lue une fois. Sans elle rien ne change.
 pub fn hide_start_switch() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
@@ -507,8 +562,46 @@ impl Stage {
         }
     }
 
+    /// Linux : la zone du jeu est une sous-fenetre X11 de la fenetre du launcher (GDK_BACKEND=x11, voir `lib.rs`). Sous Wayland
+    /// natif (pas de XID) ou sans serveur X11 joignable, le jeu garde sa propre fenetre.
+    #[cfg(target_os = "linux")]
+    pub fn attach(&self, window: &tauri::WebviewWindow, sink: EventSink) {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        let xid = match window.window_handle().map(|h| h.as_raw()) {
+            Ok(RawWindowHandle::Xlib(h)) => h.window as isize,
+            Ok(RawWindowHandle::Xcb(h)) => h.window.get() as isize,
+            _ => {
+                self.note("Scene indisponible : la fenetre du launcher n'est pas une fenetre X11");
+                return;
+            }
+        };
+        match cubelink_host::GameHost::embed(xid) {
+            Ok(h) => {
+                let _ = self.core.sink.set(sink);
+                let core = self.core.clone();
+                h.set_observer(Arc::new(move |ev| match ev {
+                    cubelink_host::HostEvent::Log(line) => core.on_log(line),
+                    cubelink_host::HostEvent::Adopted { class, after_ms } => core.on_adopted(class, *after_ms),
+                    cubelink_host::HostEvent::Fallback { reason, detail } => core.on_fallback(reason.as_str(), detail),
+                    cubelink_host::HostEvent::Fullscreen(on) => core.on_fullscreen(*on),
+                }));
+                self.refresh_calm(&h, true);
+                let _ = self.host.set(Box::new(h));
+                self.note(match self.unavailable_reason() {
+                    None => "Scene activee : le jeu s'affichera dans la fenetre du launcher",
+                    Some(_) => "Scene prete mais reglage « Jeu integre » desactive : le jeu gardera sa propre fenetre",
+                });
+                self.relayout(window);
+            }
+            Err(e) => {
+                eprintln!("[Cubelink] zone de jeu integree indisponible : {e}");
+                self.note(&format!("Scene indisponible : {e}"));
+            }
+        }
+    }
+
     /// Hors Windows la fenetre d'un autre processus ne s'adopte pas : le jeu garde la sienne.
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "linux")))]
     pub fn attach(&self, _window: &tauri::WebviewWindow, _sink: EventSink) {}
 
     /// Recale la zone du jeu apres un deplacement, un redimensionnement ou un changement de dpi : marges publiees par l'interface
@@ -551,6 +644,10 @@ impl Stage {
                 #[cfg(windows)]
                 if let Ok(hwnd) = window.hwnd() {
                     crate::foreground::focus_own_window(hwnd.0 as isize);
+                }
+                #[cfg(target_os = "linux")]
+                if let Some(xid) = own_xid(window) {
+                    crate::foreground::focus_own_window(xid);
                 }
                 let _ = window.set_focus();
             }
@@ -735,9 +832,63 @@ fn reduced_motion() -> bool {
     ok != 0 && animations == 0
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 fn reduced_motion() -> bool {
     false
+}
+
+/// Linux : reglage GNOME « animations » desactive (`gsettings get org.gnome.desktop.interface enable-animations` rend
+/// `false`). Illisible (pas de gsettings, autre bureau) : animations gardees.
+#[cfg(target_os = "linux")]
+fn reduced_motion() -> bool {
+    let out = std::process::Command::new("gsettings")
+        .args(["get", "org.gnome.desktop.interface", "enable-animations"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output();
+    out.is_ok_and(|o| o.status.success() && animations_off(&String::from_utf8_lossy(&o.stdout)))
+}
+
+/// Pur : sortie de `gsettings get ... enable-animations` -> animations desactivees ?
+#[cfg(any(target_os = "linux", test))]
+fn animations_off(gsettings_out: &str) -> bool {
+    gsettings_out.trim() == "false"
+}
+
+/// Linux : la session graphique effective est X11 (`GDK_BACKEND=x11` pose par `lib.rs` avant la fenetre, `DISPLAY` present),
+/// condition pour adopter la fenetre du jeu.
+#[cfg(target_os = "linux")]
+pub fn x11_session() -> bool {
+    x11_session_of(std::env::var("GDK_BACKEND").ok().as_deref(), std::env::var_os("DISPLAY").is_some_and(|d| !d.is_empty()))
+}
+
+/// Pur : `GDK_BACKEND` (si defini) et presence de `DISPLAY` -> session X11 ?
+#[cfg(any(target_os = "linux", test))]
+fn x11_session_of(gdk_backend: Option<&str>, display: bool) -> bool {
+    display && gdk_backend.is_some_and(|b| b.split(',').next().is_some_and(|f| f.trim() == "x11"))
+}
+
+/// XID natif de la fenetre du launcher (Linux, fenetre X11).
+#[cfg(target_os = "linux")]
+fn own_xid(window: &tauri::WebviewWindow) -> Option<isize> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    match window.window_handle().ok()?.as_raw() {
+        RawWindowHandle::Xlib(h) => Some(h.window as isize),
+        RawWindowHandle::Xcb(h) => Some(h.window.get() as isize),
+        _ => None,
+    }
+}
+
+/// Pur : la Scene existe-t-elle sur cette plateforme ? Windows toujours ; Linux seulement en session X11 effective.
+fn stage_supported_on(windows: bool, linux: bool, x11: bool) -> bool {
+    windows || (linux && x11)
+}
+
+/// Les jeux lances dans la Scene doivent etre forces en X11 (voir `launch_run::RunOptions::force_x11`).
+impl Stage {
+    pub fn force_x11(&self) -> bool {
+        cfg!(target_os = "linux") && self.live_host().is_some()
+    }
 }
 
 /// Bascule entre le jeu et le launcher (bouton de la barre de titre), avec l'animation de rideau.
@@ -760,7 +911,11 @@ pub fn stage_layout(state: State<'_, Arc<AppState>>, window: tauri::WebviewWindo
 /// La zone de jeu integree existe sur cette plateforme (l'interface n'affiche le reglage « Jeu integre » que dans ce cas).
 #[tauri::command(rename_all = "snake_case")]
 pub fn stage_supported() -> bool {
-    cfg!(windows)
+    #[cfg(target_os = "linux")]
+    let x11 = x11_session();
+    #[cfg(not(target_os = "linux"))]
+    let x11 = false;
+    stage_supported_on(cfg!(windows), cfg!(target_os = "linux"), x11)
 }
 
 /// Ouvre (`true`) ou ferme (`false`) le panneau « en jeu » (Echap, bouton Fermer).
@@ -1065,6 +1220,26 @@ pub(crate) mod fake {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scene_linux_seulement_en_session_x11() {
+        assert!(stage_supported_on(true, false, false));
+        assert!(stage_supported_on(false, true, true));
+        assert!(!stage_supported_on(false, true, false));
+        assert!(!stage_supported_on(false, false, true));
+        assert!(x11_session_of(Some("x11"), true));
+        assert!(x11_session_of(Some("x11,wayland"), true));
+        assert!(!x11_session_of(Some("wayland"), true));
+        assert!(!x11_session_of(Some("x11"), false));
+        assert!(!x11_session_of(None, true));
+    }
+
+    #[test]
+    fn animations_gnome() {
+        assert!(animations_off("false\n"));
+        assert!(!animations_off("true\n"));
+        assert!(!animations_off(""));
+    }
 
     type Events = Arc<Mutex<Vec<(String, serde_json::Value)>>>;
 

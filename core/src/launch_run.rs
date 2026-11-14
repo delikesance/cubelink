@@ -156,6 +156,14 @@ pub async fn spawn_with(cmd: &LaunchCommand, log_dir: &Path, opts: RunOptions) -
 /// Place la commande d'enrobage devant Java : `wrapper[0]` devient le programme, Java son argument. Rend le programme, les
 /// arguments, les arguments affichés (secrets masqués) et si l'enrobage s'applique. Sans effet sous Windows.
 fn wrap(wrapper: &[String], java: &Path, args: &[String], shown: Vec<String>) -> (PathBuf, Vec<String>, Vec<String>, bool) {
+    // Forme courante `VAR=valeur commande` (ex. `__NV_PRIME_RENDER_OFFLOAD=1 mangohud`) : passe par `env`, comme un shell.
+    let with_env: Vec<String>;
+    let wrapper = if wrapper.first().is_some_and(|w| is_env_assignment(w)) {
+        with_env = std::iter::once("env".to_string()).chain(wrapper.iter().cloned()).collect();
+        &with_env[..]
+    } else {
+        wrapper
+    };
     match wrapper.split_first() {
         Some((first, rest)) if !cfg!(windows) => {
             let head: Vec<String> = rest.iter().cloned().chain(std::iter::once(java.to_string_lossy().into_owned())).collect();
@@ -165,6 +173,13 @@ fn wrap(wrapper: &[String], java: &Path, args: &[String], shown: Vec<String>) ->
         }
         _ => (java.to_path_buf(), args.to_vec(), shown, false),
     }
+}
+
+/// `NOM=valeur` avec un nom de variable valide (lettres, chiffres, `_`, pas de chiffre en tête).
+fn is_env_assignment(w: &str) -> bool {
+    w.split_once('=').is_some_and(|(k, _)| {
+        !k.is_empty() && !k.starts_with(|c: char| c.is_ascii_digit()) && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    })
 }
 
 struct Plan {
@@ -596,7 +611,8 @@ async fn kill_leftovers(game: &Game, pid: u32) {
     #[cfg(not(windows))]
     {
         let _ = game;
-        // Le groupe garde son identifiant tant qu'il a un membre : il ne peut pas désigner un autre groupe.
+        // Le groupe garde son identifiant tant qu'il a un membre. Vide, son numéro ne peut désigner un autre groupe que si le PID
+        // a été recyclé en chef de groupe dans les quelques millisecondes écoulées : risque négligeable, accepté.
         signal_group("-KILL", pid).await;
     }
 }
@@ -1025,6 +1041,10 @@ mod linux_env_tests {
         assert_eq!(prog, PathBuf::from("gamemoderun"));
         assert_eq!(args, ["mangohud", "/jdk/bin/java", "-Xmx2G", "tok"]);
         assert_eq!(shown, ["mangohud", "/jdk/bin/java", "-Xmx2G", "***"]);
+        let env = vec!["__NV_PRIME_RENDER_OFFLOAD=1".to_string(), "mangohud".to_string()];
+        let (prog, args, _, _) = wrap(&env, Path::new("java"), &[], vec![]);
+        assert_eq!((prog, args), (PathBuf::from("env"), vec!["__NV_PRIME_RENDER_OFFLOAD=1".to_string(), "mangohud".into(), "java".into()]));
+        assert!(!is_env_assignment("/opt/a=b/run") && !is_env_assignment("=x") && !is_env_assignment("1A=b"));
         let (prog, args, _, wrapped) = wrap(&[], Path::new("java"), &["a".into()], vec!["a".into()]);
         assert_eq!((prog, args, wrapped), (PathBuf::from("java"), vec!["a".to_string()], false));
     }

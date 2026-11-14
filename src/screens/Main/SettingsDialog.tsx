@@ -76,7 +76,7 @@ export function SettingsDialog({ instance, onSave, onClose, onOpenFolder, onDele
           {(p) => <Input {...p} type="text" value={jvm} autoComplete="off" placeholder="-XX:+UseG1GC" onChange={(e) => setJvm(e.target.value)} />}
         </Field>
         {linux && (
-          <Field label="Commande d'enrobage (facultatif)" id={`${uid}-wrapper`} hint="Lancée devant Java, par exemple gamemoderun ou mangohud. Vide : Java est lancé directement.">
+          <Field label="Commande d'enrobage (facultatif)" id={`${uid}-wrapper`} hint="Lancée devant Java, par exemple gamemoderun, mangohud ou __NV_PRIME_RENDER_OFFLOAD=1 mangohud. Vide : Java est lancé directement.">
             {(p) => <Input {...p} type="text" value={wrapper} autoComplete="off" spellCheck={false} placeholder="gamemoderun" onChange={(e) => setWrapper(e.target.value)} />}
           </Field>
         )}

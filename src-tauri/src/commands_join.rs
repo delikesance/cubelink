@@ -424,9 +424,6 @@ mod tests {
         ) -> crate::p2p_backend::BoxFuture<'_, Result<core_lib::types::VerifyCode, String>> {
             Box::pin(async { Err("non".into()) })
         }
-        fn notify_accepted(&self, _f: Friend) -> crate::p2p_backend::BoxFuture<'_, Result<(), String>> {
-            Box::pin(async { Ok(()) })
-        }
         fn fetch_manifest(&self, _k: String) -> crate::p2p_backend::BoxFuture<'_, Result<HostManifest, String>> {
             Box::pin(async { Err("non".into()) })
         }

@@ -261,9 +261,6 @@ impl P2pBackend for PendingBackend {
     fn refuse_request(&self, public_key: String) -> BoxFuture<'_, Result<bool, String>> {
         Box::pin(async move { self.wait().await?.refuse_request(public_key).await })
     }
-    fn notify_accepted(&self, friend: Friend) -> BoxFuture<'_, Result<(), String>> {
-        Box::pin(async move { self.wait().await?.notify_accepted(friend).await })
-    }
     fn fetch_manifest(&self, friend_public_key: String) -> BoxFuture<'_, Result<HostManifest, String>> {
         Box::pin(async move { self.wait().await?.fetch_manifest(friend_public_key).await })
     }

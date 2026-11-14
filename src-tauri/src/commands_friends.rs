@@ -130,9 +130,7 @@ impl AppState {
         if self.backend().accept_request(public_key.to_string()).await.map_err(|e| crate::error::sanitize(&e))?.is_some() {
             return Ok(());
         }
-        let friend = self.friends.accept_request(public_key).map_err(|e| user_msg(&e))?;
-        // Échec de notification : l'ami reste enregistré localement.
-        let _ = self.backend().notify_accepted(friend).await;
+        self.friends.accept_request(public_key).map_err(|e| user_msg(&e))?;
         Ok(())
     }
 

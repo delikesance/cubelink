@@ -1,73 +1,13 @@
 //! Erreurs distinctes côté invité : ami hors ligne, ne partage pas encore, partage de mods désactivé,
 //! pas (ou plus) ami. Deux nœuds loopback, relais désactivé.
 
-use std::path::Path;
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use core_lib::types::{Loader, LoaderSpec};
-use cubelink_app::iroh_backend::{start_app, IrohBackend, IrohOptions};
 use cubelink_app::p2p_backend::P2pBackend;
-use cubelink_app::state::{AppState, EventSink};
-use p2p_lib::presence::PresenceConfig;
 use p2p_lib::reach::Reach;
-use p2p_lib::relay::RelayChoice;
 
-struct Node {
-    st: Arc<AppState>,
-    be: Arc<IrohBackend>,
-}
-
-impl Node {
-    async fn start(root: &Path, name: &str) -> Node {
-        let events: Arc<Mutex<Vec<(String, serde_json::Value)>>> = Arc::default();
-        let sink: EventSink = Arc::new(move |n, v| events.lock().unwrap().push((n.to_string(), v)));
-        let opts = IrohOptions {
-            relay: RelayChoice::Disabled,
-            advertise_addrs: Some(true),
-            presence: PresenceConfig {
-                interval: Duration::from_secs(3600),
-                timeout: Duration::from_secs(2),
-                failures_to_offline: 2,
-                max_concurrent: 4,
-            },
-            ..IrohOptions::default()
-        };
-        let (st, be) = start_app(root, sink, opts).await.unwrap();
-        st.auth_offline_login(name).unwrap();
-        st.skip_game_install.store(true, std::sync::atomic::Ordering::SeqCst);
-        Node { st, be }
-    }
-    fn key(&self) -> String {
-        self.st.identity.public_key_hex()
-    }
-}
-
-async fn wait_for(what: &str, secs: u64, mut f: impl FnMut() -> bool) {
-    for _ in 0..secs * 10 {
-        if f() {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    panic!("délai dépassé : {what}");
-}
-
-/// A et B deviennent amis (A demande, B accepte).
-async fn befriend(a: &Node, b: &Node) {
-    a.st.friend_send_request(&b.st.friend_my_code().0).await.unwrap();
-    wait_for("demande chez B", 20, || b.st.friend_requests(0, 10, None).unwrap().total == 1).await;
-    b.st.friend_accept(&a.key()).await.unwrap();
-    wait_for("ami chez A", 20, || a.st.friends.is_friend(&b.key()).unwrap()).await;
-}
-
-fn world(host: &Node) -> String {
-    let inst = host.st.instances.create("Monde", "1.21.1", LoaderSpec { loader: Loader::Vanilla, version: String::new() }, 2048).unwrap();
-    let gd = host.st.instances.game_dir(&inst.id).unwrap();
-    std::fs::create_dir_all(gd.join("mods")).unwrap();
-    std::fs::write(gd.join("mods/a.jar"), vec![7u8; 5000]).unwrap();
-    inst.id
-}
+mod common;
+use common::{befriend, world, Node};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn raisons_distinctes_cote_invite() {

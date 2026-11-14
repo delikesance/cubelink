@@ -1,9 +1,9 @@
 # Release et mises à jour
 
 ## Flux de travail
-1. On travaille et on pousse sur **`development`** (le workflow `ci` vérifie : clippy, tests Rust, tsc, vitest sous Windows, compilation Linux).
-2. On merge `development` dans **`main`** (de préférence par pull request : `ci` tourne aussi sur les PR vers `main`).
-3. Le merge dans `main` déclenche `release` : nouveau tag **`vMAJEUR.MINEUR.<n° de run>`**, build du **.msi** (Windows) et de l'**AppImage** (Linux), signature des mises à jour, release GitHub avec `latest.json`.
+1. Chaque sujet a sa branche, partie de **`canary`**, et une pull request vers `canary`. Le workflow `ci` tourne sur chaque PR et chaque push vers `canary` et `main` : tsc et vitest, agent LAN sous Java 8 et 17, clippy et tests Rust sous Windows et sous Linux (scénarios X11 sous Xvfb), E2E Playwright simulés sous Windows, `cargo deny` (licences, sources) et les alertes RustSec.
+2. Après une fusion dans `canary`, si toutes les vérifications de `ci` passent, `ci` appelle `canary.yml`, qui publie une **pré-version** Linux (`v<x.y.z+1>-canary.<run>`, AppImage seule, jamais « Latest », sans `latest.json` : les launchers installés ne la reçoivent pas). Les alertes RustSec ne bloquent pas cette publication.
+3. Pour une release, le mainteneur fusionne `canary` dans **`main`** par une pull request. Le merge dans `main` déclenche `release` : nouveau tag **`vMAJEUR.MINEUR.<n° de run>`**, build du **.msi** (Windows) et de l'**AppImage** (Linux), signature des mises à jour, release GitHub avec `latest.json`.
 
 Majeur/mineur : champ `version` de `src-tauri/tauri.conf.json` (changer à la main pour 0.2, 1.0…). Le patch est le numéro de run CI,
 écrit dans `tauri.conf.json` seulement pendant le build (rien n'est commité). Lancement manuel sans publier : Actions → release → Run workflow (`publish` décoché).
@@ -27,6 +27,14 @@ Majeur/mineur : champ `version` de `src-tauri/tauri.conf.json` (changer à la ma
 
 Régénérer la clé : `npx tauri signer generate -w ~/.tauri/cubelink-updater.key`, puis mettre la clé publique dans `plugins.updater.pubkey`.
 Les installations existantes ne pourront plus se mettre à jour automatiquement après un changement de clé.
+
+Les secrets ne sont donnés qu'aux étapes `tauri build` (jamais dans l'environnement global d'un workflow), et `npm ci` tourne avec `--ignore-scripts` : un script d'installation npm ne peut pas lire la clé de signature.
+
+## Outillage de la CI
+- `rust-toolchain.toml` fixe la version de Rust, en local comme en CI. La monter à la main, dans une PR qui corrige les nouveaux lints de clippy.
+- Les actions GitHub sont épinglées par SHA. `.github/dependabot.yml` ouvre chaque semaine des PR vers `canary` pour Cargo, npm et les actions.
+- `deny.toml` règle `cargo deny` : licences permissives seulement, crates.io comme seule source, crates retirées refusées.
+- `scripts/ci-apt.sh` installe les dépendances système Linux de Tauri sur les runners.
 
 ## Limites connues
 - MSI : installation « par machine » (demande les droits administrateur) ; l'ancien NSIS s'installait par utilisateur.

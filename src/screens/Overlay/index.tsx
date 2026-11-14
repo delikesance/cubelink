@@ -8,7 +8,6 @@ import { canInviteFrom, hostingKeys, useHostState, useInvites } from "../../app/
 import { Badge, Button } from "../../ui";
 import { Avatar } from "../Friends/Avatar";
 import type { FriendWithPresence, Instance, Invite } from "../../services/types";
-import { setStagePanel } from "../../app/stage";
 
 type Confirm =
   | { kind: "join"; publicKey: string; name: string }
@@ -45,7 +44,7 @@ export default function InGamePanel({ open = true }: { open?: boolean }) {
   const confirmRef = useRef<Confirm | null>(null);
   confirmRef.current = confirm;
 
-  const close = useCallback(() => { void setStagePanel(false).catch(() => {}); }, []);
+  const close = useCallback(() => { void services.stagePanel(false).catch(() => {}); }, [services]);
 
   // Listes rechargées à chaque ouverture.
   useEffect(() => {

@@ -178,17 +178,23 @@ fn icon_data_url(b64: &str) -> Option<String> {
     core_lib::world::is_valid_icon(&bytes).then(|| format!("data:image/png;base64,{}", B64.encode(&bytes)))
 }
 
+/// Invite un ami dans mon monde ouvert (refusé si aucun monde n'est ouvert).
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn friend_invite(state: State<'_, Arc<AppState>>, public_key: String) -> Result<(), String> {
     state.friend_invite(&public_key).await
 }
 
+/// Invitations reçues en attente.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub fn friend_invites(state: State<'_, Arc<AppState>>) -> Result<Vec<Invite>, String> {
     Ok(state.friend_invites())
 }
 
+/// Écarte une invitation reçue.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub fn friend_invite_dismiss(state: State<'_, Arc<AppState>>, id: String) -> Result<(), String> {
     state.friend_invite_dismiss(&id);
     Ok(())

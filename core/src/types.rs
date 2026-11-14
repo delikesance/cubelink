@@ -29,7 +29,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Hash SHA-256 en hexadécimal minuscule (64 caractères). C'est le hash du manifeste.
 pub type Sha256Hex = String;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "lowercase")]
 pub enum Loader {
     Vanilla,
@@ -39,7 +39,7 @@ pub enum Loader {
     Forge,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct LoaderSpec {
     pub loader: Loader,
     /// Version exacte du loader (ex. "21.1.77"). Vide pour Vanilla.
@@ -47,14 +47,14 @@ pub struct LoaderSpec {
 }
 
 /// Profil de jeu. `Offline` sert aux tests E2E (drapeau de test, absent de l'interface publique).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Profile {
     Online { name: String, uuid: String },
     Offline { name: String, uuid: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct Instance {
     pub id: String,
     pub name: String,
@@ -78,7 +78,7 @@ pub struct Instance {
 }
 
 /// Illustrations d'une instance. Les fichiers sont dans `<dossier de l'instance>/art/`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct InstanceArt {
     /// "curseforge", "modrinth" ou "custom".
     pub source: String,
@@ -100,7 +100,7 @@ pub struct InstanceArt {
 }
 
 /// Un fichier du manifeste hôte.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct ManifestFile {
     /// Chemin relatif dans l'instance, avec `/` (ex. "mods/create.jar").
     pub path: String,
@@ -116,7 +116,7 @@ pub struct ManifestFile {
     pub cf_fingerprint: Option<u32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct Manifest {
     pub name: String,
     pub minecraft: String,
@@ -126,21 +126,21 @@ pub struct Manifest {
 }
 
 /// Code ami (`mcl1-…`) : chaîne opaque. Le format est défini par `p2p::friend_code` (tâche N3).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct FriendCode(pub String);
 
 /// Code de vérification : 4 groupes de 4 caractères hexadécimaux majuscules (ex. "3F9A · C21B · 77D0 · 5E14").
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct VerifyCode(pub String);
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "lowercase")]
 pub enum TrustLevel {
     Ask,
     Always,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct Friend {
     /// Clé publique ed25519, hex.
     pub public_key: String,
@@ -150,7 +150,7 @@ pub struct Friend {
     pub added_at: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct FriendRequest {
     pub public_key: String,
     pub name: String,
@@ -160,7 +160,7 @@ pub struct FriendRequest {
 
 /// Invitation reçue d'un ami à rejoindre son monde (file en mémoire, jamais persistée).
 /// Dates en secondes depuis l'epoch Unix.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct Invite {
     pub id: String,
     pub public_key: String,
@@ -177,14 +177,14 @@ pub struct Invite {
     pub world_icon: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "lowercase")]
 pub enum Presence {
     Online,
     Offline,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "lowercase")]
 pub enum TransferPhase {
     Preparing,
@@ -196,7 +196,7 @@ pub enum TransferPhase {
     Done,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct TransferProgress {
     pub phase: TransferPhase,
     pub files_done: u32,
@@ -213,7 +213,7 @@ pub struct TransferProgress {
 }
 
 /// Paramètres de l'application (écran Paramètres). Forme alignée sur `src/services/types.ts`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct Settings {
     pub language: String,
     pub default_ram_mb: u32,
@@ -244,6 +244,10 @@ pub struct Settings {
     /// ouvert n'est pas touché. `true` par défaut (fichiers de réglages anciens : `true`).
     #[serde(default = "default_embedded_game")]
     pub embedded_game: bool,
+    /// Lancer Cubelink (en fond, sans fenêtre) à l'ouverture de session, pour rester joignable par ses amis.
+    /// `true` par défaut (fichiers de réglages anciens : `true`).
+    #[serde(default = "default_start_with_os")]
+    pub start_with_os: bool,
 }
 
 pub const DEFAULT_OVERLAY_HOTKEY: &str = "Ctrl+Shift+C";
@@ -268,6 +272,10 @@ fn default_embedded_game() -> bool {
     true
 }
 
+fn default_start_with_os() -> bool {
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -280,6 +288,7 @@ mod tests {
         assert_eq!(s.overlay_hotkey, "Ctrl+Shift+C");
         assert!(s.discovery && s.lan_auto);
         assert!(s.embedded_game);
+        assert!(s.start_with_os);
     }
 
     #[test]

@@ -45,7 +45,7 @@ const MAX_HINTS: usize = 8;
 
 // ---------- Contrat (sérialisé vers l'interface) ----------
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, specta::Type)]
 pub struct FixAction {
     pub id: String,
     /// "install" | "update" | "enable" | "disable"
@@ -63,7 +63,7 @@ pub struct FixAction {
     pub issue_files: Vec<String>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, specta::Type)]
 pub struct FixUnresolved {
     pub file: String,
     pub mod_name: String,
@@ -73,20 +73,20 @@ pub struct FixUnresolved {
     pub page_url: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, specta::Type)]
 pub struct FixPlan {
     pub plan_id: String,
     pub actions: Vec<FixAction>,
     pub unresolved: Vec<FixUnresolved>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, specta::Type)]
 pub struct FixFailure {
     pub title: String,
     pub error: String,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, specta::Type)]
 pub struct FixResult {
     pub applied: Vec<String>,
     pub failed: Vec<FixFailure>,
@@ -1156,7 +1156,7 @@ pub async fn plan(p: &Providers, mc: &str, loader: Loader, game_dir: &Path, stor
 // ---------- Compatibilité d'un contenu avant installation (fiche Parcourir) ----------
 
 /// Verdict pour une version d'un projet dans une instance.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, specta::Type)]
 pub struct VersionVerdict {
     pub version_id: String,
     pub ok: bool,
@@ -1165,7 +1165,7 @@ pub struct VersionVerdict {
 }
 
 /// Résultat de [`check_content`].
-#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, specta::Type)]
 pub struct ContentCheck {
     /// Fichiers de l'instance qui sont déjà ce projet (nom activé, même s'ils sont désactivés).
     pub installed: Vec<String>,

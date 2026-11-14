@@ -199,7 +199,7 @@ export default function Settings({ testConnection, clearCache }: SettingsProps =
   const [ram, setRam] = useState("");
   const [hotkey, setHotkey] = useState(DEFAULT_HOTKEY);
   // Le jeu intégré n'existe que sous Windows et Linux (X11) : ailleurs le réglage n'aurait aucun effet, il n'est pas montré.
-  const stageSupported = useStageSupported();
+  const stageSupported = useStageSupported(services);
   // Sans jeu intégré il n'y a pas de panneau « en jeu » : son raccourci ne sert à rien, on le dit plutôt que de le laisser modifiable.
   const embeddedOff = stageSupported && settings?.embedded_game === false;
 
@@ -392,6 +392,10 @@ export default function Settings({ testConnection, clearCache }: SettingsProps =
           <label className="set-row" style={{ cursor: "pointer" }}>
             <div className="set-txt"><b>Ouvrir mon monde au réseau local automatiquement</b><span>Quand tu entres dans un monde solo, Cubelink l'ouvre pour que tes amis puissent te rejoindre. Appliqué au prochain lancement du jeu.</span></div>
             <input type="checkbox" className="set-check" disabled={dis} checked={settings?.lan_auto !== false} onChange={(e) => void update({ lan_auto: e.target.checked })} />
+          </label>
+          <label className="set-row" style={{ cursor: "pointer" }}>
+            <div className="set-txt"><b>Lancer Cubelink au démarrage de l'ordinateur</b><span>Cubelink démarre en arrière-plan pour que tes amis puissent toujours te rejoindre. Fermer la fenêtre le garde ouvert dans la zone de notification&nbsp;; pour le quitter, clic droit sur son icône puis «&nbsp;Quitter Cubelink&nbsp;».</span></div>
+            <input type="checkbox" className="set-check" disabled={dis} checked={settings?.start_with_os !== false} onChange={(e) => void update({ start_with_os: e.target.checked })} />
           </label>
         </Card>
         <Card as="section" aria-label="Raccourci jeu et launcher" className="set-field">

@@ -329,7 +329,7 @@ fn plan_overrides(archive: &mut ZipArchive<File>, opts: &ImportOptions, layout: 
     let mut total: u64 = 0;
     for i in 0..archive.len() {
         let e = archive.by_index_raw(i).map_err(|e| invalid(format!("entrée {i} illisible : {e}")))?;
-        let name = e.name().to_string();
+        let name = e.name().map_err(|e| invalid(format!("entrée {i} : nom illisible : {e}")))?.into_owned();
         let (prefix, is_client) = if let Some(r) = layout.client.as_deref().and_then(|c| name.strip_prefix(c)) {
             (r, true)
         } else if let Some(r) = name.strip_prefix(layout.common.as_str()) {
@@ -788,8 +788,7 @@ pub async fn import_curseforge(
 fn plain_root(archive: &mut ZipArchive<File>) -> String {
     let mut names = Vec::new();
     for i in 0..archive.len() {
-        if let Ok(e) = archive.by_index_raw(i) {
-            let n = e.name().to_string();
+        if let Ok(n) = archive.by_index_raw(i).and_then(|e| e.name().map(|n| n.into_owned())) {
             if !n.is_empty() && !n.starts_with("__MACOSX/") {
                 names.push(n);
             }

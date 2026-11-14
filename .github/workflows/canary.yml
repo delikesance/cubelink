@@ -1,12 +1,16 @@
-# Canary : pousser sur la branche `canary` publie vite une pré-version Linux (AppImage seule) pour tester.
+# Canary : chaque push sur la branche `canary` publie une pré-version Linux (AppImage seule) pour tester.
+# Appelé par ci.yml (job `canary`) seulement quand toutes les vérifications ont réussi : jamais de pré-version cassée.
 # Pré-version (jamais « Latest »), sans latest.json : les launchers installés ne la reçoivent pas en mise à jour.
 # Version `<majeur>.<mineur>.<patch suivant>-canary.<run>` : la vraie release suivante la remplacera normalement.
 name: canary
 
 on:
-  push:
-    branches: [canary]
-    paths-ignore: ['docs/**', '**/*.md', 'LICENSE']
+  workflow_call:
+    secrets:
+      TAURI_SIGNING_PRIVATE_KEY:
+        required: false
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
+        required: false
 
 concurrency:
   group: canary
@@ -23,43 +27,27 @@ env:
   CARGO_PROFILE_RELEASE_LTO: "false"
   CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
   CARGO_PROFILE_RELEASE_OPT_LEVEL: "1"
-  TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-  TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+  # Les secrets ne sont PAS ici : seule l'étape `tauri build` les reçoit (ni npm ni les autres étapes ne les voient).
 
 jobs:
   linux:
     runs-on: ubuntu-22.04
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with: { node-version: 22, cache: npm }
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - name: Rust (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: canary-${{ runner.os }}
       # Éditeur de liens rapide (mold) au lieu de celui par défaut.
-      - uses: rui314/setup-mold@v1
+      - uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
       - name: Dépendances système
-        run: |
-          # Gains connus sur les runners : pas de réindexation des pages de manuel, pas de doc installée,
-          # pas de fsync à chaque fichier (machine jetable).
-          sudo rm -f /var/lib/man-db/auto-update
-          for l in force-unsafe-io 'path-exclude /usr/share/doc/*' 'path-exclude /usr/share/man/*' 'path-exclude /usr/share/locale/*'; do
-            echo "$l"
-          done | sudo tee /etc/dpkg/dpkg.cfg.d/99-ci >/dev/null
-          sudo tee /etc/apt/sources.list >/dev/null <<'LIST'
-          deb http://mirrors.edge.kernel.org/ubuntu jammy main restricted universe multiverse
-          deb http://mirrors.edge.kernel.org/ubuntu jammy-updates main restricted universe multiverse
-          deb http://mirrors.edge.kernel.org/ubuntu jammy-security main restricted universe multiverse
-          LIST
-          pkgs='libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev patchelf xdg-utils'
-          for i in 1 2 3; do
-            sudo timeout 240 apt-get update && sudo timeout 600 apt-get install -y --no-install-recommends $pkgs && break
-            echo "apt : essai $i échoué, nouvel essai"; sleep 5
-            [ $i = 3 ] && exit 1
-          done
-      - run: npm ci
+        run: bash scripts/ci-apt.sh
+      # --ignore-scripts : aucun script d'installation d'un paquet npm ne s'exécute sur la machine de build.
+      - run: npm ci --ignore-scripts
       - name: Version
         id: v
         run: |
@@ -75,6 +63,9 @@ jobs:
         run: JAVA_HOME="$JAVA_HOME_17_X64" bash core/resources/lan-agent/build.sh
       - name: AppImage
         run: npx tauri build --bundles appimage
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
       - name: AppImage autonome
         run: |
           cd "$(mktemp -d)"

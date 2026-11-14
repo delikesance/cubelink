@@ -28,7 +28,7 @@
 //!
 //! Dans tous les cas le processus s'arrete seul au bout de deux minutes : un test interrompu ne laisse rien trainer.
 //!
-//! Variante LINUX (X11, `x11rb`, pour `tests/x11_*.rs`) : meme contrat d'arguments, sans Win32. Fenetre 870 x 520 en (200, 150),
+//! Variante LINUX (X11, `x11rb`, pour `tests/x11_*.rs` et `tests/scene_*.rs`) : meme contrat d'arguments, sans Win32. Fenetre 870 x 520 en (200, 150),
 //! `WM_CLASS` = la classe demandee, `_NET_WM_PID`, `WM_DELETE_WINDOW` (le processus s'arrete dessus). Options reprises : `disown`
 //! (quand son parent n'est plus la racine, se reparente sur la racine), `glfwhelper` (cree AVANT sa fenetre deux fenetres d'aide
 //! minuscules, jamais affichees : `GLFW3 Helper` et `SDLHelperWindowInputCatcher`), `stall=<ms>`, `late=<ms>`. Message client

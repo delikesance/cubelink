@@ -104,6 +104,8 @@ pub struct SettingsInput {
     pub overlay_hotkey: Option<String>,
     #[serde(default)]
     pub embedded_game: Option<bool>,
+    #[serde(default)]
+    pub start_with_os: Option<bool>,
 }
 
 /// Le front envoie les réglages dans `{ settings }`.
@@ -126,8 +128,10 @@ pub fn settings_set(state: State<'_, Arc<AppState>>, settings: SettingsInput, ap
         overlay_enabled: i.overlay_enabled.unwrap_or(cur.overlay_enabled),
         overlay_hotkey: i.overlay_hotkey.map(|h| h.trim().to_string()).unwrap_or(cur.overlay_hotkey),
         embedded_game: i.embedded_game.unwrap_or(cur.embedded_game),
+        start_with_os: i.start_with_os.unwrap_or(cur.start_with_os),
     })?;
     crate::hotkey::apply_settings(&app);
+    crate::background::apply_autostart(&app);
     Ok(saved)
 }
 

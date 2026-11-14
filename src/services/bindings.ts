@@ -826,6 +826,7 @@ export type SettingsInput_Deserialize = {
 	overlay_enabled?: boolean | null,
 	overlay_hotkey?: string | null,
 	embedded_game?: boolean | null,
+	start_with_os?: boolean | null,
 };
 
 /**  Entrée de `settings_set` : les champs de `Settings` ; les plus récents sont facultatifs (absents : valeur actuelle gardée). */
@@ -843,6 +844,7 @@ export type SettingsInput_Serialize = {
 	overlay_enabled: boolean | null,
 	overlay_hotkey: string | null,
 	embedded_game: boolean | null,
+	start_with_os: boolean | null,
 };
 
 /**  Paramètres de l'application (écran Paramètres). Forme alignée sur `src/services/types.ts`. */
@@ -877,6 +879,11 @@ export type Settings_Deserialize = {
 	 *  ouvert n'est pas touché. `true` par défaut (fichiers de réglages anciens : `true`).
 	 */
 	embedded_game?: boolean,
+	/**
+	 *  Lancer Cubelink (en fond, sans fenêtre) à l'ouverture de session, pour rester joignable par ses amis.
+	 *  `true` par défaut (fichiers de réglages anciens : `true`).
+	 */
+	start_with_os?: boolean,
 };
 
 /**  Paramètres de l'application (écran Paramètres). Forme alignée sur `src/services/types.ts`. */
@@ -911,6 +918,11 @@ export type Settings_Serialize = {
 	 *  ouvert n'est pas touché. `true` par défaut (fichiers de réglages anciens : `true`).
 	 */
 	embedded_game: boolean,
+	/**
+	 *  Lancer Cubelink (en fond, sans fenêtre) à l'ouverture de session, pour rester joignable par ses amis.
+	 *  `true` par défaut (fichiers de réglages anciens : `true`).
+	 */
+	start_with_os: boolean,
 };
 
 /**  Etat publie a l'interface (`stage://state`). */

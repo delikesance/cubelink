@@ -267,6 +267,12 @@ impl AppState {
         starting || (staged && running)
     }
 
+    /// Annule [`Self::quit_requested`] une fois le jeu arrete, quand la fenetre est seulement masquee (Cubelink reste en fond).
+    pub fn cancel_quit(&self) {
+        self.quit.cancel_quit();
+        self.stage.allow_reveal();
+    }
+
     /// Arrete le jeu de la zone integree avant la sortie du launcher. Jamais revele (chargement) : tue tout de suite. Deja
     /// revele : fermeture propre (le monde s'enregistre), forcee seulement apres `grace`, et le journal le dit.
     pub async fn quit_game(&self, grace: Duration) {

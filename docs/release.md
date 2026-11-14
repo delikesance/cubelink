@@ -2,7 +2,7 @@
 
 ## Flux de travail
 1. Chaque sujet a sa branche, partie de **`canary`**, et une pull request vers `canary`. Le workflow `ci` tourne sur chaque PR et chaque push vers `canary` et `main` : tsc et vitest, agent LAN sous Java 8 et 17, clippy et tests Rust sous Windows et sous Linux (scénarios X11 sous Xvfb), E2E Playwright simulés sous Windows, `cargo deny` (licences, sources) et les alertes RustSec.
-2. Après une fusion dans `canary`, si toutes les vérifications de `ci` passent, `ci` appelle `canary.yml`, qui publie une **pré-version** Linux (`v<x.y.z+1>-canary.<run>`, AppImage seule, jamais « Latest », sans `latest.json` : les launchers installés ne la reçoivent pas). Les alertes RustSec ne bloquent pas cette publication.
+2. Après une fusion dans `canary`, si les vérifications de `ci` passent, `ci` appelle `canary.yml`, qui publie une **pré-version** Linux (`v<x.y.z+1>-canary.<run>`, AppImage seule, jamais « Latest », sans `latest.json` : les launchers installés ne la reçoivent pas). Les alertes RustSec et, pour l'instant, les E2E Windows (19 scénarios à remettre à jour) ne bloquent pas cette publication.
 3. Pour une release, le mainteneur fusionne `canary` dans **`main`** par une pull request. Le merge dans `main` déclenche `release` : nouveau tag **`vMAJEUR.MINEUR.<n° de run>`**, build du **.msi** (Windows) et de l'**AppImage** (Linux), signature des mises à jour, release GitHub avec `latest.json`.
 
 Majeur/mineur : champ `version` de `src-tauri/tauri.conf.json` (changer à la main pour 0.2, 1.0…). Le patch est le numéro de run CI,

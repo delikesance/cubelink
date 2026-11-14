@@ -1,0 +1,46 @@
+# cargo-deny : vulnérabilités connues (RustSec), licences, doublons et sources des dépendances.
+# Lancé par le job `deny` de .github/workflows/ci.yml ; en local : `cargo install cargo-deny` puis `cargo deny check`.
+
+[graph]
+# Le launcher vise Windows et Linux : on ne juge que les dépendances de ces deux cibles.
+targets = ["x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"]
+all-features = true
+
+[advisories]
+# Toute vulnérabilité ou crate retirée (yanked) fait échouer. Une crate seulement « non maintenue »
+# n'est pas une faille : avertissement seul pour les dépendances indirectes.
+yanked = "deny"
+unmaintained = "workspace"
+ignore = []
+
+[licenses]
+# Licences permissives seulement (le projet est sous MIT). Une crate « MIT OR GPL » passe par sa branche MIT.
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.9
+
+[bans]
+# Plusieurs versions d'une même crate : fréquent avec Tauri et Iroh, on ne fait que le signaler.
+multiple-versions = "allow"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

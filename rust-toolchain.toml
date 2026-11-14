@@ -1,0 +1,5 @@
+[toolchain]
+# Même compilateur en local et en CI (lu par rustup). À monter à la main, en une PR qui corrige les nouveaux lints.
+channel = "1.97.0"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

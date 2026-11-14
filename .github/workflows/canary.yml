@@ -1,4 +1,4 @@
-# Canary : chaque push sur la branche `canary` publie une pré-version Linux (AppImage seule) pour tester.
+# Canary : chaque push sur la branche `canary` publie une pré-version Linux (AppImage + paquet .rpm pour Fedora) pour tester.
 # Appelé par ci.yml (job `canary`) seulement quand toutes les vérifications ont réussi : jamais de pré-version cassée.
 # Pré-version (jamais « Latest »), sans latest.json : les launchers installés ne la reçoivent pas en mise à jour.
 # Version `<majeur>.<mineur>.<patch suivant>-canary.<run>` : la vraie release suivante la remplacera normalement.
@@ -63,8 +63,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
       - name: Agent LAN (jar Java)
         run: JAVA_HOME="$JAVA_HOME_17_X64" bash core/resources/lan-agent/build.sh
-      - name: AppImage
-        run: npx tauri build --bundles appimage
+      - name: AppImage + RPM
+        run: npx tauri build --bundles appimage,rpm
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
@@ -81,4 +81,4 @@ jobs:
           v="${{ steps.v.outputs.version }}"
           git log -10 --pretty='- %s' > notes.md
           gh release create "v$v" --target "$GITHUB_SHA" --prerelease --latest=false --title "Cubelink $v (canary, Linux)" --notes-file notes.md \
-            target/release/bundle/appimage/*.AppImage
+            target/release/bundle/appimage/*.AppImage target/release/bundle/rpm/*.rpm

@@ -1090,7 +1090,9 @@ mod tests {
         assert!(s.files.iter().any(|f| f.rel == "level.dat"));
         assert!(s.skipped_unsafe.contains(&"e\u{301}.dat".to_string()), "{:?}", s.skipped_unsafe);
         assert_eq!(s.files.iter().filter(|f| f.rel.to_lowercase() == "data.txt").count(), 1);
-        assert_eq!(s.skipped_unsafe.len(), 2);
+        // Sous Windows et macOS (casse ignorée), « data.txt » écrase « Data.txt » : pas de collision.
+        let same = std::fs::read_dir(w).unwrap().filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().to_lowercase() == "data.txt").count();
+        assert_eq!(s.skipped_unsafe.len(), if same == 2 { 2 } else { 1 }, "{:?}", s.skipped_unsafe);
     }
 
     #[test]

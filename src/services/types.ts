@@ -516,6 +516,9 @@ export interface Services {
   hearthSetBackground(id: string, on: boolean): Promise<void>;
   hearthEula(): Promise<HearthEula>;
   hearthEulaAccept(): Promise<void>;
+  /** Interrupteur de sécurité « Serveurs de groupe (expérimental) » : désactivé par défaut. Coupé, les commandes `hearth*` refusent. */
+  hearthEnabled(): Promise<boolean>;
+  hearthSetEnabled(enabled: boolean): Promise<void>;
   /** Liste complète des cartes à chaque changement. */
   onHearthState(cb: (l: HearthCard[]) => void): Unsubscribe;
   /** Liste complète des invitations de groupe en attente. */

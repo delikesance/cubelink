@@ -6,6 +6,7 @@ import { Modal } from "../Main/Modal";
 import { useHearthInvites } from "../../app/useHearth";
 import { errText, plural } from "./format";
 import { useHearthRun } from "./usePlay";
+import { useHearthEnabled } from "./useEnabled";
 
 /** Invitation à un groupe : « Rejoindre le groupe » ou « Plus tard » (l'invitation reste proposée à la prochaine ouverture). */
 function InviteMoment({ services }: { services: Services }) {
@@ -97,11 +98,12 @@ function HostPromptMoment({ services, e, onClose }: { services: Services; e: Hea
 export function HearthMoments({ services }: { services: Services }) {
   const [handover, setHandover] = useState<HearthHandover | null>(null);
   const [prompt, setPrompt] = useState<HearthHostPrompt | null>(null);
+  const enabled = useHearthEnabled(services);
   useEffect(() => services.onHearthHandover((e) => setHandover(e)), [services]);
   useEffect(() => services.onHearthHostPrompt((e) => setPrompt(e)), [services]);
   return (
     <>
-      <InviteMoment services={services} />
+      {enabled && <InviteMoment services={services} />}
       {handover && <HandoverMoment services={services} e={handover} onClose={() => setHandover(null)} />}
       {prompt && <HostPromptMoment services={services} e={prompt} onClose={() => setPrompt(null)} />}
     </>

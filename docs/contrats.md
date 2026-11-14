@@ -106,21 +106,23 @@ Voir `docs/hearth.md`. Implémentation : `src-tauri/src/hearth.rs` (runtime : so
 | `hearth_invites` | | `HearthInvite[]` | Invitations de groupe reçues, en attente. |
 | `hearth_invite_accept` | `id` (= `group_id`) | | Rejoint le groupe : la carte apparaît, la synchro du monde démarre. |
 | `hearth_invite_dismiss` | `id` | | Refuse l'invitation (elle disparaît). L'écran « Plus tard » ne l'appelle pas. |
-| `hearth_play` | `id` | | Le bouton unique : rejoint la partie en cours (`hosted`), ou démarre le serveur sur ce PC puis le jeu (`idle`). Rejette avec `eula_required` tant que le contrat Minecraft n'est pas accepté. États qui refusent : `blocked`, `unclean` (voir `hearth_unclean_choice`), `fork`, `syncing`, `pack_missing`. |
+| `hearth_play` | `id` | | Le bouton unique : rejoint la partie en cours (`hosted`), ou démarre le serveur sur ce PC puis le jeu (`idle`). Rejette avec `eula_required` tant que le contrat Minecraft n'est pas accepté. États qui refusent : `blocked`, `unclean` (voir `hearth_unclean_choice`), `fork`, `syncing`, `pack_missing`. Avant de décider, `hearth_play` fait une ronde `Hello` à tous les membres. Si la prise du bail n'obtient pas la majorité des membres (bail « au mieux »), il rejette une première fois avec un message qui commence par « Le groupe n'est pas assez joignable pour une prise du serveur sûre » ; un second `hearth_play` dans les 2 minutes vaut confirmation. Si un autre membre prend le bail en même temps, `hearth_play` le rejoint, ou rejette avec « … démarre déjà la partie : réessaie dans un instant. ». |
 | `hearth_stop` | `id` | | Arrête mon serveur (enregistre une version, relâche le bail). |
 | `hearth_unclean_choice` | `id`, `choice: "wait" \| "checkpoint" \| "last"` | | Après une partie mal terminée : `wait` ne fait rien ; `checkpoint` reprend au dernier point de reprise connu, `last` à la dernière version ; le bail de l'ancien hôte est révoqué et le serveur démarre ici (peut rejeter avec `eula_required`). |
 | `hearth_set_instance` | `id`, `instance_id` | | Relie le groupe à une instance locale dont le modpack est celui du groupe (carte `pack_missing`). |
 | `hearth_add_member` | `id`, `public_key` | | Propose d'ajouter un ami ; devient une décision du groupe (majorité). |
 | `hearth_remove_member` | `id`, `public_key` | | Propose de retirer un membre. |
-| `hearth_leave` | `id` | | Quitte le groupe et supprime le monde local. |
+| `hearth_leave` | `id` | | Quitte le groupe : arrête mon serveur s'il tourne, ferme l'accès, libère les collections du groupe dans le magasin de blobs puis supprime le monde local (même chose quand je suis retiré du groupe). |
 | `hearth_vote` | `id`, `proposal_id` | | Approuve une décision en attente. |
 | `hearth_continue_without` | `id`, `public_key` | | Propose de continuer sans un membre absent (bannière de la page Membres). |
-| `hearth_pack_update` | `id`, `instance_id` | | Propose au groupe le modpack de cette instance (les mods sont figés : sans vote, le modpack ne change pas). |
+| `hearth_pack_update` | `id`, `instance_id` | | Propose au groupe le modpack de cette instance (les mods sont figés : sans vote, le modpack ne change pas). L'instance liée au groupe ne change qu'une fois `PackUpdate` appliqué à la chaîne (tout de suite si ma voix suffit, sinon au vote qui atteint le quota). |
 | `hearth_restore` | `id`, `version_id` | | Restaure une ancienne version : crée une nouvelle version `restore`, rien n'est effacé. |
 | `hearth_resolve_fork` | `id`, `version_id` | | Garde une des deux versions d'une fourche ; l'autre reste dans l'historique. |
 | `hearth_set_background` | `id`, `on` | | Garder le serveur ouvert quand mon jeu se ferme. |
 | `hearth_eula` | | `{ accepted, url }` | État du contrat d'utilisation de Minecraft (`https://aka.ms/MinecraftEULA`), accepté une fois par PC. |
 | `hearth_eula_accept` | | | Enregistre l'acceptation (`hearth/meta.json`). |
+| `hearth_enabled` | | `bool` | Interrupteur « Serveurs de groupe (expérimental) » (`hearth/meta.json`, `false` par défaut ; docs/hearth.md § 12.1 n° 63). |
+| `hearth_set_enabled` | `enabled` | | Active ou coupe Hearth, et émet `hearth://state`. Coupé : toutes les commandes `hearth_*` refusent (« Les serveurs de groupe sont désactivés… ») sauf `hearth_list`, `hearth_detail`, `hearth_invites`, `hearth_eula`, `hearth_stop`, `hearth_enabled` et celle-ci ; le protocole `cubelink/hearth/1` refuse tous les pairs ; un serveur déjà lancé reste arrêtable. |
 
 Erreur spéciale : `eula_required` (chaîne exacte, `HEARTH_EULA_REQUIRED` côté front), renvoyée par `hearth_play` et `hearth_unclean_choice` avant toute préparation. Le front ouvre alors la boîte du contrat puis relance l'action.
 

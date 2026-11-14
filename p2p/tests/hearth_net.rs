@@ -18,7 +18,7 @@ use core_lib::types::{Loader, LoaderSpec};
 use iroh::endpoint::presets;
 use iroh::protocol::Router;
 use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey};
-use p2p_lib::hearth::lease::{Lease, LeaseTable};
+use p2p_lib::hearth::lease::{Claim, ClaimReply, ConflictKind, Lease, LeaseId, LeaseTable, ReleaseReason};
 use p2p_lib::hearth::model::{GroupId, GroupOp, GroupState, HearthSigner, OpHash, PackPin, Proposal, Sig, SignedOp};
 use p2p_lib::hearth::outbox::{MemberReplica, Outbox, Replica};
 use p2p_lib::hearth::proto::{HearthConn, HearthDelegate, HearthHandler, NetError, HEARTH_ALPN, HEARTH_BLOBS_ALPN};
@@ -77,11 +77,8 @@ impl HearthDelegate for Delegate {
         self.groups.lock().unwrap().get(group).map(Group::heads).unwrap_or_default()
     }
     fn lease(&self, group: &GroupId) -> Option<Lease> {
-        let now = Instant::now();
-        let leases = self.leases.lock().unwrap();
-        let mut l = leases.holder(group, now)?;
-        l.ttl_secs = u32::try_from(leases.remaining(group, &l.holder, now)?.as_secs()).unwrap_or(0).max(1);
-        Some(l)
+        // Un bail signé ne se modifie pas : il est relayé tel quel.
+        self.leases.lock().unwrap().holder(group, Instant::now())
     }
     fn have_version(&self, _group: &GroupId, version: &VersionId) -> bool {
         self.complete.lock().unwrap().contains(version)
@@ -91,8 +88,21 @@ impl HearthDelegate for Delegate {
         let g = groups.get(&lease.group_id).expect("groupe connu : le protocole l'a vérifié");
         self.leases.lock().unwrap().observe(g.state(), g.graph(), &from, lease, Instant::now()).expect("bail valide");
     }
-    fn on_lease_release(&self, from: PeerKey, group: &GroupId, _version: Option<VersionId>) {
-        self.leases.lock().unwrap().release(group, &from);
+    fn on_claim(&self, from: PeerKey, claim: Claim) -> Result<ClaimReply, String> {
+        let groups = self.groups.lock().unwrap();
+        let g = groups.get(&claim.group_id).expect("groupe connu : le protocole l'a vérifié");
+        self.leases.lock().unwrap().claim(g.state(), g.graph(), &from, &claim, Instant::now()).map_err(|e| e.to_string())
+    }
+    fn on_lease_release(
+        &self,
+        from: PeerKey,
+        group: &GroupId,
+        lease_id: LeaseId,
+        last_seq: u64,
+        _reason: ReleaseReason,
+        _version: Option<VersionId>,
+    ) {
+        self.leases.lock().unwrap().release_lease(group, &from, &lease_id, last_seq, Instant::now());
     }
     fn on_invite(&self, from: PeerKey, ops: Vec<SignedOp>, key: GroupKey) -> Result<(), String> {
         let mut groups = self.groups.lock().unwrap();
@@ -462,29 +472,63 @@ async fn scenario() {
     let siblings: Vec<String> = std::fs::read_dir(dest_b.parent().unwrap()).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
     assert_eq!(siblings, vec!["world".to_string()], "aucun dossier temporaire ne traîne");
 
-    // 7) Bail : annoncé à B, valable 90 s depuis la réception, expiré ensuite ; relâché à la fin de partie.
+    // 7) Bail signé : annoncé à B, valable 90 s depuis la réception, expiré ensuite ; relâché à la fin de partie
+    // avec une pierre tombale. Prise en deux phases : claim acquitté, second claim en conflit.
     {
         let conn = HearthConn::connect(&a.ep, b.addr()).await.unwrap();
-        let lease = Lease::new(g1, a.key, Some((v2.id(), 2)));
+        // Première phase : B garde le premier claim comme verrou ; une autre partie du même titulaire est en conflit.
+        let draft = Lease::new(g1, a.key, Some((v2.id(), 2)));
+        let claim = Claim::of(&draft);
+        assert_eq!(conn.claim_lease(&claim).await.unwrap(), ClaimReply::Ack);
+        let rival = Claim::of(&Lease::new(g1, a.key, Some((v2.id(), 2))));
+        let ClaimReply::Conflict(conf) = conn.claim_lease(&rival).await.unwrap() else { panic!("conflit attendu") };
+        assert_eq!((conf.kind, conf.holder, conf.lease_id), (ConflictKind::Claim, a.key, claim.lease_id));
+        // Un claim au nom d'un autre, ou d'une autre époque, est rejeté ; un non-membre n'a pas de réponse.
+        let cb = HearthConn::connect(&b.ep, a.addr()).await.unwrap();
+        assert!(matches!(cb.claim_lease(&claim).await, Err(NetError::Rejected(_))));
+        let mut old_epoch = claim.clone();
+        old_epoch.epoch = 3;
+        assert!(matches!(conn.claim_lease(&old_epoch).await, Err(NetError::Rejected(_))));
+        let cc = HearthConn::connect(&c.ep, a.addr()).await.unwrap();
+        assert_eq!(cc.claim_lease(&claim).await.unwrap_err(), NetError::NoReply);
+        // Le candidat qui renonce relâche son verrou (release avec seq 0) : le claim suivant est acquitté.
+        conn.release_lease(&g1, claim.lease_id, 0, ReleaseReason::Handover, None).await.unwrap();
+        let again = Claim::of(&Lease::new(g1, a.key, Some((v2.id(), 2))));
+        assert_eq!(conn.claim_lease(&again).await.unwrap(), ClaimReply::Ack);
+
+        // Deuxième phase : le bail signé de cette partie.
+        let lease = Lease::new(g1, a.key, Some((v2.id(), 2))).with_lease_id(again.lease_id).signed(&*a.ident);
         conn.send_lease(&lease).await.unwrap();
         let now = Instant::now();
         {
             let table = b.delegate.leases.lock().unwrap();
             assert_eq!(table.holder(&g1, now).map(|l| l.holder), Some(a.key));
+            assert!(table.locked_claim(&g1, now).is_none(), "le premier bail remplace le verrou");
             assert!(table.holder(&g1, now + Duration::from_secs(89)).is_some());
             assert!(table.holder(&g1, now + Duration::from_secs(91)).is_none(), "bail expiré");
             assert_eq!(table.unclean(&g1, now + Duration::from_secs(91)).len(), 1, "partie mal terminée");
         }
-        // Le bail est visible dans l'état renvoyé par `Hello`.
+        // Le bail est visible dans l'état renvoyé par `Hello`, toujours signé.
         let status = HearthConn::connect(&a.ep, b.addr()).await.unwrap().hello(&g1, 3, &[]).await.unwrap();
-        assert_eq!(status.lease.map(|l| l.holder), Some(a.key));
-        // Un bail annoncé au nom d'un autre membre est rejeté.
-        let forged = Lease::new(g1, a.key, None);
-        let cb = HearthConn::connect(&b.ep, a.addr()).await.unwrap();
+        let seen = status.lease.expect("bail relayé");
+        assert!(seen.verify());
+        assert_eq!(seen.holder, a.key);
+        // Un bail annoncé au nom d'un autre membre est rejeté ; un bail falsifié ou d'une autre époque aussi.
+        let forged = Lease::new(g1, a.key, None).signed(&*a.ident);
         assert!(matches!(cb.send_lease(&forged).await, Err(NetError::Rejected(_))));
-        // Fin de partie.
-        conn.release_lease(&g1, Some(v2.id())).await.unwrap();
+        let mut tampered = lease.renewed().signed(&*a.ident);
+        tampered.seq += 5;
+        assert!(matches!(conn.send_lease(&tampered).await, Err(NetError::Rejected(_))));
+        let stale_epoch = lease.renewed().at_epoch(2).signed(&*a.ident);
+        assert!(matches!(conn.send_lease(&stale_epoch).await, Err(NetError::Rejected(_))));
+        let unsigned = Lease::new(g1, a.key, None);
+        assert!(matches!(conn.send_lease(&unsigned).await, Err(NetError::Rejected(_))));
+        // Fin de partie : pierre tombale, un renouvellement tardif de la même partie est ignoré.
+        conn.release_lease(&g1, lease.lease_id, lease.seq, ReleaseReason::Stopped, Some(v2.id())).await.unwrap();
         assert!(b.delegate.leases.lock().unwrap().holder(&g1, Instant::now()).is_none());
+        let late: Lease = lease.renewed().signed(&*a.ident);
+        conn.send_lease(&late).await.unwrap();
+        assert!(b.delegate.leases.lock().unwrap().holder(&g1, Instant::now()).is_none(), "bail relâché : pierre tombale");
     }
 
     // 8) Gouvernance asynchrone : B propose, vote ; A vote à son tour et finalise.

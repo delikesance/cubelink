@@ -19,8 +19,9 @@
 //! | `Hello { group_id, op_seq, heads }` | `Status { op_seq, heads, lease? }` | état d'un membre (sonde, 60 s) |
 //! | `GetOps { group_id, after }` | `Ops { ops, more }` | rattraper la chaîne (par pages) |
 //! | `GetVersions { group_id, after_number }` | `Versions { versions, more }` | rattraper les en-têtes (par pages) |
-//! | `Lease { lease }` | `Ack` | annonce ou renouvellement du bail |
-//! | `LeaseRelease { group_id, version? }` | `Ack` | fin de partie |
+//! | `LeaseClaim { claim }` | `ClaimAck` ou `ClaimConflict { conflict }` | première phase de la prise du bail |
+//! | `Lease { lease }` (signé) | `Ack` | annonce ou renouvellement du bail |
+//! | `LeaseRelease { group_id, lease_id, last_seq, reason, version? }` | `Ack` | fin de partie (pierre tombale) |
 //! | `GroupInvite { ops, total_ops, group_key }` | `Ack` | invitation (d'un ami) |
 //! | `Propose { group_id, proposal }` / `Vote { group_id, proposal_id, sig }` | `Ack` | gouvernance asynchrone |
 //! | `OfferVersion { version }` | `Ack` | « une nouvelle version existe » (file d'envoi) |
@@ -53,7 +54,7 @@ use thiserror::Error;
 use tokio::sync::Semaphore;
 use tokio::time::timeout;
 
-use super::lease::Lease;
+use super::lease::{Claim, ClaimConflict, ClaimReply, Lease, LeaseId, ReleaseReason};
 use super::model::{
     hex_bytes, GroupId, GroupState, OpHash, Proposal, Sig, SignedOp, MAX_OPS,
 };
@@ -101,7 +102,18 @@ pub enum Request {
     GetOps { group_id: GroupId, after: u64 },
     GetVersions { group_id: GroupId, after_number: u64 },
     Lease { lease: Lease },
-    LeaseRelease { group_id: GroupId, version: Option<VersionId> },
+    /// Première phase de la prise du bail : « je veux héberger ». Réponse `ClaimAck` ou `ClaimConflict`.
+    LeaseClaim { claim: Claim },
+    /// Fin de partie : le `lease_id` et le dernier `seq` annoncés (pierre tombale chez le récepteur), la raison, et la
+    /// version publiée s'il y en a une.
+    LeaseRelease {
+        group_id: GroupId,
+        #[serde(with = "hex_bytes")]
+        lease_id: LeaseId,
+        last_seq: u64,
+        reason: ReleaseReason,
+        version: Option<VersionId>,
+    },
     GroupInvite { ops: Vec<SignedOp>, total_ops: u64, group_key: GroupKey },
     Propose { group_id: GroupId, proposal: Proposal },
     Vote {
@@ -122,6 +134,8 @@ pub enum Response {
     Ops { ops: Vec<SignedOp>, more: bool },
     Versions { versions: Vec<SignedVersion>, more: bool },
     Ack,
+    ClaimAck,
+    ClaimConflict { conflict: ClaimConflict },
     Have { complete: bool },
     Rejected { reason: String },
 }
@@ -161,8 +175,8 @@ pub trait HearthDelegate: Send + Sync + 'static {
     fn versions_after(&self, group: &GroupId, after_number: u64, limit: usize) -> Vec<SignedVersion>;
     /// Têtes du groupe.
     fn heads(&self, group: &GroupId) -> Vec<VersionId>;
-    /// Bail valide connu (le nôtre ou celui d'un autre membre). Son `ttl_secs` doit être le temps **restant** : le
-    /// récepteur le garde ce temps-là à partir de sa réception.
+    /// Notre propre bail signé (partie hébergée ou en préparation), tel qu'annoncé : il est signé, donc inchangé. Le
+    /// bail d'un tiers n'est pas relayé (le récepteur ne croit que le bail annoncé par son titulaire).
     fn lease(&self, group: &GroupId) -> Option<Lease>;
     /// Ce nœud a-t-il l'en-tête de cette version **et** tout son contenu ?
     fn have_version(&self, group: &GroupId, version: &VersionId) -> bool;
@@ -171,8 +185,19 @@ pub trait HearthDelegate: Send + Sync + 'static {
     fn on_status(&self, _from: PeerKey, _group: &GroupId, _op_seq: u64, _heads: &[VersionId]) {}
     /// Bail annoncé par son titulaire (déjà contrôlé : groupe, titulaire = émetteur, membre, durée).
     fn on_lease(&self, from: PeerKey, lease: Lease);
-    /// Fin de partie du titulaire, avec la version publiée s'il y en a une.
-    fn on_lease_release(&self, from: PeerKey, group: &GroupId, version: Option<VersionId>);
+    /// Un membre veut prendre le bail (première phase) : le témoin répond `Ack` ou `Conflict` (voir
+    /// `LeaseTable::claim`). Le claim est déjà contrôlé : groupe, émetteur = titulaire, membre, époque courante.
+    fn on_claim(&self, from: PeerKey, claim: Claim) -> Result<ClaimReply, String>;
+    /// Fin de partie du titulaire (`lease_id`, dernier `seq`, raison), avec la version publiée s'il y en a une.
+    fn on_lease_release(
+        &self,
+        from: PeerKey,
+        group: &GroupId,
+        lease_id: LeaseId,
+        last_seq: u64,
+        reason: ReleaseReason,
+        version: Option<VersionId>,
+    );
     /// Invitation (chaîne complète rejouée, nous et l'invitant en sommes membres). À l'application d'en faire
     /// une carte à accepter, ou de refuser ; elle ne stocke la clé qu'avec l'accord de l'utilisateur.
     fn on_invite(&self, from: PeerKey, ops: Vec<SignedOp>, key: GroupKey) -> Result<(), String>;
@@ -208,6 +233,7 @@ impl std::fmt::Debug for HearthHandler {
 }
 
 /// Issue du traitement d'une requête.
+#[allow(clippy::large_enum_variant)] // un `Status` porte un bail signé ; la valeur ne vit que le temps d'une réponse
 enum Served {
     Reply(Response),
     /// Non membre : fermeture sans réponse.
@@ -262,20 +288,31 @@ impl HearthHandler {
             }
             Request::Lease { lease } => {
                 let Some(state) = self.member_state(&lease.group_id, &from) else { return Served::Deny };
-                if lease.holder != from {
-                    return rejected("le bail n'est pas annoncé par son titulaire");
-                }
-                if let Err(e) = lease.validate(&state) {
+                if let Err(e) = lease.check_received(&state, &from) {
                     return rejected(e);
                 }
                 d.on_lease(from, lease);
                 Served::Reply(Response::Ack)
             }
-            Request::LeaseRelease { group_id, version } => {
+            Request::LeaseClaim { claim } => {
+                let Some(state) = self.member_state(&claim.group_id, &from) else { return Served::Deny };
+                if claim.holder != from || claim.device_id != from {
+                    return rejected("le claim n'est pas annoncé par son titulaire");
+                }
+                if claim.epoch != state.epoch {
+                    return rejected("le claim n'est pas de l'époque courante du groupe");
+                }
+                match d.on_claim(from, claim) {
+                    Ok(ClaimReply::Ack) => Served::Reply(Response::ClaimAck),
+                    Ok(ClaimReply::Conflict(conflict)) => Served::Reply(Response::ClaimConflict { conflict }),
+                    Err(e) => rejected(e),
+                }
+            }
+            Request::LeaseRelease { group_id, lease_id, last_seq, reason, version } => {
                 if self.member_state(&group_id, &from).is_none() {
                     return Served::Deny;
                 }
-                d.on_lease_release(from, &group_id, version);
+                d.on_lease_release(from, &group_id, lease_id, last_seq, reason, version);
                 Served::Reply(Response::Ack)
             }
             Request::Propose { group_id, proposal } => {
@@ -652,9 +689,25 @@ impl HearthConn {
         self.call_ack(&Request::Lease { lease: lease.clone() }).await
     }
 
-    /// Fin de partie, avec la version publiée.
-    pub async fn release_lease(&self, group: &GroupId, version: Option<VersionId>) -> Result<(), NetError> {
-        self.call_ack(&Request::LeaseRelease { group_id: *group, version }).await
+    /// Première phase de la prise du bail, avec le délai [`CLAIM_TIMEOUT`](super::lease::CLAIM_TIMEOUT).
+    pub async fn claim_lease(&self, claim: &Claim) -> Result<ClaimReply, NetError> {
+        match self.call(&Request::LeaseClaim { claim: claim.clone() }, super::lease::CLAIM_TIMEOUT).await? {
+            Response::ClaimAck => Ok(ClaimReply::Ack),
+            Response::ClaimConflict { conflict } => Ok(ClaimReply::Conflict(conflict)),
+            _ => Err(NetError::Protocol("réponse inattendue".into())),
+        }
+    }
+
+    /// Fin de partie : `lease_id` et dernier `seq` de cette partie, raison, version publiée s'il y en a une.
+    pub async fn release_lease(
+        &self,
+        group: &GroupId,
+        lease_id: LeaseId,
+        last_seq: u64,
+        reason: ReleaseReason,
+        version: Option<VersionId>,
+    ) -> Result<(), NetError> {
+        self.call_ack(&Request::LeaseRelease { group_id: *group, lease_id, last_seq, reason, version }).await
     }
 
     /// Invite le pair (un ami) dans le groupe. La chaîne qui ne tient pas dans un message est envoyée en préfixe :
@@ -742,7 +795,18 @@ mod tests {
             Request::Hello { group_id: g, op_seq: 3, heads: vec![VersionId([1; 32])] },
             Request::GetOps { group_id: g, after: 2 },
             Request::GetVersions { group_id: g, after_number: 0 },
-            Request::LeaseRelease { group_id: g, version: None },
+            Request::LeaseRelease { group_id: g, lease_id: [4; 16], last_seq: 7, reason: ReleaseReason::Crashed { mod_hint: Some("x".into()) }, version: None },
+            Request::LeaseClaim {
+                claim: Claim {
+                    group_id: g,
+                    lease_id: [5; 16],
+                    holder: [1; 32],
+                    device_id: [1; 32],
+                    base_version: Some(VersionId([3; 32])),
+                    base_number: 2,
+                    epoch: 0,
+                },
+            },
             Request::Vote { group_id: g, proposal_id: [9; 32], sig: Sig([5; 64]) },
             Request::HaveVersion { group_id: g, version: VersionId([2; 32]) },
             Request::OfferVersion { version: version(2, 4) },
@@ -750,6 +814,16 @@ mod tests {
         for r in reqs {
             let bytes = serde_json::to_vec(&r).unwrap();
             assert_eq!(serde_json::from_slice::<Request>(&bytes).unwrap(), r);
+        }
+        let conflict = ClaimConflict {
+            kind: super::super::lease::ConflictKind::Claim,
+            holder: [2; 32],
+            lease_id: [6; 16],
+            base_version: None,
+            base_number: 0,
+        };
+        for r in [Response::ClaimAck, Response::ClaimConflict { conflict }] {
+            assert_eq!(serde_json::from_slice::<Response>(&serde_json::to_vec(&r).unwrap()).unwrap(), r);
         }
         let resp = Response::Status { op_seq: 1, heads: vec![], lease: None };
         assert_eq!(serde_json::from_slice::<Response>(&serde_json::to_vec(&resp).unwrap()).unwrap(), resp);

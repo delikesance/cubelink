@@ -133,6 +133,8 @@ export function createTauriServices(): Services {
     hearthSetBackground: (id, on) => invoke("hearth_set_background", { id, on }),
     hearthEula: () => invoke("hearth_eula"),
     hearthEulaAccept: () => invoke("hearth_eula_accept"),
+    hearthEnabled: () => invoke("hearth_enabled"),
+    hearthSetEnabled: (enabled) => invoke("hearth_set_enabled", { enabled }),
     onHearthState: (cb) => on("hearth://state", cb),
     onHearthInvites: (cb) => on("hearth://invites", cb),
     onHearthHandover: (cb) => on("hearth://handover", cb),

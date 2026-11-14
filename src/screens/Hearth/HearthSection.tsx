@@ -6,6 +6,7 @@ import { useHearthCards } from "../../app/useHearth";
 import type { navigate as Navigate } from "../../app/router";
 import { mainAction, plural, resumeLabel, stateHint, stateText } from "./format";
 import { useHearthRun } from "./usePlay";
+import { useHearthEnabled } from "./useEnabled";
 
 /** Une carte de serveur de groupe : état, avatars des membres en ligne, un seul bouton principal, lien vers la page. */
 function GroupCard({ card, services, navigate }: { card: HearthCard; services: Services; navigate: typeof Navigate }) {
@@ -72,6 +73,9 @@ function GroupCard({ card, services, navigate }: { card: HearthCard; services: S
 /** Section « Serveurs de groupe » de l'accueil : une carte par groupe et le bouton de création. */
 export function HearthSection({ services, navigate }: { services: Services; navigate: typeof Navigate }) {
   const cards = useHearthCards(services);
+  const enabled = useHearthEnabled(services);
+  // Interrupteur coupé (réglage « Serveurs de groupe (expérimental) ») : la section n'existe pas.
+  if (!enabled) return null;
   return (
     <section className="home-hearth" aria-label="Serveurs de groupe">
       <div className="home-head is-small">

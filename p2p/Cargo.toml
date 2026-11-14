@@ -12,6 +12,7 @@ path = "src/lib.rs"
 [dependencies]
 cubelink-core = { path = "../core" }
 anyhow.workspace = true
+unicode-normalization.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true

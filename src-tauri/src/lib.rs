@@ -122,6 +122,8 @@ macro_rules! handlers {
             commands_hearth::hearth_set_background,
             commands_hearth::hearth_eula,
             commands_hearth::hearth_eula_accept,
+            commands_hearth::hearth_enabled,
+            commands_hearth::hearth_set_enabled,
             commands_game::game_switch,
             commands_game::game_current,
             commands_game::game_close,

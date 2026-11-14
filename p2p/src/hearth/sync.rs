@@ -157,9 +157,13 @@ fn check_segment(seg: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Valide un chemin relatif d'un monde (séparateur `/`) : ni absolu, ni `..`, ni nom réservé Windows, ni
-/// exécutable, borné en longueur et en profondeur.
+/// Valide un chemin relatif d'un monde (séparateur `/`) : en forme NFC, ni absolu, ni `..`, ni nom réservé Windows,
+/// ni caractère interdit, ni exécutable, borné en longueur et en profondeur. Même fonction à la publication
+/// ([`scan_world`]) et à la réception ([`check_names`]).
 pub fn check_world_path(path: &str) -> Result<(), String> {
+    if !unicode_normalization::is_nfc(path) {
+        return Err("chemin non normalisé (NFC)".into());
+    }
     if path.is_empty() {
         return Err("chemin vide".into());
     }
@@ -191,21 +195,50 @@ pub fn check_world_path(path: &str) -> Result<(), String> {
 
 /// Fichier qui n'entre jamais dans un monde publié : `session.lock` (verrou du jeu) et `*.tmp`.
 pub fn is_excluded(name: &str) -> bool {
-    name.eq_ignore_ascii_case("session.lock") || name.to_ascii_lowercase().ends_with(".tmp")
+    core_lib::hearth::world::is_excluded(name)
 }
 
-/// Valide les noms d'une collection : chacun sûr, aucun doublon (casse comprise : Windows).
-fn check_names<'a>(names: impl Iterator<Item = &'a str>) -> Result<usize, SyncError> {
-    let mut seen = HashSet::new();
+/// Clé de collision d'un chemin sur un disque insensible à la casse : minuscules du chemin NFC.
+pub fn collision_key(path: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
+    path.nfc().collect::<String>().to_lowercase()
+}
+
+/// Détecte les collisions d'un ensemble de chemins : doublons (casse comprise) et fichier/dossier de même nom
+/// (`a` et `a/b`).
+fn check_collisions<'a>(names: impl Iterator<Item = &'a str>) -> Result<usize, String> {
+    let mut files = HashSet::new();
+    let mut dirs = HashSet::new();
     let mut n = 0usize;
     for name in names {
-        check_world_path(name).map_err(|why| SyncError::Invalid(format!("chemin {name:?} refusé : {why}")))?;
-        if !seen.insert(name.to_lowercase()) {
-            return Err(SyncError::Invalid(format!("doublon : {name:?}")));
+        let key = collision_key(name);
+        if !files.insert(key.clone()) {
+            return Err(format!("doublon : {name:?}"));
+        }
+        let mut prefix = String::new();
+        let parts: Vec<&str> = key.split('/').collect();
+        for seg in &parts[..parts.len() - 1] {
+            if !prefix.is_empty() {
+                prefix.push('/');
+            }
+            prefix.push_str(seg);
+            dirs.insert(prefix.clone());
         }
         n += 1;
     }
+    if let Some(clash) = files.iter().find(|f| dirs.contains(*f)) {
+        return Err(format!("{clash:?} est à la fois un fichier et un dossier"));
+    }
     Ok(n)
+}
+
+/// Valide les noms d'une collection : chacun sûr, aucune collision (casse, forme Unicode, fichier/dossier).
+fn check_names<'a>(names: impl Iterator<Item = &'a str>) -> Result<usize, SyncError> {
+    let names: Vec<&str> = names.collect();
+    for name in &names {
+        check_world_path(name).map_err(|why| SyncError::Invalid(format!("chemin {name:?} refusé : {why}")))?;
+    }
+    check_collisions(names.into_iter()).map_err(SyncError::Invalid)
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -833,9 +866,44 @@ struct Scanned {
 }
 
 /// Liste les fichiers du monde : jamais de lien symbolique, exclusions, chemins validés, bornes.
+/// Collisions de casse ou d'Unicode : garde le fichier au mtime le plus récent et signale l'autre. Un fichier qui est
+/// aussi le dossier d'un autre est signalé.
+fn exclude_collisions(out: &mut Scanned) {
+    let mut files = std::mem::take(&mut out.files);
+    files.sort_by(|a, b| b.mtime.cmp(&a.mtime).then_with(|| a.rel.cmp(&b.rel)));
+    let mut seen = HashSet::new();
+    let mut kept = Vec::new();
+    for f in files {
+        if seen.insert(collision_key(&f.rel)) {
+            kept.push(f);
+        } else {
+            out.skipped_unsafe.push(f.rel);
+        }
+    }
+    let mut dirs = HashSet::new();
+    for f in &kept {
+        let key = collision_key(&f.rel);
+        let mut prefix = String::new();
+        let parts: Vec<&str> = key.split('/').collect();
+        for seg in &parts[..parts.len() - 1] {
+            if !prefix.is_empty() {
+                prefix.push('/');
+            }
+            prefix.push_str(seg);
+            dirs.insert(prefix.clone());
+        }
+    }
+    for f in kept {
+        if dirs.contains(&collision_key(&f.rel)) {
+            out.skipped_unsafe.push(f.rel);
+        } else {
+            out.files.push(f);
+        }
+    }
+}
+
 fn scan_world(root: &Path) -> Result<Scanned, SyncError> {
     let mut out = Scanned { files: Vec::new(), skipped_unsafe: Vec::new() };
-    let mut seen = HashSet::new();
     let mut stack: Vec<(PathBuf, String, usize)> = vec![(root.to_path_buf(), String::new(), 0)];
     while let Some((dir, prefix, depth)) = stack.pop() {
         if depth >= MAX_WORLD_DEPTH {
@@ -862,9 +930,10 @@ fn scan_world(root: &Path) -> Result<Scanned, SyncError> {
                 out.skipped_unsafe.push(rel);
                 continue;
             }
-            check_world_path(&rel).map_err(|why| SyncError::Invalid(format!("chemin {rel:?} refusé : {why}")))?;
-            if !seen.insert(rel.to_lowercase()) {
-                return Err(SyncError::Invalid(format!("doublon (casse) : {rel:?}")));
+            // Un chemin invalide (par exemple non NFC) est exclu et signalé, il ne bloque pas la publication.
+            if check_world_path(&rel).is_err() {
+                out.skipped_unsafe.push(rel);
+                continue;
             }
             if out.files.len() >= MAX_WORLD_FILES {
                 return Err(SyncError::Invalid(format!("trop de fichiers (plus de {MAX_WORLD_FILES})")));
@@ -874,6 +943,8 @@ fn scan_world(root: &Path) -> Result<Scanned, SyncError> {
             out.files.push(ScannedFile { rel, path: entry.path(), size: meta.len(), mtime });
         }
     }
+    exclude_collisions(&mut out);
+    check_collisions(out.files.iter().map(|f| f.rel.as_str())).map_err(SyncError::Invalid)?;
     out.files.sort_by(|a, b| a.rel.cmp(&b.rel));
     out.skipped_unsafe.sort();
     Ok(out)
@@ -951,6 +1022,32 @@ mod tests {
     }
 
     #[test]
+    fn nfc_obligatoire_et_collision_nfc() {
+        let compose = "region/caf\u{e9}.dat";
+        let decompose = "region/cafe\u{301}.dat";
+        assert!(check_world_path(compose).is_ok());
+        assert!(check_world_path(decompose).is_err(), "NFD refusé");
+        assert_eq!(collision_key(compose), collision_key(decompose));
+        assert!(check_collisions(["region/caf\u{e9}.dat", "REGION/CAF\u{c9}.dat"].into_iter()).is_err());
+    }
+
+    #[test]
+    fn noms_reserves_et_caracteres_windows() {
+        for bad in ["CON.txt", "a/nul", "a/Com1.x", "lpt9.dat", "a/b:c", "a/b*", "a/b<", "a/b|c", "a/\"b", "D:/x", "a/b."] {
+            assert!(check_world_path(bad).is_err(), "{bad:?}");
+        }
+        assert!(check_world_path("a/COM0.dat").is_ok());
+    }
+
+    #[test]
+    fn collision_fichier_dossier() {
+        assert!(check_names(["a", "a/b"].into_iter()).is_err());
+        assert!(check_names(["a/b", "a"].into_iter()).is_err());
+        assert!(check_names(["A", "a/b"].into_iter()).is_err());
+        assert!(check_names(["a/b", "a/c", "ab"].into_iter()).is_ok());
+    }
+
+    #[test]
     fn exclusions() {
         assert!(is_excluded("session.lock"));
         assert!(is_excluded("SESSION.LOCK"));
@@ -978,6 +1075,22 @@ mod tests {
         let names: Vec<&str> = s.files.iter().map(|f| f.rel.as_str()).collect();
         assert_eq!(names, vec!["level.dat", "region/r.0.0.mca"]);
         assert_eq!(s.skipped_unsafe, vec!["evil.exe".to_string()]);
+    }
+
+    #[test]
+    fn scan_exclut_les_chemins_invalides_et_les_collisions_sans_echouer() {
+        let d = tempfile::tempdir().unwrap();
+        let w = d.path();
+        std::fs::write(w.join("level.dat"), b"x").unwrap();
+        // « é » décomposé (NFD) : non NFC.
+        std::fs::write(w.join("e\u{301}.dat"), b"x").unwrap();
+        std::fs::write(w.join("Data.txt"), b"x").unwrap();
+        std::fs::write(w.join("data.txt"), b"x").unwrap();
+        let s = scan_world(w).unwrap();
+        assert!(s.files.iter().any(|f| f.rel == "level.dat"));
+        assert!(s.skipped_unsafe.contains(&"e\u{301}.dat".to_string()), "{:?}", s.skipped_unsafe);
+        assert_eq!(s.files.iter().filter(|f| f.rel.to_lowercase() == "data.txt").count(), 1);
+        assert_eq!(s.skipped_unsafe.len(), 2);
     }
 
     #[test]

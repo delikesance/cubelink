@@ -21,7 +21,7 @@ use serde::Serialize;
 use tauri::State;
 
 use crate::error::{sanitize, user_msg};
-use crate::hearth::{key_hex, parse_key, HearthRuntime, HostParams, Play, EULA_REQUIRED, HOST_STEPS, JOIN_STEPS};
+use crate::hearth::{key_hex, parse_key, Begin, HearthRuntime, HostParams, Play, EULA_REQUIRED, HOST_STEPS, JOIN_STEPS};
 use crate::state::AppState;
 
 /// Longueur maximale du nom d'un groupe (caractères).
@@ -57,6 +57,7 @@ impl AppState {
 
     /// Mondes d'une instance, avec leur taille, pour la création d'un groupe.
     pub async fn hearth_worlds(&self, instance_id: &str) -> Result<Vec<HearthWorld>, String> {
+        self.hearth.require_enabled()?;
         if !crate::commands_instances::valid_id(instance_id) {
             return Err("identifiant d'instance invalide".into());
         }
@@ -71,6 +72,15 @@ impl AppState {
         })
         .await
         .map_err(|_| "lecture des mondes interrompue".to_string())?
+    }
+
+    /// Interrupteur de sécurité (docs/hearth.md § 12.1 n° 63) : `false` par défaut.
+    pub fn hearth_enabled(&self) -> bool {
+        self.hearth.enabled()
+    }
+
+    pub fn hearth_set_enabled(&self, on: bool) {
+        self.hearth.set_enabled(on);
     }
 
     pub fn hearth_invites(&self) -> Vec<HearthInvite> {
@@ -119,6 +129,7 @@ impl AppState {
         world_name: Option<String>,
         members: Vec<String>,
     ) -> Result<HearthCard, String> {
+        self.hearth.require_enabled()?;
         let name = name.trim();
         if name.is_empty() || name.chars().count() > MAX_NAME || name.chars().any(char::is_control) {
             return Err("le nom du serveur doit faire entre 1 et 64 caractères".into());
@@ -178,16 +189,19 @@ impl AppState {
     }
 
     pub fn hearth_invite_accept(&self, id: &str) -> Result<(), String> {
+        self.hearth.require_enabled()?;
         self.hearth.accept_invite(&gid(id)?)
     }
 
     pub fn hearth_invite_dismiss(&self, id: &str) -> Result<(), String> {
+        self.hearth.require_enabled()?;
         self.hearth.dismiss_invite(&gid(id)?);
         Ok(())
     }
 
     /// Relie le groupe à une instance locale, si son modpack est celui du groupe (après l'avoir installé).
     pub async fn hearth_set_instance(&self, id: &str, instance_id: &str) -> Result<(), String> {
+        self.hearth.require_enabled()?;
         let g = gid(id)?;
         if !crate::commands_instances::valid_id(instance_id) {
             return Err("identifiant d'instance invalide".into());
@@ -198,6 +212,7 @@ impl AppState {
     }
 
     pub async fn hearth_add_member(&self, id: &str, public_key: &str) -> Result<(), String> {
+        self.hearth.require_enabled()?;
         let g = gid(id)?;
         let k = key(public_key)?;
         if !self.friends.is_friend(public_key).map_err(|e| user_msg(&e))? {
@@ -207,6 +222,7 @@ impl AppState {
     }
 
     pub async fn hearth_remove_member(&self, id: &str, public_key: &str) -> Result<(), String> {
+        self.hearth.require_enabled()?;
         let (g, k) = (gid(id)?, key(public_key)?);
         if k == self.hearth.me() {
             return Err("pour partir, utilise « Quitter le groupe »".into());
@@ -215,6 +231,7 @@ impl AppState {
     }
 
     pub async fn hearth_leave(self: &Arc<Self>, id: &str) -> Result<(), String> {
+        self.hearth.require_enabled()?;
         let g = gid(id)?;
         if self.hearth.active(&g).is_some() {
             self.hearth_stop(id).await?;
@@ -222,22 +239,25 @@ impl AppState {
         self.hearth.propose(g, GroupOp::Leave).await?;
         // Le groupe a été quitté si la chaîne l'a appliqué ; `forget_group` est aussi appelé par le runtime.
         if self.hearth.state(&g).is_some() {
-            self.hearth.forget_group(&g)?;
+            self.hearth.forget_group_wait(&g).await?;
         }
         Ok(())
     }
 
     pub async fn hearth_vote(&self, id: &str, proposal_id: &str) -> Result<(), String> {
+        self.hearth.require_enabled()?;
         let g = gid(id)?;
         let p: [u8; 32] = hex::decode(proposal_id).ok().and_then(|b| b.try_into().ok()).ok_or("identifiant de proposition invalide")?;
         self.hearth.vote(g, p).await
     }
 
     pub async fn hearth_continue_without(&self, id: &str, public_key: &str) -> Result<(), String> {
+        self.hearth.require_enabled()?;
         self.hearth.propose_continue(gid(id)?, key(public_key)?).await
     }
 
     pub async fn hearth_pack_update(&self, id: &str, instance_id: &str) -> Result<(), String> {
+        self.hearth.require_enabled()?;
         let g = gid(id)?;
         if !crate::commands_instances::valid_id(instance_id) {
             return Err("identifiant d'instance invalide".into());
@@ -247,22 +267,24 @@ impl AppState {
         if pin == self.hearth.require_state(&g)?.pack {
             return Err("le modpack de cette instance est déjà celui du groupe".into());
         }
-        self.hearth.propose(g, GroupOp::PackUpdate { pack: pin }).await?;
-        self.hearth.set_instance(&g, Some(instance_id.to_string()));
-        Ok(())
+        // L'instance liée ne change qu'une fois `PackUpdate` appliqué (voir `HearthRuntime::finalize`).
+        self.hearth.propose_pack_update(g, pin, instance_id).await
     }
 
     pub async fn hearth_restore(&self, id: &str, version_id: &str) -> Result<(), String> {
+        self.hearth.require_enabled()?;
         let v = VersionId::from_hex(version_id).ok_or("identifiant de version invalide")?;
         self.hearth.restore(gid(id)?, v).await.map(|_| ())
     }
 
     pub async fn hearth_resolve_fork(&self, id: &str, version_id: &str) -> Result<(), String> {
+        self.hearth.require_enabled()?;
         let v = VersionId::from_hex(version_id).ok_or("identifiant de version invalide")?;
         self.hearth.resolve_fork(gid(id)?, v).await
     }
 
     pub fn hearth_set_background(&self, id: &str, on: bool) -> Result<(), String> {
+        self.hearth.require_enabled()?;
         let g = gid(id)?;
         self.hearth.require_state(&g)?;
         self.hearth.set_keep_background(&g, on);
@@ -277,6 +299,7 @@ impl AppState {
 
     /// Le bouton Jouer (docs/hearth.md § 3.3 et § 7) : rejoint la partie en cours, ou démarre le serveur sur ce PC.
     pub async fn hearth_play(self: &Arc<Self>, id: &str) -> Result<(), String> {
+        self.hearth.require_enabled()?;
         let g = gid(id)?;
         let rt = self.hearth.clone();
         rt.require_state(&g)?;
@@ -314,11 +337,13 @@ impl AppState {
     async fn hearth_play_inner(self: &Arc<Self>, g: GroupId, instance: &str) -> Result<(), String> {
         let rt = self.hearth.clone();
         for _ in 0..3 {
-            rt.probe_group(g).await;
+            // Ronde `Hello` parallèle à tous les membres (4 s chacun) : on décide sur leurs réponses et la liste des
+            // injoignables, pas sur le cache.
+            let round = rt.probe_round(g).await;
             if rt.is_fork(&g) {
                 return Err("Deux versions du monde existent : choisis laquelle garder depuis la page du serveur.".into());
             }
-            match rt.decision(&g).ok_or("ce groupe n'existe plus")? {
+            match rt.decision_for(&g, &round).ok_or("ce groupe n'existe plus")? {
                 Decision::Blocked => {
                     return Err("Connexion requise : aucun membre du groupe n'est joignable. Le jeu hors ligne n'est pas possible sur un serveur de groupe.".into())
                 }
@@ -387,8 +412,11 @@ impl AppState {
         // Premier temps du bail : les autres membres voient « le serveur démarre » dès maintenant, et non seulement à la
         // fin de l'installation (de 2 à 6 minutes pour un gros pack). Un membre déjà en train de démarrer, ou dont le
         // serveur est prêt, garde la main.
-        if let Some(holder) = rt.begin_starting(g, tip).await {
-            return self.hearth_join(g, instance, holder).await;
+        // Le bail se prend en deux phases (claim puis annonce) : un bail seulement « au mieux » (pas de majorité) demande une
+        // confirmation (un second « Jouer »), et un concurrent qui a la main se rejoint.
+        match rt.begin_starting(g, tip).await? {
+            Begin::Hosting => {}
+            Begin::Join(holder) => return self.hearth_join(g, instance, holder).await,
         }
         let started = self.hearth_host_start(g, instance, &inst, &game_dir, head.as_ref(), tip).await;
         match started {
@@ -427,20 +455,30 @@ impl AppState {
             java_root: self.paths.java.clone(),
         };
         let active = rt.start_server(g, params, tip).await?;
+        // L'accès des membres s'ouvre **avant** d'annoncer le bail `Ready` : un membre qui rejoint dès l'annonce (cas du
+        // candidat qui a cédé) ne doit pas trouver le tunnel fermé. `abort_hosting` le referme si on perd le départage.
+        let st = match rt.require_state(&g) {
+            Ok(st) => st,
+            Err(e) => {
+                // Groupe supprimé entre-temps : on ne laisse pas de serveur orphelin.
+                rt.abort_hosting(g).await;
+                return Err(e);
+            }
+        };
+        self.access.allow_members(g, st.members.iter().copied().filter(|k| *k != rt.me()));
+        let port = active.port();
+        self.backend().host_set_world_port(port);
         if let Some(holder) = rt.announce_lease(&active).await {
             // Un autre bail l'emporte (serveur prêt avant le nôtre, version de départ plus avancée, ou plus petite clé).
+            self.backend().host_set_world_port(0);
             rt.abort_hosting(g).await;
             return Ok(Some(holder));
         }
         rt.run_hosting(&active);
         // Les membres atteignent le serveur par le tunnel, et le manifeste du modpack par le même accès.
-        let st = rt.require_state(&g)?;
-        self.access.allow_members(g, st.members.iter().copied().filter(|k| *k != rt.me()));
-        let port = active.port();
         if let Err(e) = self.backend().host_start_sharing(instance.to_string(), port).await {
             eprintln!("[cubelink] partage du modpack du groupe : {e}");
         }
-        self.backend().host_set_world_port(port);
         rt.set_play(&g, Some(Play::Launching { steps: HOST_STEPS, index: 2 }));
         if let Err(e) = rt.launcher().launch(self, instance, port).await {
             self.hearth_stop_inner(g).await;
@@ -522,9 +560,12 @@ impl AppState {
     /// Arrête le serveur du groupe `g` et ferme tout ce qui s'y rattache (partage, accès, état de lancement). Appelé aussi
     /// quand le serveur s'arrête tout seul.
     pub(crate) async fn hearth_stop_inner(self: &Arc<Self>, g: GroupId) {
-        match self.hearth.finish_hosting(g).await {
-            Ok(_) => {}
-            Err(e) => eprintln!("[cubelink] arrêt du serveur du groupe {g} : {e}"),
+        // Groupe oublié pendant la partie : le serveur est déjà arrêté, il ne reste que le partage et l'état à fermer.
+        if self.hearth.active(&g).is_some() {
+            match self.hearth.finish_hosting(g).await {
+                Ok(_) => {}
+                Err(e) => eprintln!("[cubelink] arrêt du serveur du groupe {g} : {e}"),
+            }
         }
         self.backend().host_stop_sharing();
         self.access.close_group(&g);
@@ -534,6 +575,7 @@ impl AppState {
     /// Choix du groupe après une partie mal terminée : `wait` (ne rien faire), `checkpoint` (reprendre depuis son
     /// dernier point de reprise) ou `last` (depuis la dernière version connue).
     pub async fn hearth_unclean_choice(self: &Arc<Self>, id: &str, choice: &str) -> Result<(), String> {
+        self.hearth.require_enabled()?;
         let g = gid(id)?;
         let rt = self.hearth.clone();
         if choice == "wait" {
@@ -699,6 +741,16 @@ pub fn hearth_set_background(state: S<'_>, id: String, on: bool) -> Result<(), S
 #[tauri::command(rename_all = "snake_case")]
 pub fn hearth_eula(state: S<'_>) -> HearthEula {
     state.hearth_eula()
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn hearth_enabled(state: S<'_>) -> bool {
+    state.hearth_enabled()
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn hearth_set_enabled(state: S<'_>, enabled: bool) {
+    state.hearth_set_enabled(enabled);
 }
 
 #[tauri::command(rename_all = "snake_case")]

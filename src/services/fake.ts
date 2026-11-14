@@ -287,6 +287,8 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
   const hearthGroups = new Map<string, HearthDetail>();
   let hearthInvs: HearthInvite[] = [];
   let hearthEula = false;
+  /** Le faux service part avec Hearth activé (le vrai réglage est coupé par défaut) ; `hearthSetEnabled` le change. */
+  let hearthOn = true;
   let hearthN = 0;
   const hearthCalls: Array<{ kind: string; args: unknown[] }> = [];
   const liteOf = (pk: string): HearthMemberLite => {
@@ -734,6 +736,8 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     },
     hearthEula: async () => ({ accepted: hearthEula, url: "https://aka.ms/MinecraftEULA" }),
     hearthEulaAccept: async () => { hearthCalls.push({ kind: "EulaAccept", args: [] }); hearthEula = true; },
+    hearthEnabled: async () => hearthOn,
+    hearthSetEnabled: async (enabled) => { hearthCalls.push({ kind: "SetEnabled", args: [enabled] }); hearthOn = enabled; hearthEmit(); },
     onHearthState: (cb) => sub(listeners.hearthState, cb),
     onHearthInvites: (cb) => sub(listeners.hearthInvites, cb),
     onHearthHandover: (cb) => sub(listeners.hearthHandover, cb),

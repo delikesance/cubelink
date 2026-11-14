@@ -142,6 +142,17 @@ impl<'de> Deserialize<'de> for GroupKey {
 // Écriture et lecture de fichiers
 // ---------------------------------------------------------------------------------------------------------
 
+/// `fsync` du dossier parent (Unix) pour que le `rename` survive à une coupure ; sans effet sous Windows.
+fn sync_parent(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    if let Some(dir) = path.parent() {
+        fs::File::open(dir)?.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
 /// Écrit `data` dans `path` de façon atomique (fichier temporaire voisin, `fsync`, `rename`).
 fn write_atomic(path: &Path, data: &[u8], private: bool) -> io::Result<()> {
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("fichier");
@@ -159,7 +170,8 @@ fn write_atomic(path: &Path, data: &[u8], private: bool) -> io::Result<()> {
         let mut f = opts.open(&tmp)?;
         f.write_all(data)?;
         f.sync_all()?;
-        fs::rename(&tmp, path)
+        fs::rename(&tmp, path)?;
+        sync_parent(path)
     };
     let r = write();
     if r.is_err() {
@@ -526,6 +538,7 @@ impl Group {
         for v in &accepted {
             self.write_version(v)?;
         }
+        self.remove_evicted();
         Ok(report)
     }
 
@@ -535,7 +548,16 @@ impl Group {
         if r == Inserted::New {
             self.write_version(&v)?;
         }
+        self.remove_evicted();
         Ok(r)
+    }
+
+    /// Efface du disque les versions évincées par les quotas (échec ignoré : elles seraient écartées au rechargement
+    /// par le même quota, ou simplement retrouvées).
+    fn remove_evicted(&mut self) {
+        for id in self.graph.take_evicted() {
+            let _ = fs::remove_file(self.dir.join("versions").join(format!("{id}.json")));
+        }
     }
 
     fn write_version(&self, v: &SignedVersion) -> Result<(), StoreError> {
@@ -778,7 +800,8 @@ impl GroupStore {
             }
             write_atomic(&tmp.join("ops.jsonl"), &data, false).map_err(io_err("écriture de ops.jsonl"))?;
             write_atomic(&tmp.join("group.key"), key.as_bytes(), true).map_err(io_err("écriture de group.key"))?;
-            fs::rename(&tmp, &dest).map_err(io_err("création du groupe"))
+            fs::rename(&tmp, &dest).map_err(io_err("création du groupe"))?;
+            sync_parent(&dest).map_err(io_err("création du groupe"))
         };
         if let Err(e) = build() {
             let _ = fs::remove_dir_all(&tmp);
@@ -829,7 +852,10 @@ impl GroupStore {
         let mut loose = state.clone();
         loose.members = ever.clone();
         let mut graph = VersionGraph::new();
+        // Les quotas ont pu évincer un ancêtre encore référencé : ses enfants restent des bases valables.
+        graph.set_lenient_parents(true);
         let (_, report) = insert_batch(&mut graph, &loose, &loose, batch);
+        graph.set_lenient_parents(false);
         skipped.extend(report.rejected.into_iter().map(|(id, why)| format!("version {id} : {why}")));
 
         let mut proposals = BTreeMap::new();

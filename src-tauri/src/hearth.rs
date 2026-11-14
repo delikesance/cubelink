@@ -27,7 +27,11 @@ use core_lib::types::{
 };
 use iroh::{Endpoint, EndpointAddr};
 use p2p_lib::friends_db::FriendsDb;
-use p2p_lib::hearth::lease::{decide_from, Arbitration, Decision, Lease, LeasePhase, LeaseTable, Observed, OnlineMember, LEASE_RENEW_INTERVAL};
+use p2p_lib::hearth::lease::{
+    arbitrate_marked, claim_outcome, decide_from, fence_action, new_lease_id, Arbitration, Claim, ClaimConflict, ClaimOutcome, ClaimReply,
+    Clock, ConflictKind, Decision, FenceAction, FenceReason, FenceVerdict, HostFence, Lease, LeaseId, LeasePhase, LeaseTable, Observed,
+    OnlineMember, ProbeRound, ReleaseReason, SystemClock, CLAIM_TIMEOUT, CONFLICT_WAIT, LEASE_RENEW_INTERVAL,
+};
 use p2p_lib::hearth::model::{GroupId, GroupOp, GroupState, OpHash, PackPin, Proposal, Sig, SignedOp};
 use p2p_lib::hearth::outbox::{MemberReplica, Outbox, Replica};
 use p2p_lib::hearth::proto::{HearthConn, HearthDelegate, NetError};
@@ -47,6 +51,12 @@ pub const EULA_REQUIRED: &str = "eula_required";
 pub const PROBE_INTERVAL: Duration = Duration::from_secs(60);
 /// Délai d'une sonde d'un membre.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(8);
+/// Délai de la connexion et du `Hello` d'une ronde de sondage (par membre, en parallèle).
+pub const ROUND_HELLO_TIMEOUT: Duration = Duration::from_secs(4);
+/// Attente du bail d'un concurrent après un `ClaimConflict` sur un claim (il annonce son bail `Starting`).
+const CLAIM_YIELD_WAIT: Duration = Duration::from_secs(12);
+/// Durée pendant laquelle un premier « Jouer » sur un bail « au mieux » attend la confirmation (le second clic).
+const BEST_EFFORT_CONFIRM: Duration = Duration::from_secs(120);
 /// Période des points de reprise pendant une partie.
 pub const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(10 * 60);
 /// Jours sans nouvelles avant de pouvoir continuer sans un membre.
@@ -55,6 +65,14 @@ pub const CONTINUE_AFTER_DAYS: u32 = 7;
 const KEEP_VERSIONS_SECS: u64 = 14 * 24 * 3600;
 /// Invitations de groupe en attente au plus.
 const MAX_PENDING_INVITES: usize = 16;
+/// Invitations acceptées d'un même ami en 24 h.
+const MAX_INVITES_PER_FRIEND_PER_DAY: usize = 3;
+/// Une invitation en attente expire après 7 jours.
+const INVITE_TTL_SECS: i64 = 7 * 24 * 3600;
+/// Message des commandes refusées quand l'interrupteur est coupé.
+pub const HEARTH_DISABLED: &str = "Les serveurs de groupe sont désactivés : active « Serveurs de groupe (expérimental) » dans les Réglages.";
+/// Délai laissé au serveur d'un groupe oublié pour s'arrêter avant d'être tué.
+const FORGET_STOP_GRACE: Duration = Duration::from_secs(20);
 /// Délai laissé au serveur pour s'arrêter proprement (sauvegarde du monde).
 const SERVER_STOP_GRACE: Duration = Duration::from_secs(90);
 /// Attente maximale du démarrage du serveur d'un autre membre (bail `Starting`).
@@ -262,10 +280,17 @@ struct GroupMeta {
     /// Membres qui n'ont pas encore reçu leur invitation.
     #[serde(default)]
     invite_pending: BTreeSet<String>,
+    /// Changement de modpack proposé d'ici : (empreinte du manifeste, instance). L'instance liée ne change qu'une fois
+    /// `PackUpdate` appliqué à la chaîne.
+    #[serde(default)]
+    pending_pack: Option<(String, String)>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Meta {
+    /// Interrupteur de sécurité (docs/hearth.md § 12.1 n° 63) : `false` par défaut, Hearth est inerte.
+    #[serde(default)]
+    hearth_enabled: bool,
     #[serde(default)]
     eula_accepted: bool,
     #[serde(default)]
@@ -321,6 +346,10 @@ pub struct ActiveHost {
     /// Dernière version de la chaîne de cette partie : parent de la suivante.
     tip: Mutex<Option<(VersionId, u64)>>,
     pub lease: Mutex<Lease>,
+    /// Dernier renouvellement du bail (horloges murale et monotone) : auto-exclusion après veille.
+    fence: Mutex<HostFence>,
+    /// Exclu après une veille : la partie finit comme branche sans bail (`LeaseRelease { Suspend }`).
+    fenced: AtomicBool,
     players: Arc<Mutex<BTreeSet<String>>>,
     tasks: Mutex<Vec<JoinHandle<()>>>,
     stopping: AtomicBool,
@@ -372,6 +401,8 @@ pub struct HearthRuntime {
     status: Mutex<HashMap<(GroupId, PeerKey), MemberStatus>>,
     meta: Mutex<Meta>,
     invites: Mutex<Vec<PendingInvite>>,
+    /// Invitations reçues (ami, secondes Unix) sur les dernières 24 h : quota par ami, même si elles sont écartées.
+    invite_log: Mutex<Vec<(PeerKey, i64)>>,
     outbox: Arc<Outbox>,
     net: OnceLock<HearthNet>,
     world: OnceLock<WorldStore>,
@@ -397,20 +428,60 @@ pub struct HearthRuntime {
     end_hook: Mutex<Option<EndHook>>,
     /// Une seule fermeture générale à la fois : la seconde attend la première.
     stop_all: tokio::sync::Mutex<()>,
+    /// Horloges (injectables : les tests font « dormir » la machine sans attendre).
+    clock: Mutex<Arc<dyn Clock>>,
+    /// Groupes dont un premier « Jouer » a reçu un bail « au mieux » : le second clic vaut confirmation.
+    best_effort: Mutex<HashMap<GroupId, Instant>>,
     me_weak: Weak<HearthRuntime>,
 }
 
+/// Issue de la première phase de la prise du bail ([`HearthRuntime::begin_starting`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Begin {
+    /// Le bail `Starting` est annoncé : on prépare le serveur.
+    Hosting,
+    /// Un autre membre a la main (bail connu, claim concurrent gagnant, ou départage perdu) : le rejoindre.
+    Join(PeerKey),
+}
+
+/// Issue d'un tour de renouvellement du bail d'un serveur prêt ([`HearthRuntime::renew_tick`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenewTick {
+    Renewed,
+    /// Exclu après une veille, rien ne contredit : reprise avec un nouveau `lease_id`.
+    Resumed,
+    /// Exclu après une veille, un autre bail ou une version plus récente existe : le serveur s'arrête, la session est
+    /// publiée comme branche sans bail.
+    Fenced,
+}
+
+/// Début du message d'un bail « au mieux » (voir [`HearthRuntime::begin_starting`]).
+pub const BEST_EFFORT_NOTE: &str = "Le groupe n'est pas assez joignable pour une prise du serveur sûre : si un autre membre joue de son côté, il y aura deux versions à départager.";
+
 /// Réaction de l'application à la fin d'une partie hébergée (voir `HearthRuntime::set_end_hook`).
 pub type EndHook = Arc<dyn Fn(GroupId) -> BoxFut<'static, ()> + Send + Sync>;
+
+/// Ce que `forget_group` laisse à nettoyer après le retrait de l'état en mémoire.
+struct ForgetTail {
+    host: Option<Arc<ActiveHost>>,
+    starting: Option<Arc<StartingHost>>,
+    collections: HashSet<[u8; 32]>,
+}
 
 /// Bail `Starting` d'un hôte et sa tâche de renouvellement.
 pub struct StartingHost {
     lease: Mutex<Lease>,
     task: Mutex<Option<JoinHandle<()>>>,
+    fence: Mutex<HostFence>,
+    /// Exclu après une veille pendant la préparation : un autre bail ou une version plus récente existe.
+    fenced: AtomicBool,
 }
 
 impl GroupMembers for HearthRuntime {
     fn is_member(&self, group: &GroupId, key: &PeerKey) -> bool {
+        if !self.enabled() {
+            return false;
+        }
         self.state(group).is_some_and(|s| s.is_member(key))
     }
 }
@@ -453,6 +524,7 @@ impl HearthRuntime {
             status: Mutex::new(HashMap::new()),
             meta: Mutex::new(meta),
             invites: Mutex::new(Vec::new()),
+            invite_log: Mutex::new(Vec::new()),
             outbox,
             net: OnceLock::new(),
             world: OnceLock::new(),
@@ -469,6 +541,8 @@ impl HearthRuntime {
             oversize: Mutex::new(HashSet::new()),
             end_hook: Mutex::new(None),
             stop_all: tokio::sync::Mutex::new(()),
+            clock: Mutex::new(Arc::new(SystemClock)),
+            best_effort: Mutex::new(HashMap::new()),
             me_weak: w.clone(),
         }))
     }
@@ -672,6 +746,28 @@ impl HearthRuntime {
         self.update_meta(gid, |m| m.keep_background = on);
     }
 
+    /// Interrupteur de sécurité : Hearth est-il actif sur ce PC ?
+    pub fn enabled(&self) -> bool {
+        lock(&self.meta).hearth_enabled
+    }
+
+    /// Active ou coupe Hearth. Coupé : l'accueil masque la section, les commandes refusent et le protocole
+    /// `cubelink/hearth/1` refuse tous les pairs, et les sondes, invitations en attente, synchros et envois de la file sont inertes ; un serveur déjà lancé n'est pas touché (l'arrêt reste possible).
+    pub fn set_enabled(&self, on: bool) {
+        lock(&self.meta).hearth_enabled = on;
+        self.save_meta();
+        self.emit_state();
+    }
+
+    /// Refus clair des commandes `hearth_*` tant que l'interrupteur est coupé.
+    pub fn require_enabled(&self) -> Result<(), String> {
+        if self.enabled() {
+            Ok(())
+        } else {
+            Err(HEARTH_DISABLED.to_string())
+        }
+    }
+
     pub fn eula_accepted(&self) -> bool {
         lock(&self.meta).eula_accepted
     }
@@ -799,24 +895,70 @@ impl HearthRuntime {
     }
 
     async fn probe_group_inner(self: &Arc<Self>, gid: GroupId) {
-        if !lock(&self.probing).insert(gid) {
-            // Une sonde tourne déjà : on attend son résultat plutôt que de décider sur un état périmé.
-            for _ in 0..300 {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                if !lock(&self.probing).contains(&gid) {
-                    break;
-                }
-            }
+        if !self.enabled() {
             return;
         }
+        if lock(&self.probing).contains(&gid) {
+            // Une sonde tourne déjà : on attend son résultat plutôt que de décider sur un état périmé.
+            self.wait_probe_free(&gid).await;
+            return;
+        }
+        let _ = self.run_probe(gid).await;
+    }
+
+    async fn wait_probe_free(&self, gid: &GroupId) {
+        for _ in 0..300 {
+            if !lock(&self.probing).contains(gid) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    /// Ronde de sondage complète avant une décision : un `Hello` en parallèle à **tous** les membres (connexion et
+    /// réponse en [`ROUND_HELLO_TIMEOUT`] chacun), puis le rattrapage des opérations et des versions. Rend qui a répondu
+    /// (avec sa version la plus avancée) et qui est injoignable : `decide` ne se fie jamais au seul cache. Si une sonde de
+    /// fond tourne déjà, on attend qu'elle finisse et on fait **notre** ronde.
+    pub async fn probe_round(self: &Arc<Self>, gid: GroupId) -> ProbeRound {
+        loop {
+            self.wait_probe_free(&gid).await;
+            if lock(&self.probing).insert(gid) {
+                break;
+            }
+        }
+        self.run_probe_guarded(gid).await
+    }
+
+    async fn run_probe(self: &Arc<Self>, gid: GroupId) -> ProbeRound {
+        if !lock(&self.probing).insert(gid) {
+            return ProbeRound::default();
+        }
+        self.run_probe_guarded(gid).await
+    }
+
+    /// Le verrou `probing` du groupe est pris par l'appelant ; il est relâché ici.
+    async fn run_probe_guarded(self: &Arc<Self>, gid: GroupId) -> ProbeRound {
+        let started = Instant::now();
+        let mut round = ProbeRound::default();
         if let Some(st) = self.state(&gid) {
             let mut set = tokio::task::JoinSet::new();
             for k in self.others(&st) {
                 let rt = self.clone();
-                set.spawn(async move { rt.probe_member(gid, k).await });
+                set.spawn(async move { (k, rt.probe_member(gid, k).await) });
             }
-            while set.join_next().await.is_some() {}
+            while let Some(r) = set.join_next().await {
+                let Ok((k, ok)) = r else { continue };
+                if ok {
+                    let latest = lock(&self.status).get(&(gid, k)).and_then(|s| s.latest);
+                    round.answers.push(OnlineMember { key: k, latest });
+                } else {
+                    round.unreachable.push(k);
+                }
+            }
         }
+        round.answers.sort_by_key(|m| m.key);
+        round.unreachable.sort();
+        round.elapsed = started.elapsed();
         lock(&self.probing).remove(&gid);
         self.save_meta();
         self.outbox.wake();
@@ -826,12 +968,16 @@ impl HearthRuntime {
             rt.maybe_take_over(gid).await;
             rt.sync_heads(gid, None).await;
         });
+        round
     }
 
     /// Le créateur a été écarté il y a plus de 30 jours (`ContinueWithout`) et le groupe est toujours gouverné par lui :
     /// le plus petit des autres membres propose de passer à la majorité (les autres votent depuis la page du serveur). Une
     /// seule proposition à la fois, et jamais quand le créateur est de retour.
     async fn maybe_take_over(self: &Arc<Self>, gid: GroupId) {
+        if !self.enabled() {
+            return;
+        }
         let Some(st) = self.state(&gid) else { return };
         if st.governance != p2p_lib::hearth::model::Governance::Creator || st.creator == self.me || !st.is_member(&self.me) {
             return;
@@ -850,20 +996,27 @@ impl HearthRuntime {
     }
 
     pub async fn probe_all(self: &Arc<Self>) {
+        if !self.enabled() {
+            return;
+        }
         for gid in self.group_ids() {
             self.probe_group(gid).await;
         }
     }
 
-    async fn probe_member(self: &Arc<Self>, gid: GroupId, key: PeerKey) {
+    async fn probe_member(self: &Arc<Self>, gid: GroupId, key: PeerKey) -> bool {
         let r = tokio::time::timeout(PROBE_TIMEOUT * 2, self.probe_inner(gid, key)).await;
         let ok = matches!(r, Ok(Ok(())));
         if !ok {
             lock(&self.status).entry((gid, key)).or_default().online = false;
         }
+        ok
     }
 
     async fn probe_inner(self: &Arc<Self>, gid: GroupId, key: PeerKey) -> Result<(), String> {
+        if !self.enabled() {
+            return Err("Hearth est coupé".into());
+        }
         if self.meta_of(&gid).invite_pending.contains(&key_hex(&key)) {
             // Sans effet tant que l'invité n'est pas joignable : on retentera à la prochaine sonde.
             if self.send_group_invite(gid, key).await.is_ok() {
@@ -872,12 +1025,15 @@ impl HearthRuntime {
                 });
             }
         }
-        let conn = self.connect(&key).await?;
         let (seq, heads) = self.with_group(&gid, |g| (g.state().op_seq, g.heads()))?;
-        let st = tokio::time::timeout(PROBE_TIMEOUT, conn.hello(&gid, seq, &heads))
-            .await
-            .map_err(|_| "délai dépassé".to_string())?
-            .map_err(|e| e.to_string())?;
+        // Connexion et `Hello` : 4 s au plus (le rattrapage qui suit a son propre délai).
+        let (conn, st) = tokio::time::timeout(ROUND_HELLO_TIMEOUT, async {
+            let conn = self.connect(&key).await?;
+            let st = conn.hello(&gid, seq, &heads).await.map_err(|e| e.to_string())?;
+            Ok::<_, String>((conn, st))
+        })
+        .await
+        .map_err(|_| "délai dépassé".to_string())??;
         if st.op_seq > seq {
             let ops = conn.fetch_ops(&gid, seq).await.map_err(|e| e.to_string())?;
             self.apply_ops(gid, &ops)?;
@@ -967,6 +1123,9 @@ impl HearthRuntime {
 
     /// Cherche, chez les membres en ligne, les mondes des têtes qu'on n'a pas en entier (synchro de fond).
     pub async fn sync_heads(self: &Arc<Self>, gid: GroupId, prefer: Option<PeerKey>) {
+        if !self.enabled() {
+            return;
+        }
         if self.active(&gid).is_some() || lock(&self.fetching).contains_key(&gid) {
             return;
         }
@@ -1097,6 +1256,9 @@ impl HearthRuntime {
 
     /// Les membres joignables, comme cibles de la file d'envoi.
     fn reachable_replicas(&self) -> Vec<Arc<dyn Replica>> {
+        if !self.enabled() {
+            return Vec::new();
+        }
         let Ok(net) = self.net() else { return Vec::new() };
         let mut by_key: BTreeMap<PeerKey, BTreeSet<GroupId>> = BTreeMap::new();
         for gid in self.group_ids() {
@@ -1257,10 +1419,14 @@ impl HearthRuntime {
 
 impl HearthDelegate for HearthRuntime {
     fn is_friend(&self, key: &PeerKey) -> bool {
-        self.friends.is_friend(&key_hex(key)).unwrap_or(false)
+        self.enabled() && self.friends.is_friend(&key_hex(key)).unwrap_or(false)
     }
 
     fn group_state(&self, group: &GroupId) -> Option<GroupState> {
+        // Interrupteur coupé : aucun groupe n'est visible des pairs, donc tout est refusé (`Deny`).
+        if !self.enabled() {
+            return None;
+        }
         self.state(group)
     }
 
@@ -1335,11 +1501,35 @@ impl HearthDelegate for HearthRuntime {
         }
     }
 
-    fn on_lease_release(&self, from: PeerKey, group: &GroupId, version: Option<VersionId>) {
-        lock(&self.leases).release(group, &from);
+    fn on_claim(&self, from: PeerKey, claim: Claim) -> Result<ClaimReply, String> {
+        let gid = claim.group_id;
+        // J'héberge déjà (serveur prêt ou en préparation) : mon bail est la réponse.
+        if let Some(mine) = self.lease(&gid) {
+            return Ok(ClaimReply::Conflict(ClaimConflict {
+                kind: ConflictKind::Lease,
+                holder: mine.holder,
+                lease_id: mine.lease_id,
+                base_version: mine.base_version,
+                base_number: mine.base_number,
+            }));
+        }
+        self.with_group(&gid, |g| lock(&self.leases).claim(g.state(), g.graph(), &from, &claim, Instant::now()))?.map_err(|e| e.to_string())
+    }
+
+    fn on_lease_release(
+        &self,
+        from: PeerKey,
+        group: &GroupId,
+        lease_id: LeaseId,
+        last_seq: u64,
+        _reason: ReleaseReason,
+        version: Option<VersionId>,
+    ) {
+        lock(&self.leases).release_lease(group, &from, &lease_id, last_seq, Instant::now());
         let gid = *group;
+        // `last_seq == 0` : un candidat qui renonce à son claim, aucune partie n'avait été annoncée.
         if let (Some(Play::Joined { holder }), Some(st)) = (self.play_of(&gid), self.state(&gid)) {
-            if holder == from && self.active(&gid).is_none() {
+            if last_seq > 0 && holder == from && self.active(&gid).is_none() {
                 self.emit_json(
                     "hearth://handover",
                     &core_lib::types::HearthHandover { group_id: gid.to_hex(), name: st.name.clone(), from_name: self.name_of(&from) },
@@ -1360,8 +1550,12 @@ impl HearthDelegate for HearthRuntime {
         let state = p2p_lib::hearth::model::replay(&ops).map_err(|e| e.to_string())?;
         let gid = state.id;
         if self.group(&gid).is_some() {
-            // Un membre nous renvoie le groupe : clé renouvelée (après le retrait d'un membre).
+            // Un membre nous renvoie le groupe : clé renouvelée (après le retrait d'un membre). L'émetteur doit être
+            // membre dans NOTRE état courant : un ami qui n'en fait pas partie ne change pas la clé d'un groupe connu.
             let (before, after) = self.with_group(&gid, |g| {
+                if !g.state().is_member(&from) {
+                    return Err("l'émetteur n'est pas membre du groupe".to_string());
+                }
                 let before = g.state().clone();
                 g.append_ops(&ops).map_err(|e| e.to_string())?;
                 g.set_key(key).map_err(|e| e.to_string())?;
@@ -1370,13 +1564,26 @@ impl HearthDelegate for HearthRuntime {
             self.after_change(&before, &after);
             return Ok(());
         }
+        let now = now_secs();
+        {
+            // Quota : 3 invitations par ami et par 24 h (celles qui sont écartées comptent aussi).
+            let mut log = lock(&self.invite_log);
+            log.retain(|(_, t)| now - *t < 24 * 3600);
+            if log.iter().filter(|(k, _)| *k == from).count() >= MAX_INVITES_PER_FRIEND_PER_DAY {
+                return Err("trop d'invitations de ce membre aujourd'hui".into());
+            }
+            log.push((from, now));
+        }
         {
             let mut inv = lock(&self.invites);
+            inv.retain(|i| now - i.received_at < INVITE_TTL_SECS);
+            // Une seule invitation par groupe : la plus récente remplace l'ancienne.
             inv.retain(|i| i.state.id != gid);
-            if inv.len() >= MAX_PENDING_INVITES {
-                return Err("trop d'invitations en attente".into());
+            // File pleine : la plus ancienne est évincée.
+            while inv.len() >= MAX_PENDING_INVITES {
+                inv.remove(0);
             }
-            inv.push(PendingInvite { from, ops, key, state, received_at: now_secs() });
+            inv.push(PendingInvite { from, ops, key, state, received_at: now });
         }
         self.emit_invites();
         Ok(())
@@ -1430,7 +1637,10 @@ impl HearthRuntime {
     }
 
     pub fn invites(&self) -> Vec<HearthInvite> {
-        let list: Vec<HearthInvite> = lock(&self.invites)
+        let now = now_secs();
+        let mut pending = lock(&self.invites);
+        pending.retain(|i| now - i.received_at < INVITE_TTL_SECS);
+        let list: Vec<HearthInvite> = pending
             .iter()
             .map(|i| HearthInvite {
                 group_id: i.state.id.to_hex(),
@@ -1449,6 +1659,7 @@ impl HearthRuntime {
     pub fn accept_invite(self: &Arc<Self>, gid: &GroupId) -> Result<(), String> {
         let inv = {
             let mut l = lock(&self.invites);
+            l.retain(|i| now_secs() - i.received_at < INVITE_TTL_SECS);
             let i = l.iter().position(|i| i.state.id == *gid).ok_or("cette invitation n'existe plus")?;
             l.remove(i)
         };
@@ -1508,18 +1719,78 @@ impl HearthRuntime {
         conn.send_invite(&ops, &gk).await.map_err(|e| e.to_string())
     }
 
-    /// Oublie le groupe sur ce PC (départ, retrait). Les données du serveur et du monde sont supprimées.
+    /// Oublie le groupe sur ce PC (départ, retrait). L'état en mémoire disparaît tout de suite ; puis, dans l'ordre : le
+    /// serveur actif est arrêté (tué après un délai), l'accès du groupe est fermé, les collections du groupe sont libérées
+    /// dans le magasin de blobs, enfin les données du groupe sont supprimées du disque.
     pub fn forget_group(&self, gid: &GroupId) -> Result<(), String> {
+        let rt = self.arc();
+        let tail = self.forget_now(gid);
+        let gid = *gid;
+        spawn(async move {
+            if let Err(e) = rt.forget_tail(gid, tail).await {
+                eprintln!("[cubelink] groupe {gid} : suppression incomplète : {e}");
+            }
+        });
+        Ok(())
+    }
+
+    /// Comme [`Self::forget_group`], en attendant la fin du ménage (arrêt du serveur, blobs, disque).
+    pub async fn forget_group_wait(self: &Arc<Self>, gid: &GroupId) -> Result<(), String> {
+        let tail = self.forget_now(gid);
+        self.forget_tail(*gid, tail).await
+    }
+
+    /// Partie synchrone : retire l'état du groupe de la mémoire et rend ce qu'il reste à nettoyer.
+    fn forget_now(&self, gid: &GroupId) -> ForgetTail {
+        let collections: HashSet<[u8; 32]> = self
+            .with_group(gid, |g| g.graph().iter().map(|(_, v)| v.header.collection).collect())
+            .unwrap_or_default();
+        let host = lock(&self.active).remove(gid);
+        if let Some(h) = &host {
+            h.stopping.store(true, Ordering::SeqCst);
+            for t in std::mem::take(&mut *lock(&h.tasks)) {
+                t.abort();
+            }
+        }
+        let starting = self.take_starting_entry(gid);
+        // Plus de membre : l'accès est fermé tout de suite, avant même l'arrêt du serveur.
+        self.access.close_group(gid);
         lock(&self.groups).remove(gid);
         lock(&self.leases).forget_group(gid);
         lock(&self.status).retain(|(g, _), _| g != gid);
         lock(&self.play).remove(gid);
+        lock(&self.best_effort).remove(gid);
         for e in self.outbox.pending().into_iter().filter(|e| e.group_id() == *gid) {
             let _ = self.outbox.remove(&e.id());
         }
         lock(&self.meta).groups.remove(&gid.to_hex());
         self.save_meta();
-        let r = self.store.delete(gid).map_err(|e| e.to_string());
+        self.emit_state();
+        ForgetTail { host, starting, collections }
+    }
+
+    async fn forget_tail(self: &Arc<Self>, gid: GroupId, tail: ForgetTail) -> Result<(), String> {
+        if let Some(h) = &tail.host {
+            // `stop` tue le processus si l'arrêt propre dépasse le délai.
+            h.server.stop(FORGET_STOP_GRACE).await;
+        }
+        let _ = tail.starting;
+        if tail.host.is_some() {
+            // Le partage du tunnel et l'état de lancement se ferment comme à la fin d'une partie.
+            let hook = lock(&self.end_hook).clone();
+            if let Some(hook) = hook {
+                hook(gid).await;
+            }
+        }
+        self.access.close_group(&gid);
+        lock(&self.play).remove(&gid);
+        if let Ok(world) = self.world() {
+            for c in &tail.collections {
+                lock(&self.complete).remove(c);
+                let _ = world.release(&gid, c).await;
+            }
+        }
+        let r = self.store.delete(&gid).map_err(|e| e.to_string());
         self.emit_state();
         r
     }
@@ -1556,6 +1827,22 @@ impl HearthRuntime {
         self.broadcast(gid, true, visit).await;
         self.emit_state();
         Ok(())
+    }
+
+    /// Propose un nouveau modpack pour le groupe. L'instance `instance_id` ne devient l'instance liée qu'une fois
+    /// l'opération `PackUpdate` appliquée (tout de suite si ma voix suffit, sinon au vote qui atteint le quota).
+    pub async fn propose_pack_update(self: &Arc<Self>, gid: GroupId, pack: PackPin, instance_id: &str) -> Result<(), String> {
+        let hash = pack.manifest_hash.clone();
+        self.update_meta(&gid, |m| m.pending_pack = Some((hash.clone(), instance_id.to_string())));
+        let r = self.propose(gid, GroupOp::PackUpdate { pack }).await;
+        if r.is_err() {
+            self.update_meta(&gid, |m| {
+                if m.pending_pack.as_ref().is_some_and(|(h, _)| *h == hash) {
+                    m.pending_pack = None;
+                }
+            });
+        }
+        r
     }
 
     /// Règles locales avant de signer un `ContinueWithout` : le membre écarté ne doit pas avoir donné signe de vie depuis
@@ -1645,6 +1932,13 @@ impl HearthRuntime {
                 self.rotate_key(gid).await;
             }
             GroupOp::Leave => self.after_leave(&after),
+            GroupOp::PackUpdate { pack } => {
+                let wanted = self.meta_of(&gid).pending_pack.filter(|(h, _)| *h == pack.manifest_hash);
+                if let Some((_, instance)) = wanted {
+                    self.update_meta(&gid, |m| m.pending_pack = None);
+                    self.set_instance(&gid, Some(instance));
+                }
+            }
             _ => {}
         }
         // Les autres membres rattrapent la chaîne au prochain échange.
@@ -1687,20 +1981,61 @@ pub struct HostParams {
 }
 
 impl HearthRuntime {
-    /// La décision du bouton Jouer d'après ce qu'on sait maintenant (sans réseau).
+    /// La décision du bouton Jouer d'après le **cache** (sans réseau) : pour l'affichage et les choix qui n'agissent pas
+    /// sur le monde. Avant de jouer, on décide sur une ronde fraîche : [`HearthRuntime::decision_for`].
     pub fn decision(&self, gid: &GroupId) -> Option<Decision> {
+        let st = self.state(gid)?;
+        let mut round = ProbeRound::default();
+        for k in self.others(&st) {
+            match lock(&self.status).get(&(*gid, k)).cloned() {
+                Some(s) if s.online => round.answers.push(OnlineMember { key: k, latest: s.latest }),
+                _ => round.unreachable.push(k),
+            }
+        }
+        self.decision_for(gid, &round)
+    }
+
+    /// La décision du bouton Jouer d'après une ronde de sondage qui vient d'avoir lieu ([`HearthRuntime::probe_round`]) :
+    /// les réponses et les injoignables, jamais le cache seul.
+    pub fn decision_for(&self, gid: &GroupId, round: &ProbeRound) -> Option<Decision> {
         let (st, graph) = self.with_group(gid, |g| (g.state().clone(), g.graph().clone())).ok()?;
-        let online: Vec<OnlineMember> = self
-            .others(&st)
-            .into_iter()
-            .filter_map(|k| {
-                let s = lock(&self.status).get(&(*gid, k)).cloned()?;
-                s.online.then_some(OnlineMember { key: k, latest: s.latest })
-            })
-            .collect();
-        // Mon point de départ : la tête effective (une fourche résolue compte pour la version gardée).
         let table = lock(&self.leases);
-        Some(decide_from(&st, &graph, &table, &self.me, &online, false, Instant::now()))
+        Some(decide_from(&st, &graph, &table, &self.me, round, false, Instant::now()))
+    }
+
+    /// Bail valide de ce titulaire dans la table (diagnostic et tests).
+    pub fn lease_of_holder(&self, gid: &GroupId, holder: &PeerKey) -> Option<Lease> {
+        lock(&self.leases).lease_of(gid, holder, Instant::now())
+    }
+
+    /// Horloges (injectables pour les tests : veille simulée).
+    pub fn set_clock(&self, c: Arc<dyn Clock>) {
+        *lock(&self.clock) = c;
+    }
+
+    fn clock(&self) -> Arc<dyn Clock> {
+        lock(&self.clock).clone()
+    }
+
+    /// Bail signé d'une nouvelle partie (`lease_id` imposé), à l'époque courante du groupe.
+    fn new_signed_lease(&self, gid: GroupId, phase: LeasePhase, base: Option<(VersionId, u64)>, lease_id: LeaseId) -> Lease {
+        let l = match phase {
+            LeasePhase::Starting => Lease::starting(gid, self.me, base),
+            LeasePhase::Ready => Lease::new(gid, self.me, base),
+        };
+        self.resign(l.with_lease_id(lease_id))
+    }
+
+    /// Signe de nouveau un bail modifié, à l'époque courante.
+    fn resign(&self, l: Lease) -> Lease {
+        let epoch = self.state(&l.group_id).map_or(l.epoch, |s| s.epoch);
+        l.at_epoch(epoch).signed(&*self.identity)
+    }
+
+    /// Point (époque, numéro) d'une version du graphe local.
+    fn point_of(&self, gid: &GroupId, v: Option<VersionId>) -> Option<VersionPoint> {
+        let id = v?;
+        self.with_group(gid, |g| g.graph().get(&id).map(|x| x.header.point())).ok().flatten()
     }
 
     /// Prépare le monde du groupe pour un serveur : la tête matérialisée dans `server/world`. Un nouveau groupe sans
@@ -1759,9 +2094,22 @@ impl HearthRuntime {
         let runner = lock(&self.runner).clone();
         let server = runner.start(spec).await?;
         // Le bail annoncé en préparation devient le bail du serveur prêt (même partie : `seq` continue).
-        let lease = match self.take_starting(&gid) {
-            Some(starting) => starting.ready(),
-            None => Lease::new(gid, self.me, base),
+        let starting = self.take_starting_entry(&gid);
+        if starting.as_ref().is_some_and(|e| e.fenced.load(Ordering::SeqCst)) {
+            // Exclu après une veille pendant la préparation : un autre bail ou une version plus récente existe.
+            server.stop(Duration::from_secs(20)).await;
+            self.emit_state();
+            return Err("Un autre membre a pris la main pendant la veille de ce PC : le serveur n'est pas lancé. Réessaie dans un instant.".into());
+        }
+        if self.state(&gid).is_none() {
+            // Groupe supprimé pendant la préparation : pas de serveur orphelin.
+            server.stop(Duration::from_secs(20)).await;
+            return Err("Le groupe a été supprimé pendant le démarrage du serveur.".into());
+        }
+        let lease = match starting {
+            // Même partie (même `lease_id`, `seq` continue), signée de nouveau en phase `Ready`.
+            Some(e) => self.resign(lock(&e.lease).ready()),
+            None => self.new_signed_lease(gid, LeasePhase::Ready, base, new_lease_id()),
         };
         let host = Arc::new(ActiveHost {
             group: gid,
@@ -1770,6 +2118,8 @@ impl HearthRuntime {
             started: Instant::now(),
             tip: Mutex::new(base),
             lease: Mutex::new(lease),
+            fence: Mutex::new(HostFence::new(&*self.clock())),
+            fenced: AtomicBool::new(false),
             players,
             tasks: Mutex::new(Vec::new()),
             stopping: AtomicBool::new(false),
@@ -1795,60 +2145,264 @@ impl HearthRuntime {
             .map(|a| lock(&a.lease).clone())
             .or_else(|| lock(&self.starting).get(gid).map(|s| lock(&s.lease).clone()))?;
         let others = lock(&self.leases).active(gid, Instant::now());
-        match self.with_group(gid, |g| p2p_lib::hearth::lease::arbitrate(&mine, &others, g.graph())).ok()? {
+        let (verdict, fork) = self.with_group(gid, |g| arbitrate_marked(&mine, &others, g.graph())).ok()?;
+        if fork {
+            eprintln!("[cubelink] le groupe {gid} a deux parties sur des branches différentes : la fourche sera visible");
+        }
+        match verdict {
             Arbitration::Yield { to } => Some(to),
             Arbitration::Keep => None,
         }
     }
 
-    /// Premier temps de la prise du bail : annonce un bail `Starting` aux membres en ligne dès qu'on a choisi d'héberger
-    /// (l'installation et le démarrage d'un gros pack prennent des minutes), attend une contre-annonce, puis le renouvelle
-    /// tant que le serveur n'est pas prêt. `Some(holder)` : un autre membre garde la main, il faut le rejoindre.
-    pub async fn begin_starting(self: &Arc<Self>, gid: GroupId, base: Option<(VersionId, u64)>) -> Option<PeerKey> {
-        let lease = Lease::starting(gid, self.me, base);
-        let entry = Arc::new(StartingHost { lease: Mutex::new(lease.clone()), task: Mutex::new(None) });
+    /// Phase 1 de la prise du bail : un `LeaseClaim` en parallèle à tous les membres (5 s chacun, relais compris). Rend
+    /// le nombre d'acquittements (moi exclu), les conflits reçus et les membres qui n'ont pas répondu.
+    async fn claim_round(self: &Arc<Self>, gid: GroupId, claim: &Claim) -> (usize, Vec<ClaimConflict>, Vec<PeerKey>) {
+        let Some(st) = self.state(&gid) else { return (0, Vec::new(), Vec::new()) };
+        let mut set = tokio::task::JoinSet::new();
+        for k in self.others(&st) {
+            let (rt, claim) = (self.clone(), claim.clone());
+            set.spawn(async move {
+                let r = async {
+                    let conn = tokio::time::timeout(CLAIM_TIMEOUT, rt.connect(&k)).await.ok()?.ok()?;
+                    tokio::time::timeout(CLAIM_TIMEOUT, conn.claim_lease(&claim)).await.ok()?.ok()
+                }
+                .await;
+                (k, r)
+            });
+        }
+        let (mut acks, mut conflicts, mut silent) = (0, Vec::new(), Vec::new());
+        while let Some(r) = set.join_next().await {
+            match r {
+                Ok((_, Some(ClaimReply::Ack))) => acks += 1,
+                Ok((_, Some(ClaimReply::Conflict(c)))) => conflicts.push(c),
+                Ok((k, None)) => silent.push(k),
+                Err(_) => {}
+            }
+        }
+        (acks, conflicts, silent)
+    }
+
+    /// Un premier « Jouer » a-t-il reçu un bail « au mieux » il y a moins de [`BEST_EFFORT_CONFIRM`] ? (Le second clic vaut
+    /// confirmation ; la confirmation est consommée.)
+    fn take_best_effort_confirmation(&self, gid: &GroupId) -> bool {
+        lock(&self.best_effort).remove(gid).is_some_and(|t| t.elapsed() < BEST_EFFORT_CONFIRM)
+    }
+
+    /// Un bail « au mieux » attend la confirmation de la personne (un second « Jouer »).
+    pub fn best_effort_pending(&self, gid: &GroupId) -> bool {
+        lock(&self.best_effort).get(gid).is_some_and(|t| t.elapsed() < BEST_EFFORT_CONFIRM)
+    }
+
+    /// Un concurrent a la main : on cède. Le verrou du claim tombe ici et chez les témoins.
+    async fn cede_claim(self: &Arc<Self>, gid: GroupId, lease_id: LeaseId) {
+        lock(&self.leases).unlock_claim(&gid, &lease_id);
+        let visit: Visit =
+            Arc::new(move |c| Box::pin(async move { c.release_lease(&gid, lease_id, 0, ReleaseReason::Handover, None).await }));
+        self.broadcast(gid, true, visit).await;
+    }
+
+    /// Premier temps de la prise du bail, en deux phases :
+    ///
+    /// 1. **Claim** : `LeaseClaim` à tous les membres joignables ; majorité stricte des membres (moi compris) = bail
+    ///    **sûr**, sinon **au mieux** : la première fois, une erreur dédiée ([`HearthRuntime::best_effort_pending`]) demande
+    ///    la confirmation (un second « Jouer » vaut confirmation). Un `ClaimConflict` fait céder : on rejoint le bail
+    ///    existant, ou on attend l'annonce du concurrent.
+    /// 2. **Annonce** d'un bail `Starting` aux membres en ligne dès qu'on a choisi d'héberger (l'installation et le démarrage
+    ///    d'un gros pack prennent des minutes), attente d'une contre-annonce, puis renouvellement tant que le serveur n'est
+    ///    pas prêt.
+    pub async fn begin_starting(self: &Arc<Self>, gid: GroupId, base: Option<(VersionId, u64)>) -> Result<Begin, String> {
+        let confirmed = self.take_best_effort_confirmation(&gid);
+        let lease = self.new_signed_lease(gid, LeasePhase::Starting, base, new_lease_id());
+        let claim = Claim::of(&lease);
+        let members = self.state(&gid).map_or(1, |s| s.members.len());
+        let graph = self.with_group(&gid, |g| g.graph().clone())?;
+        let own = lock(&self.leases).lock_own_claim(&graph, &claim, Instant::now());
+        let outcome = match own {
+            Some(c) => ClaimOutcome::Conflict(c),
+            None => {
+                let (acks, conflicts, _silent) = self.claim_round(gid, &claim).await;
+                claim_outcome(&claim, members, acks, &conflicts, &graph)
+            }
+        };
+        match outcome {
+            ClaimOutcome::Conflict(c) => {
+                self.cede_claim(gid, claim.lease_id).await;
+                return self.yield_to(gid, c).await;
+            }
+            ClaimOutcome::BestEffort { acks, needed, members } if !confirmed => {
+                self.cede_claim(gid, claim.lease_id).await;
+                lock(&self.best_effort).insert(gid, Instant::now());
+                self.emit_state();
+                return Err(format!(
+                    "{BEST_EFFORT_NOTE} ({acks} membre(s) sur {members} joignable(s), {needed} nécessaires pour une prise sûre.) Clique encore sur Jouer pour héberger quand même."
+                ));
+            }
+            ClaimOutcome::BestEffort { .. } | ClaimOutcome::Safe { .. } => {}
+        }
+        let entry = Arc::new(StartingHost {
+            lease: Mutex::new(lease.clone()),
+            task: Mutex::new(None),
+            fence: Mutex::new(HostFence::new(&*self.clock())),
+            fenced: AtomicBool::new(false),
+        });
         lock(&self.starting).insert(gid, entry.clone());
         self.broadcast_lease(gid, lease).await;
-        tokio::time::sleep(p2p_lib::hearth::lease::CONFLICT_WAIT).await;
+        // Mon bail est annoncé : il protège désormais lui-même, le verrou de mon claim n'a plus lieu d'être.
+        lock(&self.leases).unlock_claim(&gid, &claim.lease_id);
+        tokio::time::sleep(CONFLICT_WAIT).await;
         if let Some(to) = self.arbitrate_now(&gid) {
             self.end_starting(gid).await;
-            return Some(to);
+            return Ok(Begin::Join(to));
         }
         let (rt, e) = (self.clone(), entry.clone());
         let task = spawn(async move {
             loop {
                 tokio::time::sleep(LEASE_RENEW_INTERVAL).await;
-                let next = {
-                    let mut l = lock(&e.lease);
-                    *l = l.renewed();
-                    l.clone()
-                };
-                rt.broadcast_lease(gid, next).await;
+                if !rt.renew_starting(gid, &e).await {
+                    break;
+                }
             }
         });
         *lock(&entry.task) = Some(task);
         self.emit_state();
-        None
+        Ok(Begin::Hosting)
+    }
+
+    /// Un `ClaimConflict` : un bail déjà connu se rejoint ; un claim concurrent (il annonce son bail `Starting` dans
+    /// l'instant) s'attend quelques secondes, puis se rejoint.
+    async fn yield_to(self: &Arc<Self>, gid: GroupId, c: ClaimConflict) -> Result<Begin, String> {
+        if c.kind == ConflictKind::Lease {
+            return Ok(Begin::Join(c.holder));
+        }
+        let deadline = Instant::now() + CLAIM_YIELD_WAIT;
+        loop {
+            // Le concurrent annonce son bail à tous : le nôtre l'apprend par `on_lease`, ou par une ronde de sondage.
+            if let Some(l) = lock(&self.leases).active(&gid, Instant::now()).into_iter().find(|l| l.holder != self.me) {
+                return Ok(Begin::Join(l.holder));
+            }
+            if Instant::now() >= deadline {
+                return Err(format!("{} démarre déjà la partie : réessaie dans un instant.", self.name_of(&c.holder)));
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+
+    /// Un tour de renouvellement du bail `Starting`. Faux : arrêter la boucle (exclu après une veille).
+    async fn renew_starting(self: &Arc<Self>, gid: GroupId, e: &Arc<StartingHost>) -> bool {
+        let clock = self.clock();
+        let verdict = lock(&e.fence).check(&*clock);
+        if let FenceVerdict::Excluded(reason) = verdict {
+            self.log_fence(&gid, reason);
+            let base = lock(&e.lease).base_version;
+            if self.fence_stops(gid, base).await {
+                e.fenced.store(true, Ordering::SeqCst);
+                eprintln!("[cubelink] groupe {gid} : un autre bail ou une version plus récente existe, la préparation du serveur est abandonnée");
+                return false;
+            }
+            // Rien ne contredit : on reprend la préparation avec une nouvelle partie (`lease_id`).
+            let next = {
+                let mut l = lock(&e.lease);
+                let fresh = Lease { seq: 1, ..l.clone() }.with_lease_id(new_lease_id());
+                *l = self.resign(fresh);
+                l.clone()
+            };
+            lock(&e.fence).mark(&*clock);
+            self.broadcast_lease(gid, next).await;
+            return true;
+        }
+        lock(&e.fence).mark(&*clock);
+        let next = {
+            let mut l = lock(&e.lease);
+            *l = self.resign(l.renewed());
+            l.clone()
+        };
+        self.broadcast_lease(gid, next).await;
+        true
+    }
+
+    fn log_fence(&self, gid: &GroupId, reason: FenceReason) {
+        match reason {
+            FenceReason::ClockSkew { skew_secs } => {
+                eprintln!("[cubelink] groupe {gid} : écart de {skew_secs} s entre les horloges depuis le dernier renouvellement (veille ?) : bail non renouvelé");
+            }
+            FenceReason::Stale { elapsed_secs } => {
+                eprintln!("[cubelink] groupe {gid} : {elapsed_secs} s depuis le dernier renouvellement du bail : bail non renouvelé");
+            }
+        }
+    }
+
+    /// Ronde `Hello` d'un hôte qui ne doit pas renouveler : vrai si un autre bail valide ou une version plus récente que
+    /// la pointe de ma partie existe (il faut s'arrêter), faux si rien ne la contredit.
+    async fn fence_stops(self: &Arc<Self>, gid: GroupId, tip_version: Option<VersionId>) -> bool {
+        let round = self.probe_round(gid).await;
+        let others = lock(&self.leases).active(&gid, Instant::now());
+        let tip = self.point_of(&gid, tip_version);
+        fence_action(&others, &round, tip) == FenceAction::StopAndFork
+    }
+
+    /// Un tour de renouvellement du bail du serveur prêt, avec auto-exclusion après veille : avant chaque renouvellement,
+    /// l'écart entre l'horloge murale et l'horloge monotone depuis le dernier renouvellement (et le temps écoulé) est
+    /// comparé à 60 s et au `ttl`. Au-delà, le bail n'est **pas** renouvelé : une ronde `Hello` décide. Un autre bail ou une
+    /// version plus récente : `save-all flush`, `stop`, la session est publiée comme branche sans bail (`Suspend`).
+    /// Sinon l'hôte reprend avec un nouveau `lease_id`.
+    pub async fn renew_tick(self: &Arc<Self>, host: &Arc<ActiveHost>) -> RenewTick {
+        let gid = host.group;
+        let clock = self.clock();
+        let verdict = lock(&host.fence).check(&*clock);
+        let FenceVerdict::Excluded(reason) = verdict else {
+            lock(&host.fence).mark(&*clock);
+            let next = {
+                let mut l = lock(&host.lease);
+                *l = self.resign(l.renewed());
+                l.clone()
+            };
+            self.broadcast_lease(gid, next).await;
+            return RenewTick::Renewed;
+        };
+        self.log_fence(&gid, reason);
+        let tip = lock(&host.tip).map(|t| t.0);
+        if self.fence_stops(gid, tip).await {
+            eprintln!("[cubelink] groupe {gid} : un autre bail ou une version plus récente existe, ce serveur s'arrête et publie sa session comme branche");
+            host.fenced.store(true, Ordering::SeqCst);
+            // `save-all flush`, puis `save-on` : l'arrêt qui suit enregistre le monde (`save-off` l'en empêcherait).
+            if host.server.flush_begin().await.is_ok() {
+                let _ = host.server.flush_end().await;
+            }
+            // Tâche détachée : la fin de partie abandonne les tâches de l'hôte, dont celle-ci.
+            let (rt, g) = (self.clone(), gid);
+            spawn(async move { rt.host_ended(g).await });
+            return RenewTick::Fenced;
+        }
+        let next = {
+            let mut l = lock(&host.lease);
+            let fresh = Lease { seq: 1, phase: LeasePhase::Ready, ..l.clone() }.with_lease_id(new_lease_id());
+            *l = self.resign(fresh);
+            l.clone()
+        };
+        lock(&host.fence).mark(&*clock);
+        self.broadcast_lease(gid, next).await;
+        RenewTick::Resumed
     }
 
     /// La préparation du serveur est abandonnée (échec, ou un autre membre garde la main) : le bail `Starting` est relâché.
     pub async fn end_starting(self: &Arc<Self>, gid: GroupId) {
-        if self.take_starting(&gid).is_none() {
-            return;
-        }
-        let visit: Visit = Arc::new(move |c| Box::pin(async move { c.release_lease(&gid, None).await }));
+        let Some(entry) = self.take_starting_entry(&gid) else { return };
+        let l = lock(&entry.lease).clone();
+        lock(&self.leases).unlock_claim(&gid, &l.lease_id);
+        let visit: Visit =
+            Arc::new(move |c| Box::pin(async move { c.release_lease(&gid, l.lease_id, l.seq, ReleaseReason::Handover, None).await }));
         self.broadcast(gid, true, visit).await;
         self.emit_state();
     }
 
     /// Retire le bail `Starting` (sans le relâcher) et arrête son renouvellement : le serveur prend le relais.
-    fn take_starting(&self, gid: &GroupId) -> Option<Lease> {
+    fn take_starting_entry(&self, gid: &GroupId) -> Option<Arc<StartingHost>> {
         let entry = lock(&self.starting).remove(gid)?;
         if let Some(t) = lock(&entry.task).take() {
             t.abort();
         }
-        let l = lock(&entry.lease).clone();
-        Some(l)
+        Some(entry)
     }
 
     /// Second temps : le serveur répond. Annonce le bail en phase `Ready` aux membres en ligne et attend une contre-annonce.
@@ -1897,12 +2451,9 @@ impl HearthRuntime {
         let renew = spawn(async move {
             loop {
                 tokio::time::sleep(LEASE_RENEW_INTERVAL).await;
-                let next = {
-                    let mut l = lock(&h.lease);
-                    *l = l.renewed();
-                    l.clone()
-                };
-                rt.broadcast_lease(h.group, next).await;
+                if rt.renew_tick(&h).await == RenewTick::Fenced {
+                    break;
+                }
             }
         });
         let (rt, h) = (self.clone(), host.clone());
@@ -1971,7 +2522,9 @@ impl HearthRuntime {
             t.abort();
         }
         host.server.stop(Duration::from_secs(20)).await;
-        let visit: Visit = Arc::new(move |c| Box::pin(async move { c.release_lease(&gid, None).await }));
+        let l = lock(&host.lease).clone();
+        let visit: Visit =
+            Arc::new(move |c| Box::pin(async move { c.release_lease(&gid, l.lease_id, l.seq, ReleaseReason::Handover, None).await }));
         self.broadcast(gid, true, visit).await;
         self.access.close_group(&gid);
         self.emit_state();
@@ -2003,7 +2556,12 @@ impl HearthRuntime {
             self.set_materialized(&gid, Some(v.id()));
         }
         let vid = published.as_ref().ok().and_then(|v| v.as_ref().map(SignedVersion::id));
-        let visit: Visit = Arc::new(move |c| Box::pin(async move { c.release_lease(&gid, vid).await }));
+        let l = lock(&host.lease).clone();
+        let reason = if host.fenced.load(Ordering::SeqCst) { ReleaseReason::Suspend } else { ReleaseReason::Stopped };
+        let visit: Visit = Arc::new(move |c| {
+            let reason = reason.clone();
+            Box::pin(async move { c.release_lease(&gid, l.lease_id, l.seq, reason, vid).await })
+        });
         self.broadcast(gid, true, visit).await;
         self.access.close_group(&gid);
         self.gc_versions(gid).await;

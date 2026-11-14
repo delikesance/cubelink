@@ -16,6 +16,10 @@ interface HInvite { group_id: string; name: string; from: { public_key: string; 
 
 test('serveur de groupe : A le cree depuis un monde, B recoit l\'invitation et l\'accepte ; cartes et page du serveur ; contrat Minecraft exige', async ({ appA, appB }) => {
   const { host, keyA, keyB } = await setupPair({ appA, appB });
+  // Hearth est coupé par défaut (docs/hearth.md § 12.1 n° 63) : refus clair, puis on l'active des deux côtés.
+  expect(await invokeErr(appA.page, 'hearth_create', { name: 'X', instance_id: host.id, world: 'Monde Hearth', members: [keyB] })).toContain('désactivés');
+  await invoke(appA.page, 'hearth_set_enabled', { enabled: true });
+  await invoke(appB.page, 'hearth_set_enabled', { enabled: true });
   await record(appB.page, 'hearth://invites');
   await record(appA.page, 'hearth://state');
 

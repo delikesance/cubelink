@@ -39,6 +39,18 @@ describe("Accueil : serveurs de groupe", () => {
     expect(navigate).toHaveBeenCalledWith("hearth", { new: "1" });
   });
 
+  it("interrupteur coupé : la section est masquée, et revient une fois activée", async () => {
+    const services = createFakeServices({ tickMs: 0 });
+    await services.hearthSetEnabled(false);
+    render(<HearthSection services={services} navigate={vi.fn()} />);
+    await waitFor(() => expect(services.hearthCalls.some((c) => c.kind === "SetEnabled")).toBe(true));
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.queryByRole("region", { name: "Serveurs de groupe" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Créer un serveur" })).toBeNull();
+    await act(async () => { await services.hearthSetEnabled(true); });
+    await screen.findByRole("button", { name: "Créer un serveur" });
+  });
+
   it("idle : « Personne ne joue » et un seul bouton Jouer ; la page du serveur s'ouvre par le lien", async () => {
     const { navigate } = home({ id: "g1", name: "Les copains" });
     const card = await screen.findByRole("listitem", { name: "Serveur Les copains" });

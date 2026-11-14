@@ -44,6 +44,11 @@ use crate::presence::PeerKey;
 pub const VERSION_DOMAIN: &[u8] = b"cubelink/hearth/version/1";
 /// Nombre maximal de versions gardées dans un graphe (borne la mémoire face à un membre bavard).
 pub const MAX_VERSIONS: usize = 50_000;
+/// Plafond de versions gardées par auteur : au-delà, les plus anciennes versions non protégées de cet auteur sont
+/// évincées (voir [`VersionGraph::insert`]).
+pub const MAX_VERSIONS_PER_AUTHOR: usize = 5_000;
+/// Versions d'un même auteur par heure (date déclarée dans l'en-tête) : au-delà, même éviction.
+pub const MAX_VERSIONS_PER_HOUR: usize = 30;
 /// Taille totale maximale annoncée d'une version (1 Pio : au-delà, l'en-tête est faux).
 pub const MAX_TOTAL_SIZE: u64 = 1 << 50;
 
@@ -258,9 +263,19 @@ pub struct VersionGraph {
     versions: BTreeMap<VersionId, SignedVersion>,
     /// Enfants par parent, y compris pour un parent encore inconnu (la base d'une époque).
     children: BTreeMap<VersionId, BTreeSet<VersionId>>,
+    /// Versions évincées par les quotas depuis le dernier [`VersionGraph::take_evicted`] (le magasin efface leurs fichiers).
+    evicted: Vec<VersionId>,
+    /// Rechargement depuis le disque : une version dont le parent a été évincé par un quota est acceptée comme base.
+    lenient_parents: bool,
 }
 
 impl VersionGraph {
+    /// Admet (ou non) les versions dont le parent est absent. Réservé au rechargement du disque : les quotas
+    /// évincent des ancêtres encore référencés, leurs enfants restent des bases valables.
+    pub fn set_lenient_parents(&mut self, on: bool) {
+        self.lenient_parents = on;
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -323,6 +338,16 @@ impl VersionGraph {
                 }
             }
         }
+        // Quotas par auteur : on évince les plus anciennes versions non protégées de l'auteur plutôt que de refuser.
+        let author = h.author;
+        let (total, in_window) = self.author_counts(&author, h.created_at);
+        let mut over = (total + 1).saturating_sub(MAX_VERSIONS_PER_AUTHOR);
+        if in_window >= MAX_VERSIONS_PER_HOUR {
+            over = over.max(1);
+        }
+        if over > 0 && self.evict_oldest_unprotected(&author, over) < over {
+            return Err(VersionError::TooManyVersions);
+        }
         if self.versions.len() >= MAX_VERSIONS {
             return Err(VersionError::TooManyVersions);
         }
@@ -335,6 +360,69 @@ impl VersionGraph {
         }
         self.prune_inconsistent_children(&id, &header);
         Ok(Inserted::New)
+    }
+
+    /// `(versions de l'auteur, versions de l'auteur datées dans l'heure autour de `at`)`.
+    fn author_counts(&self, author: &PeerKey, at: u64) -> (usize, usize) {
+        let mut total = 0;
+        let mut window = 0;
+        for v in self.versions.values().filter(|v| v.header.author == *author) {
+            total += 1;
+            if v.header.created_at.abs_diff(at) < 3600 {
+                window += 1;
+            }
+        }
+        (total, window)
+    }
+
+    /// Versions protégées de l'éviction : toute pointe (version sans enfant) et ses ancêtres jusqu'au dernier point
+    /// de reprise inclus (ou la racine).
+    fn protected_set(&self) -> BTreeSet<VersionId> {
+        let mut keep = BTreeSet::new();
+        for (id, _) in self.versions.iter().filter(|(id, _)| !self.has_children(id)) {
+            let mut cur = Some(*id);
+            while let Some(c) = cur {
+                let Some(v) = self.versions.get(&c) else { break };
+                if !keep.insert(c) {
+                    break;
+                }
+                if v.header.kind == VersionKind::Checkpoint {
+                    break;
+                }
+                cur = v.header.parent;
+            }
+        }
+        keep
+    }
+
+    /// Retire jusqu'à `n` versions de `author`, les plus anciennes d'abord (époque, numéro), hors versions
+    /// protégées. Renvoie le nombre retiré. Les enfants d'une version retirée gardent leur parent (désormais inconnu).
+    fn evict_oldest_unprotected(&mut self, author: &PeerKey, n: usize) -> usize {
+        let keep = self.protected_set();
+        let mut cands: Vec<(u64, u64, VersionId)> = self
+            .versions
+            .iter()
+            .filter(|(id, v)| v.header.author == *author && !keep.contains(id))
+            .map(|(id, v)| (v.header.epoch, v.header.number, *id))
+            .collect();
+        cands.sort();
+        let mut done = 0;
+        for (_, _, id) in cands.into_iter().take(n) {
+            if let Some(v) = self.versions.remove(&id) {
+                if let Some(set) = v.header.parent.and_then(|p| self.children.get_mut(&p)) {
+                    set.remove(&id);
+                }
+                self.children.remove(&id);
+                self.evicted.push(id);
+                done += 1;
+            }
+        }
+        done
+    }
+
+    /// Versions évincées par les quotas depuis le dernier appel.
+    pub fn take_evicted(&mut self) -> Vec<VersionId> {
+        std::mem::take(&mut self.evicted)
     }
 
     fn check_lineage(&self, state: &GroupState, h: &VersionHeader) -> Result<(), VersionError> {
@@ -356,6 +444,7 @@ impl VersionGraph {
                     Err(VersionError::BadEpoch)
                 }
             }
+            None if self.lenient_parents => Ok(()),
             None if h.epoch > 0 && state.base_for_epoch(h.epoch) == Some(pid) => Ok(()),
             None => Err(VersionError::ParentUnknown(pid)),
         }
@@ -844,6 +933,85 @@ mod tests {
         }
         let v2 = signed(header(&st, 1, 1, None, 0, 2));
         assert_eq!(g.insert(&st, v2).unwrap_err(), VersionError::TooManyVersions);
+    }
+
+    #[test]
+    fn quota_par_heure_evince_la_plus_ancienne_non_protegee() {
+        let st = group(&[1]);
+        let mut g = VersionGraph::new();
+        let mut parent = None;
+        let mut ids = Vec::new();
+        // 40 versions (point de reprise tous les 5) à la même heure : le quota de 30/h évince au lieu de refuser.
+        for n in 1..=40u64 {
+            let mut h = header(&st, 1, n, parent, 0, n as u8);
+            h.created_at = 1_000;
+            if n % 5 == 0 {
+                h.kind = VersionKind::Checkpoint;
+            }
+            let v = signed(h);
+            let id = v.id();
+            g.insert(&st, v).unwrap_or_else(|e| panic!("version {n} : {e}"));
+            ids.push(id);
+            parent = Some(id);
+        }
+        assert!(g.len() <= MAX_VERSIONS_PER_HOUR + 10, "len {}", g.len());
+        let evicted = g.take_evicted();
+        assert!(!evicted.is_empty());
+        assert!(evicted.contains(&ids[0]), "la plus ancienne part d'abord");
+        assert!(!evicted.contains(&ids[39]), "le dernier point de reprise est protégé");
+        assert!(evicted.iter().all(|e| !ids[35..].contains(e)), "la queue jusqu'au dernier point de reprise est protégée");
+        assert!(!evicted.contains(&ids[39]), "la tête est protégée");
+        assert!(g.take_evicted().is_empty());
+    }
+
+    #[test]
+    fn rechargement_apres_eviction_garde_les_enfants() {
+        let st = group(&[1]);
+        let mut g = VersionGraph::new();
+        let mut parent = None;
+        let mut all = Vec::new();
+        for n in 1..=40u64 {
+            let mut h = header(&st, 1, n, parent, 0, n as u8);
+            h.created_at = 1_000;
+            if n % 5 == 0 {
+                h.kind = VersionKind::Checkpoint;
+            }
+            let v = signed(h);
+            parent = Some(v.id());
+            g.insert(&st, v.clone()).unwrap();
+            all.push(v);
+        }
+        let evicted = g.take_evicted();
+        assert!(!evicted.is_empty());
+        let kept: Vec<_> = all.into_iter().filter(|v| !evicted.contains(&v.id())).collect();
+        let mut strict = VersionGraph::new();
+        let rejected = kept.iter().filter(|v| strict.insert(&st, (*v).clone()).is_err()).count();
+        assert!(rejected > 0, "sans mode permissif, des versions sont rejetées");
+        let mut loose = VersionGraph::new();
+        loose.set_lenient_parents(true);
+        let mut sorted = kept.clone();
+        sorted.sort_by_key(|v| v.header.number);
+        for v in sorted {
+            loose.insert(&st, v).unwrap();
+        }
+        assert_eq!(loose.len(), kept.len());
+    }
+
+    #[test]
+    fn quota_sans_version_evincable_refuse() {
+        let st = group(&[1]);
+        let mut g = VersionGraph::new();
+        let mut parent = None;
+        // Tout est protégé (pas de point de reprise avant la tête : toute la chaîne remonte à la racine).
+        let mut last = Ok(Inserted::New);
+        for n in 1..=(MAX_VERSIONS_PER_HOUR as u64 + 1) {
+            let mut h = header(&st, 1, n, parent, 0, n as u8);
+            h.created_at = 5;
+            let v = signed(h);
+            parent = Some(v.id());
+            last = g.insert(&st, v);
+        }
+        assert_eq!(last.unwrap_err(), VersionError::TooManyVersions);
     }
 
     // --- propriétés ---------------------------------------------------------------------------------------

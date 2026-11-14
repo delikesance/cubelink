@@ -16,6 +16,8 @@
 //! * [`flow`]     : deroulement de la vue (machine a etats pure : launcher, rideau, jeu), teste sans fenetre.
 //! * [`guard`]    : quand renoncer, ou reposer la fenetre rendue (decisions pures, testees sans horloge).
 //! * [`health`]   : ce que l'hote annonce a son appelant (adoption, repli, journal) : contrat avec le launcher.
+//! * [`foreground`] : amener la fenetre du jeu invite, ou celle du launcher, au premier plan.
+//! * [`system`]   : preferences du systeme (mouvement reduit).
 //! * `win` (Windows) : [`GameHost`], la zone de jeu, l'adoption, le rideau.
 //! * `x11` (Linux) : meme [`GameHost`] sur X11 / XWayland : la fenetre du jeu est REPARENTEE dans une sous-fenetre du launcher
 //!   (une fille X11 peut avoir le focus clavier), le rideau est une fenetre ARGB traversee par la souris. Wayland natif ne permet
@@ -24,9 +26,11 @@
 
 pub mod curtain;
 pub mod flow;
+pub mod foreground;
 pub mod guard;
 pub mod health;
 pub mod progress;
+pub mod system;
 
 pub use guard::Guards;
 pub use health::{FallbackReason, HostEvent, Observer};

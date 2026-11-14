@@ -12,7 +12,6 @@ pub mod commands_join;
 pub mod commands_settings;
 pub mod commands_update;
 pub mod error;
-pub mod foreground;
 pub mod iroh_backend;
 pub mod last_seen;
 pub mod trusted_mods;
@@ -139,6 +138,32 @@ pub(crate) fn iroh_options(h: &test_hooks::Hooks) -> iroh_backend::IrohOptions {
     o
 }
 
+/// Linux, pur : le launcher doit-il etre une fenetre X11 (`GDK_BACKEND=x11`) ? Seulement si la Scene peut servir : un serveur
+/// X11 joignable (`DISPLAY`), pas de coupe-circuit, Scene permise (hors mode test) et reglage « Jeu integre » actif (lu en
+/// dernier, sur le disque). Sinon GTK choisit lui-meme, Wayland natif compris.
+#[cfg(any(target_os = "linux", test))]
+fn linux_launcher_x11(display: bool, no_stage: bool, stage_allowed: bool, embedded_game: impl FnOnce() -> bool) -> bool {
+    display && !no_stage && stage_allowed && embedded_game()
+}
+
+/// Linux : dossier de donnees de l'app, avant que Tauri ne le donne (`app_data_dir` = `$XDG_DATA_HOME` ou
+/// `~/.local/share`, puis l'identifiant de l'app). `None` : introuvable.
+#[cfg(target_os = "linux")]
+fn linux_data_dir(hooks: &test_hooks::Hooks) -> Option<std::path::PathBuf> {
+    if let Some(d) = &hooks.data_dir {
+        return Some(d.clone());
+    }
+    let base = std::env::var_os("XDG_DATA_HOME")
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/share")))?;
+    Some(base.join(IDENTIFIER))
+}
+
+/// Identifiant de l'app (`tauri.conf.json`), nom du dossier de donnees.
+#[cfg(target_os = "linux")]
+const IDENTIFIER: &str = "app.cubelink.launcher";
+
 pub fn run() {
     // Charge un éventuel `.env` de dev (ex. CUBELINK_MS_CLIENT_ID). Silencieux si absent ;
     // n'écrase jamais une variable déjà définie dans l'environnement du processus.
@@ -147,18 +172,22 @@ pub fn run() {
     let test_mode = hooks.test_mode;
     // Linux : la Scene adopte la fenetre du jeu par X11. Le launcher doit donc etre une fenetre X11 (XWayland sous Wayland) :
     // a poser AVANT la creation de la fenetre (GTK lit la variable a l'initialisation), pendant que le processus n'a qu'un fil.
-    // Sans DISPLAY (Wayland pur) rien n'est force : pas de Scene, le jeu garde sa propre fenetre.
+    // Reglage « Jeu integre » coupe, ou pas de DISPLAY (Wayland pur) : rien n'est force, GTK garde le Wayland natif quand il
+    // existe (le reglage s'applique donc au prochain demarrage de Cubelink).
     #[cfg(target_os = "linux")]
-    if std::env::var_os("DISPLAY").is_some_and(|d| !d.is_empty())
-        && std::env::var_os("CUBELINK_NO_STAGE").is_none()
-        && (!test_mode || std::env::var_os("CUBELINK_STAGE_TEST").is_some())
-    {
+    if linux_launcher_x11(
+        std::env::var_os("DISPLAY").is_some_and(|d| !d.is_empty()),
+        std::env::var_os("CUBELINK_NO_STAGE").is_some(),
+        !test_mode || std::env::var_os("CUBELINK_STAGE_TEST").is_some(),
+        || linux_data_dir(hooks).is_none_or(|root| commands_settings::load_settings(&root.join("settings.json")).embedded_game),
+    ) {
         std::env::set_var("GDK_BACKEND", "x11");
     }
-    // WebKitGTK + pilote NVIDIA : « Failed to create GBM buffer » (rendu DMABUF) et fenetre vide. Le rendu logiciel des tampons
-    // suffit pour l'interface ; l'utilisateur garde la main en definissant lui-meme la variable.
+    // WebKitGTK + pilote NVIDIA proprietaire : « Failed to create GBM buffer » (rendu DMABUF) et fenetre vide. Le rendu
+    // logiciel des tampons suffit pour l'interface, mais coute sur les autres pilotes : on ne le pose qu'avec NVIDIA.
+    // L'utilisateur garde la main en definissant lui-meme la variable.
     #[cfg(target_os = "linux")]
-    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() && std::path::Path::new("/proc/driver/nvidia/version").exists() {
         std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
     }
     tauri::Builder::default()
@@ -302,5 +331,23 @@ mod tests {
         assert_eq!(o.inactivity, std::time::Duration::from_secs(4));
         assert!(o.stall_retry <= std::time::Duration::from_secs(2));
         assert_eq!(iroh_options(&hooks(true, None)).inactivity, iroh_backend::DEFAULT_INACTIVITY);
+    }
+
+    #[test]
+    fn launcher_x11_seulement_si_la_scene_peut_servir() {
+        assert!(linux_launcher_x11(true, false, true, || true));
+        // « Jeu integre » coupe : Wayland natif garde.
+        assert!(!linux_launcher_x11(true, false, true, || false));
+        // Sans DISPLAY, coupe-circuit ou mode test : rien n'est force, et le reglage n'est meme pas lu.
+        for (display, no_stage, allowed) in [(false, false, true), (true, true, true), (true, false, false)] {
+            assert!(!linux_launcher_x11(display, no_stage, allowed, || panic!("reglage lu pour rien")));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn identifiant_conforme_a_tauri_conf() {
+        let conf: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        assert_eq!(conf["identifier"], IDENTIFIER);
     }
 }

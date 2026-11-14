@@ -54,7 +54,9 @@ jobs:
           set -euo pipefail
           last=$(gh release list --exclude-pre-releases --limit 1 --json tagName -q '.[0].tagName' | sed 's/^v//')
           next=$(echo "$last" | awk -F. '{print $1"."$2"."$3+1}')
+          # Numéro du run `ci` appelant ; une relance du même run ajoute son numéro d'essai (sinon le tag existerait déjà).
           version="$next-canary.$GITHUB_RUN_NUMBER"
+          if [ "$GITHUB_RUN_ATTEMPT" != 1 ]; then version="$version.$GITHUB_RUN_ATTEMPT"; fi
           sed -i -E "s/(\"version\"[[:space:]]*:[[:space:]]*\")[^\"]+(\")/\1$version\2/" src-tauri/tauri.conf.json
           echo "version=$version" >> "$GITHUB_OUTPUT"
         env:

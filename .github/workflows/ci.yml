@@ -7,15 +7,19 @@ name: ci
 on:
   push:
     branches: [canary, main]
+    # Une doc seule ne relance pas tout (ni ne publie de pré-version identique). Les PR, elles, sont toujours vérifiées.
+    paths-ignore: ['docs/**', '**/*.md', 'LICENSE']
   pull_request:
     branches: [canary, main]
 
 permissions:
   contents: read
 
+# Une PR mise à jour annule son run précédent. Un push sur canary/main n'est jamais annulé : sinon deux merges
+# rapprochés couperaient la publication canary du premier en plein build.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_INCREMENTAL: 0          # inutile en CI et alourdit le cache

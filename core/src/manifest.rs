@@ -266,6 +266,10 @@ fn walk(
             continue;
         }
         let lower = name.to_ascii_lowercase();
+        if crate::mrpack::has_dangerous_ext(name) {
+            report.skipped.push((rel_path, "fichier exécutable".into()));
+            continue;
+        }
         if lower.ends_with(".lock") {
             report.skipped.push((rel_path, "fichier de verrou (propre au jeu qui tourne)".into()));
             continue;
@@ -397,6 +401,9 @@ pub fn validate_manifest(m: &Manifest) -> Result<()> {
         if let Err(why) = check_path(&f.path) {
             return bad(format!("chemin {:?} refusé : {why}", f.path));
         }
+        if crate::mrpack::has_dangerous_ext(&f.path) {
+            return bad(format!("fichier exécutable refusé : {:?}", f.path));
+        }
         if !seen.insert(f.path.to_ascii_lowercase()) {
             return bad(format!("doublon : {:?}", f.path));
         }
@@ -470,6 +477,7 @@ mod tests {
         put(r, "kubejs/exported/tags.json", b"x");
         put(r, "kubejs/probe/generated/x.d.ts", b"x");
         put(r, "defaultconfigs/ftb.snbt", b"d");
+        put(r, "config/outil.exe", b"MZ");
         put(r, "saves/w/level.dat", b"x");
         put(r, "logs/latest.log", b"x");
         put(r, "crash-reports/c.txt", b"x");
@@ -521,6 +529,7 @@ mod tests {
         );
         assert!(rep.skipped.iter().any(|(p, _)| p == "config/auth_token.json"));
         assert!(rep.skipped.iter().any(|(p, _)| p == "mods/readme.txt"));
+        assert!(rep.skipped.iter().any(|(p, why)| p == "config/outil.exe" && why.contains("exécutable")));
         validate_manifest(&m).unwrap();
     }
 
@@ -658,7 +667,8 @@ mod tests {
         for p in [
             "../x", "C:\\x", "C:/x", "mods/../../x", "/etc/passwd", "mods\\a.jar", "mods/a\0.jar", "mods//a.jar",
             "saves/w/level.dat", "options.txt", "a.jar", "mods/CON", "mods/nul.txt", "mods/COM1.jar", "mods/aux",
-            "mods/a.jar.", "mods/./a.jar", "", "mods/a:b.jar",
+            "mods/a.jar.", "mods/./a.jar", "", "mods/a:b.jar", "config/x.exe", "kubejs/run.BAT", "defaultconfigs/a.ps1",
+            "config/sub/lib.dll", "resourcepacks/s.sh", "mods/a.exe",
         ] {
             assert!(validate_manifest(&mf(vec![file(p)])).is_err(), "{p:?} aurait dû être refusé");
         }

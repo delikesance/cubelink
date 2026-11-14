@@ -147,7 +147,8 @@ fn invalid(msg: impl Into<String>) -> Error {
 
 // ---------- Validation des chemins ----------
 
-fn has_dangerous_ext(name: &str) -> bool {
+/// Nom de fichier à extension exécutable (`DANGEROUS_EXT`), quel que soit le dossier.
+pub fn has_dangerous_ext(name: &str) -> bool {
     let last = name.rsplit('/').next().unwrap_or(name);
     match last.rsplit_once('.') {
         Some((_, ext)) => DANGEROUS_EXT.iter().any(|d| ext.eq_ignore_ascii_case(d)),

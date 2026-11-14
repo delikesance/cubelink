@@ -32,10 +32,10 @@ use std::time::{Duration, Instant};
 use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
-use crate::flow::{Bar, Content, Effect, Event, Machine, View};
+use crate::flow::{Bar, CAPTION_SWITCH, CAPTION_TO_GAME, CAPTION_TO_LAUNCHER, Content, Effect, Event, Machine, View};
 use crate::guard::{self, Guards, Watched, ADOPTION_RETRY};
 use crate::health::{FallbackReason, HostEvent, Observer};
-use crate::progress::{Closer, Profile, Tracker};
+use crate::progress::{count_jars, Closer, Profile, Tracker};
 use debug::dbg;
 use game_window::{Origin, Returned};
 use util::hw;
@@ -51,9 +51,6 @@ const WM_APP_RAISE: u32 = WM_APP + 6;
 /// Fil de surveillance : (re)pose les hooks sur le processus `wparam` (0 = les retire).
 const WM_APP_HOOK: u32 = WM_APP + 7;
 
-const CAPTION_SWITCH: &str = "Changement de modpack";
-const CAPTION_TO_LAUNCHER: &str = "Retour au launcher";
-const CAPTION_TO_GAME: &str = "Retour au jeu";
 
 // ---------------------------------------------------------------------------------------------------- etat partage
 
@@ -751,6 +748,3 @@ impl GameHost {
     }
 }
 
-fn count_jars(dir: &std::path::Path) -> u32 {
-    std::fs::read_dir(dir).map_or(0, |d| d.filter_map(|e| e.ok()).filter(|e| e.path().extension().is_some_and(|x| x == "jar")).count() as u32)
-}

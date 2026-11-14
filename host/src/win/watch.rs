@@ -90,18 +90,9 @@ pub(super) fn set_hooks(pid: u32) -> bool {
     tid != 0 && unsafe { PostThreadMessageW(tid, WM_APP_HOOK, pid as usize, 0) } != 0
 }
 
-/// Classes des fenetres de jeu (GLFW 3, SDL 3, LWJGL 2), fenetres d'aide exclues.
-///
-/// SDL 3 cree, apres sa fenetre principale, des fenetres techniques « message seulement » (`SDLHelperWindowInputCatcher` pour les
-/// entrees brutes, `SDL_HIDAPI_DEVICE_DETECTION` pour les manettes). Elles ne s'affichent jamais et refusent tout proprietaire :
-/// mesure sur un vrai Minecraft SDL 3, les prendre pour des fenetres de jeu declenchait un repli « rattachement refuse » alors
-/// que LA fenetre du jeu etait adoptee et posee, et les transformait en fenetres de premier niveau. On n'y touche pas.
-///
-/// GLFW 3.4 a lui aussi sa fenetre d'aide, `GLFW3 Helper` (cachee, creee AVANT la fenetre du jeu). Mesure sur un gros modpack :
-/// son adoption attendait 21 s le fil du jeu, et celle de LA fenetre du jeu attendait derriere dans la file unique.
+/// Classes des fenetres de jeu (GLFW 3, SDL 3, LWJGL 2), fenetres d'aide exclues (voir `guard::is_helper_class`).
 fn is_game_class(c: &str) -> bool {
-    let helper = c.starts_with("SDLHelperWindow") || c.starts_with("SDL_HIDAPI") || c.starts_with("GLFW3 Helper");
-    !helper && (c.starts_with("GLFW") || c.starts_with("SDL") || c == "LWJGL")
+    !crate::guard::is_helper_class(c) && (c.starts_with("GLFW") || c.starts_with("SDL") || c == "LWJGL")
 }
 
 /// `hwnd` peut etre LA fenetre d'un jeu : une vraie fenetre de premier niveau (fille du bureau ; ni fenetre fille, ni fenetre
@@ -301,7 +292,7 @@ pub(super) fn scan_adopt(s: &Shared) {
         if ctx.pids.contains(&pid) && IsWindowVisible(h) != 0 && is_candidate(h) {
             let mut r: RECT = std::mem::zeroed();
             GetWindowRect(h, &mut r);
-            if r.right - r.left >= 200 && r.bottom - r.top >= 150 {
+            if crate::guard::main_sized(r.right - r.left, r.bottom - r.top) {
                 ctx.found.push(h as isize);
             }
         }

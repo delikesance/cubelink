@@ -37,16 +37,13 @@ use x11rb::connection::Connection;
 use x11rb::protocol::xproto::*;
 use x11rb::rust_connection::RustConnection;
 
-use crate::flow::{Bar, Cadence, Content, Effect, Event, Machine, View};
+use crate::flow::{Bar, CAPTION_SWITCH, CAPTION_TO_GAME, CAPTION_TO_LAUNCHER, Cadence, Content, Effect, Event, Machine, View};
 use crate::guard::{self, Guards, Watched, ADOPTION_RETRY};
 use crate::health::{FallbackReason, HostEvent, Observer};
-use crate::progress::{Closer, Profile, Tracker};
+use crate::progress::{count_jars, feed_tracker, line_body, Closer, Profile, Tracker};
 use embedded::Origin;
 use util::Atoms;
 
-const CAPTION_SWITCH: &str = "Changement de modpack";
-const CAPTION_TO_LAUNCHER: &str = "Retour au launcher";
-const CAPTION_TO_GAME: &str = "Retour au jeu";
 
 /// Journal de diagnostic (`CUBELINK_STAGE_DEBUG`) : stderr, horodate.
 fn dbg_on() -> bool {
@@ -791,102 +788,5 @@ impl Drop for GameHost {
         if let Some(t) = s.ticker.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
             t.unpark();
         }
-    }
-}
-
-/// Ligne du jeu sans son horodatage `[hh:mm:ss] ` de tete.
-fn line_body(line: &str) -> &str {
-    let l = line.trim_end();
-    let b = l.as_bytes();
-    if b.len() > 11 && b[0] == b'[' && b[3] == b':' && b[6] == b':' && b[9] == b']' && b[10] == b' ' && [1, 2, 4, 5, 7, 8].iter().all(|i| b[*i].is_ascii_digit()) {
-        &l[11..]
-    } else {
-        l
-    }
-}
-
-/// Bruit repete qui ne doit pas compter comme de l'activite du jeu : l'avertissement SDL 3 « Failed to synchronize SDL window » (une
-/// fois par image tant qu'une synchronisation de fenetre echoue), ou une ligne identique a la precedente, horodatage mis a part.
-fn is_noise(body: &str, last: Option<&str>) -> bool {
-    body.contains("Failed to synchronize SDL window") || last == Some(body)
-}
-
-/// Passe `line` au suivi du lancement ; vrai si c'etait du bruit (analysee mais sans compter comme activite).
-fn feed_tracker(t: &mut Tracker, last_body: &mut Option<String>, line: &str) -> bool {
-    let body = line_body(line);
-    let noise = is_noise(body, last_body.as_deref());
-    if last_body.as_deref() != Some(body) {
-        *last_body = Some(body.to_string());
-    }
-    if noise {
-        t.feed_line_quiet(line);
-    } else {
-        t.feed_line(line);
-    }
-    noise
-}
-
-fn count_jars(dir: &std::path::Path) -> u32 {
-    std::fs::read_dir(dir).map_or(0, |d| d.filter_map(|e| e.ok()).filter(|e| e.path().extension().is_some_and(|x| x == "jar")).count() as u32)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // lignes COPIEES du journal reel d'un lancement (Minecraft 26.3, LWJGL 3.4.3 / SDL 3, XWayland) ou l'avertissement SDL
-    // revenait ~10 fois par seconde apres le dernier message utile
-    const SPAM: &str = "[20:33:35] [Render thread/WARN]: Failed to synchronize SDL window: ";
-    const SPAM_NEXT_SECOND: &str = "[20:33:36] [Render thread/WARN]: Failed to synchronize SDL window: ";
-    const RELOAD: &str = "[20:33:32] [Render thread/INFO]: Reloading ResourceManager: vanilla, vanilla";
-    const SOUND: &str = "[20:33:34] [Render thread/INFO]: Sound engine started";
-    const ATLAS: &str = "[20:33:34] [Render thread/INFO]: Created: 1024x1024x0 minecraft:textures/atlas/gui.png-atlas";
-
-    /// `GameHost::feed_line` sans hote : meme filtre, sur un `Tracker`.
-    fn feed(t: &mut Tracker, last: &mut Option<String>, line: &str) -> bool {
-        feed_tracker(t, last, line)
-    }
-
-    #[test]
-    fn horodatage_retire() {
-        assert_eq!(line_body(SPAM), "[Render thread/WARN]: Failed to synchronize SDL window:");
-        assert_eq!(line_body("sans horodatage  "), "sans horodatage");
-        assert_eq!(line_body("[Cubelink] READY"), "[Cubelink] READY");
-    }
-
-    #[test]
-    fn le_bruit_sdl_repete_ne_repousse_pas_la_quietude() {
-        let (mut t, mut last) = (Tracker::new(0, None), None);
-        for l in [RELOAD, SOUND, ATLAS] {
-            assert!(!feed(&mut t, &mut last, l), "ligne utile prise pour du bruit : {l}");
-        }
-        t.window_shown();
-        std::thread::sleep(Duration::from_millis(300));
-        // le jeu se plaint en boucle, une ligne « nouvelle » (horodatage) a chaque seconde : ce n'est pas de l'activite
-        for l in [SPAM, SPAM, SPAM_NEXT_SECOND, SPAM_NEXT_SECOND] {
-            assert!(feed(&mut t, &mut last, l));
-        }
-        assert!(t.looks_ready(Duration::from_millis(200)), "le bruit a repousse la quietude");
-        assert!(t.silent_for() >= Duration::from_millis(300));
-    }
-
-    #[test]
-    fn une_ligne_utile_repousse_la_quietude() {
-        let (mut t, mut last) = (Tracker::new(0, None), None);
-        for l in [RELOAD, SOUND, ATLAS] {
-            feed(&mut t, &mut last, l);
-        }
-        t.window_shown();
-        std::thread::sleep(Duration::from_millis(300));
-        assert!(!feed(&mut t, &mut last, "[20:33:37] [Render thread/INFO]: Narrator loaded"), "une vraie ligne n'est pas du bruit");
-        assert!(!t.looks_ready(Duration::from_millis(200)), "une ligne utile doit relancer la quietude");
-    }
-
-    #[test]
-    fn une_ligne_identique_a_la_precedente_est_du_bruit_pas_la_premiere() {
-        assert!(!is_noise("a", None));
-        assert!(!is_noise("a", Some("b")));
-        assert!(is_noise("a", Some("a")));
-        assert!(is_noise("[Render thread/WARN]: Failed to synchronize SDL window:", None));
     }
 }

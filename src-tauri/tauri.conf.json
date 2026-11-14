@@ -11,7 +11,7 @@
   },
   "app": {
     "windows": [
-      { "title": "Cubelink", "visible": false, "width": 1280, "height": 720, "minWidth": 960, "minHeight": 600, "decorations": false, "dragDropEnabled": true,
+      { "title": "Cubelink", "width": 1280, "height": 720, "minWidth": 960, "minHeight": 600, "decorations": false, "dragDropEnabled": true,
         "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,CalculateNativeWinOcclusion" }
     ],
     "security": { "csp": null }

@@ -203,11 +203,16 @@ pub fn run() {
                 }
             }
             app.manage(st.clone());
-            // Fond : icone de notification, demarrage avec la session, fenetre montree sauf lancement automatique.
-            background::try_setup_tray(app.handle(), st.clone());
+            // Fond : icone de notification (hors mode test : fermer y quitte, comme avant), demarrage avec la session, fenetre
+            // masquee tout de suite au lancement automatique.
+            if !test_mode {
+                background::try_setup_tray(app.handle(), st.clone());
+            }
             background::apply_autostart(app.handle());
-            if !background::started_in_background(std::env::args()) {
-                background::show_main(app.handle());
+            if background::started_in_background(std::env::args()) {
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.hide();
+                }
             }
             commands_update::setup(app, test_mode);
             hotkey::setup(app.handle(), test_mode);

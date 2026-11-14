@@ -8,7 +8,7 @@ import { UpdateBanner } from "./UpdateBanner";
 import { StageNotice } from "./StageNotice";
 import { useContextMenu, useSuppressNativeMenu } from "./useContextMenu";
 import { openExternal } from "./externalLinks";
-import { setStagePanel, useStage, useStageFullscreen, useStageLayout } from "./stage";
+import { useStage, useStageFullscreen, useStageLayout } from "./stage";
 import InGamePanel from "../screens/Overlay";
 import "../screens/Overlay/overlay.css";
 
@@ -164,19 +164,19 @@ export function Shell({ services }: { services?: Services } = {}) {
     [svc, route, params, canBack, set],
   );
   const Screen = screenFor(route);
-  const stage = useStage();
+  const stage = useStage(svc);
   // Zone de jeu : l'élément réservé est mesuré et son rectangle publié à Rust.
   const slotRef = useRef<HTMLDivElement>(null);
-  useStageLayout(slotRef);
-  const fullscreen = useStageFullscreen(stage);
+  useStageLayout(svc, slotRef);
+  const fullscreen = useStageFullscreen(svc, stage);
 
   // Échap : ferme le panneau « en jeu » et rend le clavier au jeu (la confirmation du panneau gère sa propre touche Échap avant).
   useEffect(() => {
     if (!stage.panel) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape" && !e.defaultPrevented) { e.preventDefault(); void setStagePanel(false).catch(() => {}); } };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape" && !e.defaultPrevented) { e.preventDefault(); void svc.stagePanel(false).catch(() => {}); } };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [stage.panel]);
+  }, [svc, stage.panel]);
 
   return (
     <ShellContext.Provider value={value}>
@@ -188,7 +188,7 @@ export function Shell({ services }: { services?: Services } = {}) {
         >
           Aller au contenu
         </a>
-        <TitleBar context={title ?? ROUTE_LABELS[route]} />
+        <TitleBar context={title ?? ROUTE_LABELS[route]} stage={stage} />
         <main id="contenu" className="content" ref={mainRef} tabIndex={-1} data-route={route} onContextMenu={onLinkMenu}>
           {route === "login" && booting
             ? <div className="boot" role="status">Chargement…</div>
@@ -196,7 +196,7 @@ export function Shell({ services }: { services?: Services } = {}) {
         </main>
         {linkMenu.menu}
         <UpdateBanner services={svc} />
-        <StageNotice />
+        <StageNotice services={svc} />
         <div className="stage-slot" ref={slotRef} aria-hidden="true" />
         {/* Monté (et déjà dessiné) sous la fenêtre du jeu tant que le jeu est affiché : la découpe animée de la fenêtre du jeu
             le révèle, sans flash. Fermé : inerte (ni focus ni clic). */}

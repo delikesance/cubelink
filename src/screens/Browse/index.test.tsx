@@ -13,7 +13,7 @@ const hit = (o: Partial<BrowseHit> = {}): BrowseHit => ({
 const version = (o: Partial<BrowseVersion> = {}): BrowseVersion => ({
   id: "v1", name: "1.0.0", minecraft: ["1.21.1"], loaders: ["neoforge"], published: "2026-01-01", downloadable: true, ...o,
 });
-const inst: Instance = { id: "i1", name: "Mon monde", minecraft: "1.21.1", loader: { loader: "fabric", version: "" }, ram_mb: 4096, mod_count: 0 };
+const inst: Instance = { id: "i1", name: "Mon monde", minecraft: "1.21.1", loader: { loader: "fabric", version: "" }, ram_mb: 4096, mod_count: 0, java_path: null, jvm_args: "", art: null };
 
 function setup(over: Record<string, unknown> = {}, params: Record<string, string> = {}) {
   const base = createFakeServices({ tickMs: 0 });

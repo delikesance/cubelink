@@ -199,7 +199,7 @@ export default function Settings({ testConnection, clearCache }: SettingsProps =
   const [ram, setRam] = useState("");
   const [hotkey, setHotkey] = useState(DEFAULT_HOTKEY);
   // Le jeu intégré n'existe que sous Windows et Linux (X11) : ailleurs le réglage n'aurait aucun effet, il n'est pas montré.
-  const stageSupported = useStageSupported();
+  const stageSupported = useStageSupported(services);
   // Sans jeu intégré il n'y a pas de panneau « en jeu » : son raccourci ne sert à rien, on le dit plutôt que de le laisser modifiable.
   const embeddedOff = stageSupported && settings?.embedded_game === false;
 

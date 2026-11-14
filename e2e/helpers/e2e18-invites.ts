@@ -19,7 +19,7 @@ export async function setupPair(world: Pick<World, 'appA' | 'appB'>) {
     await waitForRoute(app.page, 'login');
     // Le raccourci par defaut est global a la machine : on le remplace des le depart.
     const s = await invoke<Record<string, unknown>>(app.page, 'settings_get');
-    await invoke(app.page, 'settings_set', { ...s, close_on_launch: false, overlay_hotkey: TEST_HOTKEY });
+    await invoke(app.page, 'settings_set', { settings: { ...s, close_on_launch: false, overlay_hotkey: TEST_HOTKEY } });
   }
   await loginOffline(appA.page, 'Hote');
   await loginOffline(appB.page, 'Invite');

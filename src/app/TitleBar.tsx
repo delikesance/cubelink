@@ -2,7 +2,8 @@ import { useEffect, useState } from "react";
 import { isTauri } from "../services";
 import { Logo } from "../screens/Login/Logo";
 import { goBack, useCanGoBack, useLocation } from "./router";
-import { switchStageView, useStage } from "./stage";
+import { useServices } from "./context";
+import type { StageState } from "./stage";
 
 type WindowAction = "minimize" | "close" | "toggleMaximize";
 
@@ -35,8 +36,8 @@ function useMaximized(): boolean {
   return max;
 }
 
-export function TitleBar({ context }: { context: string }) {
-  const stage = useStage();
+export function TitleBar({ context, stage }: { context: string; stage: StageState }) {
+  const services = useServices();
   const canBack = useCanGoBack();
   const { route } = useLocation();
   const maximized = useMaximized();
@@ -54,7 +55,7 @@ export function TitleBar({ context }: { context: string }) {
         </button>
         <span className="tb-brand"><Logo width={18} small />Cubelink</span>
         {stage.attached && (
-          <button type="button" className="tb-btn tb-stage" onClick={() => void switchStageView(!stage.game)}>
+          <button type="button" className="tb-btn tb-stage" onClick={() => void services.stageView(!stage.game).catch(() => {})}>
             {stage.game ? "Launcher" : "Retour au jeu"}
           </button>
         )}

@@ -38,7 +38,7 @@ pub enum LaunchEvent {
     Failed { message: String },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "lowercase")]
 pub enum LaunchPhase {
     Preparing,
@@ -48,7 +48,7 @@ pub enum LaunchPhase {
 }
 
 /// Forme du contrat : `{ id, state, message? }`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct LaunchStateEvent {
     pub id: String,
     pub state: LaunchPhase,

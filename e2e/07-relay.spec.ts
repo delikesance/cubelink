@@ -96,7 +96,7 @@ test.describe('T7 relais : reglages (sans Internet)', () => {
     await waitForRoute(page, 'login');
     await loginOffline(page, 'Alex');
     const cur = await invoke<Settings>(page, 'settings_get');
-    const err = await invoke(page, 'settings_set', { ...cur, allow_relay: false, relay_only: true }).then(() => null, (e) => String(e));
+    const err = await invoke(page, 'settings_set', { settings: { ...cur, allow_relay: false, relay_only: true } }).then(() => null, (e) => String(e));
     expect(err, 'la contradiction doit etre refusee').not.toBeNull();
     expect(err).toMatch(/relais/i);
     expect(err).toMatch(/contradict|incompatible|désactiv|desactiv/i);

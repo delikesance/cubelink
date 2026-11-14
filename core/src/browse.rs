@@ -27,7 +27,7 @@ pub const CURSEFORGE_HOSTS: &[&str] = &["edge.forgecdn.net", "mediafilez.forgecd
 /// Nombre maximal de fichiers (dépendances comprises) installés en une fois.
 const MAX_FILES: usize = 40;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "lowercase")]
 pub enum BrowseSource {
     Curseforge,
@@ -51,7 +51,7 @@ impl BrowseSource {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "lowercase")]
 pub enum BrowseKind {
     Modpack,
@@ -105,7 +105,7 @@ impl BrowseKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct BrowseQuery {
     pub source: BrowseSource,
     pub kind: BrowseKind,
@@ -120,7 +120,7 @@ pub struct BrowseQuery {
     pub limit: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct BrowseHit {
     pub source: BrowseSource,
     pub id: String,
@@ -134,13 +134,13 @@ pub struct BrowseHit {
     pub downloadable: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct BrowsePage {
     pub hits: Vec<BrowseHit>,
     pub total: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct BrowseVersion {
     pub id: String,
     pub name: String,
@@ -150,7 +150,7 @@ pub struct BrowseVersion {
     pub downloadable: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct BrowseInstallInput {
     pub source: BrowseSource,
     pub id: String,

@@ -1,6 +1,6 @@
 # Build + release automatiques : chaque merge dans `main` produit un nouveau tag `vMAJEUR.MINEUR.<run>` et une release GitHub
 # avec l'installeur Windows (.msi), l'AppImage Linux et latest.json (lu par l'updater du launcher).
-# Flux de travail : on pousse sur `development`, puis on merge dans `main`.
+# Flux de travail : les PR sont fusionnées dans `canary`, puis `canary` est fusionnée dans `main` (voir docs/release.md).
 # `workflow_dispatch` (depuis n'importe quelle branche) construit tout SANS publier, pour vérifier les builds.
 # Windows : .msi (updater) + paquet .msix à téléverser dans le Microsoft Store (qui le signe).
 name: release
@@ -26,15 +26,12 @@ permissions:
 env:
   CARGO_INCREMENTAL: 0
   CARGO_TERM_COLOR: always
-  # Clé de signature des mises à jour (générée par `tauri signer generate`, sans mot de passe).
-  TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-  TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-  # Clés embarquées à la compilation (`option_env!`) dans l'app publiée :
-  # - CUBELINK_CF_API_KEY : clé de développeur CurseForge (reconnaissance des mods au « Rejoindre », import, parcourir).
+  # Les secrets ne sont PAS dans l'environnement global : seules les étapes `tauri build` les reçoivent,
+  # pour que ni npm ni les autres étapes ne les voient.
+  # - TAURI_SIGNING_PRIVATE_KEY(_PASSWORD) : signature des mises à jour (`tauri signer generate`).
+  # - CUBELINK_CF_API_KEY : clé de développeur CurseForge, embarquée à la compilation (`option_env!`).
   #   Extractible de l'installeur : choix assumé, comme les autres launchers.
   # - CUBELINK_MS_CLIENT_ID : identifiant Azure (facultatif, l'app a une valeur par défaut).
-  CUBELINK_CF_API_KEY: ${{ secrets.CUBELINK_CF_API_KEY }}
-  CUBELINK_MS_CLIENT_ID: ${{ secrets.CUBELINK_MS_CLIENT_ID }}
 
 jobs:
   version:
@@ -45,9 +42,9 @@ jobs:
       tag: ${{ steps.v.outputs.tag }}
       publish: ${{ steps.v.outputs.publish }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with: { fetch-tags: true }
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with: { node-version: 22 }
       - id: v
         shell: bash
@@ -68,21 +65,24 @@ jobs:
           fi
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          CUBELINK_CF_API_KEY: ${{ secrets.CUBELINK_CF_API_KEY }}
 
   build-windows:
     needs: version
     runs-on: windows-latest
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with: { node-version: 22, cache: npm }
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - name: Rust (rust-toolchain.toml)
+        shell: bash
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: release-${{ runner.os }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: npm ci
+      - run: npm ci --ignore-scripts
       - name: Version
         shell: bash
         run: node scripts/release-version.mjs "$GITHUB_RUN_NUMBER" --write
@@ -91,7 +91,12 @@ jobs:
         run: JAVA_HOME="$JAVA_HOME_17_X64" bash core/resources/lan-agent/build.sh
       - name: Installeur MSI
         run: npx tauri build --bundles msi
-      - uses: actions/upload-artifact@v4
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          CUBELINK_CF_API_KEY: ${{ secrets.CUBELINK_CF_API_KEY }}
+          CUBELINK_MS_CLIENT_ID: ${{ secrets.CUBELINK_MS_CLIENT_ID }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: windows-msi
           path: target/release/bundle/msi/*.msi
@@ -105,11 +110,11 @@ jobs:
           -IdentityName "${{ vars.MSIX_IDENTITY_NAME || 'Cubelink.Placeholder' }}"
           -Publisher "${{ vars.MSIX_PUBLISHER || 'CN=Placeholder' }}"
           -PublisherDisplayName "${{ vars.MSIX_PUBLISHER_DISPLAY_NAME || 'Cubelink' }}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: windows-msix
           path: target/release/bundle/msix/*.msix
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: windows-sig
           path: target/release/bundle/msi/*.msi.sig
@@ -120,34 +125,30 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with: { node-version: 22, cache: npm }
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - name: Rust (rust-toolchain.toml)
+        shell: bash
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: release-${{ runner.os }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Dépendances système (miroir kernel.org car les noms ubuntu.com ne résolvent plus depuis les runners)
-        run: |
-          sudo tee /etc/apt/sources.list >/dev/null <<'LIST'
-          deb http://mirrors.edge.kernel.org/ubuntu jammy main restricted universe multiverse
-          deb http://mirrors.edge.kernel.org/ubuntu jammy-updates main restricted universe multiverse
-          deb http://mirrors.edge.kernel.org/ubuntu jammy-security main restricted universe multiverse
-          LIST
-          pkgs='libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev patchelf xdg-utils'
-          for i in 1 2 3; do
-            sudo timeout 240 apt-get update && sudo timeout 600 apt-get install -y --no-install-recommends $pkgs && break
-            echo "apt : essai $i échoué, nouvel essai"; sleep 5
-            [ $i = 3 ] && exit 1
-          done
-      - run: npm ci
+      - name: Dépendances système
+        run: bash scripts/ci-apt.sh
+      - run: npm ci --ignore-scripts
       - name: Version
         run: node scripts/release-version.mjs "$GITHUB_RUN_NUMBER" --write
       - name: Agent LAN (jar Java)
         run: JAVA_HOME="$JAVA_HOME_17_X64" bash core/resources/lan-agent/build.sh
       - name: AppImage
         run: npx tauri build --bundles appimage
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          CUBELINK_CF_API_KEY: ${{ secrets.CUBELINK_CF_API_KEY }}
+          CUBELINK_MS_CLIENT_ID: ${{ secrets.CUBELINK_MS_CLIENT_ID }}
       # libgcrypt est embarquée mais linuxdeploy exclut libgpg-error, dont elle dépend : sur une distribution qui
       # ne l'a pas, le launcher ne démarre pas (« libgpg-error.so.0: cannot open shared object file »).
       # tauri.linux.conf.json l'ajoute ; on vérifie que toute bibliothèque embarquée trouve ses dépendances.
@@ -157,7 +158,7 @@ jobs:
           "$GITHUB_WORKSPACE"/target/release/bundle/appimage/*.AppImage --appimage-extract >/dev/null
           test -f squashfs-root/usr/lib/libgpg-error.so.0 || { echo "libgpg-error.so.0 absente de l'AppImage" >&2; exit 1; }
           ldd squashfs-root/usr/lib/libgcrypt.so.20
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: linux-appimage
           path: |
@@ -171,10 +172,10 @@ jobs:
     if: ${{ always() && needs.version.outputs.publish == 'true' && needs.build-windows.result == 'success' && needs.build-linux.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with: { node-version: 22 }
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with: { path: artifacts }
       - name: Rassembler les signatures de mise à jour
         shell: bash

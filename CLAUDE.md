@@ -22,18 +22,18 @@ Claude mène le chantier de bout en bout sans demander la permission : comprendr
 - Docs utiles : `docs/architecture.md`, `docs/contrats.md` (commandes et événements Tauri), `docs/ux-guidelines.md`, `docs/release.md`, `docs/taches-agents.md`.
 - Une commande ou un événement Tauri qui change : mettre à jour `docs/contrats.md` dans le même commit.
 
-## Git : une branche par chantier, une PR vers `development`
-1. Au début : `git fetch`, puis `git switch -c <type>/<sujet-court> origin/development` (types : `feat`, `fix`, `chore`, `docs`, `refactor`). Si l'arbre est propre et que la branche courante porte déjà le chantier demandé, continuer dessus sans demander.
-2. Ne jamais committer sur `development` ni sur `main`.
+## Git : une branche par chantier, une PR vers `canary`
+1. Au début : `git fetch`, puis `git switch -c <type>/<sujet-court> origin/canary` (types : `feat`, `fix`, `chore`, `docs`, `refactor`). Si l'arbre est propre et que la branche courante porte déjà le chantier demandé, continuer dessus sans demander.
+2. Ne jamais committer sur `canary` ni sur `main`. `canary` reçoit les PR (chaque fusion publie une pré-version si `ci` passe) ; seul l'utilisateur fusionne `canary` dans `main` pour une release.
 3. Committer seul, par petits commits cohérents, dès qu'une étape est vérifiée. Messages en français.
-4. À la fin, sans attendre : `git push -u origin <branche>`, puis `gh pr create --base development`. Titre et description en français : ce qui change, test réel fait par feature avec son résultat, ce qui reste.
+4. À la fin, sans attendre : `git push -u origin <branche>`, puis `gh pr create --base canary`. Titre et description en français : ce qui change, test réel fait par feature avec son résultat, ce qui reste.
 5. Ne jamais merger, ne jamais forcer un push : seul l'utilisateur fusionne.
-6. Si `development` a avancé et que la PR est en conflit : rebaser ou fusionner `development` dans la branche, résoudre, re-tester, sans push forcé (merge de `development` plutôt que rebase si la branche est déjà poussée).
+6. Si `canary` a avancé et que la PR est en conflit : rebaser ou fusionner `canary` dans la branche, résoudre, re-tester, sans push forcé (merge de `canary` plutôt que rebase si la branche est déjà poussée).
 
 ## Définition de « terminé »
 Une feature est terminée quand toutes ces conditions sont vraies, et Claude les vérifie lui-même :
 1. Elle a été **exercée en réel** (voir ci-dessous).
-2. `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` et `npx vitest run` sont verts, ainsi que `npx tsc --noEmit` (c'est ce que fait la CI).
+2. `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` et `npx vitest run` sont verts, ainsi que `npx tsc --noEmit`. La CI lance aussi les tests sous Linux (`xvfb-run -a cargo test --workspace`), les E2E simulés sous Windows et `cargo deny check`.
 3. Les docs touchées (`docs/contrats.md`, etc.) sont à jour.
 4. Le diff a été relu (voir « Relecture »), commité, poussé, et la PR ouverte.
 

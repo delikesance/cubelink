@@ -27,15 +27,15 @@ mod watch;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex, MutexGuard, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
-use crate::flow::{Bar, CAPTION_SWITCH, CAPTION_TO_GAME, CAPTION_TO_LAUNCHER, Content, Effect, Event, Machine, View};
-use crate::guard::{self, Guards, Watched, ADOPTION_RETRY};
+use crate::flow::{CAPTION_TO_LAUNCHER, Effect, Event};
+use crate::guard::{self, Watched, ADOPTION_RETRY};
 use crate::health::{FallbackReason, HostEvent, Observer};
-use crate::progress::{count_jars, Closer, Profile, Tracker};
+use crate::scene::{Backend, Common};
 use debug::dbg;
 use game_window::{Origin, Returned};
 use util::hw;
@@ -74,20 +74,9 @@ struct Exposed {
 }
 
 #[derive(Default)]
-struct State {
-    /// Deroulement de la vue (rideau, pose de la fenetre du jeu, panneau).
-    machine: Machine,
-    pids: HashSet<u32>,
-    adopted: Vec<isize>,
-    /// LA fenetre du jeu (adoptee puis affichee par le jeu).
-    current: Option<isize>,
-    shown_at: Option<Instant>,
-    title: String,
-    caption: String,
-    tracker: Option<Tracker>,
-    closer: Option<Closer>,
-    /// Apparition du rideau (horloge de ses animations).
-    curtain_t0: Option<Instant>,
+pub struct State {
+    /// Part commune aux deux systemes (voir `crate::scene`), accessible directement par `Deref`.
+    c: Common<isize>,
     /// Fenetres en cours d'adoption (evite les doublons entre les evenements et le balayage lent).
     adopting: HashSet<isize>,
     /// Toute fenetre du jeu qu'on a touchee (garee, adoptee), telle qu'elle etait avant : de quoi la rendre. Une fenetre absente
@@ -96,48 +85,34 @@ struct State {
     /// (largeur, hauteur, bande) de la decoupe actuellement appliquee a la fenetre du jeu ; (0, 0, 0) : aucune. Bande 0 : region
     /// pleine (le jeu en porte toujours une une fois pose, voir `game_window::apply_region`).
     region: (i32, i32, i32),
-    /// Zone de jeu en coordonnees client de la fenetre du launcher (x, y, largeur, hauteur).
-    view: (i32, i32, i32, i32),
-    /// Debut de la surveillance du jeu courant (`watch`).
-    started: Option<Instant>,
-    /// La Scene a renonce pour ce lancement (repli) ; remis a faux par `begin`.
-    fell_back: bool,
-    /// `HostEvent::Adopted` deja emis pour le jeu surveille.
-    announced: bool,
     /// Fenetres dont le rattachement est refuse, tant qu'elles peuvent etre LA fenetre du jeu (`current` inconnue, ou elle-meme).
     refused: HashMap<isize, Refused>,
     /// Fenetres secondaires non rattachees deja signalees au journal (une ligne par fenetre).
     shrugged: HashSet<isize>,
-    /// Lancement CACHE (`GameHost::expect_hidden`) : le jeu n'affichera pas sa fenetre lui-meme ; c'est l'hote qui la montre, a la
-    /// pose ou, quoi qu'il arrive, en la lui rendant. Vaut pour le lancement en cours ; remis a faux par `begin`.
-    expect_hidden: bool,
-    /// La premiere pose de LA fenetre du jeu attend (`guard::pose_waits`) : elle reste garee hors ecran, rien ne la cale.
-    pose_pending: bool,
-    /// Dernier cadre remis par le jeu sur une fenetre pas encore posee.
-    reframed_at: Option<Instant>,
-    /// Instant ou chaque fenetre adoptee l'a ete.
-    adopted_at: HashMap<isize, Instant>,
-    /// Numero du lancement surveille (change a chaque `watch` et a chaque fin de jeu) : ce qui a ete mis en route pour un
-    /// lancement (guet d'une fenetre cachee) s'arrete quand il n'est plus le courant.
-    gen: u64,
     /// Fenetres que le jeu a AFFICHEES avant la fin de leur adoption (voir `embedded::adopt`).
     shown_early: HashSet<isize>,
     /// Fenetres constatees visibles a l'ecran sans etre rattachees (voir `embedded::cover_exposed`).
     exposed: HashMap<isize, Exposed>,
-    /// `request_close` a ete demande au jeu surveille : sa fenetre se defait, on ne la corrige plus.
-    close_asked: bool,
-    /// Fenetres rendues au jeu par le dernier repli : `request_close` peut encore leur demander de se fermer.
-    released: Vec<isize>,
-    /// LA fenetre du jeu est en plein ecran (derniere valeur annoncee par `HostEvent::Fullscreen`).
-    fullscreen: bool,
     /// Dernier changement de `fullscreen` (voir `embedded::note_fullscreen`).
     fullscreen_at: Option<Instant>,
     /// Le focus est a rendre au jeu apres la bascule plein ecran du launcher (voir `embedded::refocus`).
     refocus: bool,
-    guards: Guards,
 }
 
-struct Shared {
+impl std::ops::Deref for State {
+    type Target = Common<isize>;
+    fn deref(&self) -> &Common<isize> {
+        &self.c
+    }
+}
+
+impl std::ops::DerefMut for State {
+    fn deref_mut(&mut self) -> &mut Common<isize> {
+        &mut self.c
+    }
+}
+
+pub struct Shared {
     /// Zone de jeu : cible des messages de l'API.
     host: AtomicIsize,
     curtain: AtomicIsize,
@@ -204,7 +179,7 @@ impl Shared {
 }
 
 /// Effets d'une transition, avec ce qu'il faut pour les executer une fois le verrou relache.
-struct Todo {
+pub struct Todo {
     effects: Vec<Effect>,
     /// LA fenetre du jeu au moment de la transition.
     current: Option<isize>,
@@ -344,16 +319,6 @@ unsafe fn on_reveal(s: &Shared, host: HWND, cancel: bool) {
     run(s, &todo);
 }
 
-/// Fenetres a qui demander la fermeture : LA fenetre du jeu seulement (les fenetres d'aide adoptees n'ont pas a recevoir WM_CLOSE) ;
-/// a defaut (pas encore affichee), toutes les fenetres adoptees ; apres un repli, celles qu'on a rendues au jeu.
-fn close_targets(st: &State) -> Vec<isize> {
-    match st.current {
-        Some(c) => vec![c],
-        None if !st.adopted.is_empty() => st.adopted.clone(),
-        None => st.released.clone(),
-    }
-}
-
 /// REPLI : la Scene renonce pour le lancement en cours. Toute fenetre du jeu deja touchee lui est rendue (sur le fil de la fenetre
 /// du jeu), la surveillance s'arrete, le rideau se rouvre sur le launcher, puis `HostEvent::Fallback` est emis, une seule fois.
 /// Faux (sans effet) s'il n'y a pas de jeu surveille ou si le repli a deja eu lieu. Appelable de n'importe quel fil.
@@ -489,262 +454,79 @@ fn guard_tick(s: &Shared) {
 
 // ---------------------------------------------------------------------------------------------------- API publique
 
-/// La Scene : zone de jeu dans la fenetre du launcher, rideau, et jeu courant.
-pub struct GameHost {
-    s: Arc<Shared>,
-}
+/// La Scene Windows : l'API commune (`crate::scene`) sur ce systeme.
+pub type GameHost = crate::scene::GameHost<Shared>;
 
-impl GameHost {
-    /// Cree la zone du jeu (fenetre fille de `parent`, un HWND de la fenetre du launcher) et le rideau, et demarre les fils de
-    /// l'hote. A appeler DEPUIS LE FIL qui possede `parent` (sa boucle de messages anime le rideau). Un seul hote par processus.
-    pub fn embed(parent: isize) -> Result<GameHost, String> {
+impl Backend for Shared {
+    type Win = isize;
+    type State = State;
+    type Todo = Todo;
+
+    fn install(parent: isize) -> Result<Arc<Self>, String> {
         let s = Shared::install(parent)?;
         unsafe { embedded::create(&s)? };
         watch::start()?;
-        Ok(GameHost { s })
+        Ok(s)
     }
 
-    /// Place la zone du jeu et le rideau (coordonnees physiques dans la zone cliente de la fenetre parente).
-    pub fn relayout(&self, x: i32, y: i32, w: i32, h: i32) {
-        self.s.lock().view = (x, y, w.max(1), h.max(1));
-        unsafe { embedded::sync(&self.s) };
+    fn lock(&self) -> MutexGuard<'_, State> {
+        Shared::lock(self)
     }
 
-    /// Un lancement commence : les panneaux se ferment sur le launcher (ou sur le jeu en cours) puis le chargement s'affiche.
-    /// Le lancement est (de nouveau) dans la Scene : `staged` redevient vrai.
-    pub fn begin(&self, title: &str, caption: &str, mods_dir: Option<&std::path::Path>, profile_path: Option<&std::path::Path>) {
-        // lectures disque hors du verrou
-        let n = mods_dir.map_or(0, count_jars);
-        let prev = profile_path.and_then(Profile::load);
-        let todo = {
-            let mut st = self.s.lock();
-            let todo = dispatch(&mut st, Event::BeginLaunch);
-            st.fell_back = false;
-            st.expect_hidden = false; // consigne du lancement precedent : a redonner pour celui-ci
-            st.tracker = Some(Tracker::new(n, prev));
-            st.title = title.to_string();
-            // la fermeture de l'ancien jeu vient d'occuper la 1re moitie de la barre
-            let second_half = st.machine.content() == Content::Launch(Bar::SecondHalf);
-            st.caption = if second_half { CAPTION_SWITCH } else { caption }.to_string();
-            todo
-        };
-        self.s.log(format!("lancement : rideau ferme ({n} mods)"));
-        run(&self.s, &todo);
+    fn log(&self, m: String) {
+        Shared::log(self, m);
     }
 
-    /// Surveille les fenetres du processus `pid` (le nouveau jeu) : elles seront adoptees des leur creation.
-    pub fn watch(&self, pid: u32) {
-        let todo = {
-            let mut st = self.s.lock();
-            let todo = dispatch(&mut st, Event::Watch);
-            st.adopting.clear();
-            st.origin.clear();
-            st.pids.clear();
-            st.pids.insert(pid);
-            st.adopted.clear();
-            st.released.clear();
-            st.current = None;
-            st.shown_at = None;
-            st.refused.clear();
-            st.shrugged.clear();
-            st.exposed.clear();
-            st.shown_early.clear();
-            st.adopted_at.clear();
-            st.pose_pending = false;
-            st.reframed_at = None;
-            st.close_asked = false;
-            st.announced = false;
-            st.gen += 1;
-            st.started = Some(Instant::now());
-            todo
-        };
-        run(&self.s, &todo);
-        self.s.log(format!("surveillance des fenetres du processus {pid}"));
-        if !watch::set_hooks(pid) {
-            fallback(&self.s, FallbackReason::HookFailed, "fil de surveillance des fenetres injoignable".into());
-        }
-        curtain_window::request_sync(&self.s); // relance le minuteur (filet de securite, gardes) s'il etait arrete
+    fn set_observer(&self, observer: Observer) {
+        *self.observer.lock().unwrap_or_else(|e| e.into_inner()) = Some(observer);
     }
 
-    /// Une ligne de la sortie du jeu (alimente l'avancement du lancement ou de la fermeture).
-    pub fn feed_line(&self, line: &str) {
-        let mut st = self.s.lock();
-        if let Some(t) = st.tracker.as_mut() {
-            t.feed_line(line);
-        }
-        if let Some(c) = st.closer.as_mut() {
-            c.feed_line(line);
-        }
+    fn dispatch(st: &mut State, ev: Event) -> Todo {
+        dispatch(st, ev)
     }
 
-    /// Le jeu a l'air pret (textures assemblees, fenetre affichee, plus de bruit depuis `quiet`) ou la fenetre est affichee depuis
-    /// trop longtemps (`max`) : on ne laisse jamais le rideau bloque. Apres un repli il n'y a plus rien a attendre de la Scene :
-    /// vrai aussi (le rideau est deja rouvert, `mark_ready` et `reveal` sont alors sans effet). Si aucune fenetre n'apparait, c'est
-    /// le delai de garde (`crate::guard::NO_WINDOW_GUARD`) qui declenche le repli.
-    pub fn is_ready(&self, quiet: Duration, max: Duration) -> bool {
-        let st = self.s.lock();
-        if st.fell_back || st.tracker.as_ref().is_some_and(|t| t.looks_ready(quiet)) {
-            return true;
-        }
-        st.shown_at.is_some_and(|t| t.elapsed() > max)
+    fn shows_curtain(todo: &Todo) -> bool {
+        todo.shows_curtain()
     }
 
-    /// Le jeu est pret : la barre atteint 100 %, l'historique des durees est enregistre.
-    pub fn mark_ready(&self, profile_path: Option<&std::path::Path>) {
-        let profile = {
-            let mut st = self.s.lock();
-            st.tracker.as_mut().map(|t| {
-                t.mark_ready();
-                t.finish_profile()
-            })
-        };
-        // ecriture du fichier hors du verrou
-        if let (Some(profile), Some(path)) = (profile, profile_path) {
-            profile.save(path);
-        }
-    }
-
-    /// Ouvre le rideau (les panneaux s'ecartent et decouvrent le jeu).
-    pub fn reveal(&self) {
-        unsafe { SendMessageW(self.s.host(), WM_APP_REVEAL, 0, 0) };
-    }
-
-    /// Debut d'un changement de modpack : les panneaux se ferment sur le jeu en cours et la barre suit sa fermeture (0-50 %).
-    pub fn begin_close(&self, title: &str) {
-        let todo = {
-            let mut st = self.s.lock();
-            let todo = dispatch(&mut st, Event::BeginClose);
-            st.closer = Some(Closer::new());
-            st.tracker = None;
-            st.title = title.to_string();
-            st.caption = CAPTION_SWITCH.to_string();
-            todo
-        };
-        self.s.log("changement de modpack : rideau ferme sur le jeu en cours");
-        run(&self.s, &todo);
-    }
-
-    /// Demande au jeu de se fermer comme le ferait le joueur (croix de la fenetre) : il quitte le monde, enregistre, s'eteint.
-    /// Vaut aussi pour un jeu rendu par un repli (sa fenetre est connue jusqu'au prochain `watch`).
-    pub fn request_close(&self) {
-        let windows = {
-            let mut st = self.s.lock();
-            st.close_asked = true;
-            close_targets(&st)
-        };
-        self.s.log(format!("fermeture demandee au jeu ({} fenetre(s))", windows.len()));
-        for w in windows {
-            unsafe { PostMessageW(hw(w), WM_CLOSE, 0, 0) };
-        }
-    }
-
-    /// La tache de jeu est terminee (arret du jeu, echec du lancement ou kill). Pendant un changement de modpack (fermeture
-    /// demandee) : la barre atteint 50 % et rien d'autre ; sinon retour au launcher avec la meme animation de rideau. Apres un
-    /// repli le rideau est deja rouvert sur le launcher : la fin du jeu rendu ne rejoue aucune animation.
-    pub fn run_finished(&self) {
-        let todo = {
-            let mut st = self.s.lock();
-            st.released.clear();
-            st.gen += 1; // le jeu est parti : plus rien a guetter pour lui
-            if st.fell_back && !st.machine.closing() && !st.machine.attached() {
-                None
-            } else {
-                let todo = dispatch(&mut st, Event::GameExited);
-                if todo.shows_curtain() {
-                    st.title.clear();
-                    st.caption = CAPTION_TO_LAUNCHER.to_string();
-                }
-                Some(todo)
-            }
-        };
-        self.s.log(if todo.is_some() { "jeu termine" } else { "jeu termine (il avait ete rendu : rien a faire)" });
-        if let Some(todo) = todo {
-            run(&self.s, &todo);
-        }
-    }
-
-    /// Le jeu ne s'est pas ferme dans le delai : on le laisse tranquille (jamais force) et on rouvre le rideau sur lui.
-    pub fn cancel_close(&self) {
-        unsafe { SendMessageW(self.s.host(), WM_APP_REVEAL, 1, 0) };
-    }
-
-    /// Bascule entre le jeu (`true`) et le launcher (`false`) avec l'animation de rideau, sans arreter le jeu.
-    pub fn set_view(&self, game: bool) {
-        dbg("set_view");
-        let todo = {
-            let mut st = self.s.lock();
-            let todo = dispatch(&mut st, Event::SetView(if game { View::Game } else { View::Launcher }));
-            if todo.shows_curtain() {
-                st.title.clear();
-                st.caption = if game { CAPTION_TO_GAME } else { CAPTION_TO_LAUNCHER }.to_string();
-            }
-            todo
-        };
-        run(&self.s, &todo);
-    }
-
-    /// Le joueur est dans le jeu : fenetre du jeu affichee, rideau retire, aucun basculement en cours.
-    pub fn in_game(&self) -> bool {
-        self.s.lock().machine.in_game()
-    }
-
-    /// Panneau « en jeu » ouvert ?
-    pub fn panel(&self) -> bool {
-        self.s.lock().machine.panel_width() > 0
-    }
-
-    /// Ouvre (bande de `width_px` a droite du jeu, le launcher apparait dessous) ou ferme le panneau. A l'ouverture : refuse (faux)
-    /// hors du jeu (chargement, rideau, launcher visible). A la fermeture : le jeu retrouve le premier plan. Vrai si l'etat a change.
-    pub fn set_panel(&self, open: bool, width_px: i32) -> bool {
-        let ev = if open { Event::PanelOpen { width: width_px.max(1) } } else { Event::PanelClose };
-        let todo = dispatch(&mut self.s.lock(), ev);
-        run(&self.s, &todo);
+    fn has_effects(todo: &Todo) -> bool {
         !todo.effects.is_empty()
     }
 
-    /// (un jeu est rattache, la zone du jeu est celle qu'on voit)
-    pub fn view(&self) -> (bool, bool) {
-        let st = self.s.lock();
-        (!st.pids.is_empty(), st.machine.view() == View::Game)
+    fn run(&self, todo: &Todo) {
+        run(self, todo);
     }
 
-    /// Delais de garde (voir `crate::guard`). Les valeurs par defaut sont celles de production ; les tests d'integration les
-    /// raccourcissent.
-    pub fn set_guards(&self, guards: Guards) {
-        self.s.lock().guards = guards;
-    }
-}
-
-/// CONTRAT avec le launcher (voir `crate::health`). Signatures figees.
-impl GameHost {
-    /// Installe l'observateur des evenements de sante (remplace le precedent).
-    pub fn set_observer(&self, observer: Observer) {
-        *self.s.observer.lock().unwrap_or_else(|e| e.into_inner()) = Some(observer);
+    fn sync(&self) {
+        unsafe { embedded::sync(self) };
     }
 
-    /// Mouvement reduit (preference systeme) : le rideau ne s'anime plus (panneaux poses / retires sans glissement, logo fige).
-    pub fn set_calm(&self, calm: bool) {
-        self.s.lock().machine.set_calm(calm);
+    fn reset_for_watch(st: &mut State) {
+        st.adopting.clear();
+        st.origin.clear();
+        st.refused.clear();
+        st.shrugged.clear();
+        st.exposed.clear();
+        st.shown_early.clear();
     }
 
-    /// Rend au jeu sa fenetre (cadre, barre des taches, position visible, plus de proprietaire), rouvre le rideau sur le launcher
-    /// et arrete la surveillance pour CE lancement ; emet `HostEvent::Fallback { reason: Requested, .. }`. Sans jeu : sans effet.
-    pub fn release(&self, detail: &str) {
-        fallback(&self.s, FallbackReason::Requested, detail.to_string());
+    fn start_watch(&self, pid: u32) {
+        if !watch::set_hooks(pid) {
+            fallback(self, FallbackReason::HookFailed, "fil de surveillance des fenetres injoignable".into());
+        }
+        curtain_window::request_sync(self); // relance le minuteur (filet de securite, gardes) s'il etait arrete
     }
 
-    /// Lancement CACHE : le launcher a demarre le jeu avec la consigne « fenetre cachee » (`STARTUPINFO` : `STARTF_USESHOWWINDOW`
-    /// et `SW_HIDE`), le jeu n'affichera donc pas sa fenetre lui-meme. A appeler apres `begin` et avant `watch` ; vaut pour CE
-    /// lancement, `begin` le remet a faux. L'hote tient alors la fenetre adoptee pour celle du jeu sans attendre qu'il l'affiche,
-    /// l'affiche lui-meme a la pose, et GARANTIT qu'elle soit montree si la Scene renonce (tout repli) : jamais de jeu invisible.
-    /// Un jeu qui ignore la consigne et s'affiche lui-meme suit le chemin habituel.
-    pub fn expect_hidden(&self, hidden: bool) {
-        self.s.lock().expect_hidden = hidden;
+    fn reveal(&self, cancel: bool) {
+        // l'ouverture se fait sur le fil de l'interface (qui possede le rideau)
+        unsafe { SendMessageW(self.host(), WM_APP_REVEAL, usize::from(cancel), 0) };
     }
 
-    /// Le lancement en cours est toujours dans la Scene (faux apres un repli, jusqu'au prochain `begin`).
-    pub fn staged(&self) -> bool {
-        !self.s.lock().fell_back
+    fn ask_close(&self, w: isize) {
+        unsafe { PostMessageW(hw(w), WM_CLOSE, 0, 0) };
+    }
+
+    fn fallback(&self, reason: FallbackReason, detail: String) -> bool {
+        fallback(self, reason, detail)
     }
 }
-

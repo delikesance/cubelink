@@ -34,7 +34,8 @@ static SYNC_PENDING: AtomicBool = AtomicBool::new(false);
 
 /// Tout ce que montre le rideau maintenant (une seule prise du verrou).
 fn frame(s: &Shared) -> Frame {
-    let st = &mut *s.lock();
+    let mut guard = s.lock();
+    let st = &mut guard.c;
     Frame::capture(&st.machine, &mut st.closer, &mut st.tracker, &st.title, &st.caption, st.curtain_t0)
 }
 

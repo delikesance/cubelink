@@ -38,7 +38,7 @@ Pas de compte Cubelink, pas de serveur à louer, pas de téléchargement manuel.
 | **Modpacks et mods** | Parcourir Modrinth et CurseForge, installer un modpack, importer un `.mrpack`, activer, retirer ou ajouter des mods à une instance. |
 | **Cache par hash** | Un fichier n'est téléchargé qu'une seule fois, puis partagé entre les instances par lien physique. |
 | **Compte Microsoft** | Connexion directe entre ton appareil et Microsoft : Cubelink ne voit jamais ton mot de passe. Plusieurs comptes possibles. |
-| **Jeu intégré (« la Scène »)** | Sous Windows, le jeu s'affiche *dans* la fenêtre du lanceur, avec un rideau de chargement et un panneau d'invitations en jeu. |
+| **Jeu intégré (« la Scène »)** | Sous Windows et Linux (X11 ou XWayland), le jeu s'affiche *dans* la fenêtre du lanceur, avec un rideau de chargement et un panneau d'invitations en jeu. |
 | **Sécurité lisible** | Rejoindre un ami revient à exécuter son code : l'écran de confirmation liste ce qui sera installé, et les mods inconnus des catalogues sont signalés. |
 | **Mises à jour automatiques** | Via GitHub Releases, signature vérifiée. |
 
@@ -50,7 +50,9 @@ Pas de compte Cubelink, pas de serveur à louer, pas de téléchargement manuel.
 |---|---|---|
 | **Windows 10/11** | Plateforme principale | Paquet MSIX du **Microsoft Store** (signé par Microsoft, sans alerte SmartScreen), ou `.msi` sur les [releases](https://github.com/delikesance/cubelink/releases/latest) |
 | **Linux** | AppImage construite en CI, **pas encore éprouvée sur une vraie machine** | [Releases](https://github.com/delikesance/cubelink/releases/latest) — les retours sont très bienvenus |
-| **macOS** | Non pris en charge pour l'instant | — |
+| **macOS** | Non pris en charge | — |
+
+Cubelink fonctionne **sous Windows et Linux seulement**. Sous Linux, la Scène passe par X11 : avec « Jeu intégré » actif, Cubelink s'ouvre en XWayland ; coupe ce réglage pour garder le Wayland natif (le jeu s'ouvre alors dans sa propre fenêtre).
 
 Détails du flux de release : [`docs/release.md`](docs/release.md).
 
@@ -70,7 +72,7 @@ Pour aller plus loin : [`docs/architecture.md`](docs/architecture.md) (décision
 |---|---|
 | `core/` (`cubelink-core`) | Logique du jeu : auth Microsoft/Xbox/Minecraft, manifestes Mojang, Java, loaders (Fabric, Quilt, Forge, NeoForge), cache, Modrinth/CurseForge, import `.mrpack`, profil invité. Contient aussi l'**agent LAN** Java (`core/resources/lan-agent/`). |
 | `p2p/` (`cubelink-p2p`) | Réseau : identité, code ami, présence, transfert par hash, tunnel de jeu, relais (Iroh/QUIC). |
-| `host/` (`cubelink-host`) | « La Scène » sous Windows : adoption de la fenêtre du jeu, rideau, repli. |
+| `host/` (`cubelink-host`) | « La Scène » sous Windows et Linux (X11) : adoption de la fenêtre du jeu, rideau, repli. |
 | `src-tauri/` (`cubelink`) | L'application Tauri : commandes, intégration, mises à jour. |
 | `src/` | Interface React/TypeScript : écrans (`screens/`), composants (`ui/`), services, tokens de design (`styles/`). |
 | `e2e/` | Scénarios Playwright de bout en bout. |
@@ -157,7 +159,7 @@ Le dépôt est prêt pour les agents : [`CLAUDE.md`](CLAUDE.md) décrit le flux 
 - [x] Modrinth, import de modpacks, parcours du catalogue
 - [x] Social P2P : code ami, présence, transfert, profil invité, tunnel de jeu
 - [x] Refonte de l'interface, distribution via le Microsoft Store
-- [x] La Scène : le jeu dans la fenêtre du lanceur (Windows)
+- [x] La Scène : le jeu dans la fenêtre du lanceur (Windows, Linux X11)
 - [ ] Essai réel à deux machines distantes, pour valider le jeu à plusieurs de bout en bout
 - [ ] Relais auto-hébergé et plafonné (aujourd'hui : relais publics d'Iroh)
 - [ ] Validation de la version Linux

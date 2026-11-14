@@ -77,12 +77,10 @@ impl TransferControl {
     }
 }
 
-/// Manifeste de l'hôte et, si le transport sait la porter, son indication de mods hors Modrinth (non fiable ;
-/// vide avec p2p actuel : le manifeste ne porte pas de sha1).
+/// Manifeste de l'hôte.
 #[derive(Debug, Clone)]
 pub struct HostManifest {
     pub manifest: Manifest,
-    pub unknown_mods: Vec<String>,
 }
 
 /// Résultat du test « Ta connexion avec tes amis » (Paramètres).
@@ -128,8 +126,6 @@ pub trait P2pBackend: Send + Sync {
     fn refuse_request(&self, _public_key: String) -> BoxFuture<'_, Result<bool, String>> {
         Box::pin(async { Ok(false) })
     }
-    /// Prévient l'autre côté qu'on a accepté sa demande (repli local).
-    fn notify_accepted(&self, friend: Friend) -> BoxFuture<'_, Result<(), String>>;
     /// Envoie une invitation à rejoindre notre monde à un ami (clé hex). Par défaut : sans effet.
     fn send_invite(&self, _public_key: String, _msg: InviteMessage) -> BoxFuture<'_, Result<(), String>> {
         Box::pin(async { Ok(()) })
@@ -187,9 +183,6 @@ impl P2pBackend for UnavailableBackend {
     }
     fn send_request(&self, _t: FriendCodePayload, _n: String) -> BoxFuture<'_, Result<VerifyCode, String>> {
         Box::pin(async { Err(UNAVAILABLE.to_string()) })
-    }
-    fn notify_accepted(&self, _f: Friend) -> BoxFuture<'_, Result<(), String>> {
-        Box::pin(async { Ok(()) })
     }
     fn fetch_manifest(&self, _k: String) -> BoxFuture<'_, Result<HostManifest, String>> {
         Box::pin(async { Err(UNAVAILABLE.to_string()) })

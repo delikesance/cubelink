@@ -23,9 +23,8 @@ const SCAN_EVERY: Duration = Duration::from_millis(500);
 /// Classe d'une fenetre de jeu (repli sans `_NET_WM_PID`) : Minecraft, GLFW, SDL, LWJGL 2, AWT de Java. Les fenetres d'aide de SDL
 /// et de GLFW n'en sont pas.
 fn is_game_class(c: &str) -> bool {
-    let helper = c.starts_with("SDLHelperWindow") || c.starts_with("SDL_HIDAPI") || c.starts_with("GLFW3 Helper");
     let l = c.to_lowercase();
-    !helper && ["minecraft", "glfw", "sdl", "lwjgl", "sun-awt", "java"].iter().any(|k| l.contains(k))
+    !guard::is_helper_class(c) && ["minecraft", "glfw", "sdl", "lwjgl", "sun-awt", "java"].iter().any(|k| l.contains(k))
 }
 
 /// Demarre le fil des evenements.
@@ -158,7 +157,7 @@ fn consider(s: &Shared, win: u32, how: &str) {
         }
     };
     // fenetre d'essai ou technique (SDL en cree une quinzaine) : jamais touchee ; une taille de jeu viendra peut-etre (`ConfigureNotify`)
-    if !ours || !geo.is_some_and(|(_, _, w, h)| guard::main_sized(w, h)) || class.starts_with("SDLHelperWindow") || class.starts_with("GLFW3 Helper") {
+    if !ours || !geo.is_some_and(|(_, _, w, h)| guard::main_sized(w, h)) || guard::is_helper_class(&class) {
         return;
     }
     embedded::adopt(s, win, how);

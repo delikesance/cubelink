@@ -835,9 +835,6 @@ impl P2pBackend for IrohBackend {
         })
     }
 
-    fn notify_accepted(&self, _f: Friend) -> BoxFuture<'_, std::result::Result<(), String>> {
-        Box::pin(async { Ok(()) })
-    }
 
     fn fetch_manifest(&self, key: String) -> BoxFuture<'_, std::result::Result<HostManifest, String>> {
         Box::pin(async move {
@@ -848,7 +845,7 @@ impl P2pBackend for IrohBackend {
                 e => user_msg(&e),
             })?;
             // p2p ne transporte pas d'indication de l'hôte : voir `find_unknown_mods` (côté invité, après réception).
-            Ok(HostManifest { manifest, unknown_mods: vec![] })
+            Ok(HostManifest { manifest })
         })
     }
 

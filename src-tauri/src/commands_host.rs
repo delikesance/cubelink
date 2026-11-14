@@ -212,7 +212,7 @@ mod tests {
     use crate::p2p_backend::{BoxFuture, P2pBackend, ProgressFn, TransferControl};
     use crate::state::test_support::test_state;
     
-    use core_lib::types::{Error, Friend, Loader, LoaderSpec, Presence, VerifyCode};
+    use core_lib::types::{Error, Loader, LoaderSpec, Presence, VerifyCode};
     use p2p_lib::friend_code::FriendCodePayload;
     use p2p_lib::transfer::plan::Plan;
     use std::sync::Mutex;
@@ -274,9 +274,6 @@ mod tests {
         }
         fn send_request(&self, _t: FriendCodePayload, _n: String) -> BoxFuture<'_, Result<VerifyCode, String>> {
             Box::pin(async { Err("x".into()) })
-        }
-        fn notify_accepted(&self, _f: Friend) -> BoxFuture<'_, Result<(), String>> {
-            Box::pin(async { Ok(()) })
         }
         fn fetch_manifest(&self, _k: String) -> BoxFuture<'_, Result<crate::p2p_backend::HostManifest, String>> {
             Box::pin(async { Err("x".into()) })

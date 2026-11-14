@@ -1,7 +1,8 @@
 import { useDeferredValue, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { Services } from "../../services";
 import { IconButton } from "../../ui";
-import { ICONS, Icon, Panel } from "./Panel";
+import { ICONS, Icon } from "../../ui";
+import { Panel } from "./Panel";
 
 const MAX_LINES = 5000;
 const trim = (l: string[]) => (l.length > MAX_LINES ? l.slice(l.length - MAX_LINES) : l);

@@ -3,7 +3,7 @@ import { useServices, useShell } from "../../app/context";
 import { useAccounts } from "../../app/useAccounts";
 import { Button, Card } from "../../ui";
 import { SkinHead } from "../../app/AccountSwitcher";
-import { ICONS, Icon } from "../Main/Panel";
+import { ICONS, Icon } from "../../ui";
 import { OfflineForm } from "../Login/OfflineForm";
 import { messageOf, useDeviceLogin } from "../Login/useDeviceLogin";
 import { formatCountdown } from "../Login";

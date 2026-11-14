@@ -70,11 +70,6 @@ pub fn encode(p: &FriendCodePayload) -> String {
     format!("{PREFIX}{}", groups.join("-"))
 }
 
-/// `launcher://add/<code>`
-pub fn to_link(p: &FriendCodePayload) -> String {
-    format!("{LINK_PREFIX}{}", encode(p))
-}
-
 fn invalid(msg: &str) -> Error {
     Error::Invalid(format!("code ami : {msg}"))
 }
@@ -167,8 +162,7 @@ mod tests {
         assert!(c.len() >= 16 + 5);
         assert!(c[5..].bytes().all(|b| b.is_ascii_lowercase() || (b'2'..=b'7').contains(&b) || b == b'-'));
         assert!(c[5..].split('-').all(|g| g.len() <= 4));
-        assert!(to_link(&sample()).starts_with("launcher://add/mcl1-"));
-    }
+            }
 
     #[test]
     fn tolerant_parsing() {
@@ -177,7 +171,7 @@ mod tests {
         assert_eq!(parse(&c.to_uppercase()).unwrap(), p);
         assert_eq!(parse(&format!("  {}\r\n", c.replace('-', "- \n"))).unwrap(), p);
         assert_eq!(parse(&c.replace('-', "--")).unwrap(), p);
-        assert_eq!(parse(&to_link(&p)).unwrap(), p);
+        assert_eq!(parse(&format!("{LINK_PREFIX}{c}")).unwrap(), p);
     }
 
     #[test]
@@ -221,7 +215,7 @@ mod tests {
         #[test]
         fn roundtrip(p in payload_strategy()) {
             prop_assert_eq!(parse(&encode(&p)).unwrap(), p.clone());
-            prop_assert_eq!(parse(&to_link(&p)).unwrap(), p);
+            prop_assert_eq!(parse(&format!("{LINK_PREFIX}{}", encode(&p))).unwrap(), p);
         }
 
         #[test]

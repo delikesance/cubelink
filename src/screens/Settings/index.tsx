@@ -8,7 +8,7 @@ import { Logo } from "../Login/Logo";
 import { Accounts } from "./Accounts";
 import { useStageSupported } from "../../app/stage";
 import type { NetTest, Settings as BaseSettings } from "../../services/types";
-import { Icon } from "../Main/Panel";
+import { Icon } from "../../ui";
 import "../Friends/friends.css";
 import MyCode from "../Friends/MyCode";
 import Requests from "../Friends/Requests";

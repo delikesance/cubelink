@@ -18,21 +18,6 @@ export function badgeLabel(total: number): string {
   return total > 99 ? "99+" : total > 0 ? String(total) : "";
 }
 
-/** Nombre total de demandes en attente, tenu à jour par l'événement friend://request. */
-export function useRequestsTotal(): number {
-  const services = useServices();
-  const [total, setTotal] = useState(0);
-  useEffect(() => {
-    let alive = true;
-    services.friendRequests({ offset: 0, limit: 1 })
-      .then((p) => { if (alive) setTotal(p.total); })
-      .catch(() => {});
-    const off = services.onFriendRequest(() => setTotal((t) => t + 1));
-    return () => { alive = false; off(); };
-  }, [services]);
-  return total;
-}
-
 /** Pastille de l'onglet « Demandes » (à placer dans le libellé de l'onglet). */
 export function RequestsBadge({ total }: { total: number }) {
   const label = badgeLabel(total);

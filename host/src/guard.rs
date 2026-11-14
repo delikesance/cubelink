@@ -91,6 +91,14 @@ pub fn returned_rect(work: (i32, i32, i32, i32), want: (i32, i32)) -> (i32, i32,
     (l + (ww - w) / 2, t + (wh - h) / 2, w, h)
 }
 
+/// Classe d'une fenetre d'AIDE de SDL 3 ou de GLFW 3.4 (cachee, « message seulement », creee avant ou apres la fenetre du jeu) :
+/// jamais une fenetre de jeu, jamais touchee. Mesure sur un vrai Minecraft SDL 3 : les prendre pour des fenetres de jeu declenchait
+/// un repli « rattachement refuse » alors que LA fenetre du jeu etait adoptee et posee ; sur un gros modpack, l'adoption de la
+/// fenetre d'aide de GLFW attendait 21 s le fil du jeu, et celle de LA fenetre du jeu derriere elle.
+pub fn is_helper_class(c: &str) -> bool {
+    c.starts_with("SDLHelperWindow") || c.starts_with("SDL_HIDAPI") || c.starts_with("GLFW3 Helper")
+}
+
 /// Taille minimale d'une candidate PRINCIPALE (une fenetre qui peut etre LA fenetre du jeu). En dessous : fenetres d'essai et
 /// fenetres techniques (SDL 3 en cree une quinzaine par lancement, 10 x 10 ou 136 x 39), jamais tenues pour la fenetre du jeu.
 pub const MAIN_MIN: (i32, i32) = (200, 150);

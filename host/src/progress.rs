@@ -152,7 +152,6 @@ pub struct Tracker {
     shown: f32,
     ready_marker: bool,
     window_seen: bool,
-    pub lines: u64,
 }
 
 fn between<'a>(s: &'a str, a: &str, b: &str) -> Option<&'a str> {
@@ -179,16 +178,11 @@ impl Tracker {
             shown: 0.0,
             ready_marker: false,
             window_seen: false,
-            lines: 0,
         }
     }
 
     pub fn phase(&self) -> Phase {
         self.phase
-    }
-
-    pub fn ready_marker(&self) -> bool {
-        self.ready_marker
     }
 
     fn advance(&mut self, to: Phase) {
@@ -233,7 +227,6 @@ impl Tracker {
 
     /// Analyse une ligne de la sortie du jeu.
     pub fn feed_line(&mut self, line: &str) {
-        self.lines += 1;
         self.last_line = Instant::now();
         let l = line.trim_end();
         if l.contains("[Cubelink] READY") {
@@ -525,7 +518,6 @@ pub struct Closer {
     phase: ClosePhase,
     starts: BTreeMap<ClosePhase, Duration>,
     last_line: Instant,
-    saw_save: bool,
     exited: bool,
     shown: f32,
     activity: Option<(String, Instant)>,
@@ -540,16 +532,11 @@ impl Default for Closer {
 impl Closer {
     pub fn new() -> Closer {
         let now = Instant::now();
-        Closer { start: now, phase: ClosePhase::Ask, starts: BTreeMap::from([(ClosePhase::Ask, Duration::ZERO)]), last_line: now, saw_save: false, exited: false, shown: 0.0, activity: None }
+        Closer { start: now, phase: ClosePhase::Ask, starts: BTreeMap::from([(ClosePhase::Ask, Duration::ZERO)]), last_line: now, exited: false, shown: 0.0, activity: None }
     }
 
     pub fn phase(&self) -> ClosePhase {
         self.phase
-    }
-
-    /// Le jeu a annonce l'enregistrement du monde (ou n'avait pas de monde ouvert : alors `false` et c'est normal).
-    pub fn saw_save(&self) -> bool {
-        self.saw_save
     }
 
     fn advance(&mut self, to: ClosePhase) {
@@ -568,10 +555,8 @@ impl Closer {
         self.last_line = Instant::now();
         let l = line.trim_end();
         if l.contains("All chunks are saved") || l.contains("All dimensions are saved") {
-            self.saw_save = true;
             self.advance(ClosePhase::Exit); // l'enregistrement est fini : il ne reste que l'arret de Java
         } else if l.contains("Saving worlds") || l.contains("Saving chunks") || l.contains("Saving players") || l.contains("Saving level") {
-            self.saw_save = true;
             self.advance(ClosePhase::Save);
             self.activity = Some((l.split("]: ").last().unwrap_or(l).chars().take(80).collect(), Instant::now()));
         } else if l.contains("Stopping server") || l.contains("Stopping singleplayer server") || l.contains("Disconnecting") || l.contains("Server stopped") || l.contains("Stopping worker threads") || l.contains("Stopping!") {
@@ -631,6 +616,43 @@ impl Closer {
     }
 }
 
+/// Ligne du jeu sans son horodatage `[hh:mm:ss] ` de tete.
+pub fn line_body(line: &str) -> &str {
+    let l = line.trim_end();
+    let b = l.as_bytes();
+    if b.len() > 11 && b[0] == b'[' && b[3] == b':' && b[6] == b':' && b[9] == b']' && b[10] == b' ' && [1, 2, 4, 5, 7, 8].iter().all(|i| b[*i].is_ascii_digit()) {
+        &l[11..]
+    } else {
+        l
+    }
+}
+
+/// Bruit repete qui ne doit pas compter comme de l'activite du jeu : l'avertissement SDL 3 « Failed to synchronize SDL window » (une
+/// fois par image tant qu'une synchronisation de fenetre echoue), ou une ligne identique a la precedente, horodatage mis a part.
+pub fn is_noise(body: &str, last: Option<&str>) -> bool {
+    body.contains("Failed to synchronize SDL window") || last == Some(body)
+}
+
+/// Passe `line` au suivi du lancement ; vrai si c'etait du bruit (analysee mais sans compter comme activite).
+pub fn feed_tracker(t: &mut Tracker, last_body: &mut Option<String>, line: &str) -> bool {
+    let body = line_body(line);
+    let noise = is_noise(body, last_body.as_deref());
+    if last_body.as_deref() != Some(body) {
+        *last_body = Some(body.to_string());
+    }
+    if noise {
+        t.feed_line_quiet(line);
+    } else {
+        t.feed_line(line);
+    }
+    noise
+}
+
+/// Nombre de `.jar` du dossier des mods (0 s'il est illisible).
+pub fn count_jars(dir: &Path) -> u32 {
+    std::fs::read_dir(dir).map_or(0, |d| d.filter_map(|e| e.ok()).filter(|e| e.path().extension().is_some_and(|x| x == "jar")).count() as u32)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -683,7 +705,6 @@ mod tests {
         assert!(s.stages.iter().any(|x| x.phase == Phase::World && x.current));
         t.feed_line("[04:01:14] [Server thread/INFO]: System chat: Testeur joined the game");
         assert_eq!(t.phase(), Phase::Ready);
-        assert!(t.ready_marker());
     }
 
     /// Lignes reelles d'un lancement Linux (logs/test/latest.log) : le WARN SDL repete ne repousse pas la quietude, et analyser une
@@ -752,7 +773,6 @@ mod tests {
         assert_eq!(c.phase(), ClosePhase::Quit);
         c.feed_line("[10:00:01] [Server thread/INFO]: Saving players");
         assert_eq!(c.phase(), ClosePhase::Save);
-        assert!(c.saw_save());
         c.feed_line("[10:00:02] [Server thread/INFO]: Saving worlds");
         c.feed_line("[10:00:03] [Server thread/INFO]: ThreadedAnvilChunkStorage: All dimensions are saved");
         assert_eq!(c.phase(), ClosePhase::Exit);
@@ -767,11 +787,62 @@ mod tests {
     fn ready_marker_and_profile_roundtrip() {
         let mut t = Tracker::new(10, None);
         feed(&mut t, &["[x] [Render thread/INFO]: [STDOUT]: [Cubelink] READY title"]);
-        assert!(t.ready_marker() && t.phase() == Phase::Ready);
+        assert_eq!(t.phase(), Phase::Ready);
         let p = t.finish_profile();
         assert_eq!(p.runs, 1);
         let t2 = Tracker::new(10, Some(p));
         let mut t2 = t2;
         assert!(!t2.snapshot().first_run || t2.snapshot().remaining.is_none());
+    }
+
+    // lignes COPIEES du journal reel d'un lancement (Minecraft 26.3, LWJGL 3.4.3 / SDL 3, XWayland) ou l'avertissement SDL
+    // revenait ~10 fois par seconde apres le dernier message utile
+    const SPAM: &str = "[20:33:35] [Render thread/WARN]: Failed to synchronize SDL window: ";
+    const SPAM_NEXT_SECOND: &str = "[20:33:36] [Render thread/WARN]: Failed to synchronize SDL window: ";
+    const RELOAD: &str = "[20:33:32] [Render thread/INFO]: Reloading ResourceManager: vanilla, vanilla";
+    const SOUND: &str = "[20:33:34] [Render thread/INFO]: Sound engine started";
+    const ATLAS: &str = "[20:33:34] [Render thread/INFO]: Created: 1024x1024x0 minecraft:textures/atlas/gui.png-atlas";
+
+    #[test]
+    fn horodatage_retire() {
+        assert_eq!(line_body(SPAM), "[Render thread/WARN]: Failed to synchronize SDL window:");
+        assert_eq!(line_body("sans horodatage  "), "sans horodatage");
+        assert_eq!(line_body("[Cubelink] READY"), "[Cubelink] READY");
+    }
+
+    #[test]
+    fn le_bruit_sdl_repete_ne_repousse_pas_la_quietude() {
+        let (mut t, mut last) = (Tracker::new(0, None), None);
+        for l in [RELOAD, SOUND, ATLAS] {
+            assert!(!feed_tracker(&mut t, &mut last, l), "ligne utile prise pour du bruit : {l}");
+        }
+        t.window_shown();
+        std::thread::sleep(Duration::from_millis(300));
+        // le jeu se plaint en boucle, une ligne « nouvelle » (horodatage) a chaque seconde : ce n'est pas de l'activite
+        for l in [SPAM, SPAM, SPAM_NEXT_SECOND, SPAM_NEXT_SECOND] {
+            assert!(feed_tracker(&mut t, &mut last, l));
+        }
+        assert!(t.looks_ready(Duration::from_millis(200)), "le bruit a repousse la quietude");
+        assert!(t.silent_for() >= Duration::from_millis(300));
+    }
+
+    #[test]
+    fn une_ligne_utile_repousse_la_quietude() {
+        let (mut t, mut last) = (Tracker::new(0, None), None);
+        for l in [RELOAD, SOUND, ATLAS] {
+            feed_tracker(&mut t, &mut last, l);
+        }
+        t.window_shown();
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!feed_tracker(&mut t, &mut last, "[20:33:37] [Render thread/INFO]: Narrator loaded"), "une vraie ligne n'est pas du bruit");
+        assert!(!t.looks_ready(Duration::from_millis(200)), "une ligne utile doit relancer la quietude");
+    }
+
+    #[test]
+    fn une_ligne_identique_a_la_precedente_est_du_bruit_pas_la_premiere() {
+        assert!(!is_noise("a", None));
+        assert!(!is_noise("a", Some("b")));
+        assert!(is_noise("a", Some("a")));
+        assert!(is_noise("[Render thread/WARN]: Failed to synchronize SDL window:", None));
     }
 }

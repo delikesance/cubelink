@@ -1,19 +1,13 @@
 import { useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
-import { PixelHead } from "../screens/Main/Pixel";
+import { PixelHead } from "../ui";
 import type { AccountInfo, Services } from "../services/types";
 import { useShell } from "./context";
 import { useAccounts } from "./useAccounts";
+import { useSkinHead } from "./useSkinHead";
 
 /** Tête du skin d'un compte Microsoft (8×8, agrandie sans lissage) ; tête générée pour un compte hors ligne ou sans réseau. */
 export function SkinHead({ services, account, size }: { services: Services; account: AccountInfo; size: number }) {
-  const [src, setSrc] = useState<string | null>(null);
-  useEffect(() => {
-    setSrc(null);
-    if (account.kind !== "online") return;
-    let alive = true;
-    services.authSkinHead(account.uuid).then((s) => { if (alive) setSrc(s); }, () => {});
-    return () => { alive = false; };
-  }, [services, account.kind, account.uuid]);
+  const src = useSkinHead(services, account.kind === "online" ? "uuid" : null, account.uuid);
   return src
     ? <img className="acc-head px-img" src={src} width={size} height={size} alt="" />
     : <PixelHead className="acc-head" seed={account.uuid || account.name} size={size} />;
@@ -21,13 +15,7 @@ export function SkinHead({ services, account, size }: { services: Services; acco
 
 /** Tête du skin d'un ami, retrouvée par son pseudo ; tête générée (`seed`) si le pseudo est inconnu de Mojang ou hors réseau. */
 export function NameHead({ services, name, seed, size }: { services: Services; name: string; seed: string; size: number }) {
-  const [src, setSrc] = useState<string | null>(null);
-  useEffect(() => {
-    setSrc(null);
-    let alive = true;
-    services.skinHeadByName(name).then((s) => { if (alive) setSrc(s); }, () => {});
-    return () => { alive = false; };
-  }, [services, name]);
+  const src = useSkinHead(services, "name", name);
   return src
     ? <img className="px-img" src={src} width={size} height={size} alt="" />
     : <PixelHead seed={seed} size={size} />;

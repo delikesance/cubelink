@@ -1,15 +1,14 @@
 //! Fenetre du rideau : contenu (texte et avancement), rendu ARGB, minuteur.
 
 use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use x11rb::connection::RequestConnection;
 use x11rb::protocol::xproto::*;
 
 use super::{dispatch, embedded, guard_tick, run_if, watch, Shared};
-use crate::curtain::{self, Curtain, Model};
-use crate::flow::{bar_fraction, Cadence, Content, Effect, Event};
-use crate::progress::Phase;
+use crate::curtain::{self, Curtain, Frame};
+use crate::flow::{Cadence, Effect, Event};
 
 /// Cadence du minuteur : rapide pendant une animation, lente (filet de securite) sinon.
 const TICK_FAST: Duration = Duration::from_millis(16);
@@ -27,65 +26,10 @@ impl Render {
     }
 }
 
-/// Ce que montre le rideau a un instant donne.
-struct Frame {
-    title: String,
-    caption: String,
-    sentence: String,
-    /// Ligne rassurante.
-    note: Option<String>,
-    /// Avancement global (fermeture 0-50 %, lancement 50-100 % lors d'un changement de modpack).
-    fraction: f32,
-    /// Secondes depuis l'apparition du rideau.
-    t: f32,
-    cover: f32,
-    card: f32,
-    /// Mouvement reduit : logo et reflet de la barre figes.
-    calm: bool,
-}
-
-/// Phrase, ligne rassurante et avancement brut du suivi correspondant a `content` ; `None` : rien a suivre.
-fn progress(st: &mut super::State, content: Content) -> Option<(&'static str, Option<&'static str>, f32)> {
-    match content {
-        Content::Wait => None,
-        Content::Close => st.closer.as_mut().map(|c| {
-            let sn = c.snapshot();
-            let i = sn.stages.iter().position(|x| x.current).unwrap_or(0);
-            let sentence = match i {
-                0 | 1 => "Fermeture du jeu en cours…",
-                2 => "Enregistrement de ton monde…",
-                _ => "Presque terminé…",
-            };
-            (sentence, Some("Ton monde est enregistré avant la fermeture : rien n'est perdu."), sn.fraction)
-        }),
-        Content::Launch(_) => st.tracker.as_mut().map(|tr| {
-            let sn = tr.snapshot();
-            let sentence = match sn.phase {
-                Phase::Java | Phase::Scan | Phase::Mixin | Phase::Bootstrap => "Préparation du jeu…",
-                Phase::ModLoad => "Chargement des mods…",
-                Phase::Window | Phase::Resources | Phase::Textures => "Mise en place des textures et des sons…",
-                Phase::World => "Ouverture de ton monde…",
-                Phase::Ready => "C'est prêt !",
-            };
-            let slow = sn.overdue || sn.silent_for > Duration::from_secs(6);
-            (sentence, slow.then_some("Ça prend un peu plus de temps que d'habitude, tout va bien."), sn.fraction)
-        }),
-    }
-}
-
 /// Tout ce que montre le rideau maintenant (une seule prise du verrou).
 fn frame(s: &Shared) -> Frame {
-    let now = Instant::now();
-    let mut st = s.lock();
-    let t = st.curtain_t0.map_or(0.0, |t0| now.saturating_duration_since(t0).as_secs_f32());
-    let (cover, card) = st.machine.levels(now);
-    let content = st.machine.content();
-    let (sentence, note, fraction) = match progress(&mut st, content) {
-        Some((sentence, note, raw)) => (sentence, note, bar_fraction(content, raw)),
-        None => ("Un instant…", None, bar_fraction(Content::Wait, 0.0)),
-    };
-    let calm = st.machine.calm();
-    Frame { title: st.title.clone(), caption: st.caption.clone(), sentence: sentence.to_string(), note: note.map(str::to_string), fraction, t, cover, card, calm }
+    let st = &mut *s.lock();
+    Frame::capture(&st.machine, &mut st.closer, &mut st.tracker, &st.title, &st.caption, st.curtain_t0)
 }
 
 fn cadence(s: &Shared) -> Cadence {
@@ -176,7 +120,7 @@ pub(super) fn present(s: &Shared) {
     let Some((_, _, w, h)) = s.lock().curtain_rect else { return };
     let (w, h) = (w.max(1) as usize, h.max(1) as usize);
     let f = frame(s);
-    let m = Model { title: &f.title, caption: &f.caption, sentence: &f.sentence, note: f.note.as_deref(), fraction: f.fraction, cover: f.cover, card: f.card, t: f.t, calm: f.calm };
+    let m = f.model();
     let mut r = s.render.lock().unwrap_or_else(|e| e.into_inner());
     let Render { curtain, buf } = &mut *r;
     let pm = curtain.render_ref(&m, w as u32, h as u32, s.scale);

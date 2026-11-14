@@ -1,9 +1,8 @@
 import "./shared.css";
-import { useEffect, useRef, useState, type CSSProperties } from "react";
+import type { CSSProperties } from "react";
 import type { Instance, Services } from "../../services";
 import { avatarColors } from "./accent";
 import { useArtImage } from "./artImage";
-import { DefaultArt } from "./DefaultArt";
 
 type ImgServices = Pick<Services, "instancesArtImage">;
 
@@ -23,9 +22,6 @@ export function initials(name: string): string {
 export const sourceLabel = (s: "curseforge" | "modrinth" | "custom") =>
   s === "curseforge" ? "CurseForge" : s === "modrinth" ? "Modrinth" : null;
 
-/** N'accepte que http(s) pour le lien externe. */
-export const safeUrl = (u: string | null | undefined) => (u && /^https?:\/\//i.test(u) ? u : null);
-
 /** Icône du modpack, sinon initiales sur fond de la couleur de l'instance. */
 export function Avatar({ services, inst, className }: { services: ImgServices; inst: Instance; className: string }) {
   const img = useArtImage(services, inst.id, inst.art?.icon, true);
@@ -34,65 +30,6 @@ export function Avatar({ services, inst, className }: { services: ImgServices; i
     <span ref={img.ref} className={`${className}${showImg ? " has-img" : ""}`} style={avatarStyle(inst)} aria-hidden="true">
       {showImg ? <img src={img.src!} alt="" onError={img.markError} /> : initials(inst.name)}
     </span>
-  );
-}
-
-/** Une couche de décor : image par défaut (blocs) toujours dessous, image du modpack par-dessus quand elle est prête. */
-/** Côté le plus grand de l'écran en pixels physiques (2560 max) : le décor est demandé à cette taille, pas plus. */
-export function backdropPx(): number {
-  if (typeof window === "undefined" || !window.screen) return 1920;
-  const px = Math.max(window.screen.width || 0, window.screen.height || 0) * (window.devicePixelRatio || 1);
-  return Math.min(2560, Math.max(1280, Math.ceil(px)));
-}
-
-/** Agrandissement au-delà duquel une image étirée en plein cadre se voit pixelisée : on la montre alors floutée. */
-export const SOFT_UPSCALE = 1.5;
-
-/** Agrandissement réel d'une image en `object-fit: cover` dans une boîte `w` x `h` (pixels CSS). */
-export function coverUpscale(natural: { w: number; h: number }, box: { w: number; h: number }, dpr = 1): number {
-  if (natural.w <= 0 || natural.h <= 0) return 1;
-  return Math.max(box.w / natural.w, box.h / natural.h) * dpr;
-}
-
-function BackdropLayer({ services, inst, fading }: { services: ImgServices; inst: Instance | null; fading?: boolean }) {
-  const img = useArtImage(services, inst?.id ?? "", inst?.art?.screenshots[0] ?? null, false, backdropPx());
-  const [soft, setSoft] = useState(false);
-  const onLoad = (e: React.SyntheticEvent<HTMLImageElement>) => {
-    const el = e.currentTarget;
-    const up = coverUpscale({ w: el.naturalWidth, h: el.naturalHeight }, { w: el.clientWidth, h: el.clientHeight }, window.devicePixelRatio || 1);
-    setSoft(up > SOFT_UPSCALE);
-  };
-  return (
-    <div className={`home-layer${fading ? " is-out" : ""}`} aria-hidden="true">
-      <DefaultArt className="home-default-art" />
-      {img.status === "ready" && img.src && (
-        <img className={`home-bg${soft ? " is-soft" : ""}`} src={img.src} alt="" onLoad={onLoad} onError={img.markError} />
-      )}
-    </div>
-  );
-}
-
-/**
- * Décor plein cadre de l'accueil. Au changement d'instance, l'ancien décor reste dessous et s'efface :
- * fondu croisé de 450 ms (le nouveau entre par-dessus).
- */
-export function Backdrop({ services, inst }: { services: ImgServices; inst: Instance | null }) {
-  const [prev, setPrev] = useState<Instance | null>(null);
-  const last = useRef<Instance | null>(inst);
-  useEffect(() => {
-    const before = last.current;
-    last.current = inst;
-    if (!before || before.id === inst?.id) return;
-    setPrev(before);
-    const t = setTimeout(() => setPrev(null), 450);
-    return () => clearTimeout(t);
-  }, [inst]);
-  return (
-    <div className="home-bgwrap" aria-hidden="true">
-      {prev && <BackdropLayer key={`p-${prev.id}`} services={services} inst={prev} fading />}
-      <BackdropLayer key={inst?.id ?? "none"} services={services} inst={inst} />
-      <div className="home-veil" />
-    </div>
   );
 }
 

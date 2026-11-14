@@ -1516,7 +1516,7 @@ pub fn undo(game_dir: &Path, backup_id: &str, index: &StoreIndex, minecraft: &st
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mod_meta::tests::{jar, zip_bytes};
+    use crate::mod_meta::tests::zip_bytes;
     use crate::providers::curseforge_api::CfApi;
     use crate::providers::modrinth_api::ModrinthClient;
     use serde_json::json;
@@ -2040,11 +2040,5 @@ mod tests {
         let t = std::time::Instant::now();
         let c = check_content(&p, &inst.minecraft, inst.loader.loader, &src.join("minecraft"), &e.store, &e.index, &dlo(), BrowseSource::Modrinth, &project, None).await.unwrap();
         println!("en {:?} : {c:#?}", t.elapsed());
-    }
-
-    #[allow(dead_code)]
-    fn _keep(_: &Path) {
-        let d = tempfile::tempdir().unwrap();
-        let _ = jar(d.path(), "x.jar", &[]);
     }
 }

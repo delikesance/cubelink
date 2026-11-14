@@ -11,11 +11,8 @@
 
 use std::ffi::c_void;
 use std::ptr::{null, null_mut};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use cubelink_host::{FallbackReason, HostEvent, Observer};
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, POINT, RECT, WAIT_OBJECT_0};
 use windows_sys::Win32::System::Threading::{TerminateProcess, WaitForSingleObject, PROCESS_INFORMATION, STARTF_USESHOWWINDOW, STARTUPINFOW};
 use windows_sys::Win32::Graphics::Gdi::{ClientToScreen, CreateRectRgn, DeleteObject, GetRgnBox, GetWindowRgn, MonitorFromWindow, MONITOR_DEFAULTTONULL};
@@ -394,48 +391,17 @@ pub fn assert_given_back(h: isize) {
     assert_eq!(exstyle(h) & WS_EX_TOOLWINDOW, 0, "fenetre rendue absente de la barre des taches");
 }
 
-// ------------------------------------------------------------------------------------------------ evenements de l'hote
-
-/// Evenements recus de l'hote (l'observateur est appele depuis ses fils).
-#[derive(Clone, Default)]
-pub struct Events(Arc<Mutex<Vec<HostEvent>>>);
-
-impl Events {
-    pub fn observer(&self) -> Observer {
-        let sink = self.0.clone();
-        Arc::new(move |ev: &HostEvent| sink.lock().unwrap().push(ev.clone()))
-    }
-
-    pub fn all(&self) -> Vec<HostEvent> {
-        self.0.lock().unwrap().clone()
-    }
-
-    pub fn fallbacks(&self) -> Vec<(FallbackReason, String)> {
-        self.all().into_iter().filter_map(|e| if let HostEvent::Fallback { reason, detail } = e { Some((reason, detail)) } else { None }).collect()
-    }
-
-    /// Classes des fenetres annoncees par `HostEvent::Adopted`, dans l'ordre.
-    pub fn adopted(&self) -> Vec<String> {
-        self.all().into_iter().filter_map(|e| if let HostEvent::Adopted { class, .. } = e { Some(class) } else { None }).collect()
-    }
-
-    pub fn logs(&self) -> Vec<String> {
-        self.all().into_iter().filter_map(|e| if let HostEvent::Log(m) = e { Some(m) } else { None }).collect()
-    }
-
-    /// Une ligne du journal contient `needle`.
-    pub fn logged(&self, needle: &str) -> bool {
-        self.logs().iter().any(|l| l.contains(needle))
-    }
-
-    /// Echec du test si le journal ne contient pas `needle` (affiche alors tout le journal).
-    #[track_caller]
-    pub fn assert_logged(&self, needle: &str) {
-        assert!(self.logged(needle), "journal sans {needle:?} :\n{}", self.logs().join("\n"));
-    }
-}
+#[path = "../shared/events.rs"]
+mod events;
+#[allow(unused_imports)] // chaque scenario n'utilise qu'une partie des outils
+pub use events::Events;
 
 // ------------------------------------------------------------------------------------------------ echantillonnage
+
+#[path = "../shared/sampler.rs"]
+mod sampler;
+#[allow(unused_imports)]
+pub use sampler::Sampler;
 
 /// Echantillonne en continu (toutes les ~0,5 ms, sur un fil a part) les fenetres de classe `class` du processus `pid` et retient
 /// tout instant ou l'une d'elles est a la fois VISIBLE, A L'ECRAN et AVEC SON CADRE : c'est la fenetre de jeu autonome que le joueur
@@ -443,11 +409,6 @@ impl Events {
 ///
 /// `strict` (lancement cache) : la fenetre ne doit se voir QUE posee, sans cadre, exactement sur `zone` ; tout autre instant ou
 /// elle est visible a l'ecran est retenu.
-pub struct Sampler {
-    stop: Arc<AtomicBool>,
-    thread: Option<std::thread::JoinHandle<(u64, Vec<String>)>>,
-}
-
 impl Sampler {
     pub fn start(pid: u32, class: &str) -> Sampler {
         Self::run(pid, class, None)
@@ -458,12 +419,9 @@ impl Sampler {
     }
 
     fn run(pid: u32, class: &str, zone: Option<(i32, i32, i32, i32)>) -> Sampler {
-        let stop = Arc::new(AtomicBool::new(false));
-        let (flag, class) = (stop.clone(), class.to_string());
-        let thread = std::thread::spawn(move || {
-            let t0 = Instant::now();
-            let (mut samples, mut seen) = (0u64, Vec::new());
-            while !flag.load(Ordering::Relaxed) {
+        let class = class.to_string();
+        Sampler::spawn(move || {
+            move |t0: Instant, seen: &mut Vec<String>| {
                 for h in windows_of(pid, &class) {
                     // lectures non atomiques : un etat fautif n'est retenu que s'il se relit a l'identique
                     let bad = |h: isize| visible(h) && on_screen(h) && (framed(h) || zone.is_some_and(|z| rect(h) != z));
@@ -471,23 +429,7 @@ impl Sampler {
                         seen.push(format!("+{} ms : fenetre {h:#x} visible en {:?}, style {:#x}", t0.elapsed().as_millis(), rect(h), style(h)));
                     }
                 }
-                samples += 1;
-                std::thread::sleep(Duration::from_micros(500));
             }
-            (samples, seen)
-        });
-        Sampler { stop, thread: Some(thread) }
-    }
-
-    /// Arrete l'echantillonnage : (nombre d'echantillons, apparitions fautives).
-    pub fn stop(mut self) -> (u64, Vec<String>) {
-        self.stop.store(true, Ordering::Relaxed);
-        self.thread.take().map(|t| t.join().expect("fil d'echantillonnage")).unwrap_or_default()
-    }
-}
-
-impl Drop for Sampler {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
+        })
     }
 }

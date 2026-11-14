@@ -1,5 +1,6 @@
 import "./avatar.css";
-import { useEffect, useState, type CSSProperties } from "react";
+import type { CSSProperties } from "react";
+import { useSkinHead } from "../../app/useSkinHead";
 import type { Services } from "../../services/types";
 
 const PALETTE = ["#8EC5E8", "#F0A080", "#C8A8E0", "#B8DC8C", "#8CB4F0", "#F2C98A", "#E8A0C0", "#8ED8C4"];
@@ -18,14 +19,7 @@ export type AvatarPresence = "online" | "offline" | "none";
  * Avec `services`, la vraie tête du skin (retrouvée par pseudo) remplace l'initiale quand elle est disponible.
  */
 export function Avatar({ name, size = 44, presence = "none", tone, services }: { name: string; size?: number; presence?: AvatarPresence; tone?: string; services?: Services }) {
-  const [head, setHead] = useState<string | null>(null);
-  useEffect(() => {
-    setHead(null);
-    if (!services) return;
-    let alive = true;
-    services.skinHeadByName(name).then((s) => { if (alive) setHead(s); }, () => {});
-    return () => { alive = false; };
-  }, [services, name]);
+  const head = useSkinHead(services, services ? "name" : null, name);
   const style: CSSProperties = { width: size, height: size, background: tone ?? avatarColor(name), fontSize: Math.round(size * 0.36) };
   return (
     <span className="av" style={style} aria-hidden="true">

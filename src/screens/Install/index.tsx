@@ -2,7 +2,7 @@ import { useEffect, useRef } from "react";
 import "./install.css";
 import { useScreenTitle, useShell } from "../../app/context";
 import { Button } from "../../ui";
-import { DefaultArt } from "../Main/DefaultArt";
+import { DefaultArt } from "../../ui";
 import { TransferPanel } from "./TransferPanel";
 import { useTransfer } from "./useTransfer";
 

@@ -5,7 +5,7 @@ const HAIRS = ["#2b1d14", "#b8332c", "#d9b44a", "#111111", "#6b4a2b", "#e8e1d0",
 const EYES = ["#3f8f5a", "#3a5ba8", "#6b4aa8", "#5a3a20", "#2a6f7a"];
 
 /** Empreinte stable d'une chaîne (FNV-1a 32 bits). */
-export function hash(s: string): number {
+function hash(s: string): number {
   let h = 0x811c9dc5;
   for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 0x01000193) >>> 0;
   return h;

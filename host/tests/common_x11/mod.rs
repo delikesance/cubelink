@@ -18,7 +18,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use cubelink_host::{FallbackReason, HostEvent, Observer};
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::*;
 use x11rb::rust_connection::RustConnection;
@@ -375,73 +374,29 @@ impl Drop for FakeWm {
     }
 }
 
-// ------------------------------------------------------------------------------------------------ evenements de l'hote
-
-/// Evenements recus de l'hote (l'observateur est appele depuis ses fils).
-#[derive(Clone, Default)]
-pub struct Events(Arc<Mutex<Vec<HostEvent>>>);
-
-impl Events {
-    pub fn observer(&self) -> Observer {
-        let sink = self.0.clone();
-        Arc::new(move |ev: &HostEvent| sink.lock().unwrap().push(ev.clone()))
-    }
-
-    pub fn all(&self) -> Vec<HostEvent> {
-        self.0.lock().unwrap().clone()
-    }
-
-    pub fn fallbacks(&self) -> Vec<(FallbackReason, String)> {
-        self.all().into_iter().filter_map(|e| if let HostEvent::Fallback { reason, detail } = e { Some((reason, detail)) } else { None }).collect()
-    }
-
-    /// Classes des fenetres annoncees par `HostEvent::Adopted`, dans l'ordre.
-    pub fn adopted(&self) -> Vec<String> {
-        self.all().into_iter().filter_map(|e| if let HostEvent::Adopted { class, .. } = e { Some(class) } else { None }).collect()
-    }
-
-    /// Valeurs de `HostEvent::Fullscreen`, dans l'ordre.
-    pub fn fullscreens(&self) -> Vec<bool> {
-        self.all().into_iter().filter_map(|e| if let HostEvent::Fullscreen(on) = e { Some(on) } else { None }).collect()
-    }
-
-    pub fn logs(&self) -> Vec<String> {
-        self.all().into_iter().filter_map(|e| if let HostEvent::Log(m) = e { Some(m) } else { None }).collect()
-    }
-
-    /// Une ligne du journal contient `needle`.
-    pub fn logged(&self, needle: &str) -> bool {
-        self.logs().iter().any(|l| l.contains(needle))
-    }
-
-    /// Echec du test si le journal ne contient pas `needle` (affiche alors tout le journal).
-    #[track_caller]
-    pub fn assert_logged(&self, needle: &str) {
-        assert!(self.logged(needle), "journal sans {needle:?} :\n{}", self.logs().join("\n"));
-    }
-}
+#[path = "../shared/events.rs"]
+mod events;
+#[allow(unused_imports)] // chaque scenario n'utilise qu'une partie des outils
+pub use events::Events;
 
 // ------------------------------------------------------------------------------------------------ echantillonnage
+
+#[path = "../shared/sampler.rs"]
+mod sampler;
+#[allow(unused_imports)]
+pub use sampler::Sampler;
 
 /// Echantillonne en continu (toutes les ~0,5 ms, sur un fil et une connexion a part) les fenetres du processus `pid` qui sont des
 /// enfants DIRECTS de la racine et de classe `class` : tout instant ou l'une d'elles est VISIBLE est une fenetre de jeu autonome
 /// que le joueur ne doit jamais apercevoir tant que le jeu est dans la Scene.
-pub struct Sampler {
-    stop: Arc<AtomicBool>,
-    thread: Option<std::thread::JoinHandle<(u64, Vec<String>)>>,
-}
-
 impl Sampler {
     pub fn start(pid: u32, class: &str) -> Sampler {
-        let stop = Arc::new(AtomicBool::new(false));
-        let (flag, class) = (stop.clone(), class.to_string());
-        let thread = std::thread::spawn(move || {
+        let class = class.to_string();
+        Sampler::spawn(move || {
             let (c, n) = RustConnection::connect(None).expect("connexion de l'echantillonneur");
             let root = c.setup().roots[n].root;
             let pid_atom = c.intern_atom(false, b"_NET_WM_PID").unwrap().reply().unwrap().atom;
-            let t0 = Instant::now();
-            let (mut samples, mut seen) = (0u64, Vec::new());
-            while !flag.load(Ordering::Relaxed) {
+            move |t0: Instant, seen: &mut Vec<String>| {
                 let kids = c.query_tree(root).unwrap().reply().unwrap().children;
                 for w in kids {
                     let Some(p) = c.get_property(false, w, pid_atom, AtomEnum::CARDINAL, 0, 1).ok().and_then(|k| k.reply().ok()).and_then(|r| r.value32().and_then(|mut v| v.next())) else { continue };
@@ -453,24 +408,8 @@ impl Sampler {
                         seen.push(format!("+{} ms : fenetre {w:#x} visible sur la racine", t0.elapsed().as_millis()));
                     }
                 }
-                samples += 1;
-                std::thread::sleep(Duration::from_micros(500));
             }
-            (samples, seen)
-        });
-        Sampler { stop, thread: Some(thread) }
-    }
-
-    /// Arrete l'echantillonnage : (nombre d'echantillons, apparitions fautives).
-    pub fn stop(mut self) -> (u64, Vec<String>) {
-        self.stop.store(true, Ordering::Relaxed);
-        self.thread.take().map(|t| t.join().expect("fil d'echantillonnage")).unwrap_or_default()
-    }
-}
-
-impl Drop for Sampler {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
+        })
     }
 }
 

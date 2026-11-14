@@ -214,26 +214,26 @@ impl Core {
 
     // --- observateur de l'hote : appele depuis ses fils, doit rendre la main vite et ne jamais rappeler l'hote ---
 
-    #[cfg_attr(not(any(windows, test)), allow(dead_code))]
+    #[cfg_attr(not(any(windows, target_os = "linux", test)), allow(dead_code))]
     fn on_log(&self, line: &str) {
         self.note("hote", line);
     }
 
-    #[cfg_attr(not(any(windows, test)), allow(dead_code))]
+    #[cfg_attr(not(any(windows, target_os = "linux", test)), allow(dead_code))]
     fn on_adopted(&self, class: &str, after_ms: u64) {
         lock(&self.health).adopted();
         self.note("hote", &format!("fenetre du jeu adoptee (classe {class}, apres {after_ms} ms)"));
     }
 
     /// Le jeu entre ou sort du plein ecran : l'interface met la fenetre du launcher en plein ecran pour lui (`stage://fullscreen`).
-    #[cfg_attr(not(any(windows, test)), allow(dead_code))]
+    #[cfg_attr(not(any(windows, target_os = "linux", test)), allow(dead_code))]
     fn on_fullscreen(&self, on: bool) {
         self.emit("stage://fullscreen", serde_json::Value::Bool(on), true);
     }
 
     /// L'hote a rendu sa fenetre au jeu : a partir d'ici le lancement en cours se comporte comme hors Scene (plus de rideau a
     /// ouvrir, plus de sortie a suivre, fermer le launcher ne ferme plus le jeu).
-    #[cfg_attr(not(any(windows, test)), allow(dead_code))]
+    #[cfg_attr(not(any(windows, target_os = "linux", test)), allow(dead_code))]
     fn on_fallback(&self, reason: &str, detail: &str) {
         self.live.store(false, Ordering::SeqCst);
         let cut = lock(&self.health).fallback(reason != REASON_REQUESTED, reason);
@@ -290,62 +290,7 @@ pub(crate) trait HostApi: Send + Sync {
     fn expect_hidden(&self, hidden: bool);
 }
 
-#[cfg(windows)]
-impl HostApi for cubelink_host::GameHost {
-    fn relayout(&self, x: i32, y: i32, w: i32, h: i32) {
-        self.relayout(x, y, w, h)
-    }
-    fn begin(&self, title: &str, mods_dir: &Path, profile_path: &Path) {
-        self.begin(title, "Lancement", Some(mods_dir), Some(profile_path))
-    }
-    fn watch(&self, pid: u32) {
-        self.watch(pid)
-    }
-    fn feed_line(&self, line: &str) {
-        self.feed_line(line)
-    }
-    fn is_ready(&self) -> bool {
-        self.is_ready(READY_QUIET, READY_MAX)
-    }
-    fn mark_ready(&self, profile_path: &Path) {
-        self.mark_ready(Some(profile_path))
-    }
-    fn reveal(&self) {
-        self.reveal()
-    }
-    fn begin_close(&self, title: &str) {
-        self.begin_close(title)
-    }
-    fn request_close(&self) {
-        self.request_close()
-    }
-    fn cancel_close(&self) {
-        self.cancel_close()
-    }
-    fn run_finished(&self) {
-        self.run_finished()
-    }
-    fn set_view(&self, game: bool) {
-        self.set_view(game)
-    }
-    fn view(&self) -> (bool, bool) {
-        self.view()
-    }
-    fn panel(&self) -> bool {
-        self.panel()
-    }
-    fn set_panel(&self, open: bool, width_px: i32) -> bool {
-        self.set_panel(open, width_px)
-    }
-    fn set_calm(&self, calm: bool) {
-        self.set_calm(calm)
-    }
-    fn expect_hidden(&self, hidden: bool) {
-        self.expect_hidden(hidden)
-    }
-}
-
-#[cfg(target_os = "linux")]
+#[cfg(any(windows, target_os = "linux"))]
 impl HostApi for cubelink_host::GameHost {
     fn relayout(&self, x: i32, y: i32, w: i32, h: i32) {
         self.relayout(x, y, w, h)
@@ -530,52 +475,16 @@ impl Stage {
         }
     }
 
-    /// Cree la zone du jeu dans la fenetre principale. A appeler depuis le fil principal (`setup`).
-    #[cfg(windows)]
+    /// Cree la zone du jeu dans la fenetre principale. A appeler depuis le fil principal (`setup`). Linux : la zone est une
+    /// sous-fenetre X11 de celle du launcher (GDK_BACKEND=x11, voir `lib.rs`) ; sous Wayland natif (pas de XID) ou sans serveur
+    /// X11 joignable, le jeu garde sa propre fenetre.
+    #[cfg(any(windows, target_os = "linux"))]
     pub fn attach(&self, window: &tauri::WebviewWindow, sink: EventSink) {
-        let Ok(hwnd) = window.hwnd() else {
-            self.note("Scene indisponible : fenetre du launcher sans identifiant natif");
+        let Some(handle) = own_handle(window) else {
+            self.note("Scene indisponible : fenetre du launcher sans identifiant natif (X11 requis sous Linux)");
             return;
         };
-        match cubelink_host::GameHost::embed(hwnd.0 as isize) {
-            Ok(h) => {
-                let _ = self.core.sink.set(sink);
-                let core = self.core.clone();
-                h.set_observer(Arc::new(move |ev| match ev {
-                    cubelink_host::HostEvent::Log(line) => core.on_log(line),
-                    cubelink_host::HostEvent::Adopted { class, after_ms } => core.on_adopted(class, *after_ms),
-                    cubelink_host::HostEvent::Fallback { reason, detail } => core.on_fallback(reason.as_str(), detail),
-                    cubelink_host::HostEvent::Fullscreen(on) => core.on_fullscreen(*on),
-                }));
-                self.refresh_calm(&h, true);
-                let _ = self.host.set(Box::new(h));
-                self.note(match self.unavailable_reason() {
-                    None => "Scene activee : le jeu s'affichera dans la fenetre du launcher",
-                    Some(_) => "Scene prete mais reglage « Jeu integre » desactive : le jeu gardera sa propre fenetre",
-                });
-                self.relayout(window);
-            }
-            Err(e) => {
-                eprintln!("[Cubelink] zone de jeu integree indisponible : {e}");
-                self.note(&format!("Scene indisponible : {e}"));
-            }
-        }
-    }
-
-    /// Linux : la zone du jeu est une sous-fenetre X11 de la fenetre du launcher (GDK_BACKEND=x11, voir `lib.rs`). Sous Wayland
-    /// natif (pas de XID) ou sans serveur X11 joignable, le jeu garde sa propre fenetre.
-    #[cfg(target_os = "linux")]
-    pub fn attach(&self, window: &tauri::WebviewWindow, sink: EventSink) {
-        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-        let xid = match window.window_handle().map(|h| h.as_raw()) {
-            Ok(RawWindowHandle::Xlib(h)) => h.window as isize,
-            Ok(RawWindowHandle::Xcb(h)) => h.window.get() as isize,
-            _ => {
-                self.note("Scene indisponible : la fenetre du launcher n'est pas une fenetre X11");
-                return;
-            }
-        };
-        match cubelink_host::GameHost::embed(xid) {
+        match cubelink_host::GameHost::embed(handle) {
             Ok(h) => {
                 let _ = self.core.sink.set(sink);
                 let core = self.core.clone();
@@ -641,13 +550,9 @@ impl Stage {
         let changed = h.set_panel(open, pw);
         if changed {
             if open {
-                #[cfg(windows)]
-                if let Ok(hwnd) = window.hwnd() {
-                    crate::foreground::focus_own_window(hwnd.0 as isize);
-                }
-                #[cfg(target_os = "linux")]
-                if let Some(xid) = own_xid(window) {
-                    crate::foreground::focus_own_window(xid);
+                #[cfg(any(windows, target_os = "linux"))]
+                if let Some(handle) = own_handle(window) {
+                    crate::foreground::focus_own_window(handle);
                 }
                 let _ = window.set_focus();
             }
@@ -868,9 +773,15 @@ fn x11_session_of(gdk_backend: Option<&str>, display: bool) -> bool {
     display && gdk_backend.is_some_and(|b| b.split(',').next().is_some_and(|f| f.trim() == "x11"))
 }
 
-/// XID natif de la fenetre du launcher (Linux, fenetre X11).
+/// Identifiant natif de la fenetre du launcher : HWND (Windows).
+#[cfg(windows)]
+fn own_handle(window: &tauri::WebviewWindow) -> Option<isize> {
+    window.hwnd().ok().map(|h| h.0 as isize)
+}
+
+/// Identifiant natif de la fenetre du launcher : XID (Linux, fenetre X11).
 #[cfg(target_os = "linux")]
-fn own_xid(window: &tauri::WebviewWindow) -> Option<isize> {
+fn own_handle(window: &tauri::WebviewWindow) -> Option<isize> {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     match window.window_handle().ok()?.as_raw() {
         RawWindowHandle::Xlib(h) => Some(h.window as isize),

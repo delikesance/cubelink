@@ -3,7 +3,8 @@ import type { FixResult, ModEntry, ModIssue, Services } from "../../services";
 import { Button, IconButton } from "../../ui";
 import { avatarColors } from "./accent";
 import { FixDialog } from "./FixDialog";
-import { ICONS, Icon, Panel } from "./Panel";
+import { ICONS, Icon } from "../../ui";
+import { Panel } from "./Panel";
 import { useContextMenu } from "../../app/useContextMenu";
 
 export interface ModsPanelProps {

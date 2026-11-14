@@ -63,7 +63,7 @@ impl ManifestServer {
                 Some(Arc::new(b))
             }
         };
-        *self.inner.current.lock().unwrap_or_else(|p| p.into_inner()) = bytes;
+        *crate::util::lock(&self.inner.current) = bytes;
         Ok(())
     }
 
@@ -88,7 +88,7 @@ impl std::fmt::Debug for ManifestHandler {
 impl ProtocolHandler for ManifestHandler {
     async fn accept(&self, conn: Connection) -> std::result::Result<(), AcceptError> {
         let peer = conn.remote_id().to_string();
-        let current = self.inner.current.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        let current = crate::util::lock(&self.inner.current).clone();
         if !self.inner.authorizer.is_allowed(&peer) {
             let code = self.inner.authorizer.denial(&peer).close_code().unwrap_or(CLOSE_DENIED);
             conn.close(code.into(), b"denied");

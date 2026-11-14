@@ -2,7 +2,7 @@
 
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use core_lib::types::{Error, Friend, FriendRequest, Result, TrustLevel, VerifyCode};
 use rusqlite::{params, Connection, OptionalExtension, Row, TransactionBehavior};
@@ -64,10 +64,7 @@ fn db(e: rusqlite::Error) -> Error {
 }
 
 fn now() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+    crate::util::now_secs() as i64
 }
 
 fn check_key(key: &str) -> Result<()> {
@@ -231,7 +228,7 @@ impl FriendsDb {
     }
 
     fn lock(&self) -> MutexGuard<'_, Connection> {
-        self.conn.lock().unwrap_or_else(|p| p.into_inner())
+        crate::util::lock(&self.conn)
     }
 
     /// Version de schéma de la base.

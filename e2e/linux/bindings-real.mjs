@@ -76,7 +76,7 @@ const SCENARIO = async () => {
   await step("authAccounts", () => svc.authAccounts());
   const s = await step("settingsGet", () => svc.settingsGet());
   if (s) {
-    await step("settingsSet", () => svc.settingsSet({ ...s, close_on_launch: !s.close_on_launch, overlay_hotkey: "Ctrl+Alt+F9" }));
+    await step("settingsSet", () => svc.settingsSet({ ...s, close_on_launch: !s.close_on_launch, overlay_hotkey: "Ctrl+Alt+F9", start_with_os: false }));
     await step("settingsGet (relu)", () => svc.settingsGet());
     await step("settingsSet (refus français)", () => svc.settingsSet({ ...s, allow_relay: false, relay_only: true }), true);
   }
@@ -143,8 +143,8 @@ try {
       if (!r.ok) failed = true;
     }
     const settings = JSON.parse(fs.readFileSync(path.join(dataDir, "settings.json"), "utf8"));
-    const disk = settings.overlay_hotkey === "Ctrl+Alt+F9";
-    console.log(`${disk ? "OK  " : "ÉCHEC"} settings.json sur le disque — overlay_hotkey = ${settings.overlay_hotkey}`);
+    const disk = settings.overlay_hotkey === "Ctrl+Alt+F9" && settings.start_with_os === false;
+    console.log(`${disk ? "OK  " : "ÉCHEC"} settings.json sur le disque — overlay_hotkey = ${settings.overlay_hotkey}, start_with_os = ${settings.start_with_os}`);
     if (!disk) failed = true;
   } finally {
     await wd("DELETE", `/session/${sid}`).catch(() => {});

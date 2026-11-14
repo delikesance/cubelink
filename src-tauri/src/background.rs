@@ -161,6 +161,11 @@ pub fn setup_tray(app: &AppHandle, st: Arc<AppState>) -> tauri::Result<()> {
     Ok(())
 }
 
+/// L'icône de notification existe (la fenêtre masquée peut être rouverte depuis elle).
+pub fn tray_ok() -> bool {
+    TRAY_OK.load(Ordering::SeqCst)
+}
+
 /// Comme [`setup_tray`], mais une bibliothèque d'icône absente (Linux sans `libayatana-appindicator`) fait paniquer le
 /// crate système au lieu de renvoyer une erreur : rattrapé ici, Cubelink démarre sans icône (fermer quitte alors).
 pub fn try_setup_tray(app: &AppHandle, st: Arc<AppState>) {

@@ -209,7 +209,8 @@ pub fn run() {
                 background::try_setup_tray(app.handle(), st.clone());
             }
             background::apply_autostart(app.handle());
-            if background::started_in_background(std::env::args()) {
+            // Sans icone de notification, une fenetre masquee serait introuvable : elle reste alors visible.
+            if background::started_in_background(std::env::args()) && background::tray_ok() {
                 if let Some(w) = app.get_webview_window("main") {
                     let _ = w.hide();
                 }

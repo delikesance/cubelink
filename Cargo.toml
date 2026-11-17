@@ -23,7 +23,7 @@ rusqlite = { version = "0.42", features = ["bundled"] }
 zip = { version = "9", default-features = false, features = ["deflate"] }
 url = "2"
 aes-gcm = "0.10"
-rand = "0.8"
+rand = "0.10"
 ed25519-dalek = { version = "2", features = ["rand_core", "serde"] }
 data-encoding = "2"
 hex = "0.4"

@@ -33,7 +33,7 @@ hex.workspace = true
 futures-util.workspace = true
 tracing.workspace = true
 specta.workspace = true
-base64 = "0.22"
+base64 = "0.23"
 ammonia = "4"
 pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
 toml = { version = "0.8", default-features = false, features = ["parse"] }

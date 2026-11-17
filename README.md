@@ -2,7 +2,7 @@
 
 <img src="docs/images/banner.svg" alt="Cubelink : clique sur un ami, tu as ses mods, tu es dans sa partie" width="100%" />
 
-[![CI](https://github.com/delikesance/cubelink/actions/workflows/ci.yml/badge.svg?branch=development)](https://github.com/delikesance/cubelink/actions/workflows/ci.yml)
+[![CI](https://github.com/delikesance/cubelink/actions/workflows/ci.yml/badge.svg?branch=canary)](https://github.com/delikesance/cubelink/actions/workflows/ci.yml)
 [![Licence MIT](https://img.shields.io/badge/licence-MIT-4FC3E8.svg)](LICENSE)
 ![Tauri 2](https://img.shields.io/badge/Tauri-2-24C8DB)
 ![Rust](https://img.shields.io/badge/Rust-2021-orange)
@@ -38,7 +38,7 @@ Pas de compte Cubelink, pas de serveur à louer, pas de téléchargement manuel.
 | **Modpacks et mods** | Parcourir Modrinth et CurseForge, installer un modpack, importer un `.mrpack`, activer, retirer ou ajouter des mods à une instance. |
 | **Cache par hash** | Un fichier n'est téléchargé qu'une seule fois, puis partagé entre les instances par lien physique. |
 | **Compte Microsoft** | Connexion directe entre ton appareil et Microsoft : Cubelink ne voit jamais ton mot de passe. Plusieurs comptes possibles. |
-| **Jeu intégré (« la Scène »)** | Sous Windows, le jeu s'affiche *dans* la fenêtre du lanceur, avec un rideau de chargement et un panneau d'invitations en jeu. |
+| **Jeu intégré (« la Scène »)** | Sous Windows et Linux (X11 ou XWayland), le jeu s'affiche *dans* la fenêtre du lanceur, avec un rideau de chargement et un panneau d'invitations en jeu. |
 | **Sécurité lisible** | Rejoindre un ami revient à exécuter son code : l'écran de confirmation liste ce qui sera installé, et les mods inconnus des catalogues sont signalés. |
 | **Mises à jour automatiques** | Via GitHub Releases, signature vérifiée. |
 
@@ -49,8 +49,10 @@ Pas de compte Cubelink, pas de serveur à louer, pas de téléchargement manuel.
 | Plateforme | État | Comment |
 |---|---|---|
 | **Windows 10/11** | Plateforme principale | Paquet MSIX du **Microsoft Store** (signé par Microsoft, sans alerte SmartScreen), ou `.msi` sur les [releases](https://github.com/delikesance/cubelink/releases/latest) |
-| **Linux** | AppImage construite en CI, **pas encore éprouvée sur une vraie machine** | [Releases](https://github.com/delikesance/cubelink/releases/latest) — les retours sont très bienvenus |
-| **macOS** | Non pris en charge pour l'instant | — |
+| **Linux** | AppImage et paquet .rpm (Fedora, `sudo dnf install ./Cubelink-*.rpm`) construits en CI, **pas encore éprouvés sur une vraie machine** | [Releases](https://github.com/delikesance/cubelink/releases/latest) — les retours sont très bienvenus |
+| **macOS** | Non pris en charge | — |
+
+Cubelink fonctionne **sous Windows et Linux seulement**. Sous Linux, la Scène passe par X11 : avec « Jeu intégré » actif, Cubelink s'ouvre en XWayland ; coupe ce réglage pour garder le Wayland natif (le jeu s'ouvre alors dans sa propre fenêtre).
 
 Détails du flux de release : [`docs/release.md`](docs/release.md).
 
@@ -70,7 +72,7 @@ Pour aller plus loin : [`docs/architecture.md`](docs/architecture.md) (décision
 |---|---|
 | `core/` (`cubelink-core`) | Logique du jeu : auth Microsoft/Xbox/Minecraft, manifestes Mojang, Java, loaders (Fabric, Quilt, Forge, NeoForge), cache, Modrinth/CurseForge, import `.mrpack`, profil invité. Contient aussi l'**agent LAN** Java (`core/resources/lan-agent/`). |
 | `p2p/` (`cubelink-p2p`) | Réseau : identité, code ami, présence, transfert par hash, tunnel de jeu, relais (Iroh/QUIC). |
-| `host/` (`cubelink-host`) | « La Scène » sous Windows : adoption de la fenêtre du jeu, rideau, repli. |
+| `host/` (`cubelink-host`) | « La Scène » sous Windows et Linux (X11) : adoption de la fenêtre du jeu, rideau, repli. |
 | `src-tauri/` (`cubelink`) | L'application Tauri : commandes, intégration, mises à jour. |
 | `src/` | Interface React/TypeScript : écrans (`screens/`), composants (`ui/`), services, tokens de design (`styles/`). |
 | `e2e/` | Scénarios Playwright de bout en bout. |
@@ -80,7 +82,7 @@ Pour aller plus loin : [`docs/architecture.md`](docs/architecture.md) (décision
 
 ### Prérequis
 
-- [Rust](https://rustup.rs/) (stable) et [Node.js](https://nodejs.org/) 22
+- [Rust](https://rustup.rs/) (la version de `rust-toolchain.toml`, installée d'elle-même par rustup) et [Node.js](https://nodejs.org/) 22
 - Les [prérequis système de Tauri 2](https://tauri.app/start/prerequisites/) (WebView2 et Build Tools C++ sous Windows)
 - Un **JDK 17**, pour compiler l'agent LAN (`core/resources/cubelink-lan-agent.jar`, non versionné)
 
@@ -89,7 +91,7 @@ Pour aller plus loin : [`docs/architecture.md`](docs/architecture.md) (décision
 ```bash
 git clone https://github.com/delikesance/cubelink.git
 cd cubelink
-git switch development
+git switch canary
 
 npm ci
 JAVA_HOME=/chemin/vers/jdk17 bash core/resources/lan-agent/build.sh   # une fois, produit l'agent LAN
@@ -133,14 +135,14 @@ Pas sûr que ton idée rentre dans le projet ? Ouvre une issue pour en discuter 
 
 ### Le flux, en quatre étapes
 
-1. **Une branche par sujet**, depuis `development` : `git fetch && git switch -c <type>/<sujet-court> origin/development`. Types : `feat`, `fix`, `chore`, `docs`, `refactor`.
+1. **Une branche par sujet**, depuis `canary` : `git fetch && git switch -c <type>/<sujet-court> origin/canary`. Types : `feat`, `fix`, `chore`, `docs`, `refactor`.
 2. **Reste ciblé** : un changement = un sujet. Teste en local avec les commandes ci-dessus, puis lance une fois clippy, `cargo test --workspace` et `npx vitest run`.
-3. **Ouvre une pull request vers `development`** (jamais directement vers `main`). Titre et description **en français** : ce qui change, comment c'est vérifié, ce qui reste à faire.
-4. **Relecture et fusion** par le mainteneur. Pas de push forcé. `development` est fusionné dans `main` par le mainteneur au moment d'une release.
+3. **Ouvre une pull request vers `canary`** (jamais directement vers `main`). Titre et description **en français** : ce qui change, comment c'est vérifié, ce qui reste à faire.
+4. **Relecture et fusion** par le mainteneur. Pas de push forcé. Chaque fusion dans `canary` publie une pré-version de test ; `canary` est fusionnée dans `main` par le mainteneur au moment d'une release.
 
 ### Règles de la maison
 
-- **Pas de logique sans test** : un correctif de bug vient avec le test qui l'aurait attrapé. La CI exécute clippy en `-D warnings`, les tests Rust (Windows), `tsc`, vitest et un `cargo check` Linux.
+- **Pas de logique sans test** : un correctif de bug vient avec le test qui l'aurait attrapé. La CI exécute clippy en `-D warnings` et les tests Rust sous Windows et Linux, `tsc`, vitest, les E2E Playwright simulés et `cargo deny`.
 - **Pas de réseau réel dans les tests** : Microsoft, Mojang et Modrinth sont simulés ; le P2P se teste entre deux nœuds locaux.
 - **Pas d'entrée réelle non plus** : un test ne pilote jamais la vraie souris, le vrai clavier ou le focus de ta machine ; on simule dans l'application.
 - **Touche peu aux fichiers partagés** (`Cargo.toml`, `Cargo.lock`, `package.json`, `core/src/types.rs`, `docs/contrats.md`) et mentionne-le dans la PR si tu le fais : ce sont eux qui créent des conflits.
@@ -157,7 +159,7 @@ Le dépôt est prêt pour les agents : [`CLAUDE.md`](CLAUDE.md) décrit le flux 
 - [x] Modrinth, import de modpacks, parcours du catalogue
 - [x] Social P2P : code ami, présence, transfert, profil invité, tunnel de jeu
 - [x] Refonte de l'interface, distribution via le Microsoft Store
-- [x] La Scène : le jeu dans la fenêtre du lanceur (Windows)
+- [x] La Scène : le jeu dans la fenêtre du lanceur (Windows, Linux X11)
 - [ ] Essai réel à deux machines distantes, pour valider le jeu à plusieurs de bout en bout
 - [ ] Relais auto-hébergé et plafonné (aujourd'hui : relais publics d'Iroh)
 - [ ] Validation de la version Linux

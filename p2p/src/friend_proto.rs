@@ -17,8 +17,8 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use core_lib::types::{Error, Friend, FriendRequest, Result, TrustLevel, VerifyCode};
 use ed25519_dalek::Signature;
@@ -104,13 +104,7 @@ fn net(e: impl fmt::Debug) -> Error {
     Error::Network(format!("{e:?}"))
 }
 
-fn now_secs() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
-}
-
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|p| p.into_inner())
-}
+use crate::util::{lock, now_secs};
 
 fn check_name(name: &str) -> Result<()> {
     if name.trim().is_empty() || name.chars().count() > MAX_NAME_CHARS || name.chars().any(char::is_control) {

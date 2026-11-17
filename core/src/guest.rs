@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::instance::{InstanceKind, InstanceStore};
 use crate::manifest::{validate_manifest, ALLOWED_PREFIXES};
 use crate::store::index::StoreIndex;
-use crate::store::link::link_into;
+use crate::store::link::{copy_into, link_into};
 use crate::types::{Error, Instance, LoaderSpec, Manifest, Result};
 
 const GUEST_META: &str = "guest.json";
@@ -133,7 +133,13 @@ pub fn install_manifest_files(
     let res = (|| -> Result<()> {
         for (rel, sha, src) in &plan {
             let dst = check_dest(&canon_game, rel)?;
-            link_into(&canon_game, rel, src)?;
+            // Les jars de mods ne changent pas : liés au cache. Le reste (configs, scripts) peut être réécrit en place
+            // par le jeu : copié, pour ne pas altérer l'objet du cache sans changer son hash.
+            if is_mod_jar(rel) {
+                link_into(&canon_game, rel, src)?;
+            } else {
+                copy_into(&canon_game, rel, src)?;
+            }
             created.push(dst);
             index.add_ref(sha)?;
             reffed.push(sha);
@@ -166,6 +172,10 @@ pub fn remove_guest_instance(store: &InstanceStore, id: &str, index: &StoreIndex
         }
     }
     store.delete(id)
+}
+
+fn is_mod_jar(rel: &str) -> bool {
+    rel.starts_with("mods/") && rel.to_ascii_lowercase().ends_with(".jar")
 }
 
 /// Vérifie que la destination reste dans le game_dir : pas de lien symbolique sur le chemin.
@@ -301,6 +311,11 @@ mod tests {
         assert_eq!(fs::read(gd.join("mods/a.jar")).unwrap(), b"aaa");
         let obj = e.root.join(object_rel_path(&m.files[0].sha256).unwrap());
         assert!(same_file(&obj, &gd.join("mods/a.jar")));
+        // Config copiée, pas liée : la réécrire en place ne touche pas l'objet du cache.
+        let cfg_obj = e.root.join(object_rel_path(&m.files[1].sha256).unwrap());
+        assert!(!same_file(&cfg_obj, &gd.join("config/x.toml")));
+        fs::write(gd.join("config/x.toml"), b"x=2").unwrap();
+        assert_eq!(fs::read(&cfg_obj).unwrap(), b"x=1");
         assert!(!gd.join("options.txt").exists() && !gd.join("saves").exists());
         assert_eq!(e.index.get(&m.files[0].sha256).unwrap().unwrap().refs, 1);
         let p = plan(&m);

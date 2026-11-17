@@ -14,6 +14,12 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 type Events = Arc<Mutex<Vec<(String, serde_json::Value)>>>;
 
+/// Règle de jonction : l'hôte ouvre à `guest` l'accès à sa partie en cours (comme une invitation acceptée).
+fn allow(host: &Node, guest: &Node) {
+    let key: [u8; 32] = hex::decode(guest.key()).unwrap().try_into().unwrap();
+    host.st.access.allow_friend(&key);
+}
+
 struct Node {
     _dir: tempfile::TempDir,
     st: Arc<AppState>,
@@ -145,6 +151,7 @@ async fn amis_presence_partage_join_coupure_et_refus() {
     let (inst_id, files) = make_world(&b);
     let world_port = echo_server().await;
     b.be.host_start_sharing(inst_id, world_port).await.unwrap();
+    allow(&b, &a);
 
     // 4. Plan puis join avec une coupure au 2e fichier.
     let plan = a.st.join_plan(&b.key()).await.unwrap();
@@ -152,7 +159,7 @@ async fn amis_presence_partage_join_coupure_et_refus() {
     assert_eq!(plan.unknown_mods, vec!["mods/homemade.jar".to_string()], "avertissement avant téléchargement");
     assert!(plan.unknown_unchecked.is_empty());
     a.be.inject_cut_at_fetch(2);
-    a.st.join_start(&b.key(), None).await.unwrap();
+    a.st.join_start(&b.key(), None, &plan.manifest_hash, true).await.unwrap();
     wait_for("transfert terminé", || a.progress().iter().any(|p| matches!(p.phase, TransferPhase::Done | TransferPhase::Failed))).await;
     let prog = a.progress();
     let last = prog.last().unwrap();
@@ -231,6 +238,7 @@ async fn join_handlers_partages_instance_dynamique() {
 
     let (first, _) = make_world(&b);
     b.be.host_start_sharing(first, 0).await.unwrap();
+    allow(&b, &a);
     assert_eq!(a.st.join_plan(&b.key()).await.unwrap().manifest.files.len(), 3);
 
     // Seconde instance (1 fichier) partagée sans recréer le Router.
@@ -244,7 +252,7 @@ async fn join_handlers_partages_instance_dynamique() {
     assert_eq!(plan.manifest.files.len(), 1);
 
     // RAM choisie avant de rejoindre : appliquée à l'instance invitée.
-    a.st.join_start(&b.key(), Some(6144)).await.unwrap();
+    a.st.join_start(&b.key(), Some(6144), &plan.manifest_hash, true).await.unwrap();
     wait_for("transfert terminé", || a.progress().iter().any(|p| matches!(p.phase, TransferPhase::Done | TransferPhase::Failed))).await;
     assert_eq!(a.progress().last().unwrap().phase, TransferPhase::Done);
     let guests = a.st.instances.list();

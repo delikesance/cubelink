@@ -1,7 +1,7 @@
 import { useRef, useState, type ReactNode } from "react";
 import "./install.css";
 import { Button, Card } from "../../ui";
-import { ICONS, Icon } from "../Main/Panel";
+import { ICONS, Icon } from "../../ui";
 import { etaSeconds, formatEta, percent, progressLabel } from "./format";
 import type { useTransfer } from "./useTransfer";
 import type { TransferProgress } from "../../services/types";

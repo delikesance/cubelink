@@ -20,6 +20,10 @@ pub const QUICK_CARD_DELAY_MS: f32 = 2000.0;
 pub const OPEN_DELAY_MS: f32 = 170.0;
 /// Ouverture des deux panneaux.
 pub const OPEN_MS: f32 = 650.0;
+/// Legendes du rideau (voir `curtain::Model::caption`).
+pub const CAPTION_SWITCH: &str = "Changement de modpack";
+pub const CAPTION_TO_LAUNCHER: &str = "Retour au launcher";
+pub const CAPTION_TO_GAME: &str = "Retour au jeu";
 /// Panneaux consideres comme fermes a partir de ce niveau.
 const COVERED: f32 = 0.999;
 

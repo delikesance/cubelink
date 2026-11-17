@@ -3,7 +3,7 @@
 //! Flux : `list_loader_versions` -> `fetch_profile` -> `install` -> `merge_with_vanilla`.
 //! Les types `LoaderVersion`, `MergedVersion` et `InstalledProfile` sont ceux de Fabric.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -55,16 +55,7 @@ impl QuiltClient {
     }
 
     async fn get_bytes(&self, url: &str) -> Result<Vec<u8>> {
-        let resp = self.http.get(url).send().await.map_err(|e| Error::Network(e.to_string()))?;
-        let status = resp.status();
-        if status.as_u16() == 404 {
-            return Err(Error::NotFound(url.to_string()));
-        }
-        if !status.is_success() {
-            return Err(Error::Network(format!("HTTP {} pour {url}", status.as_u16())));
-        }
-        let bytes = resp.bytes().await.map_err(|e| Error::Network(e.to_string()))?;
-        Ok(bytes.to_vec())
+        crate::mojang::versions::get_bytes(&self.http, url).await
     }
 
     /// Versions du loader compatibles avec `minecraft`, de la plus récente à la plus ancienne.
@@ -131,7 +122,7 @@ impl QuiltClient {
         tokio::fs::create_dir_all(&dir).await?;
         let json_path = dir.join(format!("{id}.json"));
         let body = serde_json::to_vec_pretty(profile).map_err(|e| Error::Other(e.to_string()))?;
-        write_atomic(&json_path, &body).await?;
+        super::write_atomic(&json_path, &body).await?;
         Ok(InstalledProfile { id: id.to_string(), json_path })
     }
 
@@ -169,7 +160,7 @@ impl QuiltClient {
         if let Some(parent) = dest.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
-        write_atomic(&dest, &bytes).await
+        super::write_atomic(&dest, &bytes).await
     }
 }
 
@@ -183,18 +174,6 @@ async fn is_valid(path: &Path, sha1: Option<&str>) -> bool {
         Some(expected) => sha1_hex(&data).eq_ignore_ascii_case(expected),
         None => true,
     }
-}
-
-async fn write_atomic(dest: &Path, data: &[u8]) -> Result<()> {
-    let mut tmp = dest.as_os_str().to_owned();
-    tmp.push(".tmp");
-    let tmp = PathBuf::from(tmp);
-    tokio::fs::write(&tmp, data).await?;
-    if let Err(e) = tokio::fs::rename(&tmp, dest).await {
-        let _ = tokio::fs::remove_file(&tmp).await;
-        return Err(e.into());
-    }
-    Ok(())
 }
 
 /// Liste des versions du loader (client par défaut).

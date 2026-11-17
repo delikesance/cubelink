@@ -43,7 +43,8 @@ test('Illustrations : recherche auto, image locale, installation Parcourir, gale
   await page.waitForTimeout(500);
 
   // --- recherche automatique, sans aucun clic : l'illustration est appliquee par defaut ---
-  await expect(page.locator('img.home-bg')).toBeVisible({ timeout: 30_000 });
+  // le décor plein écran a disparu de l'accueil : l'icône du modpack sur la tuile prouve l'illustration appliquée
+  await expect(page.locator('.home-av.has-img img').first()).toBeVisible({ timeout: 30_000 });
   await expect.poll(async () => (await invoke<Inst[]>(page, 'instances_list')).find((i) => i.id === 'host-world')?.art?.screenshots.length ?? 0, { timeout: 30_000 }).toBe(4);
   const list = await invoke<Inst[]>(page, 'instances_list');
   const me = list.find((i) => i.id === 'host-world')!;

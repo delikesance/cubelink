@@ -6,7 +6,7 @@ import { Detail, SOURCE_LABEL, CF_UNAVAILABLE, isCurseForgeDown, messageOf } fro
 import { Button } from "../../ui";
 import { useContextMenu, type MenuItem } from "../../app/useContextMenu";
 import { openExternal } from "../../app/externalLinks";
-import { ICONS, Icon } from "../Main/Panel";
+import { ICONS, Icon } from "../../ui";
 
 export const KINDS: { value: BrowseKind; label: string }[] = [
   { value: "modpack", label: "Modpacks" },

@@ -142,6 +142,7 @@ impl InstanceStore {
             mod_count: 0,
             java_path: None,
             jvm_args: String::new(),
+            wrapper: String::new(),
             art: None,
         };
         let stored = StoredInstance { instance: instance.clone(), created_at: now_secs(), kind, custom: false };
@@ -234,8 +235,8 @@ impl InstanceStore {
         Ok(self.with_live_mod_count(id, stored.instance))
     }
 
-    /// Met à jour nom, RAM, Java et arguments JVM. `None` : champ inchangé ; pour `java_path` et
-    /// `jvm_args`, une chaîne vide efface la valeur. L'id (donc le dossier) ne change jamais.
+    /// Met à jour nom, RAM, Java, arguments JVM et commande d'enrobage. `None` : champ inchangé ; pour `java_path`,
+    /// `jvm_args` et `wrapper`, une chaîne vide efface la valeur. L'id (donc le dossier) ne change jamais.
     pub fn update(
         &self,
         id: &str,
@@ -243,6 +244,7 @@ impl InstanceStore {
         ram_mb: Option<u32>,
         java_path: Option<&str>,
         jvm_args: Option<&str>,
+        wrapper: Option<&str>,
     ) -> Result<Instance> {
         let mut stored = self.read_meta(id)?;
         // Tout est validé avant la moindre écriture.
@@ -252,6 +254,7 @@ impl InstanceStore {
         }
         let java_path = java_path.map(validate_java_path).transpose()?;
         let jvm_args = jvm_args.map(validate_jvm_args).transpose()?;
+        let wrapper = wrapper.map(validate_wrapper).transpose()?;
         if let Some(n) = name {
             stored.instance.name = n;
         }
@@ -263,6 +266,9 @@ impl InstanceStore {
         }
         if let Some(a) = jvm_args {
             stored.instance.jvm_args = a;
+        }
+        if let Some(w) = wrapper {
+            stored.instance.wrapper = w;
         }
         self.write_meta(id, &stored)?;
         Ok(self.with_live_mod_count(id, stored.instance))
@@ -364,6 +370,17 @@ fn validate_jvm_args(a: &str) -> Result<String> {
         return Err(Error::Invalid("arguments JVM : caractères de contrôle interdits".into()));
     }
     Ok(a.to_string())
+}
+
+fn validate_wrapper(w: &str) -> Result<String> {
+    let w = w.trim();
+    if w.chars().count() > MAX_JVM_ARGS_CHARS {
+        return Err(Error::Invalid(format!("commande d'enrobage trop longue (max {MAX_JVM_ARGS_CHARS} caractères)")));
+    }
+    if w.chars().any(|c| c.is_control()) {
+        return Err(Error::Invalid("commande d'enrobage : caractères de contrôle interdits".into()));
+    }
+    Ok(w.to_string())
 }
 
 /// Découpe la chaîne d'arguments JVM d'une instance (séparateur : espaces).
@@ -584,7 +601,7 @@ mod tests {
         assert_eq!(effective_ram_mb(i.ram_mb, 10240), 10240);
         // Valeur propre à l'instance, puis retour au défaut.
         assert_eq!(effective_ram_mb(s.update_ram(&i.id, 6144).unwrap().ram_mb, 10240), 6144);
-        assert_eq!(s.update(&i.id, None, Some(RAM_DEFAULT), None, None).unwrap().ram_mb, RAM_DEFAULT);
+        assert_eq!(s.update(&i.id, None, Some(RAM_DEFAULT), None, None, None).unwrap().ram_mb, RAM_DEFAULT);
         assert!(s.update_ram(&i.id, 100).is_err());
     }
 
@@ -592,13 +609,16 @@ mod tests {
     fn update_fields() {
         let (_t, s) = store();
         let i = s.create("Avant", "1.21.1", spec(), 2048).unwrap();
-        let u = s.update(&i.id, Some("  Après "), Some(4096), Some(" /opt/java/bin/java "), Some(" -Xss1M  -Dfoo=bar ")).unwrap();
+        let u = s.update(&i.id, Some("  Après "), Some(4096), Some(" /opt/java/bin/java "), Some(" -Xss1M  -Dfoo=bar "), None).unwrap();
         assert_eq!((u.name.as_str(), u.ram_mb, u.id.as_str()), ("Après", 4096, i.id.as_str()));
         assert_eq!(u.java_path.as_deref(), Some("/opt/java/bin/java"));
         assert_eq!(split_jvm_args(&u.jvm_args), vec!["-Xss1M", "-Dfoo=bar"]);
         assert_eq!(s.get(&i.id).unwrap(), u);
         // Champs absents : inchangés ; chaîne vide : effacé.
-        let u2 = s.update(&i.id, None, None, Some(""), None).unwrap();
+        let u2 = s.update(&i.id, None, None, Some(""), None, None).unwrap();
+        let w = s.update(&i.id, None, None, None, None, Some("  gamemoderun  mangohud ")).unwrap();
+        assert_eq!(w.wrapper, "gamemoderun  mangohud");
+        assert_eq!(s.update(&i.id, None, None, None, None, Some("")).unwrap().wrapper, "");
         assert_eq!(u2.java_path, None);
         assert_eq!(u2.name, "Après");
         assert_eq!(u2.jvm_args, "-Xss1M  -Dfoo=bar");
@@ -608,16 +628,17 @@ mod tests {
     fn update_rejects_invalid_without_writing() {
         let (_t, s) = store();
         let i = s.create("Stable", "1.21.1", spec(), 2048).unwrap();
-        assert!(matches!(s.update(&i.id, Some("a/b"), None, None, None), Err(Error::Invalid(_))));
-        assert!(matches!(s.update(&i.id, Some(""), None, None, None), Err(Error::Invalid(_))));
+        assert!(matches!(s.update(&i.id, Some("a/b"), None, None, None, None), Err(Error::Invalid(_))));
+        assert!(matches!(s.update(&i.id, Some(""), None, None, None, None), Err(Error::Invalid(_))));
         // Nom valide mais RAM invalide : rien ne doit être écrit.
-        assert!(s.update(&i.id, Some("Autre"), Some(100), None, None).is_err());
+        assert!(s.update(&i.id, Some("Autre"), Some(100), None, None, None).is_err());
         assert!(s.update(&i.id, None, None, None, Some("-Da
-b")).is_err());
-        assert!(s.update(&i.id, None, None, None, Some(&"x".repeat(3000))).is_err());
-        assert!(s.update(&i.id, None, None, Some("a b"), None).is_err());
+b"), None).is_err());
+        assert!(s.update(&i.id, None, None, None, None, Some("prime-run\u{7}")).is_err());
+        assert!(s.update(&i.id, None, None, None, Some(&"x".repeat(3000)), None).is_err());
+        assert!(s.update(&i.id, None, None, Some("a b"), None, None).is_err());
         assert_eq!(s.get(&i.id).unwrap(), i);
-        assert!(matches!(s.update("nope", Some("x"), None, None, None), Err(Error::NotFound(_))));
+        assert!(matches!(s.update("nope", Some("x"), None, None, None, None), Err(Error::NotFound(_))));
     }
 
     #[test]
@@ -633,7 +654,7 @@ b")).is_err());
         let i = s.get("vieux").unwrap();
         assert_eq!((i.java_path, i.jvm_args.as_str(), i.ram_mb), (None, "", 3072));
         assert_eq!(i.art, None);
-        assert_eq!(s.update("vieux", None, None, None, Some("-Xmx1G")).unwrap().jvm_args, "-Xmx1G");
+        assert_eq!(s.update("vieux", None, None, None, Some("-Xmx1G"), None).unwrap().jvm_args, "-Xmx1G");
     }
 
     #[test]
@@ -678,5 +699,50 @@ b")).is_err());
         assert_eq!(v["kind"], "own");
         assert!(v["created_at"].as_i64().unwrap() > 0);
         assert_eq!(v["loader"]["loader"], "neoforge");
+    }
+}
+
+/// Arguments JVM par défaut hors Windows (Linux, macOS) : tas fixe et G1 réglé pour des pauses courtes, afin d'éviter les
+/// saccades dues à la croissance du tas. Ils précèdent `jvm_args` de l'instance (`user`). La JVM refuse de démarrer si un
+/// `-Xms` dépasse le `-Xmx` final ou si deux ramasse-miettes sont choisis : le tas fixe est donc omis quand l'utilisateur
+/// règle lui-même `-Xms`/`-Xmx`, et les réglages G1 quand il choisit un ramasse-miettes. Windows : aucun (inchangé).
+pub fn default_jvm_args(windows: bool, ram_mb: u32, user: &[String]) -> Vec<String> {
+    if windows {
+        return Vec::new();
+    }
+    let user_heap = user.iter().any(|a| a.starts_with("-Xms") || a.starts_with("-Xmx"));
+    let user_gc = user.iter().any(|a| a.starts_with("-XX:+Use") && a.ends_with("GC"));
+    let mut a = Vec::new();
+    if !user_heap {
+        a.push(format!("-Xms{ram_mb}M"));
+    }
+    if !user_gc {
+        a.extend(["-XX:+UseG1GC", "-XX:+ParallelRefProcEnabled", "-XX:MaxGCPauseMillis=130"].map(String::from));
+    }
+    a.push("-XX:+DisableExplicitGC".into());
+    a
+}
+
+#[cfg(test)]
+mod default_jvm_args_tests {
+    use super::*;
+
+    #[test]
+    fn windows_untouched_and_linux_fixed_heap() {
+        assert!(default_jvm_args(true, 4096, &[]).is_empty());
+        let l = default_jvm_args(false, 4096, &[]);
+        assert_eq!(l[0], "-Xms4096M");
+        assert!(l.contains(&"-XX:+UseG1GC".to_string()));
+    }
+
+    #[test]
+    fn user_heap_and_gc_win() {
+        // `-Xms4096M ... -Xmx2G` ferait refuser le démarrage à la JVM ; idem pour deux ramasse-miettes.
+        let l = default_jvm_args(false, 4096, &split_jvm_args("-Xmx2G -XX:+UseZGC"));
+        assert!(!l.iter().any(|a| a.starts_with("-Xms")));
+        assert!(!l.iter().any(|a| a.contains("G1") || a.contains("MaxGCPause")));
+        let l = default_jvm_args(false, 4096, &split_jvm_args("-XX:+UseG1GC"));
+        assert!(l.contains(&"-Xms4096M".to_string()));
+        assert!(!l.contains(&"-XX:+UseG1GC".to_string()));
     }
 }

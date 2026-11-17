@@ -43,8 +43,9 @@ pub fn validate_hotkey(h: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Pur : titre et corps de la notification d'invitation (`None` si la charge utile est inutilisable).
-pub fn invite_notification(payload: &Value, hotkey: &str) -> Option<(String, String)> {
+/// Pur : titre et corps de la notification d'invitation (`None` si la charge utile est inutilisable). `hotkey` : `None` quand
+/// le raccourci n'existera pas (pas de Scene : le jeu a sa propre fenetre), le texte renvoie alors vers le launcher.
+pub fn invite_notification(payload: &Value, hotkey: Option<&str>) -> Option<(String, String)> {
     let clip = |s: &str| s.chars().filter(|c| !c.is_control()).take(48).collect::<String>();
     let name = clip(payload.get("name")?.as_str()?);
     if name.trim().is_empty() {
@@ -55,7 +56,10 @@ pub fn invite_notification(payload: &Value, hotkey: &str) -> Option<(String, Str
         Some(w) => format!("Monde : {w}. "),
         None => String::new(),
     };
-    body.push_str(&format!("Appuie sur {hotkey} en jeu pour répondre."));
+    match hotkey {
+        Some(hotkey) => body.push_str(&format!("Appuie sur {hotkey} en jeu pour répondre.")),
+        None => body.push_str("Ouvre Cubelink pour répondre."),
+    }
     Some((format!("{name} t'invite à rejoindre son monde"), body))
 }
 
@@ -138,7 +142,10 @@ pub fn setup(app: &AppHandle, test_mode: bool) {
         }
         let Ok(v) = serde_json::from_str::<Value>(ev.payload()) else { return };
         let (_, hotkey) = settings_of(&h);
-        if let Some((title, body)) = invite_notification(&v, &hotkey) {
+        // Linux : le raccourci n'existe que si le prochain jeu ira dans la Scene (X11) ; sinon la notification n'en parle pas.
+        let scene = h.try_state::<Arc<AppState>>().is_some_and(|s| s.stage.available());
+        let hotkey = (!cfg!(target_os = "linux") || scene).then_some(hotkey.as_str());
+        if let Some((title, body)) = invite_notification(&v, hotkey) {
             if let Err(e) = h.notification().builder().title(title).body(body).show() {
                 eprintln!("[Cubelink] notification d'invitation : {e}");
             }
@@ -172,12 +179,14 @@ mod tests {
     #[test]
     fn notification_d_invitation() {
         let v = serde_json::json!({"name": "Alex", "world_name": "Survie"});
-        let (t, b) = invite_notification(&v, "Ctrl+Shift+C").unwrap();
+        let (t, b) = invite_notification(&v, Some("Ctrl+Shift+C")).unwrap();
         assert_eq!(t, "Alex t'invite à rejoindre son monde");
         assert!(b.contains("Survie") && b.contains("Ctrl+Shift+C"));
-        assert!(invite_notification(&serde_json::json!({"world_name": "x"}), "F9").is_none());
-        assert!(invite_notification(&serde_json::json!({"name": "  "}), "F9").is_none());
+        let (_, b) = invite_notification(&v, None).unwrap();
+        assert!(b.contains("Survie") && !b.contains("Ctrl") && b.contains("Ouvre Cubelink"));
+        assert!(invite_notification(&serde_json::json!({"world_name": "x"}), Some("F9")).is_none());
+        assert!(invite_notification(&serde_json::json!({"name": "  "}), Some("F9")).is_none());
         let long = serde_json::json!({"name": "a".repeat(500)});
-        assert!(invite_notification(&long, "F9").unwrap().0.len() < 100);
+        assert!(invite_notification(&long, Some("F9")).unwrap().0.len() < 100);
     }
 }

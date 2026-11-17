@@ -1,23 +1,26 @@
 //! Coque Tauri. Propriété : tâche U13 (commandes), selon docs/contrats.md.
 
 pub mod authz;
+pub mod background;
+pub mod bindings;
 pub mod commands_art;
 pub mod commands_auth;
 pub mod commands_browse;
 pub mod commands_friends;
 pub mod commands_game;
+pub mod commands_hearth;
 pub mod commands_host;
 pub mod commands_instances;
 pub mod commands_join;
 pub mod commands_settings;
 pub mod commands_update;
 pub mod error;
-pub mod foreground;
 pub mod iroh_backend;
 pub mod last_seen;
 pub mod trusted_mods;
 pub mod install;
 pub mod invites;
+pub mod hearth;
 pub mod hotkey;
 pub mod p2p_backend;
 pub mod stage;
@@ -28,6 +31,128 @@ pub mod test_hooks;
 use std::sync::Arc;
 
 use tauri::{Emitter, Manager};
+
+/// Commandes enregistrées dans les deux modes ; `$extra` ajoute celles propres à un mode.
+/// Source unique : le gestionnaire d'invocation et les liaisons TypeScript (`src/services/bindings.ts`) en sortent.
+macro_rules! commands {
+    ($($extra:tt)*) => {
+        tauri_specta::collect_commands![
+            commands_auth::auth_status,
+            commands_auth::auth_accounts,
+            commands_auth::auth_skin_head,
+            commands_auth::skin_head_by_name,
+            commands_auth::auth_switch,
+            commands_auth::auth_remove,
+            commands_auth::auth_begin_login,
+            commands_auth::auth_poll_login,
+            commands_auth::auth_logout,
+            commands_auth::auth_offline_login,
+            commands_instances::instances_list,
+            commands_instances::instances_create,
+            commands_instances::instances_import_mrpack,
+            commands_instances::instances_launch,
+            commands_instances::minecraft_versions,
+            commands_game::instances_kill,
+            commands_game::instances_delete,
+            commands_game::instances_update,
+            commands_game::instances_open_folder,
+            commands_game::instances_logs,
+            commands_art::instances_art_image,
+            commands_art::instances_art_set,
+            commands_art::instances_art_lookup,
+            commands_art::instances_description,
+            commands_friends::net_test,
+            commands_friends::friend_my_code,
+            commands_friends::friend_regenerate_code,
+            commands_friends::friend_list,
+            commands_friends::friend_send_request,
+            commands_friends::friend_requests,
+            commands_friends::friend_accept,
+            commands_friends::friend_refuse,
+            commands_friends::friend_refuse_all,
+            commands_join::join_plan,
+            commands_join::join_start,
+            commands_join::join_pause,
+            commands_join::join_resume,
+            commands_join::join_cancel,
+            commands_join::join_open_tunnel,
+            commands_join::join_close_tunnel,
+            commands_join::join_play,
+            commands_settings::settings_get,
+            commands_settings::settings_set,
+            commands_browse::browse_search,
+            commands_browse::browse_versions,
+            commands_browse::browse_install,
+            commands_browse::mods_list,
+            commands_browse::mods_icon,
+            commands_browse::mods_check,
+            commands_browse::browse_check,
+            commands_browse::mods_fix_plan,
+            commands_browse::mods_fix_apply,
+            commands_browse::mods_fix_undo,
+            commands_browse::mods_toggle,
+            commands_browse::mods_remove,
+            commands_browse::mods_add,
+            commands_host::host_start_sharing,
+            commands_host::host_stop_sharing,
+            commands_host::host_state,
+            invites::friend_invite,
+            invites::friend_invites,
+            invites::friend_invite_dismiss,
+            invites::friend_join_requests,
+            invites::friend_join_request_answer,
+            invites::friend_join_request,
+            commands_hearth::hearth_list,
+            commands_hearth::hearth_detail,
+            commands_hearth::hearth_worlds,
+            commands_hearth::hearth_create,
+            commands_hearth::hearth_invites,
+            commands_hearth::hearth_invite_accept,
+            commands_hearth::hearth_invite_dismiss,
+            commands_hearth::hearth_play,
+            commands_hearth::hearth_stop,
+            commands_hearth::hearth_unclean_choice,
+            commands_hearth::hearth_set_instance,
+            commands_hearth::hearth_add_member,
+            commands_hearth::hearth_remove_member,
+            commands_hearth::hearth_leave,
+            commands_hearth::hearth_vote,
+            commands_hearth::hearth_continue_without,
+            commands_hearth::hearth_pack_update,
+            commands_hearth::hearth_restore,
+            commands_hearth::hearth_resolve_fork,
+            commands_hearth::hearth_set_background,
+            commands_hearth::hearth_eula,
+            commands_hearth::hearth_eula_accept,
+            commands_hearth::hearth_enabled,
+            commands_hearth::hearth_set_enabled,
+            commands_game::game_switch,
+            commands_game::game_current,
+            commands_game::game_close,
+            commands_game::game_join_friend,
+            stage::commands::stage_view,
+            stage::commands::stage_state,
+            stage::commands::stage_panel,
+            stage::commands::stage_layout,
+            stage::commands::stage_supported,
+            $($extra)*
+        ]
+    };
+}
+
+/// Commandes du mode normal : ce sont elles que décrivent `src/services/bindings.ts` et `docs/contrats.md`.
+pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
+    tauri_specta::Builder::<tauri::Wry>::new().commands(commands![
+        commands_update::update_state,
+        commands_update::update_check,
+        commands_update::update_install,
+    ])
+}
+
+/// Commandes du mode test (`CUBELINK_TEST_MODE=1`) : sans la mise à jour, avec les crochets de test. Jamais exportées.
+fn test_builder() -> tauri_specta::Builder<tauri::Wry> {
+    tauri_specta::Builder::<tauri::Wry>::new().commands(commands![test_hooks::test_state, test_hooks::test_cut_guest_connection])
+}
 
 /// `test_state` n'existe dans le gestionnaire d'invocation qu'en mode test.
 fn select_handler<R: tauri::Runtime>(
@@ -59,13 +184,74 @@ pub(crate) fn iroh_options(h: &test_hooks::Hooks) -> iroh_backend::IrohOptions {
     o
 }
 
+/// Linux, pur : le launcher doit-il etre une fenetre X11 (`GDK_BACKEND=x11`) ? Seulement si la Scene peut servir : un serveur
+/// X11 joignable (`DISPLAY`), pas de coupe-circuit, Scene permise (hors mode test) et reglage « Jeu integre » actif (lu en
+/// dernier, sur le disque). Sinon GTK choisit lui-meme, Wayland natif compris.
+#[cfg(any(target_os = "linux", test))]
+fn linux_launcher_x11(display: bool, no_stage: bool, stage_allowed: bool, embedded_game: impl FnOnce() -> bool) -> bool {
+    display && !no_stage && stage_allowed && embedded_game()
+}
+
+/// Linux : dossier de donnees de l'app, avant que Tauri ne le donne (`app_data_dir` = `$XDG_DATA_HOME` ou
+/// `~/.local/share`, puis l'identifiant de l'app). `None` : introuvable.
+#[cfg(target_os = "linux")]
+fn linux_data_dir(hooks: &test_hooks::Hooks) -> Option<std::path::PathBuf> {
+    if let Some(d) = &hooks.data_dir {
+        return Some(d.clone());
+    }
+    let base = std::env::var_os("XDG_DATA_HOME")
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/share")))?;
+    Some(base.join(IDENTIFIER))
+}
+
+/// Identifiant de l'app (`tauri.conf.json`), nom du dossier de donnees.
+#[cfg(target_os = "linux")]
+const IDENTIFIER: &str = "app.cubelink.launcher";
+
 pub fn run() {
     // Charge un éventuel `.env` de dev (ex. CUBELINK_MS_CLIENT_ID). Silencieux si absent ;
     // n'écrase jamais une variable déjà définie dans l'environnement du processus.
     let _ = dotenvy::dotenv();
     let hooks = test_hooks::init().unwrap_or_else(|e| panic!("configuration de test invalide : {e}"));
     let test_mode = hooks.test_mode;
-    tauri::Builder::default()
+    // Linux : la Scene adopte la fenetre du jeu par X11. Le launcher doit donc etre une fenetre X11 (XWayland sous Wayland) :
+    // a poser AVANT la creation de la fenetre (GTK lit la variable a l'initialisation), pendant que le processus n'a qu'un fil.
+    // Reglage « Jeu integre » coupe, ou pas de DISPLAY (Wayland pur) : rien n'est force, GTK garde le Wayland natif quand il
+    // existe (le reglage s'applique donc au prochain demarrage de Cubelink).
+    #[cfg(target_os = "linux")]
+    if linux_launcher_x11(
+        std::env::var_os("DISPLAY").is_some_and(|d| !d.is_empty()),
+        std::env::var_os("CUBELINK_NO_STAGE").is_some(),
+        !test_mode || std::env::var_os("CUBELINK_STAGE_TEST").is_some(),
+        || linux_data_dir(hooks).is_none_or(|root| commands_settings::load_settings(&root.join("settings.json")).embedded_game),
+    ) {
+        std::env::set_var("GDK_BACKEND", "x11");
+    }
+    // WebKitGTK + pilote NVIDIA proprietaire : « Failed to create GBM buffer » (rendu DMABUF) et fenetre vide. Le rendu
+    // logiciel des tampons suffit pour l'interface, mais coute sur les autres pilotes : on ne le pose qu'avec NVIDIA.
+    // L'utilisateur garde la main en definissant lui-meme la variable.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() && std::path::Path::new("/proc/driver/nvidia/version").exists() {
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    }
+    let mut builder = tauri::Builder::default();
+    // Une seule instance (hors mode test : les E2E lancent plusieurs applications en parallele, chacune son dossier) :
+    // relancer Cubelink alors qu'il tourne en fond montre la fenetre existante au lieu d'ouvrir un second noeud P2P.
+    if !test_mode {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            // Un démarrage de session alors que Cubelink tourne déjà ne fait pas surgir la fenêtre.
+            if !background::started_in_background(&args) {
+                background::show_main(app);
+            }
+        }));
+    }
+    builder
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec![background::BACKGROUND_ARG]),
+        ))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -91,55 +277,61 @@ pub fn run() {
                 }
             }
             app.manage(st.clone());
+            // Fond : icone de notification (hors mode test : fermer y quitte, comme avant), demarrage avec la session, fenetre
+            // masquee tout de suite au lancement automatique.
+            if !test_mode {
+                background::try_setup_tray(app.handle(), st.clone());
+            }
+            background::apply_autostart(app.handle());
+            // Sans icone de notification, une fenetre masquee serait introuvable : elle reste alors visible.
+            if background::started_in_background(std::env::args()) && background::tray_ok() {
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.hide();
+                }
+            }
             commands_update::setup(app, test_mode);
             hotkey::setup(app.handle(), test_mode);
             // Zone de jeu integree (Windows) : la fenetre du jeu est adoptee dans celle du launcher. Le joueur la coupe par le reglage
             // « Jeu integre » ; CUBELINK_NO_STAGE=1 est un coupe-circuit de developpement (la zone n'est meme pas creee).
             let stage_allowed = !test_mode || std::env::var_os("CUBELINK_STAGE_TEST").is_some();
-            if cfg!(windows) && stage_allowed {
+            if cfg!(any(windows, target_os = "linux")) && stage_allowed {
                 st.stage.open_log(&st.paths.logs);
                 st.stage.note(&format!("demarrage de Cubelink {}", env!("CARGO_PKG_VERSION")));
             }
-            if std::env::var_os("CUBELINK_NO_STAGE").is_some() {
+            let staged = if std::env::var_os("CUBELINK_NO_STAGE").is_some() {
                 st.stage.note("Scene desactivee : CUBELINK_NO_STAGE");
-            } else if stage_allowed {
-                if let Some(w) = app.get_webview_window("main") {
+                false
+            } else {
+                stage_allowed
+            };
+            if let Some(w) = app.get_webview_window("main") {
+                if staged {
                     let h = app.handle().clone();
                     let sink: state::EventSink = Arc::new(move |name, payload| {
                         let _ = h.emit(name, payload);
                     });
                     st.stage.attach(&w, sink);
-                    let (st2, h2) = (st.clone(), app.handle().clone());
-                    w.on_window_event(move |e| {
-                        // Fermer la fenetre du launcher arrete aussi le jeu de la zone integree, jamais abandonne en tache de fond
-                        // (regles dans `quit_requested` / `quit_game`) : tue net tant qu'il charge derriere le rideau, ferme
-                        // proprement (monde enregistre, force apres 60 s) une fois montre au joueur. Un jeu dans sa PROPRE fenetre
-                        // (reglage « Jeu integre » coupe, ou repli) n'est pas concerne : le launcher se ferme, le jeu continue.
-                        // Pendant la simple preparation (aucun processus) le launcher se ferme tout de suite ; le rideau, fenetre du
-                        // launcher, disparait avec lui.
-                        if let tauri::WindowEvent::CloseRequested { api, .. } = e {
-                            static CLOSING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-                            if st2.quit_requested() {
-                                api.prevent_close();
-                                if !CLOSING.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                                    let (st3, h3) = (st2.clone(), h2.clone());
-                                    tauri::async_runtime::spawn(async move {
-                                        st3.quit_game(std::time::Duration::from_secs(60)).await;
-                                        h3.exit(0);
-                                    });
-                                }
-                            } else {
-                                st2.stage.flush_log();
-                            }
-                        }
-                        // Focus retrouve (retour par Alt+Tab) : l'hote rouvre un jeu en plein ecran que GLFW a reduit en perdant le focus.
-                        if matches!(e, tauri::WindowEvent::Resized(_) | tauri::WindowEvent::Moved(_) | tauri::WindowEvent::ScaleFactorChanged { .. } | tauri::WindowEvent::Focused(true)) {
-                            if let Some(w) = h2.get_webview_window("main") {
-                                st2.stage.relayout(&w);
-                            }
-                        }
-                    });
                 }
+                let (st2, h2) = (st.clone(), app.handle().clone());
+                w.on_window_event(move |e| {
+                    // Fermer la fenetre du launcher la masque : Cubelink reste en fond (zone de notification) pour que les
+                    // amis restent joignables ; « Quitter Cubelink » dans le menu de l'icone sort vraiment. Un jeu de la
+                    // zone integree est d'abord arrete (regles dans `quit_requested` / `quit_game`, voir `background`) :
+                    // tue net tant qu'il charge derriere le rideau, ferme proprement (monde enregistre, force apres 60 s)
+                    // une fois montre au joueur. Un jeu dans sa PROPRE fenetre n'est pas concerne et continue.
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = e {
+                        api.prevent_close();
+                        background::on_close_requested(&h2, &st2);
+                    }
+                    // Focus retrouve (retour par Alt+Tab) : l'hote rouvre un jeu en plein ecran que GLFW a reduit en perdant le focus.
+                    if staged
+                        && matches!(e, tauri::WindowEvent::Resized(_) | tauri::WindowEvent::Moved(_) | tauri::WindowEvent::ScaleFactorChanged { .. } | tauri::WindowEvent::Focused(true))
+                    {
+                        if let Some(w) = h2.get_webview_window("main") {
+                            st2.stage.relayout(&w);
+                        }
+                    }
+                });
             }
             // Diagnostic : lance une instance sans clic (CUBELINK_STAGE_AUTOLAUNCH=<id>). Ignore sur une installation normale :
             // il faut le mode test ou CUBELINK_STAGE_DEBUG, pour qu'une variable d'environnement oubliee ne lance jamais un jeu.
@@ -169,158 +361,29 @@ pub fn run() {
             });
             Ok(())
         })
-        .invoke_handler(select_handler(test_mode, tauri::generate_handler![
-            commands_auth::auth_status,
-            commands_auth::auth_accounts,
-            commands_auth::auth_skin_head,
-            commands_auth::skin_head_by_name,
-            commands_auth::auth_switch,
-            commands_auth::auth_remove,
-            commands_auth::auth_begin_login,
-            commands_auth::auth_poll_login,
-            commands_auth::auth_logout,
-            commands_auth::auth_offline_login,
-            commands_instances::instances_list,
-            commands_instances::instances_create,
-            commands_instances::instances_import_mrpack,
-            commands_instances::instances_launch,
-            commands_instances::minecraft_versions,
-            commands_game::instances_kill,
-            commands_game::instances_delete,
-            commands_game::instances_update,
-            commands_game::instances_open_folder,
-            commands_game::instances_logs,
-            commands_art::instances_art_image,
-            commands_art::instances_art_set,
-            commands_art::instances_art_lookup,
-            commands_art::instances_description,
-            commands_friends::net_test,
-            commands_friends::friend_my_code,
-            commands_friends::friend_regenerate_code,
-            commands_friends::friend_list,
-            commands_friends::friend_send_request,
-            commands_friends::friend_requests,
-            commands_friends::friend_accept,
-            commands_friends::friend_refuse,
-            commands_friends::friend_refuse_all,
-            commands_join::join_plan,
-            commands_join::join_start,
-            commands_join::join_pause,
-            commands_join::join_resume,
-            commands_join::join_cancel,
-            commands_join::join_open_tunnel,
-            commands_join::join_close_tunnel,
-            commands_join::join_play,
-            commands_update::update_state,
-            commands_update::update_check,
-            commands_update::update_install,
-            commands_settings::settings_get,
-            commands_settings::settings_set,
-            commands_browse::browse_search,
-            commands_browse::browse_versions,
-            commands_browse::browse_install,
-            commands_browse::mods_list,
-            commands_browse::mods_icon,
-            commands_browse::mods_check,
-            commands_browse::browse_check,
-            commands_browse::mods_fix_plan,
-            commands_browse::mods_fix_apply,
-            commands_browse::mods_fix_undo,
-            commands_browse::mods_toggle,
-            commands_browse::mods_remove,
-            commands_browse::mods_add,
-            commands_host::host_start_sharing,
-            commands_host::host_stop_sharing,
-            commands_host::host_state,
-            invites::friend_invite,
-            invites::friend_invites,
-            invites::friend_invite_dismiss,
-            commands_game::game_switch,
-            commands_game::game_current,
-            commands_game::game_close,
-            commands_game::game_join_friend,
-            stage::stage_view,
-            stage::stage_state,
-            stage::stage_panel,
-            stage::stage_layout,
-            stage::stage_supported,
-        ], tauri::generate_handler![
-            commands_auth::auth_status,
-            commands_auth::auth_accounts,
-            commands_auth::auth_skin_head,
-            commands_auth::skin_head_by_name,
-            commands_auth::auth_switch,
-            commands_auth::auth_remove,
-            commands_auth::auth_begin_login,
-            commands_auth::auth_poll_login,
-            commands_auth::auth_logout,
-            commands_auth::auth_offline_login,
-            commands_instances::instances_list,
-            commands_instances::instances_create,
-            commands_instances::instances_import_mrpack,
-            commands_instances::instances_launch,
-            commands_instances::minecraft_versions,
-            commands_game::instances_kill,
-            commands_game::instances_delete,
-            commands_game::instances_update,
-            commands_game::instances_open_folder,
-            commands_game::instances_logs,
-            commands_art::instances_art_image,
-            commands_art::instances_art_set,
-            commands_art::instances_art_lookup,
-            commands_art::instances_description,
-            commands_friends::net_test,
-            commands_friends::friend_my_code,
-            commands_friends::friend_regenerate_code,
-            commands_friends::friend_list,
-            commands_friends::friend_send_request,
-            commands_friends::friend_requests,
-            commands_friends::friend_accept,
-            commands_friends::friend_refuse,
-            commands_friends::friend_refuse_all,
-            commands_join::join_plan,
-            commands_join::join_start,
-            commands_join::join_pause,
-            commands_join::join_resume,
-            commands_join::join_cancel,
-            commands_join::join_open_tunnel,
-            commands_join::join_close_tunnel,
-            commands_join::join_play,
-            commands_settings::settings_get,
-            commands_settings::settings_set,
-            commands_browse::browse_search,
-            commands_browse::browse_versions,
-            commands_browse::browse_install,
-            commands_browse::mods_list,
-            commands_browse::mods_icon,
-            commands_browse::mods_check,
-            commands_browse::browse_check,
-            commands_browse::mods_fix_plan,
-            commands_browse::mods_fix_apply,
-            commands_browse::mods_fix_undo,
-            commands_browse::mods_toggle,
-            commands_browse::mods_remove,
-            commands_browse::mods_add,
-            commands_host::host_start_sharing,
-            commands_host::host_stop_sharing,
-            commands_host::host_state,
-            invites::friend_invite,
-            invites::friend_invites,
-            invites::friend_invite_dismiss,
-            commands_game::game_switch,
-            commands_game::game_current,
-            commands_game::game_close,
-            commands_game::game_join_friend,
-            stage::stage_view,
-            stage::stage_state,
-            stage::stage_panel,
-            stage::stage_layout,
-            stage::stage_supported,
-            test_hooks::test_state,
-            test_hooks::test_cut_guest_connection,
-        ]))
-        .run(tauri::generate_context!())
+        .invoke_handler(select_handler(test_mode, specta_builder().invoke_handler(), test_builder().invoke_handler()))
+        .run(context(test_mode))
         .expect("erreur au lancement de Cubelink");
+}
+
+/// Contexte Tauri. En mode test, les arguments de `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` (port CDP du harnais E2E) sont
+/// AJOUTES a ceux de la fenetre. Depuis que tauri.conf.json fixe `additionalBrowserArgs`, la variable seule ne suffit plus :
+/// en CI, WebView2 n'ouvrait jamais le port de debogage (« CDP indisponible » sur tous les scenarios).
+fn context(test_mode: bool) -> tauri::Context<tauri::Wry> {
+    let mut ctx = tauri::generate_context!();
+    if test_mode {
+        let extra = std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").ok();
+        for w in &mut ctx.config_mut().app.windows {
+            w.additional_browser_args = merge_browser_args(w.additional_browser_args.take(), extra.as_deref());
+        }
+    }
+    ctx
+}
+
+/// Arguments de la fenetre suivis de ceux de l'environnement (les deux facultatifs, les blancs ignores).
+fn merge_browser_args(window: Option<String>, env: Option<&str>) -> Option<String> {
+    let parts: Vec<&str> = [window.as_deref(), env].into_iter().flatten().map(str::trim).filter(|s| !s.is_empty()).collect();
+    (!parts.is_empty()).then(|| parts.join(" "))
 }
 
 #[cfg(test)]
@@ -329,6 +392,19 @@ mod tests {
 
     fn hooks(test_mode: bool, relay: Option<test_hooks::RelayMode>) -> test_hooks::Hooks {
         test_hooks::Hooks { test_mode, relay, ..Default::default() }
+    }
+
+    #[test]
+    fn arguments_webview_de_l_environnement_ajoutes_a_ceux_de_la_fenetre() {
+        let w = Some("--disable-features=msWebOOUI".to_string());
+        assert_eq!(
+            merge_browser_args(w.clone(), Some("--remote-debugging-port=9222 --remote-allow-origins=*")).as_deref(),
+            Some("--disable-features=msWebOOUI --remote-debugging-port=9222 --remote-allow-origins=*")
+        );
+        assert_eq!(merge_browser_args(w.clone(), None), w);
+        assert_eq!(merge_browser_args(w.clone(), Some("  ")), w);
+        assert_eq!(merge_browser_args(None, Some("--x")).as_deref(), Some("--x"));
+        assert_eq!(merge_browser_args(None, None), None);
     }
 
     #[test]
@@ -351,5 +427,23 @@ mod tests {
         assert_eq!(o.inactivity, std::time::Duration::from_secs(4));
         assert!(o.stall_retry <= std::time::Duration::from_secs(2));
         assert_eq!(iroh_options(&hooks(true, None)).inactivity, iroh_backend::DEFAULT_INACTIVITY);
+    }
+
+    #[test]
+    fn launcher_x11_seulement_si_la_scene_peut_servir() {
+        assert!(linux_launcher_x11(true, false, true, || true));
+        // « Jeu integre » coupe : Wayland natif garde.
+        assert!(!linux_launcher_x11(true, false, true, || false));
+        // Sans DISPLAY, coupe-circuit ou mode test : rien n'est force, et le reglage n'est meme pas lu.
+        for (display, no_stage, allowed) in [(false, false, true), (true, true, true), (true, false, false)] {
+            assert!(!linux_launcher_x11(display, no_stage, allowed, || panic!("reglage lu pour rien")));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn identifiant_conforme_a_tauri_conf() {
+        let conf: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        assert_eq!(conf["identifier"], IDENTIFIER);
     }
 }

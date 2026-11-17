@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Button, Card, ProgressBar } from "../../ui";
 import { useServices } from "../../app/context";
+import { openExternal } from "../../app/externalLinks";
 import { useUpdateState } from "../../app/useUpdateState";
 
 function messageOf(e: unknown): string {
@@ -27,6 +28,7 @@ export function UpdateSection() {
   else if (phase === "up_to_date") text = "Cubelink est à jour.";
   else if (phase === "available" || phase === "downloading") text = `Version ${v} trouvée, téléchargement…`;
   else if (phase === "ready") text = `Version ${v} prête à installer.`;
+  else if (phase === "available_manual") text = `Nouvelle version ${v} disponible. ${st?.message ?? ""}`.trim();
   else if (phase === "error") text = st?.message || "La vérification a échoué.";
 
   return (
@@ -39,7 +41,8 @@ export function UpdateSection() {
           {phase === "downloading" && <ProgressBar value={pct} label="Téléchargement de la mise à jour" showValue />}
         </div>
         {/* Une version est déjà trouvée (téléchargement ou prête) : chercher à nouveau n'apporterait rien. */}
-        {phase === "ready" ? <Button onClick={install}>Redémarrer et installer</Button>
+        {phase === "available_manual" ? <Button onClick={() => openExternal(st?.url || "https://github.com/delikesance/cubelink/releases/latest")}>Voir la release</Button>
+          : phase === "ready" ? <Button onClick={install}>Redémarrer et installer</Button>
           : phase !== "available" && phase !== "downloading" && <Button variant="secondary" disabled={busy} onClick={check}>Chercher une mise à jour</Button>}
       </div>
     </Card>

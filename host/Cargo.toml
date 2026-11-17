@@ -3,7 +3,8 @@ name = "cubelink-host"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "La Scene Cubelink : le jeu tourne dans la fenetre du launcher (Windows), un rideau couvre lancements et changements de modpack."
+publish = false
+description = "La Scene Cubelink : le jeu tourne dans la fenetre du launcher (Windows et Linux X11), un rideau couvre lancements et changements de modpack."
 
 [lib]
 name = "cubelink_host"
@@ -30,3 +31,7 @@ windows-sys = { version = "0.61", features = [
   "Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Graphics_Dwm", "Win32_System_LibraryLoader", "Win32_UI_Accessibility",
   "Win32_UI_HiDpi", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading",
 ] }
+
+# Linux : la Scene passe par X11 (ou XWayland), en Rust pur (pas de libxcb a l'execution). `shape` : fenetre du rideau traversee par la souris.
+[target.'cfg(target_os = "linux")'.dependencies]
+x11rb = { version = "0.13", features = ["shape"] }

@@ -5,7 +5,7 @@ import { navigate } from "../../app/router";
 import { setImportWarning } from "../../app/importWarning";
 import type { Loader } from "../../services/types";
 import { Button, Field, Input, RAM_DEFAULT, RamPicker, useDefaultRam } from "../../ui";
-import { ICONS, Icon } from "../Main/Panel";
+import { ICONS, Icon } from "../../ui";
 
 export const RECOMMENDED_VERSION = "1.21.1";
 const FORBIDDEN = /[<>:"/\\|?*]/;
@@ -15,12 +15,6 @@ const LOADERS: { value: Loader; label: string }[] = [
   { value: "fabric", label: "Fabric" },
   { value: "quilt", label: "Quilt" },
   { value: "forge", label: "Forge" },
-];
-export const RAM_OPTIONS = [
-  { mb: 2048, label: "2\u00a0Go" },
-  { mb: 4096, label: "4\u00a0Go (recommandée)" },
-  { mb: 6144, label: "6\u00a0Go" },
-  { mb: 8192, label: "8\u00a0Go" },
 ];
 const isPack = (p: string) => /\.(mrpack|zip)$/i.test(p);
 

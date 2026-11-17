@@ -14,6 +14,7 @@ use p2p_lib::friend_code::FriendCodePayload;
 use p2p_lib::friends_db::FriendsDb;
 use p2p_lib::identity::Identity;
 use p2p_lib::invite::InviteMessage;
+use p2p_lib::join_request::JoinAnswer;
 use p2p_lib::transfer::plan::Plan;
 use serde::Serialize;
 
@@ -102,8 +103,9 @@ pub struct AppState {
     pub last_seen: Arc<crate::last_seen::LastSeen>,
     /// Mods inconnus déjà acceptés (par sha256) : la case de confiance ne les redemande pas.
     pub trusted_mods: Arc<crate::trusted_mods::TrustedMods>,
-    /// Par ami : sha256 des mods inconnus montrés par le dernier `join_plan`, acceptés au `join_start`.
-    pub pending_trust: Mutex<std::collections::HashMap<String, Vec<String>>>,
+    /// Par ami : le dernier `join_plan` montré (hash du manifeste, sha256 des fichiers qui demandent l'accord), vérifié
+    /// au `join_start`.
+    pub pending_trust: Mutex<std::collections::HashMap<String, crate::commands_join::PendingConsent>>,
     pub settings: Arc<Mutex<Settings>>,
     pub profile: Mutex<Option<Profile>>,
     pub pending_login: Mutex<Option<DeviceCode>>,
@@ -124,6 +126,15 @@ pub struct AppState {
     pub invites: Mutex<Vec<core_lib::types::Invite>>,
     /// Dernier envoi d'invitation par ami (anti-spam côté émetteur).
     pub invites_sent: Mutex<std::collections::HashMap<String, std::time::Instant>>,
+    /// Pairs autorisés à rejoindre la partie en cours (invités, demandes acceptées, membres de groupe). Vidé à
+    /// `host_stop_sharing` ; consulté par les autorisations du tunnel, du manifeste et des fichiers.
+    pub access: Arc<crate::authz::SessionAccess>,
+    /// Serveurs de groupe (Hearth) : groupes, baux, versions du monde, serveur dédié (voir `hearth`).
+    pub hearth: Arc<crate::hearth::HearthRuntime>,
+    /// Demandes à rejoindre reçues d'amis, en attente d'une décision de l'hôte (voir `invites`).
+    pub join_requests: Mutex<Vec<crate::invites::JoinRequest>>,
+    /// Amis (hex) à qui nous avons demandé à rejoindre et dont la réponse n'est pas arrivée.
+    pub join_requests_out: Mutex<std::collections::HashSet<String>>,
     /// Instance invitée créée par le dernier `join_start` réussi (lue par `game_join_friend`).
     pub last_join_instance: Mutex<Option<String>>,
     backend: RwLock<Arc<dyn P2pBackend>>,
@@ -159,6 +170,11 @@ impl QuitGate {
     pub fn begin_quit(&self) -> bool {
         self.quitting.store(true, std::sync::atomic::Ordering::SeqCst);
         self.spawning()
+    }
+
+    /// La fermeture n'a pas quitté l'application (Cubelink masqué en fond) : les lancements suivants sont de nouveau permis.
+    pub fn cancel_quit(&self) {
+        self.quitting.store(false, std::sync::atomic::Ordering::SeqCst);
     }
 
     pub fn quitting(&self) -> bool {
@@ -261,9 +277,6 @@ impl P2pBackend for PendingBackend {
     fn refuse_request(&self, public_key: String) -> BoxFuture<'_, Result<bool, String>> {
         Box::pin(async move { self.wait().await?.refuse_request(public_key).await })
     }
-    fn notify_accepted(&self, friend: Friend) -> BoxFuture<'_, Result<(), String>> {
-        Box::pin(async move { self.wait().await?.notify_accepted(friend).await })
-    }
     fn fetch_manifest(&self, friend_public_key: String) -> BoxFuture<'_, Result<HostManifest, String>> {
         Box::pin(async move { self.wait().await?.fetch_manifest(friend_public_key).await })
     }
@@ -286,6 +299,12 @@ impl P2pBackend for PendingBackend {
     fn send_invite(&self, public_key: String, msg: InviteMessage) -> BoxFuture<'_, Result<(), String>> {
         Box::pin(async move { self.wait().await?.send_invite(public_key, msg).await })
     }
+    fn send_join_request(&self, public_key: String) -> BoxFuture<'_, Result<JoinAnswer, String>> {
+        Box::pin(async move { self.wait().await?.send_join_request(public_key).await })
+    }
+    fn answer_join_request(&self, public_key: &str, accept: bool) -> bool {
+        self.current().is_some_and(|b| b.answer_join_request(public_key, accept))
+    }
     fn host_start_sharing(&self, instance_id: String, world_port: u16) -> BoxFuture<'_, Result<(), String>> {
         Box::pin(async move { self.wait().await?.host_start_sharing(instance_id, world_port).await })
     }
@@ -301,6 +320,9 @@ impl P2pBackend for PendingBackend {
     }
     fn join_open_tunnel(&self, friend_public_key: String) -> BoxFuture<'_, Result<u16, String>> {
         Box::pin(async move { self.wait().await?.join_open_tunnel(friend_public_key).await })
+    }
+    fn hearth_open_tunnel(&self, holder: String) -> BoxFuture<'_, Result<u16, String>> {
+        Box::pin(async move { self.wait().await?.hearth_open_tunnel(holder).await })
     }
     fn join_close_tunnel(&self) -> BoxFuture<'_, ()> {
         Box::pin(async move {
@@ -350,6 +372,8 @@ pub fn default_settings() -> Settings {
         overlay_enabled: true,
         overlay_hotkey: core_lib::types::DEFAULT_OVERLAY_HOTKEY.into(),
         embedded_game: true,
+        open_to_all_friends: false,
+        start_with_os: true,
     }
 }
 
@@ -365,14 +389,19 @@ impl AppState {
         stage.set_wanted(settings.embedded_game);
         let last_seen = Arc::new(crate::last_seen::LastSeen::open(paths.p2p.join("last_seen.json")));
         let trusted_mods = Arc::new(crate::trusted_mods::TrustedMods::open(paths.p2p.join("trusted_mods.json")));
+        let instances = Arc::new(InstanceStore::new(paths.instances.clone()));
+        let identity = Arc::new(identity);
+        let friends = Arc::new(friends);
+        let access = Arc::new(crate::authz::SessionAccess::default());
+        let hearth = crate::hearth::HearthRuntime::new(&paths.root, identity.clone(), friends.clone(), instances.clone(), access.clone(), emit.clone())?;
         Ok(Self {
             last_seen,
             trusted_mods,
             pending_trust: Mutex::new(std::collections::HashMap::new()),
-            instances: Arc::new(InstanceStore::new(paths.instances.clone())),
+            instances,
             store: Arc::new(store),
-            identity: Arc::new(identity),
-            friends: Arc::new(friends),
+            identity,
+            friends,
             settings: Arc::new(Mutex::new(settings)),
             profile: Mutex::new(None),
             pending_login: Mutex::new(None),
@@ -385,6 +414,10 @@ impl AppState {
             host: Mutex::new(None),
             invites: Mutex::new(Vec::new()),
             invites_sent: Mutex::new(std::collections::HashMap::new()),
+            access,
+            hearth,
+            join_requests: Mutex::new(Vec::new()),
+            join_requests_out: Mutex::new(std::collections::HashSet::new()),
             last_join_instance: Mutex::new(None),
             backend: RwLock::new(backend),
             quit: QuitGate::default(),

@@ -11,7 +11,7 @@ export function clearArtCache() {
   pending.clear();
 }
 
-export function loadArtImage(services: Pick<Services, "instancesArtImage">, id: string, file: string, maxPx?: number): Promise<string> {
+function loadArtImage(services: Pick<Services, "instancesArtImage">, id: string, file: string, maxPx?: number): Promise<string> {
   const key = keyOf(id, file, maxPx);
   const hit = cache.get(key);
   if (hit) return Promise.resolve(hit);
@@ -39,7 +39,7 @@ export function useArtImage(services: Pick<Services, "instancesArtImage">, id: s
     const io = new IntersectionObserver((es) => { if (es.some((e) => e.isIntersecting)) { setVisible(true); io.disconnect(); } });
     io.observe(ref.current);
     return () => io.disconnect();
-  }, [visible]);
+  }, [visible, maxPx]);
 
   useEffect(() => {
     if (!file) { setState({ status: "idle", src: null }); return; }

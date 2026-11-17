@@ -12,7 +12,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use core_lib::store::hash::{sha256_reader, verify_file};
@@ -22,6 +22,7 @@ use futures_util::stream::{FuturesUnordered, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
+use super::lock;
 use super::plan::Plan;
 use super::recv::{RecvOptions, RecvSummary};
 use super::send::{BlobTransport, FetchRequest};
@@ -119,10 +120,6 @@ struct Journal {
 
 fn now_unix() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
-}
-
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|p| p.into_inner())
 }
 
 fn valid_id(id: &str) -> bool {
@@ -672,13 +669,9 @@ impl<T: BlobTransport> ResumableReceive<T> {
 mod tests {
     use super::*;
     use crate::transfer::send::Host;
-    use sha2::{Digest, Sha256};
+    use crate::transfer::send::tests::sha;
     use std::collections::{HashMap, VecDeque};
     use std::sync::atomic::AtomicUsize;
-
-    fn sha(d: &[u8]) -> String {
-        hex::encode(Sha256::digest(d))
-    }
 
     /// Transport de test : sert des contenus en mémoire, honore `resume_from`, coupe après N octets
     /// (une coupure par appel, dans l'ordre) et compte les octets réellement transférés.

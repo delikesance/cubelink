@@ -118,16 +118,7 @@ impl VersionsClient {
     }
 
     async fn get_bytes(&self, url: &str) -> Result<Vec<u8>> {
-        let resp = self.http.get(url).send().await.map_err(|e| Error::Network(e.to_string()))?;
-        let status = resp.status();
-        if status.as_u16() == 404 {
-            return Err(Error::NotFound(url.to_string()));
-        }
-        if !status.is_success() {
-            return Err(Error::Network(format!("HTTP {} pour {url}", status.as_u16())));
-        }
-        let bytes = resp.bytes().await.map_err(|e| Error::Network(e.to_string()))?;
-        Ok(bytes.to_vec())
+        get_bytes(&self.http, url).await
     }
 
     pub async fn fetch_manifest(&self) -> Result<VersionManifest> {
@@ -159,43 +150,23 @@ pub async fn fetch_version_json(entry: &VersionEntry) -> Result<VersionJson> {
     VersionsClient::new().fetch_version_json(entry).await
 }
 
-/// SHA-1 minimal (RFC 3174), hexadécimal minuscule. Utilisé uniquement pour l'intégrité Mojang.
+/// GET d'une URL en mémoire : 404 en `NotFound`, autre échec HTTP en `Network`.
+pub(crate) async fn get_bytes(http: &reqwest::Client, url: &str) -> Result<Vec<u8>> {
+    let resp = http.get(url).send().await.map_err(|e| Error::Network(e.to_string()))?;
+    let status = resp.status();
+    if status.as_u16() == 404 {
+        return Err(Error::NotFound(url.to_string()));
+    }
+    if !status.is_success() {
+        return Err(Error::Network(format!("HTTP {} pour {url}", status.as_u16())));
+    }
+    let bytes = resp.bytes().await.map_err(|e| Error::Network(e.to_string()))?;
+    Ok(bytes.to_vec())
+}
+
+/// SHA-1 hexadécimal minuscule (implémentation partagée : `unknown_mods::sha1_hex`). Sert à l'intégrité Mojang.
 pub fn sha1_hex(data: &[u8]) -> String {
-    let mut h: [u32; 5] = [0x6745_2301, 0xEFCD_AB89, 0x98BA_DCFE, 0x1032_5476, 0xC3D2_E1F0];
-    let mut msg = data.to_vec();
-    msg.push(0x80);
-    while msg.len() % 64 != 56 {
-        msg.push(0);
-    }
-    msg.extend_from_slice(&((data.len() as u64) * 8).to_be_bytes());
-    for chunk in msg.as_chunks::<64>().0 {
-        let mut w = [0u32; 80];
-        for (i, b) in chunk.as_chunks::<4>().0.iter().enumerate() {
-            w[i] = u32::from_be_bytes(*b);
-        }
-        for i in 16..80 {
-            w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
-        }
-        let [mut a, mut b, mut c, mut d, mut e] = h;
-        for (i, wi) in w.iter().enumerate() {
-            let (f, k) = match i {
-                0..=19 => ((b & c) | (!b & d), 0x5A82_7999),
-                20..=39 => (b ^ c ^ d, 0x6ED9_EBA1),
-                40..=59 => ((b & c) | (b & d) | (c & d), 0x8F1B_BCDC),
-                _ => (b ^ c ^ d, 0xCA62_C1D6u32),
-            };
-            let t = a.rotate_left(5).wrapping_add(f).wrapping_add(e).wrapping_add(k).wrapping_add(*wi);
-            e = d;
-            d = c;
-            c = b.rotate_left(30);
-            b = a;
-            a = t;
-        }
-        for (x, y) in h.iter_mut().zip([a, b, c, d, e]) {
-            *x = x.wrapping_add(y);
-        }
-    }
-    h.iter().map(|x| format!("{x:08x}")).collect()
+    crate::unknown_mods::sha1_hex(data)
 }
 
 #[cfg(test)]

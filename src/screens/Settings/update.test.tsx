@@ -35,6 +35,17 @@ describe("section Mise à jour", () => {
     expect(spy).toHaveBeenCalled();
   });
 
+  it("paquet Nix : version disponible, pas d'installation, bouton vers la release", async () => {
+    const fake = createFakeServices({ tickMs: 0 });
+    render(<Shell services={fake} />);
+    open();
+    await screen.findByText(/Version installée\s*:\s*0\.1\.0/);
+    act(() => fake.emitUpdateState({ phase: "available_manual", version: "0.2.0", message: "Cubelink est installé via Nix : mets à jour ton paquet ou ton flake.", url: "https://github.com/delikesance/cubelink/releases/latest" }));
+    expect(screen.getByText(/Nouvelle version 0\.2\.0 disponible\..*Nix/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Voir la release" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Redémarrer et installer" })).toBeNull();
+  });
+
   it("affiche l'erreur", async () => {
     const fake = createFakeServices({ tickMs: 0 });
     render(<Shell services={fake} />);

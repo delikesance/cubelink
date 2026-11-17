@@ -1,7 +1,7 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
 
 export const ROUTES = [
-  "login", "main", "instance", "create", "install", "join", "settings", "error", "legal", "browse",
+  "login", "main", "instance", "create", "install", "join", "settings", "error", "legal", "browse", "hearth",
 ] as const;
 export type RouteName = (typeof ROUTES)[number];
 export const DEFAULT_ROUTE: RouteName = "login";

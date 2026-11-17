@@ -6,7 +6,7 @@
 // hash verifies), tunnel TCP reel jusqu'au faux monde. Les temps mesures sont journalises (console + annotations).
 import net from 'node:net';
 import path from 'node:path';
-import { test, expect, invoke, testState, makeHostInstance, startFakeWorld, loginOffline } from './harness/fixtures';
+import { test, expect, invoke, inviteAllFriends, joinStart, testState, makeHostInstance, startFakeWorld, loginOffline } from './harness/fixtures';
 import { makeBigHost, recordEvents, waitProgress, lastProgress, guestInstance, sha256File, waitOnline, events } from './helpers/e2e2-common';
 import { NAME_A, NAME_B, keyOfCode, makeFriends as makeFriendsUi, readMyCode } from './helpers/e2e1-common';
 
@@ -60,6 +60,7 @@ test('multijoueur reel via le relais public : ami, partage, join, transfert rela
   const host = await makeBigHost(appA, { count: 2, sizeMb: 3 });
   const fake = await startFakeWorld(appA);
   await invoke(appA.page, 'host_start_sharing', { instance_id: host.id, world_port: fake.lanPort });
+  await inviteAllFriends(appA); // règle de jonction : B est invité pour cette partie
 
   // 4. B : plan puis transfert.
   await recordEvents(appB.page, 'transfer://progress');
@@ -67,7 +68,7 @@ test('multijoueur reel via le relais public : ami, partage, join, transfert rela
   expect(plan.manifest.files).toHaveLength(2);
   expect(plan.to_receive).toBe(2);
   await timed('transfert', async () => {
-    await invoke(appB.page, 'join_start', { friend_public_key: keyA });
+    await joinStart(appB.page, keyA);
     await waitProgress(appB.page, (p) => p.phase === 'done' || p.phase === 'failed', 300_000, 'fin du transfert');
   });
   const last = await lastProgress(appB.page) as { phase: string; error?: string; via_relay?: boolean; bytes_done: number; speed_bps?: number };

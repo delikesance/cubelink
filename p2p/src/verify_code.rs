@@ -5,7 +5,7 @@
 //! (les nonces suivent leur clé, pas leur rôle), chaque champ précédé de sa longueur
 //! (u32 BE). On garde les 8 premiers octets.
 
-use core_lib::types::{Error, Result, VerifyCode};
+use core_lib::types::VerifyCode;
 use sha2::{Digest, Sha256};
 
 /// Séparateur de domaine du hachage.
@@ -53,34 +53,10 @@ pub fn verify_code(
 }
 
 /// Met en forme 8 octets : « 3F9A · C21B · 77D0 · 5E14 ».
-pub fn format_code(bytes: &[u8; 8]) -> VerifyCode {
+fn format_code(bytes: &[u8; 8]) -> VerifyCode {
     let hex = hex::encode_upper(bytes);
     let groups: Vec<&str> = (0..4).map(|i| &hex[i * 4..i * 4 + 4]).collect();
     VerifyCode(groups.join(" · "))
-}
-
-/// Lit un code saisi : tolère espaces, tirets, « · » et minuscules.
-pub fn parse_code(s: &str) -> Result<[u8; 8]> {
-    let cleaned: String = s
-        .chars()
-        .filter(|c| !c.is_whitespace() && !matches!(c, '-' | '·' | '–' | '—'))
-        .collect();
-    if cleaned.len() != CODE_BYTES * 2 || !cleaned.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err(Error::Invalid(format!(
-            "code de vérification : {} caractères hexadécimaux attendus",
-            CODE_BYTES * 2
-        )));
-    }
-    let mut out = [0u8; CODE_BYTES];
-    hex::decode_to_slice(&cleaned, &mut out)
-        .map_err(|e| Error::Invalid(format!("code de vérification : {e}")))?;
-    Ok(out)
-}
-
-/// Comparaison en temps constant de deux codes déjà analysés.
-pub fn codes_match(a: &[u8; 8], b: &[u8; 8]) -> bool {
-    let diff = a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y));
-    std::hint::black_box(diff) == 0
 }
 
 #[cfg(test)]
@@ -93,49 +69,6 @@ mod tests {
     fn format_exact() {
         let c = format_code(&[0x3F, 0x9A, 0xC2, 0x1B, 0x77, 0xD0, 0x5E, 0x14]);
         assert_eq!(c.0, "3F9A · C21B · 77D0 · 5E14");
-    }
-
-    #[test]
-    fn parse_tolerant() {
-        let want = [0x3F, 0x9A, 0xC2, 0x1B, 0x77, 0xD0, 0x5E, 0x14];
-        for s in [
-            "3F9A · C21B · 77D0 · 5E14",
-            "3f9a c21b 77d0 5e14",
-            "3F9A-C21B-77D0-5E14",
-            "  3f9ac21b77d05e14 ",
-            "3f9a·c21b·77d0·5e14",
-        ] {
-            assert_eq!(parse_code(s).unwrap(), want, "{s}");
-        }
-    }
-
-    #[test]
-    fn parse_rejects_invalid() {
-        for s in [
-            "",
-            "3F9A",
-            "3F9A C21B 77D0 5E1",
-            "3F9A C21B 77D0 5E145",
-            "ZZZZ C21B 77D0 5E14",
-            "3F9A C21B 77D0 5E1é",
-        ] {
-            assert!(parse_code(s).is_err(), "{s}");
-        }
-    }
-
-    #[test]
-    fn roundtrip_format_parse() {
-        let b = [1, 2, 3, 4, 5, 6, 7, 8];
-        assert_eq!(parse_code(&format_code(&b).0).unwrap(), b);
-    }
-
-    #[test]
-    fn match_semantics() {
-        let a = [1u8; 8];
-        let mut b = a;
-        assert!(codes_match(&a, &b));
-        b[7] ^= 1;
-        assert!(!codes_match(&a, &b));
     }
 
     #[test]
@@ -185,8 +118,7 @@ mod tests {
                      nb in prop::collection::vec(any::<u8>(), 0..64)) {
             let c1 = verify_code(&a, &b, &na, &nb);
             prop_assert_eq!(&c1, &verify_code(&a, &b, &na, &nb));
-            let parsed = parse_code(&c1.0).unwrap();
-            prop_assert_eq!(format_code(&parsed), c1);
+            prop_assert_eq!(c1.0.len(), "3F9A · C21B · 77D0 · 5E14".len());
         }
     }
 }

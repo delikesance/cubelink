@@ -7,7 +7,7 @@ use cubelink_host::curtain::*;
 const NOTE: &str = "Ton monde est enregistré avant la fermeture : rien n'est perdu.";
 
 fn model<'a>(sentence: &'a str, note: Option<&'a str>, fraction: f32, cover: f32, card: f32, t: f32, calm: bool) -> Model<'a> {
-    Model { title: "Fabulously Optimized", caption: "Changement de modpack", sentence, note, fraction, cover, card, t, calm }
+    Model { title: "Fabulously Optimized", caption: cubelink_host::flow::CAPTION_SWITCH, sentence, note, fraction, cover, card, t, calm }
 }
 
 fn composite(top: &tiny_skia::Pixmap, w: u32, h: u32) -> tiny_skia::Pixmap {

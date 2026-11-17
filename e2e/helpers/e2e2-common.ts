@@ -4,7 +4,7 @@ import { spawn, execFileSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { invoke, testState, loginOffline, waitForRoute, ROOT, type App, type World } from '../harness/fixtures';
+import { invoke, inviteAllFriends, testState, loginOffline, waitForRoute, ROOT, type App, type World } from '../harness/fixtures';
 
 export const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const FAKE_JAVA = path.join(ROOT, 'tests-fixtures', 'mojang', 'fake-java.cmd');
@@ -79,7 +79,7 @@ export async function setupHostAndGuest(world: Pick<World, 'appA' | 'appB' | 'se
   for (const app of [appA, appB]) {
     await waitForRoute(app.page, 'login');
     const s = await invoke<Record<string, unknown>>(app.page, 'settings_get');
-    await invoke(app.page, 'settings_set', { ...s, close_on_launch: false });
+    await invoke(app.page, 'settings_set', { settings: { ...s, close_on_launch: false } });
     if (Object.keys(extraEnv).length) browsers.push(await restartApp(app, world, 'disabled', extraEnv));
   }
   await waitForRoute(appA.page, 'login'); await waitForRoute(appB.page, 'login');
@@ -89,6 +89,8 @@ export async function setupHostAndGuest(world: Pick<World, 'appA' | 'appB' | 'se
   await makeFriends(appA, appB);
   const keyA = await friendKeyOnB(appB);
   await invoke(appA.page, 'host_start_sharing', { instance_id: host.id, world_port: 25599 });
+  // Règle de jonction : B est invité pour cette partie.
+  await inviteAllFriends(appA);
   return { host, keyA };
 }
 

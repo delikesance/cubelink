@@ -25,7 +25,7 @@ fn guard() -> std::sync::MutexGuard<'static, ()> {
     LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct ModEntry {
     /// Nom actuel du fichier (finit par `.disabled` si le mod est désactivé).
     pub file: String,

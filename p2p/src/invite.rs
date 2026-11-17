@@ -125,7 +125,7 @@ impl InviteHandler {
     /// Vrai (et date retenue) si cet ami n'a pas déjà invité il y a moins de `min_interval`.
     fn allow(&self, key: PeerKey) -> bool {
         let now = Instant::now();
-        let mut last = self.last.lock().unwrap_or_else(|p| p.into_inner());
+        let mut last = crate::util::lock(&self.last);
         last.retain(|_, t| now.duration_since(*t) < self.min_interval);
         if last.contains_key(&key) {
             return false;

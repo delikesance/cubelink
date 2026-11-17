@@ -2,7 +2,8 @@
 //!
 //! En usage réel, le partage est automatique : `HostAuto` partage l'instance (manifeste, sans port) dès que le jeu
 //! tourne, détecte l'ouverture au réseau local dans la sortie du jeu, invite alors automatiquement les amis en ligne
-//! (invitations renouvelées tant que le jeu tourne, annulées à la fin), puis arrête le partage à la fin du jeu.
+//! SI `Settings.open_to_all_friends` (sinon, seuls les amis invités ou acceptés entrent ; invitations renouvelées tant
+//! que le jeu tourne, annulées à la fin), puis arrête le partage à la fin du jeu.
 
 use std::sync::Arc;
 
@@ -14,11 +15,26 @@ use crate::state::{lock, AppState};
 use crate::test_hooks::{set_tunnel_port, validate_world_port};
 
 /// Port du monde LAN annoncé par Minecraft, p. ex. `[Server thread/INFO] [minecraft/IntegratedServer]: Started
-/// serving on 54321` ou le chat `Local game hosted on port 54321`. `None` si la ligne n'en contient pas.
+/// serving on 54321`, ou par l'agent LAN (`[Cubelink] LAN: Published LAN server on port 54321`). `None` si la ligne
+/// n'en contient pas.
+///
+/// Sécurité : seul le message d'un journal est lu, jamais une ligne de chat. Le message doit COMMENCER par le marqueur,
+/// juste après l'en-tête du journal (voir [`log_message`]) : `<Bob> Started serving on 5432` (chat journalisé par le
+/// serveur), `[CHAT] Local game hosted on port 5432` (chat affiché au client) ou `[Bob] …` (`/say`) sont ignorés.
+/// Sans cela, un joueur pourrait faire relayer le tunnel vers un autre service local de l'hôte.
 pub fn parse_world_port(line: &str) -> Option<u16> {
+    let msg = log_message(line.trim_end());
+    // L'agent LAN écrit sur la sortie standard, que certaines versions journalisent en `[STDOUT]: …` (ou
+    // `[STDOUT]: [Classe:méthode:ligne]: …`). Un joueur ne fabrique pas ce jeton : son message commence par `<Pseudo>`.
+    let msg = msg.strip_prefix("[STDOUT]:").map(str::trim_start).unwrap_or(msg);
+    let msg = match msg.strip_prefix('[').and_then(|r| r.split_once("]: ")) {
+        Some((inner, rest)) if inner.contains(':') && !inner.contains(' ') => rest,
+        _ => msg,
+    };
+    let msg = msg.strip_prefix("[Cubelink] LAN: ").unwrap_or(msg);
     for marker in ["Started serving on", "Local game hosted on port", "Published LAN server on port"] {
-        let Some(i) = line.find(marker) else { continue };
-        let rest = line[i + marker.len()..].trim_start();
+        let Some(rest) = msg.strip_prefix(marker) else { continue };
+        let rest = rest.trim_start();
         // Hôte optionnel avant le port : `127.0.0.1:54321`.
         let token = rest.split_whitespace().next().unwrap_or("");
         let rest = match token.rsplit_once(':') {
@@ -27,16 +43,63 @@ pub fn parse_world_port(line: &str) -> Option<u16> {
         };
         let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
         if (4..=5).contains(&digits.len()) {
-            if let Some(p) = digits.parse::<u32>().ok().and_then(|p| validate_world_port(p).ok()) {
-                return Some(p);
-            }
+            return digits.parse::<u32>().ok().and_then(|p| validate_world_port(p).ok());
         }
+        return None;
     }
     None
 }
 
+/// Message d'une ligne de journal, sans son en-tête : jetons `[12:00:01]`, `[Server thread/INFO]`,
+/// `[minecraft/IntegratedServer]` (log4j, terminés par `:`) ou `(Minecraft)` (Fabric). Un jeton entre crochets n'est
+/// un en-tête que s'il contient `/` ou n'est qu'une heure : `[CHAT]`, `[Not Secure]` ou `[Bob]` arrêtent la lecture
+/// et restent dans le message. Un pseudo ne contient ni `/`, ni crochets, ni parenthèses : un joueur ne forge pas
+/// d'en-tête, et son message commence toujours par `<Pseudo>`, `[CHAT]` ou `[Pseudo]`.
+/// Heure d'un en-tête de journal : `HH:MM:SS`, éventuellement suivie de `.mmm`. Un pseudo numérique (`[1234]`) n'en
+/// est pas une.
+fn is_clock(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() >= 8
+        && b[2] == b':'
+        && b[5] == b':'
+        && [0, 1, 3, 4, 6, 7].iter().all(|&i| b[i].is_ascii_digit())
+        && (b.len() == 8 || (b[8] == b'.' && b.len() > 9 && b[9..].iter().all(u8::is_ascii_digit)))
+}
+
+/// Fin du serveur intégré (monde quitté) : un monde rouvert ensuite au réseau local aura un nouveau port.
+fn is_server_stop(line: &str) -> bool {
+    log_message(line.trim_end()).starts_with("Stopping server")
+}
+
+fn log_message(line: &str) -> &str {
+    let mut s = line.trim_start();
+    loop {
+        let close = match s.as_bytes().first() {
+            Some(b'[') => ']',
+            Some(b'(') => ')',
+            _ => break,
+        };
+        let Some(end) = s.find(close) else { break };
+        let inner = &s[1..end];
+        let header = !inner.is_empty()
+            && if close == ']' {
+                inner.contains('/') || is_clock(inner)
+            } else {
+                inner.chars().all(|c| c.is_ascii_alphanumeric() || "_.$-".contains(c))
+            };
+        if !header {
+            break;
+        }
+        s = s[end + 1..].trim_start();
+        if let Some(rest) = s.strip_prefix(':') {
+            return rest.trim_start();
+        }
+    }
+    s
+}
+
 /// État du partage hôte (événement `host://state`, commande `host_state`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, specta::Type)]
 pub struct HostState {
     pub instance_id: String,
     pub sharing: bool,
@@ -89,6 +152,9 @@ impl AppState {
     pub fn host_stop_sharing(&self) {
         self.backend().host_stop_sharing();
         set_tunnel_port(0);
+        // L'accès donné pour cette partie (invités, demandes acceptées) tombe avec elle ; les demandes en attente aussi.
+        self.access.clear();
+        self.join_requests_clear();
         // Les invitations envoyées ne valent plus rien : on prévient les amis invités (au mieux).
         self.invites_revoke_sent();
         let prev = lock(&self.host).take();
@@ -118,6 +184,11 @@ impl AppState {
     /// Sans effet tant que le monde n'est pas ouvert et partagé.
     pub(crate) async fn announce_world(&self, sent: &mut std::collections::HashMap<String, std::time::Instant>) {
         if self.host_state().and_then(|h| h.world_port).is_none() {
+            return;
+        }
+        // Règle de jonction : sans ce réglage, on n'invite que les amis choisis un à un (`friend_invite`).
+        if !lock(&self.settings).open_to_all_friends {
+            sent.clear();
             return;
         }
         let Ok(friends) = self.friend_list() else { return };
@@ -160,13 +231,20 @@ impl HostAuto {
         Self { st: st.clone(), id: instance_id.to_string(), share: Some(share), port: None, announce: Some(announce) }
     }
 
-    /// Une ligne de sortie du jeu : détecte l'ouverture du monde au réseau local (le port ne change qu'à l'ouverture).
+    /// Une ligne de sortie du jeu : détecte l'ouverture du monde au réseau local. Le port détecté est définitif tant
+    /// que ce monde tourne : une ligne plus tardive (même forgée) ne détourne pas le tunnel. Après l'arrêt du serveur
+    /// intégré (`Stopping server`, monde quitté), le monde suivant ouvert au réseau local donne le nouveau port.
     pub fn on_line(&mut self, line: &str) {
-        if let Some(p) = parse_world_port(line) {
-            if self.port != Some(p) {
-                self.port = Some(p);
-                self.st.host_world_opened(&self.id, p);
+        if self.port.is_some() {
+            // Monde quitté (serveur intégré arrêté) : le prochain monde ouvert au réseau local pourra donner son port.
+            if is_server_stop(line) {
+                self.port = None;
             }
+            return;
+        }
+        if let Some(p) = parse_world_port(line) {
+            self.port = Some(p);
+            self.st.host_world_opened(&self.id, p);
         }
     }
 
@@ -190,17 +268,23 @@ impl Drop for HostAuto {
     }
 }
 
+/// Partage le monde LAN avec les amis (`world_port` 0 : fichiers seulement). Normalement automatique.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub async fn host_start_sharing(state: State<'_, Arc<AppState>>, instance_id: String, world_port: u32) -> Result<(), String> {
     state.host_start_sharing(&instance_id, world_port).await
 }
 
+/// État du partage hôte, `None` si rien n'est partagé.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub fn host_state(state: State<'_, Arc<AppState>>) -> Result<Option<HostState>, String> {
     Ok(state.host_state())
 }
 
+/// Arrête le partage hôte.
 #[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
 pub fn host_stop_sharing(state: State<'_, Arc<AppState>>) -> Result<(), String> {
     state.host_stop_sharing();
     Ok(())
@@ -212,7 +296,7 @@ mod tests {
     use crate::p2p_backend::{BoxFuture, P2pBackend, ProgressFn, TransferControl};
     use crate::state::test_support::test_state;
     
-    use core_lib::types::{Error, Friend, Loader, LoaderSpec, Presence, VerifyCode};
+    use core_lib::types::{Error, Loader, LoaderSpec, Presence, VerifyCode};
     use p2p_lib::friend_code::FriendCodePayload;
     use p2p_lib::transfer::plan::Plan;
     use std::sync::Mutex;
@@ -233,7 +317,14 @@ mod tests {
     fn parse_port_lignes_reelles() {
         let l = "[12:00:01] [Server thread/INFO] [minecraft/IntegratedServer]: Started serving on 54321";
         assert_eq!(parse_world_port(l), Some(54321));
-        assert_eq!(parse_world_port("[12:00:01] [Render thread/INFO] [minecraft/ChatComponent]: [CHAT] Local game hosted on port 25565"), Some(25565));
+        assert_eq!(parse_world_port("[12:00:01] [Server thread/INFO] (Minecraft) Started serving on 54321"), Some(54321));
+        assert_eq!(parse_world_port("[Cubelink] LAN: Published LAN server on port 54321"), Some(54321));
+        assert_eq!(parse_world_port("[12:00:01] [Render thread/INFO]: [STDOUT]: [Cubelink] LAN: Published LAN server on port 54321"), Some(54321));
+        assert_eq!(
+            parse_world_port("[12:00:01] [Client thread/INFO] [STDOUT]: [app.cubelink.agent.LanAgent:log:150]: [Cubelink] LAN: Published LAN server on port 54321"),
+            Some(54321)
+        );
+        assert_eq!(parse_world_port("[12:00:01.123] [Server thread/INFO]: Started serving on 54321"), Some(54321));
         assert_eq!(parse_world_port("Local game hosted on port  1024"), Some(1024));
         assert_eq!(parse_world_port("Started serving on 54321\r"), Some(54321));
         assert_eq!(parse_world_port("[Server thread/INFO]: Started serving on 127.0.0.1:41234"), Some(41234));
@@ -261,6 +352,38 @@ mod tests {
         }
     }
 
+    #[test]
+    fn arret_du_serveur_integre() {
+        assert!(is_server_stop("[12:00:01] [Server thread/INFO] [minecraft/MinecraftServer]: Stopping server"));
+        assert!(is_server_stop("[12:00:01] [Server thread/INFO] (Minecraft) Stopping server"));
+        assert!(!is_server_stop("[12:00:01] [Server thread/INFO]: <Bob> Stopping server"));
+        assert!(!is_server_stop("[12:00:01] [Render thread/INFO]: [CHAT] <Bob> Stopping server"));
+    }
+
+    /// S2 : une ligne de chat (ou de `/say`) ne fournit jamais le port du tunnel, quel que soit le format du journal.
+    #[test]
+    fn parse_port_ignore_le_chat() {
+        for l in [
+            "[12:00:01] [Render thread/INFO] [minecraft/ChatComponent]: [CHAT] Local game hosted on port 25565",
+            "[12:00:01] [Render thread/INFO]: [CHAT] <Bob> Local game hosted on port 5432",
+            "[12:00:01] [Server thread/INFO] [minecraft/MinecraftServer]: <Bob> Started serving on 5432",
+            "[12:00:01] [Server thread/INFO]: <Bob> Local game hosted on port 5432",
+            "[12:00:01] [Server thread/INFO] (Minecraft) <Bob> Started serving on 5432",
+            "[12:00:01] [Server thread/INFO]: [Not Secure] <Bob> Started serving on 5432",
+            "[12:00:01] [Server thread/INFO]: [Bob] Started serving on 5432",
+            "[12:00:01] [Server thread/INFO]: [1234] Started serving on 5432",
+            "[12:00:01] [Server thread/INFO]: [12:34] Started serving on 5432",
+            "[12:00:01] [Server thread/INFO]: <Bob> [STDOUT]: [Cubelink] LAN: Published LAN server on port 5432",
+            "[12:00:01] [Server thread/INFO]: <Bob> ]: Started serving on 5432",
+            "[12:00:01] [Server thread/INFO]: <Bob> [Cubelink] LAN: Published LAN server on port 5432",
+            "[12:00:01] [Server thread/INFO]: * Bob Started serving on 5432",
+            "<Bob> Started serving on 5432",
+            "[CHAT] Local game hosted on port 5432",
+        ] {
+            assert_eq!(parse_world_port(l), None, "{l:?}");
+        }
+    }
+
     #[derive(Default)]
     struct Rec(Mutex<Vec<String>>);
     impl Rec {
@@ -274,9 +397,6 @@ mod tests {
         }
         fn send_request(&self, _t: FriendCodePayload, _n: String) -> BoxFuture<'_, Result<VerifyCode, String>> {
             Box::pin(async { Err("x".into()) })
-        }
-        fn notify_accepted(&self, _f: Friend) -> BoxFuture<'_, Result<(), String>> {
-            Box::pin(async { Ok(()) })
         }
         fn fetch_manifest(&self, _k: String) -> BoxFuture<'_, Result<crate::p2p_backend::HostManifest, String>> {
             Box::pin(async { Err("x".into()) })
@@ -308,6 +428,10 @@ mod tests {
         auto.on_line("[main/INFO]: Setting user: Steve");
         auto.on_line("[Server thread/INFO] [minecraft/IntegratedServer]: Started serving on 54321");
         auto.on_line("[Render thread/INFO]: [CHAT] Local game hosted on port 54321"); // doublon ignoré
+        // S2 : le port est définitif une fois le monde ouvert, même face à une ligne valide plus tardive.
+        auto.on_line("[Server thread/INFO] [minecraft/IntegratedServer]: Started serving on 5432");
+        auto.on_line("[Server thread/INFO]: <Bob> Stopping server"); // chat : le port reste
+        auto.on_line("[Server thread/INFO] [minecraft/IntegratedServer]: Started serving on 5433");
         let want = Some(HostState { instance_id: inst.id.clone(), sharing: true, world_port: Some(54321) });
         for _ in 0..100 {
             if st.host_state() == want {

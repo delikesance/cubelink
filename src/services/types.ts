@@ -1,150 +1,76 @@
-// Types miroirs de docs/contrats.md et core/src/types.rs (JSON, énumérations en minuscules).
+// Types des données échangées avec Rust. La plupart sont générés depuis Rust dans `bindings.ts` (`npm run bindings`) :
+// ne pas les redéfinir ici, les réexporter. Restent écrits à la main : les entrées propres à `Services`, les charges
+// utiles d'événements construites en JSON libre côté Rust, et quelques précisions (unions de chaînes) sur des champs
+// que Rust garde en `String`.
+
+import type * as B from "./bindings";
+
+// Les structures que serde lit et écrit différemment (champ `serde(default)`, `Option`) existent en deux variantes
+// générées : `_Serialize` (ce que Rust renvoie, tous les champs présents) et `_Deserialize` (ce que Rust accepte).
+// Le front reçoit la première et envoie la seconde.
+export type {
+  AccountInfo, AccountKind, BrowseKind, BrowseSource, BrowseVersion, FixFailure, Friend, FriendCode, FriendRequest,
+  LaunchPhase, Loader, LoaderSpec, ModEntry, Presence, Profile, StageState, TransferPhase, TrustLevel, UpdatePhase,
+  VerifyCode, VersionVerdict,
+} from "./bindings";
+import type {
+  BrowseKind, BrowseSource, BrowseVersion, FriendCode, FriendRequest, LoaderSpec, ModEntry, Presence, Profile, StageState,
+  VerifyCode,
+} from "./bindings";
+
+export type AccountsState = B.AccountsState_Serialize;
+export type BrowseHit = B.BrowseHit_Serialize;
+export type BrowseInstallResult = B.BrowseInstallResult_Serialize;
+export type BrowsePage = B.BrowsePage_Serialize;
+export type ContentCheck = B.ContentCheck_Serialize;
+/** `kind` : "install", "update", "enable" ou "disable" ; `source` : "modrinth" ou "curseforge". */
+export type FixAction = B.FixAction_Serialize;
+export type FixPlan = B.FixPlan_Serialize;
+export type FixResult = B.FixResult_Serialize;
+export type FixUnresolved = B.FixUnresolved_Serialize;
+export type FriendWithPresence = B.FriendWithPresence_Serialize;
+export type HostState = B.HostState_Serialize;
+export type Instance = B.Instance_Serialize;
+/** Illustration d'une instance. `source` : "curseforge", "modrinth" ou "custom". */
+export type InstanceArt = B.InstanceArt_Serialize;
+export type Invite = B.Invite_Serialize;
+export type JoinPlan = B.JoinPlan_Serialize;
+export type Manifest = B.Manifest_Serialize;
+export type ManifestFile = B.ManifestFile_Serialize;
+export type ModCheck = B.ModCheck_Serialize;
+/** `kind` : "missing_dep", "incompatible", "wrong_minecraft", "wrong_loader" ou "duplicate" ; `severity` : "error" ou "warning". */
+export type ModIssue = B.ModIssue_Serialize;
+export type NetTest = B.NetTest_Serialize;
+export type Settings = B.Settings_Serialize;
+export type TransferProgress = B.TransferProgress_Serialize;
+export type UpdateState = B.UpdateState_Serialize;
+
+/** Recherche dans le catalogue. `sort` : "relevance", "downloads" ou "updated". */
+export type BrowseQuery = B.BrowseQuery_Deserialize;
+/** `ram_mb` (modpack) : RAM de la nouvelle instance, 0 ou absent = « Par défaut ». */
+export type BrowseInstallInput = B.BrowseInstallInput_Deserialize;
 
 export type Sha256Hex = string;
-export type Loader = "vanilla" | "neoforge" | "fabric" | "quilt" | "forge";
-export interface LoaderSpec { loader: Loader; version: string }
-
-export type Profile =
-  | { kind: "online"; name: string; uuid: string }
-  | { kind: "offline"; name: string; uuid: string };
-
-/** Un compte enregistré (Microsoft ou hors ligne). */
-export interface AccountInfo { id: string; kind: "online" | "offline"; name: string; uuid: string }
-/** Comptes enregistrés et identifiant du compte actif (null si aucun n'est actif). */
-export interface AccountsState { accounts: AccountInfo[]; active: string | null }
-
-/** Test « Ta connexion avec tes amis » (Paramètres → Réseau). */
-export interface NetTest {
-  relay_connected: boolean;
-  /** Nom d'hôte du relais. */
-  relay: string | null;
-  relay_ms: number | null;
-  /** L'UDP passe (nécessaire à la connexion directe). */
-  udp: boolean;
-  ipv6: boolean;
-  /** true : connexion directe facile ; false : routeur strict ; null : inconnu. */
-  direct: boolean | null;
-  relay_only: boolean;
-  /** Rapport réseau pas encore arrivé : udp/direct pas fiables. */
-  partial: boolean;
-}
-
-export interface Instance {
-  id: string;
-  name: string;
-  minecraft: string;
-  loader: LoaderSpec;
-  ram_mb: number;
-  mod_count: number;
-  java_path?: string | null;
-  jvm_args?: string;
-  art?: InstanceArt | null;
-}
-
-/** Illustration d'une instance (icône, bannière, captures). */
-export interface InstanceArt { source: "curseforge" | "modrinth" | "custom"; project_id: string; title: string; author: string; summary: string; color: string | null; icon: string | null; screenshots: string[]; page_url: string | null }
 
 /** Champs modifiables d'une instance (instances_update). */
-export interface InstancePatch { name?: string; ram_mb?: number; java_path?: string | null; jvm_args?: string }
-
-export interface ManifestFile { path: string; size: number; sha256: Sha256Hex }
-export interface Manifest {
-  name: string;
-  minecraft: string;
-  loader: LoaderSpec;
-  java_major: number;
-  files: ManifestFile[];
-}
-
-/** Chaîne opaque `mcl1-…`. */
-export type FriendCode = string;
-/** 4 groupes de 4 caractères hexadécimaux majuscules. */
-export type VerifyCode = string;
-
-export type TrustLevel = "ask" | "always";
-export interface Friend { public_key: string; name: string; trust: TrustLevel; added_at: number }
-/** Invitation reçue à rejoindre le monde d'un ami (timestamps en secondes Unix). */
-export interface Invite {
-  id: string;
-  public_key: string;
-  name: string;
-  world_name: string;
-  minecraft: string;
-  /** Nom du modpack de l'hôte (absent pour une ancienne version de Cubelink). */
-  pack?: string | null;
-  /** Icône du monde (data URL PNG, au plus 64 px), si l'hôte en a envoyé une. */
-  world_icon?: string | null;
-  received_at: number;
-  expires_at: number;
-}
-export interface FriendRequest {
-  public_key: string;
-  name: string;
-  verify_code: VerifyCode;
-  received_at: number;
-}
-export type Presence = "online" | "offline";
-
-export type TransferPhase =
-  | "preparing" | "receiving" | "verifying" | "launching" | "paused" | "failed" | "done";
-export interface TransferProgress {
-  phase: TransferPhase;
-  files_done: number;
-  files_total: number;
-  bytes_done: number;
-  bytes_total: number;
-  speed_bps: number;
-  via_relay: boolean;
-  /** Message d'échec (phase "failed"), en français. */
-  error?: string;
-}
-
-/** Non défini côté Rust à ce jour : forme provisoire, à confirmer avec le team lead. */
-export interface Settings {
-  language: string;
-  default_ram_mb: number;
-  java_path: string | null;
-  trust_default: TrustLevel;
-  allow_relay: boolean;
-  close_on_launch: boolean;
-  relay_only: boolean;
-  share_mods: boolean;
-  /** Retrouver ses amis même si leur adresse change (publication de présence via les serveurs n0). Défaut true. */
-  discovery: boolean;
-  /** Ouvrir mon monde solo au réseau local automatiquement (agent Java, instances perso). Défaut true. */
-  lan_auto: boolean;
-  /** Panneau en jeu (fenêtre superposée au jeu) activé. Défaut true. */
-  overlay_enabled: boolean;
-  /** Raccourci global du panneau en jeu, ex. « Ctrl+Shift+C ». */
-  overlay_hotkey: string;
-  /** Jeu intégré (Windows) : le jeu s'affiche dans la fenêtre de Cubelink. Pris en compte au prochain lancement. Défaut true. */
-  embedded_game: boolean;
-}
+export interface InstancePatch { name?: string; ram_mb?: number; java_path?: string | null; jvm_args?: string; wrapper?: string }
+/** Demande à rejoindre reçue d'un ami (hôte), en attente de sa décision. Timestamps en secondes Unix. */
+export type JoinRequest = B.JoinRequest;
+/** Réponse de l'hôte à ma demande à rejoindre. */
+export type JoinAnswer = B.JoinAnswer;
 
 // Entrées / sorties de commandes
-export interface DeviceCode { user_code: string; verification_uri: string; expires_in: number }
+export type DeviceCode = B.DeviceCodeInfo;
 /** `ram_mb` : 0 ou absent = « Par défaut » (valeur globale des paramètres). */
 export interface ImportTarget { name?: string; minecraft?: string; loader?: LoaderSpec; ram_mb?: number }
 export interface CreateInstanceInput { name: string; minecraft: string; loader: LoaderSpec; ram_mb: number }
-/** `last_seen` : dernière fois vu en ligne (secondes Unix), absent si jamais vu. */
-export interface FriendWithPresence { friend: Friend; presence: Presence; last_seen?: number | null }
 export interface FriendRequestsQuery { offset: number; limit: number; query?: string }
-export interface FriendRequestsPage { items: FriendRequest[]; total: number }
-export interface JoinPlan {
-  manifest: Manifest;
-  cached: number;
-  to_receive: number;
-  to_receive_bytes: number;
-  unknown_mods: string[];
-  /** Jars non vérifiés (sha1 absent, réseau) : ni reconnus ni signalés inconnus. */
-  unknown_unchecked?: string[];
-  /** Mods inconnus déjà acceptés lors d'un précédent « Rejoindre » (même contenu) : la confiance n'est pas redemandée. */
-  unknown_trusted?: string[];
-}
+export type FriendRequestsPage = B.RequestsPage;
+
 
 // Événements
-export type LaunchStateName = "preparing" | "running" | "exited" | "failed";
-export interface LaunchState { id: string; state: LaunchStateName; message?: string }
+export type LaunchStateName = B.LaunchPhase;
+export type LaunchState = B.LaunchStateEvent_Serialize;
 export interface PresenceEvent { public_key: string; presence: Presence }
 
 /** Événement transfer://unknown_mods : mods reçus mais absents des catalogues. */
@@ -155,72 +81,72 @@ export interface TransferErrorDetails { step: string; message: string; details: 
 
 /** Événement launch://log : une ligne de sortie du jeu. */
 export interface LaunchLogEvent { id: string; line: string }
-/** État du partage hôte (événement host://state, commande host_state). world_port = port du monde LAN détecté, null tant que le monde n'est pas ouvert au réseau local. */
-export interface HostState { instance_id: string; sharing: boolean; world_port: number | null }
 
 /** Événement import://warning : mods introuvables lors d'un import. */
 export interface ImportWarningEvent { missing: string[] }
 
-export type BrowseSource = "curseforge" | "modrinth";
-export type BrowseKind = "modpack" | "mod" | "resourcepack" | "shader";
-export interface BrowseQuery { source: BrowseSource; kind: BrowseKind; query: string; minecraft?: string; loader?: string; sort?: "relevance" | "downloads" | "updated"; offset: number; limit: number }
-export interface BrowseHit { source: BrowseSource; id: string; kind: BrowseKind; name: string; summary: string; author: string; icon_url: string | null; downloads: number; page_url: string; downloadable: boolean }
-export interface BrowsePage { hits: BrowseHit[]; total: number }
-export interface BrowseVersion { id: string; name: string; minecraft: string[]; loaders: string[]; published: string; downloadable: boolean }
-/** `ram_mb` (modpack) : RAM de la nouvelle instance, 0 ou absent = « Par défaut ». */
-export interface BrowseInstallInput { source: BrowseSource; id: string; kind: BrowseKind; version_id?: string; instance_id?: string; ram_mb?: number }
-export interface BrowseInstallResult { instance: Instance; installed: string[]; missing: string[] }
-/** Verdict d'une version d'un mod dans une instance (simulation dans le pack). */
-export interface VersionVerdict { version_id: string; ok: boolean; problems: string[] }
-/** Compatibilité d'un mod avec une instance : fichiers déjà présents, version recommandée, blocages. */
-export interface ContentCheck { installed: string[]; recommended: string | null; verdicts: VersionVerdict[]; blockers: string[] }
-export interface ModEntry { file: string; enabled: boolean; size: number; custom: boolean }
-export interface ModIssue {
-  /** Nom du jar concerné, identique à ModEntry.file (version activée, sans .disabled). */
-  file: string;
-  mod_name: string;
-  kind: "missing_dep" | "incompatible" | "wrong_minecraft" | "wrong_loader" | "duplicate";
-  severity: "error" | "warning";
-  /** Phrase prête à afficher. */
-  message: string;
-  /** Fichier de l'autre mod impliqué, s'il est installé. */
-  related?: string;
-}
-export interface ModCheck { issues: ModIssue[]; checked: number }
-export interface FixAction {
-  id: string;
-  kind: "install" | "update" | "enable" | "disable";
-  title: string;
-  detail?: string;
-  source?: "modrinth" | "curseforge";
-  file?: string;
-  /** Fichiers (ModIssue.file) des problèmes que cette action règle. */
-  issue_files: string[];
-}
-export interface FixUnresolved { file: string; mod_name: string; message: string; reason: string; page_url?: string }
-export interface FixPlan { plan_id: string; actions: FixAction[]; unresolved: FixUnresolved[] }
-export interface FixResult { applied: string[]; failed: { title: string; error: string }[]; backup_id: string | null; check: ModCheck }
 export interface FixProgressEvent { done: number; total: number; label: string }
 export interface BrowseProgressEvent { done: number; total: number; label: string }
+/** Événement `stage://fallback` : le jeu n'a pas pu être affiché dans la fenêtre de Cubelink, il a gardé la sienne. */
+export interface StageFallback {
+  /** Identifiant technique de la raison (journal `stage.log`), jamais montré au joueur. */
+  reason: string;
+  /** Trop d'échecs de suite : le jeu s'ouvrira dans sa propre fenêtre jusqu'au redémarrage de Cubelink (le message dit comment revenir). */
+  session_off: boolean;
+}
+/** Rectangle de la zone de jeu et largeur du panneau, en pixels physiques (origine : coin haut-gauche de la zone cliente). */
+export interface StageLayout { x: number; y: number; w: number; h: number; panel_w: number }
+
 export interface PickFilesOptions { extensions: string[]; multiple?: boolean }
 
 export type Unsubscribe = () => void;
 
 /** Une méthode par commande (rejet = message d'erreur en français), un abonnement par événement. */
-export type UpdatePhase = "idle" | "checking" | "up_to_date" | "available" | "downloading" | "ready" | "error";
 
-/** État de la mise à jour automatique du launcher (octets pour downloaded/total, message d'erreur en français). */
-export interface UpdateState {
-  phase: UpdatePhase;
-  /** Version installée. */
-  current: string;
-  /** Version proposée. */
-  version: string | null;
-  notes: string | null;
-  downloaded: number;
-  total: number | null;
-  message: string | null;
+// ---------------------------------------------------------------------------
+// Serveurs de groupe (Hearth) : types générés depuis core/src/types.rs, voir docs/contrats.md.
+// ---------------------------------------------------------------------------
+
+export type HearthStateKind = B.HearthStateKind;
+export type HearthMemberLite = B.HearthMemberLite;
+export type HearthUnclean = B.HearthUnclean_Serialize;
+export type HearthCard = B.HearthCard_Serialize;
+export type HearthInvite = B.HearthInvite;
+export type HearthWorld = B.HearthWorld;
+// Champs `String` côté Rust, à valeurs fixes : le front les resserre (voir `core/src/types.rs`).
+export type HearthMember = Omit<B.HearthMember_Serialize, "sync"> & { sync: "ok" | "behind" | "unknown" };
+export type HearthVersion = Omit<B.HearthVersion, "kind"> & { kind: "session" | "checkpoint" | "restore" };
+export type HearthProposal = Omit<B.HearthProposal_Serialize, "kind"> & {
+  kind: "continue_without" | "add_member" | "remove_member" | "pack_update" | "set_governance" | "leave";
+};
+export type HearthBlocker = B.HearthBlocker;
+export type HearthBranch = B.HearthBranch;
+export type HearthSettings = B.HearthSettings_Serialize;
+export type HearthDetail = Omit<B.HearthDetail_Serialize, "members" | "versions" | "proposals"> & {
+  members: HearthMember[];
+  versions: HearthVersion[];
+  proposals: HearthProposal[];
+};
+export type HearthEula = B.HearthEula;
+
+// Charges d'événements (typées à la main).
+export interface HearthHandover { group_id: string; name: string; from_name: string }
+export interface HearthHostPrompt { group_id: string; name: string; players: number }
+
+export interface HearthCreateInput {
+  name: string;
+  instanceId: string;
+  /** Nom du monde existant de l'instance ; null : nouveau monde. */
+  world: string | null;
+  /** Clés publiques des amis invités. */
+  members: string[];
 }
+
+/** Choix après une partie mal terminée : attendre l'hôte, reprendre au point de reprise ou à la dernière version. */
+export type HearthUncleanChoice = "wait" | "checkpoint" | "last";
+
+/** Erreur renvoyée par `hearthPlay` tant que le contrat d'utilisation de Minecraft n'est pas accepté. */
+export const HEARTH_EULA_REQUIRED = "eula_required";
 
 export interface Services {
   authStatus(): Promise<Profile | null>;
@@ -276,6 +202,12 @@ export interface Services {
   /** Invitations reçues en attente. */
   friendInvites(): Promise<Invite[]>;
   friendInviteDismiss(id: string): Promise<void>;
+  /** Invité : demande à un ami de rejoindre sa partie ; attend sa décision (au plus ~2 min). */
+  friendJoinRequest(publicKey: string): Promise<JoinAnswer>;
+  /** Hôte : accepte (ouvre l'accès à la partie en cours) ou refuse la demande d'un ami. Rejette si elle n'est plus valable. */
+  friendJoinRequestAnswer(publicKey: string, accept: boolean): Promise<void>;
+  /** Hôte : demandes à rejoindre en attente de décision. */
+  friendJoinRequests(): Promise<JoinRequest[]>;
   /** Ferme le jeu en cours puis lance l'instance. */
   gameSwitch(instanceId: string): Promise<void>;
   /** Instance du jeu en cours (en préparation ou lancé), `null` sinon. */
@@ -286,8 +218,10 @@ export interface Services {
   gameJoinFriend(publicKey: string, instanceId?: string): Promise<void>;
 
   joinPlan(friendPublicKey: string): Promise<JoinPlan>;
-  /** `ramMb` : RAM de l'instance invitée (0 ou absent = « Par défaut »). */
-  joinStart(friendPublicKey: string, ramMb?: number): Promise<void>;
+  /** `manifestHash` : `JoinPlan.manifest_hash` du plan montré. `acceptUnknown` : case de confiance cochée (exigée par
+   *  le backend s'il y a des mods inconnus ou non vérifiés, ou des scripts). `ramMb` : RAM de l'instance invitée
+   *  (0 ou absent = « Par défaut »). */
+  joinStart(friendPublicKey: string, manifestHash: string, acceptUnknown: boolean, ramMb?: number): Promise<void>;
   /** Invité, en un geste : ouvre le tunnel vers le monde de l'ami, lance l'instance invitée avec connexion automatique à 127.0.0.1:port, referme le tunnel à la fin du jeu. Suit les événements de lancement habituels. */
   /** `instanceId` vide : l'instance invitée préparée par le dernier transfert. */
   joinPlay(friendPublicKey: string, instanceId: string): Promise<void>;
@@ -335,6 +269,45 @@ export interface Services {
   onFriendInvite(cb: (i: Invite) => void): Unsubscribe;
   /** Liste complète des invitations à chaque changement. */
   onFriendInvites(cb: (l: Invite[]) => void): Unsubscribe;
+  /** Hôte : une demande à rejoindre vient d'arriver. */
+  onFriendJoinRequest(cb: (r: JoinRequest) => void): Unsubscribe;
+  /** Hôte : liste complète des demandes en attente, à chaque changement. */
+  onFriendJoinRequests(cb: (l: JoinRequest[]) => void): Unsubscribe;
+  // --- serveurs de groupe (Hearth) ---
+  hearthList(): Promise<HearthCard[]>;
+  hearthDetail(id: string): Promise<HearthDetail>;
+  /** Mondes existants d'une instance, proposés à la création. */
+  hearthWorlds(instanceId: string): Promise<HearthWorld[]>;
+  hearthCreate(input: HearthCreateInput): Promise<HearthCard>;
+  hearthInvites(): Promise<HearthInvite[]>;
+  hearthInviteAccept(groupId: string): Promise<void>;
+  hearthInviteDismiss(groupId: string): Promise<void>;
+  /** Le bouton unique de la carte : jouer ou rejoindre selon l'état. Rejette avec `eula_required` au premier hébergement. */
+  hearthPlay(id: string): Promise<void>;
+  hearthStop(id: string): Promise<void>;
+  hearthUncleanChoice(id: string, choice: HearthUncleanChoice): Promise<void>;
+  /** Associe le modpack du groupe à une instance locale. */
+  hearthSetInstance(id: string, instanceId: string): Promise<void>;
+  hearthAddMember(id: string, publicKey: string): Promise<void>;
+  hearthRemoveMember(id: string, publicKey: string): Promise<void>;
+  hearthLeave(id: string): Promise<void>;
+  hearthVote(id: string, proposalId: string): Promise<void>;
+  hearthContinueWithout(id: string, publicKey: string): Promise<void>;
+  hearthPackUpdate(id: string, instanceId: string): Promise<void>;
+  hearthRestore(id: string, versionId: string): Promise<void>;
+  hearthResolveFork(id: string, versionId: string): Promise<void>;
+  hearthSetBackground(id: string, on: boolean): Promise<void>;
+  hearthEula(): Promise<HearthEula>;
+  hearthEulaAccept(): Promise<void>;
+  /** Interrupteur de sécurité « Serveurs de groupe (expérimental) » : désactivé par défaut. Coupé, les commandes `hearth*` refusent. */
+  hearthEnabled(): Promise<boolean>;
+  hearthSetEnabled(enabled: boolean): Promise<void>;
+  /** Liste complète des cartes à chaque changement. */
+  onHearthState(cb: (l: HearthCard[]) => void): Unsubscribe;
+  /** Liste complète des invitations de groupe en attente. */
+  onHearthInvites(cb: (l: HearthInvite[]) => void): Unsubscribe;
+  onHearthHandover(cb: (e: HearthHandover) => void): Unsubscribe;
+  onHearthHostPrompt(cb: (e: HearthHostPrompt) => void): Unsubscribe;
   onUnknownMods(cb: (e: UnknownModsEvent) => void): Unsubscribe;
   onTransferErrorDetails(cb: (e: TransferErrorDetails) => void): Unsubscribe;
   onBrowseProgress(cb: (e: BrowseProgressEvent) => void): Unsubscribe;
@@ -347,4 +320,21 @@ export interface Services {
   /** Redémarre et installe la mise à jour téléchargée (rejette si une partie est en cours). */
   updateInstall(): Promise<void>;
   onUpdateState(cb: (s: UpdateState) => void): Unsubscribe;
+
+  /** Zone de jeu intégrée (Windows, Linux X11) : elle existe sur ce système. */
+  stageSupported(): Promise<boolean>;
+  stageState(): Promise<StageState>;
+  /** Bascule entre le jeu (`true`) et le launcher (bouton de la barre de titre). */
+  stageView(game: boolean): Promise<void>;
+  /** Ouvre ou ferme le panneau « en jeu » (Échap, bouton Fermer). */
+  stagePanel(open: boolean): Promise<void>;
+  /** Publie à Rust le rectangle de la zone de jeu mesuré dans le DOM. */
+  stageLayout(layout: StageLayout): Promise<void>;
+  /** Met la fenêtre du launcher en plein écran ou l'en sort (plein écran du jeu intégré). */
+  setFullscreen(on: boolean): Promise<void>;
+  onStageState(cb: (s: StageState) => void): Unsubscribe;
+  /** Charge utile brute : `useStageFallback` la valide. */
+  onStageFallback(cb: (f: StageFallback) => void): Unsubscribe;
+  /** Le jeu demande (F11) ou quitte le plein écran. */
+  onStageFullscreen(cb: (on: boolean) => void): Unsubscribe;
 }

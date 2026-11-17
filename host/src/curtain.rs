@@ -4,7 +4,11 @@
 //! Choix UX : barre determinee et monotone ; la phrase explique l'attente ; mise en page stable (emplacements reserves) ;
 //! deux mouvements discrets seulement (le morceau du logo flotte, un reflet traverse la barre) ; `calm` les fige.
 
+use std::time::{Duration, Instant};
+
 use ab_glyph::{point, Font, FontRef, PxScale, ScaleFont};
+use crate::flow::{bar_fraction, Content, Machine};
+use crate::progress::{Closer, Phase, Tracker};
 use tiny_skia::{
     Color, FillRule, GradientStop, LineCap, LineJoin, Mask, Paint, PathBuilder, Pixmap, Point, RadialGradient, SpreadMode, Stroke,
     Transform,
@@ -54,6 +58,70 @@ pub struct Model<'a> {
     pub t: f32,
     /// Mouvement reduit : pas de flottement ni de reflet.
     pub calm: bool,
+}
+
+/// Ce que montre le rideau a un instant donne : un [`Model`] qui possede ses textes (pris sous le verrou d'etat, dessine apres).
+pub struct Frame {
+    title: String,
+    caption: String,
+    sentence: String,
+    note: Option<String>,
+    fraction: f32,
+    t: f32,
+    cover: f32,
+    card: f32,
+    calm: bool,
+}
+
+impl Frame {
+    /// Tout ce que montre le rideau maintenant, a partir de l'etat de la Scene (une seule prise du verrou) : `t0` est l'apparition
+    /// du rideau, `title` et `caption` ses textes fixes ; la phrase, la ligne rassurante et la barre viennent du suivi de
+    /// `content` (fermeture de l'ancien jeu ou lancement du nouveau).
+    pub fn capture(machine: &Machine, closer: &mut Option<Closer>, tracker: &mut Option<Tracker>, title: &str, caption: &str, t0: Option<Instant>) -> Frame {
+        let now = Instant::now();
+        let t = t0.map_or(0.0, |t0| now.saturating_duration_since(t0).as_secs_f32());
+        let (cover, card) = machine.levels(now);
+        let content = machine.content();
+        let (sentence, note, fraction) = match Frame::progress(content, closer, tracker) {
+            Some((sentence, note, raw)) => (sentence, note, bar_fraction(content, raw)),
+            None => ("Un instant…", None, bar_fraction(Content::Wait, 0.0)),
+        };
+        Frame { title: title.to_string(), caption: caption.to_string(), sentence: sentence.to_string(), note: note.map(str::to_string), fraction, t, cover, card, calm: machine.calm() }
+    }
+
+    /// Phrase, ligne rassurante et avancement brut du suivi correspondant a `content` ; `None` : rien a suivre.
+    fn progress(content: Content, closer: &mut Option<Closer>, tracker: &mut Option<Tracker>) -> Option<(&'static str, Option<&'static str>, f32)> {
+        match content {
+            Content::Wait => None,
+            Content::Close => closer.as_mut().map(|c| {
+                let sn = c.snapshot();
+                let i = sn.stages.iter().position(|x| x.current).unwrap_or(0);
+                let sentence = match i {
+                    0 | 1 => "Fermeture du jeu en cours…",
+                    2 => "Enregistrement de ton monde…",
+                    _ => "Presque terminé…",
+                };
+                (sentence, Some("Ton monde est enregistré avant la fermeture : rien n'est perdu."), sn.fraction)
+            }),
+            Content::Launch(_) => tracker.as_mut().map(|tr| {
+                let sn = tr.snapshot();
+                let sentence = match sn.phase {
+                    Phase::Java | Phase::Scan | Phase::Mixin | Phase::Bootstrap => "Préparation du jeu…",
+                    Phase::ModLoad => "Chargement des mods…",
+                    Phase::Window | Phase::Resources | Phase::Textures => "Mise en place des textures et des sons…",
+                    Phase::World => "Ouverture de ton monde…",
+                    Phase::Ready => "C'est prêt !",
+                };
+                let slow = sn.overdue || sn.silent_for > Duration::from_secs(6);
+                (sentence, slow.then_some("Ça prend un peu plus de temps que d'habitude, tout va bien."), sn.fraction)
+            }),
+        }
+    }
+
+    /// Le modele a dessiner.
+    pub fn model(&self) -> Model<'_> {
+        Model { title: &self.title, caption: &self.caption, sentence: &self.sentence, note: self.note.as_deref(), fraction: self.fraction, cover: self.cover, card: self.card, t: self.t, calm: self.calm }
+    }
 }
 
 /// Chemins du logo, analyses une seule fois.

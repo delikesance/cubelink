@@ -16,6 +16,8 @@ use std::sync::{Arc, Mutex};
 use core_lib::manifest::validate_manifest;
 use core_lib::types::{Error, Manifest, Result};
 
+use super::lock;
+
 /// Identifiant d'un pair : sa clé publique, en texte (z-base32/hex selon le transport).
 pub type PeerId = String;
 
@@ -45,7 +47,8 @@ impl PeerAuthorizer for AllowList {
 pub struct ServeLimits {
     /// Taille maximale d'un fichier servi.
     pub max_file_bytes: u64,
-    /// Volume total maximal servi à un même pair (sur la durée de vie de l'hôte).
+    /// Volume total maximal servi à un même pair pendant une session (voir [`Host::begin_session`]). Une reprise ou une
+    /// nouvelle demande du même fichier ne le recompte pas.
     pub max_total_bytes_per_peer: u64,
     /// Requêtes simultanées maximales par pair.
     pub max_concurrent_per_peer: usize,
@@ -109,7 +112,10 @@ impl ServeIndex {
 #[derive(Debug, Default)]
 struct PeerState {
     active: usize,
+    /// Volume compté pour la session en cours (chaque fichier une seule fois : une reprise ne recompte pas).
     sent: u64,
+    /// Fichiers (sha256) déjà comptés dans la session en cours.
+    counted: std::collections::HashSet<String>,
 }
 
 /// Côté hôte : décide de chaque requête (autorisation, manifeste, limites).
@@ -129,11 +135,11 @@ impl Host {
     /// Appelé quand un fichier du jeu ne correspond plus à son empreinte annoncée (le manifeste est périmé) :
     /// l'application recalcule alors le manifeste pour que le « Réessayer » de l'invité reparte d'un état frais.
     pub fn set_on_drift(&self, f: Arc<dyn Fn() + Send + Sync>) {
-        *self.on_drift.lock().unwrap_or_else(|p| p.into_inner()) = Some(f);
+        *lock(&self.on_drift) = Some(f);
     }
 
     fn drift(&self) {
-        let f = self.on_drift.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        let f = lock(&self.on_drift).clone();
         if let Some(f) = f {
             f();
         }
@@ -163,17 +169,33 @@ impl Host {
                 file.size, self.limits.max_file_bytes
             )));
         }
-        let mut peers = self.peers.lock().unwrap_or_else(|p| p.into_inner());
+        let mut peers = lock(&self.peers);
         let st = peers.entry(peer.to_string()).or_default();
         if st.active >= self.limits.max_concurrent_per_peer {
             return Err(Error::Network("trop de requêtes simultanées pour ce pair".into()));
         }
-        if st.sent.saturating_add(file.size) > self.limits.max_total_bytes_per_peer {
+        let new = !st.counted.contains(sha256);
+        if new && st.sent.saturating_add(file.size) > self.limits.max_total_bytes_per_peer {
             return Err(Error::Invalid("volume total maximal atteint pour ce pair".into()));
         }
         st.active += 1;
-        st.sent += file.size;
+        if new {
+            st.sent += file.size;
+            st.counted.insert(sha256.to_string());
+        }
         Ok(Permit { host: Arc::clone(self), peer: peer.to_string(), file })
+    }
+
+    /// Nouvelle session de transfert pour `peer` (nouvelle connexion de contrôle) : le quota repart de zéro, sauf si
+    /// un transfert de ce pair est encore en cours (une connexion parallèle ne remet pas le compteur à zéro).
+    pub fn begin_session(&self, peer: &str) {
+        let mut peers = lock(&self.peers);
+        if let Some(st) = peers.get_mut(peer) {
+            if st.active == 0 {
+                st.sent = 0;
+                st.counted.clear();
+            }
+        }
     }
 
     pub fn limits(&self) -> &ServeLimits {
@@ -196,7 +218,7 @@ impl Permit {
 
 impl Drop for Permit {
     fn drop(&mut self) {
-        let mut peers = self.host.peers.lock().unwrap_or_else(|p| p.into_inner());
+        let mut peers = lock(&self.host.peers);
         if let Some(st) = peers.get_mut(&self.peer) {
             st.active = st.active.saturating_sub(1);
         }
@@ -261,28 +283,18 @@ pub struct MemTransport {
     id: PeerId,
     /// Coupure simulée : nombre d'octets servis dans un `fetch` avant `Error::Network`.
     cut_after: Mutex<Option<u64>>,
-    /// Vrai : la coupure ne se produit qu'une fois (puis le transport redevient normal).
-    cut_once: bool,
     /// Octets réellement transférés (hors préfixe déjà présent), tous `fetch` confondus.
     transferred: AtomicU64,
 }
 
 impl MemTransport {
     pub fn new(net: Arc<MemNetwork>, id: impl Into<PeerId>) -> Self {
-        Self { net, id: id.into(), cut_after: Mutex::new(None), cut_once: true, transferred: AtomicU64::new(0) }
+        Self { net, id: id.into(), cut_after: Mutex::new(None), transferred: AtomicU64::new(0) }
     }
 
     /// Mode test : le prochain `fetch` échoue en `Error::Network` après `n` octets (une seule fois).
     pub fn with_cut_after(mut self, n: u64) -> Self {
         *self.cut_after.get_mut().unwrap_or_else(|p| p.into_inner()) = Some(n);
-        self.cut_once = true;
-        self
-    }
-
-    /// Comme `with_cut_after`, mais chaque `fetch` est coupé après `n` octets.
-    pub fn with_cut_after_always(mut self, n: u64) -> Self {
-        *self.cut_after.get_mut().unwrap_or_else(|p| p.into_inner()) = Some(n);
-        self.cut_once = false;
         self
     }
 
@@ -296,7 +308,7 @@ const MEM_CHUNK: usize = 64 * 1024;
 
 impl BlobTransport for MemTransport {
     async fn serve(&self, host: Arc<Host>) -> Result<()> {
-        self.net.hosts.lock().unwrap_or_else(|p| p.into_inner()).insert(self.id.clone(), host);
+        lock(&self.net.hosts).insert(self.id.clone(), host);
         Ok(())
     }
 
@@ -311,11 +323,7 @@ impl BlobTransport for MemTransport {
         use std::sync::atomic::Ordering;
         use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
-        let host = self
-            .net
-            .hosts
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
+        let host = lock(&self.net.hosts)
             .get(peer)
             .cloned()
             .ok_or_else(|| Error::Network(format!("pair injoignable : {peer}")))?;
@@ -344,10 +352,7 @@ impl BlobTransport for MemTransport {
         } else {
             tokio::fs::File::create(&req.dest).await?
         };
-        let limit = {
-            let mut g = self.cut_after.lock().unwrap_or_else(|p| p.into_inner());
-            if self.cut_once { g.take() } else { *g }
-        };
+        let limit = lock(&self.cut_after).take();
         let mut buf = vec![0u8; MEM_CHUNK];
         let mut total = offset;
         let mut sent = 0u64;
@@ -399,12 +404,66 @@ mod iroh_impl {
     use iroh::protocol::{AcceptError, ProtocolHandler, Router};
     use iroh::{Endpoint, EndpointAddr};
     use iroh_blobs::api::blobs::{AddPathOptions, ImportMode};
+    use iroh_blobs::store::fs::options::Options as FsOptions;
     use iroh_blobs::store::fs::FsStore;
+    use iroh_blobs::store::{GcConfig, ProtectCb, ProtectOutcome};
     use iroh_blobs::{BlobFormat, BlobsProtocol, Hash, HashAndFormat};
     use n0_future::StreamExt;
 
     /// Statut de contrôle : le fichier du jeu a changé depuis le manifeste (à réessayer avec un manifeste frais).
     const STATUS_CHANGED: u8 = 2;
+
+    /// Fréquence du ramasse-miettes du magasin de blobs : les blobs reçus (déjà exportés vers le cache) et ceux qui ne
+    /// sont plus servis sont supprimés, pour que le magasin ne double pas l'espace occupé par les mods.
+    const GC_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+    /// Délai maximal pour lire la requête d'un invité (64 octets) sur le canal de contrôle.
+    const CONTROL_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+    /// Délai maximal pendant lequel un invité tient un créneau de transfert (fin de son flux de contrôle).
+    const CONTROL_HOLD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+    /// sha256 -> (BLAKE3, empreinte du fichier au moment de l'import), partagé par les handlers de contrôle.
+    type KnownMap = Arc<Mutex<HashMap<String, (Hash, FileStamp)>>>;
+
+    /// Blobs que le ramasse-miettes doit garder : ceux que l'hôte sert (`known`) et ceux que l'invité est en train de
+    /// recevoir puis d'exporter (`inflight`, compteur par hash).
+    #[derive(Default)]
+    struct Protected {
+        known: KnownMap,
+        inflight: Mutex<HashMap<Hash, usize>>,
+    }
+
+    impl Protected {
+        fn snapshot(&self) -> Vec<Hash> {
+            let mut v: Vec<Hash> = lock(&self.known).values().map(|(h, _)| *h).collect();
+            v.extend(lock(&self.inflight).keys().copied());
+            v
+        }
+    }
+
+    /// Protège un blob en cours de réception jusqu'à la fin de son export.
+    struct InflightGuard<'a> {
+        p: &'a Protected,
+        hash: Hash,
+    }
+
+    impl<'a> InflightGuard<'a> {
+        fn new(p: &'a Protected, hash: Hash) -> Self {
+            *lock(&p.inflight).entry(hash).or_default() += 1;
+            Self { p, hash }
+        }
+    }
+
+    impl Drop for InflightGuard<'_> {
+        fn drop(&mut self) {
+            let mut m = lock(&self.p.inflight);
+            if let Some(n) = m.get_mut(&self.hash) {
+                *n -= 1;
+                if *n == 0 {
+                    m.remove(&self.hash);
+                }
+            }
+        }
+    }
 
     fn net(e: impl std::fmt::Debug) -> Error {
         Error::Network(format!("{e:?}"))
@@ -416,6 +475,7 @@ mod iroh_impl {
     pub struct IrohTransport {
         endpoint: Endpoint,
         store: FsStore,
+        protected: Arc<Protected>,
         peers: Mutex<HashMap<PeerId, EndpointAddr>>,
         relayed: Mutex<HashMap<PeerId, bool>>,
         router: Mutex<Option<Router>>,
@@ -431,10 +491,28 @@ mod iroh_impl {
 
     impl IrohTransport {
         pub async fn new(endpoint: Endpoint, store_dir: impl AsRef<Path>) -> Result<Self> {
-            let store = FsStore::load(store_dir.as_ref()).await.map_err(net)?;
+            Self::with_gc(endpoint, store_dir, GC_INTERVAL).await
+        }
+
+        /// Comme [`Self::new`], avec la fréquence du ramasse-miettes (tests).
+        pub async fn with_gc(endpoint: Endpoint, store_dir: impl AsRef<Path>, gc_interval: std::time::Duration) -> Result<Self> {
+            let protected = Arc::new(Protected::default());
+            let p = protected.clone();
+            let add_protected: ProtectCb = Arc::new(move |live| {
+                let keep = p.snapshot();
+                Box::pin(async move {
+                    live.extend(keep);
+                    ProtectOutcome::Continue
+                })
+            });
+            let root = store_dir.as_ref();
+            let mut opts = FsOptions::new(root);
+            opts.gc = Some(GcConfig { interval: gc_interval, add_protected: Some(add_protected) });
+            let store = FsStore::load_with_opts(root.join("blobs.db"), opts).await.map_err(net)?;
             Ok(Self {
                 endpoint,
                 store,
+                protected,
                 peers: Mutex::new(HashMap::new()),
                 relayed: Mutex::new(HashMap::new()),
                 router: Mutex::new(None),
@@ -445,7 +523,7 @@ mod iroh_impl {
         }
 
         fn cached(&self, peer: &str, alpn: &'static [u8]) -> Option<Connection> {
-            let conns = self.conns.lock().unwrap_or_else(|p| p.into_inner());
+            let conns = lock(&self.conns);
             conns.get(&(peer.to_string(), alpn)).filter(|c| c.close_reason().is_none()).cloned()
         }
 
@@ -460,13 +538,13 @@ mod iroh_impl {
             }
             let c = self.endpoint.connect(addr.clone(), alpn).await.map_err(net)?;
             self.opened.fetch_add(1, Ordering::Relaxed);
-            self.conns.lock().unwrap_or_else(|p| p.into_inner()).insert((peer.to_string(), alpn), c.clone());
+            lock(&self.conns).insert((peer.to_string(), alpn), c.clone());
             Ok(c)
         }
 
         /// Oublie une connexion en échec (la suivante sera rouverte), si c'est bien celle en cache.
         fn forget(&self, peer: &str, alpn: &'static [u8], c: &Connection) {
-            let mut conns = self.conns.lock().unwrap_or_else(|p| p.into_inner());
+            let mut conns = lock(&self.conns);
             let key = (peer.to_string(), alpn);
             if conns.get(&key).is_some_and(|x| x.stable_id() == c.stable_id()) {
                 conns.remove(&key);
@@ -506,7 +584,9 @@ mod iroh_impl {
             // de concurrence de ce fichier jusque-là (lâché sur erreur, le flux se termine tout seul).
             let conn = self.conn(peer, addr, iroh_blobs::ALPN).await?;
             let relayed = conn.paths().iter().any(|p| p.is_selected() && p.is_relay());
-            self.relayed.lock().unwrap_or_else(|p| p.into_inner()).insert(peer.to_string(), relayed);
+            lock(&self.relayed).insert(peer.to_string(), relayed);
+            // Protégé du ramasse-miettes jusqu'à la fin de l'export ; supprimé du magasin au passage suivant.
+            let _keep = InflightGuard::new(&self.protected, hash);
             let r = self.get_blob(&conn, hash, req, on_bytes, cancel).await;
             if matches!(r, Err(Error::Network(_))) || conn.close_reason().is_some() {
                 self.forget(peer, iroh_blobs::ALPN, &conn);
@@ -539,6 +619,14 @@ mod iroh_impl {
                 }
                 match item {
                     iroh_blobs::api::remote::GetProgressItem::Progress(n) => {
+                        // Un hôte qui envoie plus que la taille du manifeste remplirait le disque : coupé tout de suite
+                        // (le flux lâché abandonne la requête), sans attendre la vérification du sha256.
+                        if n > req.size {
+                            return Err(Error::Invalid(format!(
+                                "le pair envoie plus que la taille du manifeste ({n} > {} octets)",
+                                req.size
+                            )));
+                        }
                         if n > last {
                             last = n;
                             let eff = last.saturating_sub(skip);
@@ -569,7 +657,7 @@ mod iroh_impl {
         /// Oublie (sans les fermer) les connexions en cache vers `peer` : les prochains fichiers en rouvrent de
         /// neuves, ceux en vol finissent sur les anciennes. Après un silence, la connexion est peut-être morte.
         pub fn forget_peer(&self, peer: &str) {
-            self.conns.lock().unwrap_or_else(|p| p.into_inner()).retain(|(p, _), _| p != peer);
+            lock(&self.conns).retain(|(p, _), _| p != peer);
         }
 
         /// Nombre de connexions sortantes ouvertes pour des transferts depuis la création.
@@ -579,7 +667,7 @@ mod iroh_impl {
 
         /// Fin d'un transfert : ferme les connexions réutilisées vers `peer`.
         pub fn close_peer(&self, peer: &str) {
-            let mut conns = self.conns.lock().unwrap_or_else(|p| p.into_inner());
+            let mut conns = lock(&self.conns);
             conns.retain(|(p, _), c| {
                 if p == peer {
                     c.close(0u32.into(), b"done");
@@ -601,11 +689,11 @@ mod iroh_impl {
         /// Enregistre comment joindre un pair ; renvoie son `PeerId`.
         pub fn add_peer(&self, addr: EndpointAddr) -> PeerId {
             let id = addr.id.to_string();
-            let old = self.peers.lock().unwrap_or_else(|p| p.into_inner()).insert(id.clone(), addr.clone());
+            let old = lock(&self.peers).insert(id.clone(), addr.clone());
             // Adresse changée (hôte redémarré, re-résolution après un silence) : les connexions en cache sont
             // peut-être mortes sans le savoir ; les suivantes seront rouvertes vers la nouvelle adresse.
             if old.is_some_and(|o| o != addr) {
-                self.conns.lock().unwrap_or_else(|p| p.into_inner()).retain(|(p, _), _| *p != id);
+                lock(&self.conns).retain(|(p, _), _| *p != id);
             }
             id
         }
@@ -620,14 +708,14 @@ mod iroh_impl {
         /// Comme [`Self::handlers`], mais l'hôte est demandé à chaque connexion/requête : `None`
         /// refuse tout (rien de partagé). Permet de changer d'instance partagée à chaud.
         pub fn handlers_dynamic(&self, host: HostProvider) -> (ControlHandler, GatedBlobsHandler) {
-            let control = ControlHandler { host: host.clone(), store: self.store.clone(), known: Arc::default() };
+            let control = ControlHandler { host: host.clone(), store: self.store.clone(), known: self.protected.known.clone() };
             let blobs = GatedBlobsHandler { host, inner: BlobsProtocol::new(&self.store, None) };
             (control, blobs)
         }
 
         /// Arrête le routeur (hôte).
         pub async fn shutdown(&self) {
-            let r = self.router.lock().unwrap_or_else(|p| p.into_inner()).take();
+            let r = lock(&self.router).take();
             if let Some(r) = r {
                 let _ = r.shutdown().await;
             }
@@ -647,7 +735,7 @@ mod iroh_impl {
         /// sha256 -> (BLAKE3, empreinte du fichier au moment de l'import), rempli paresseusement.
         /// L'entrée n'est valable que si le fichier vivant n'a pas changé (taille + date de modification) :
         /// sinon un fichier altéré puis réparé resterait servi sous son ancien BLAKE3.
-        known: Arc<Mutex<HashMap<String, (Hash, FileStamp)>>>,
+        known: KnownMap,
     }
 
     impl std::fmt::Debug for ControlHandler {
@@ -667,7 +755,7 @@ mod iroh_impl {
     /// Échec d'une requête de contrôle : refus (autorisation…) ou fichier modifié depuis le manifeste.
     #[derive(Debug)]
     enum AnswerErr {
-        Refused(#[allow(dead_code)] Error),
+        Refused,
         Changed,
     }
 
@@ -676,22 +764,18 @@ mod iroh_impl {
             match e {
                 // Contenu absent du manifeste de l'hôte : l'hôte l'a recalculé depuis (ou le manifeste de l'invité est périmé).
                 Error::NotFound(_) => AnswerErr::Changed,
-                e => AnswerErr::Refused(e),
+                _ => AnswerErr::Refused,
             }
         }
     }
 
     impl ControlHandler {
         async fn answer(&self, peer: &str, sha: &str) -> std::result::Result<(Permit, Hash), AnswerErr> {
-            self.answer_inner(peer, sha).await
-        }
-
-        async fn answer_inner(&self, peer: &str, sha: &str) -> std::result::Result<(Permit, Hash), AnswerErr> {
             let host = (self.host)().ok_or_else(|| Error::Auth("rien n'est partagé".into()))?;
             let permit = host.authorize(peer, sha)?;
             // Empreinte prise AVANT l'import : si le fichier change pendant, l'entrée sera périmée au prochain appel.
             let now = stamp(&permit.file().path);
-            let cached = self.known.lock().unwrap_or_else(|p| p.into_inner()).get(sha).copied();
+            let cached = lock(&self.known).get(sha).copied();
             let hash = match cached {
                 Some((h, st)) if now.is_some() && Some(st) == now => h,
                 _ => {
@@ -713,11 +797,10 @@ mod iroh_impl {
                         })
                         .await
                         .map_err(net)?;
-                    let mut known = self.known.lock().unwrap_or_else(|p| p.into_inner());
-                    match now {
-                        Some(st) => known.insert(sha.to_string(), (tag.hash, st)),
-                        None => known.remove(sha),
-                    };
+                    let mut known = lock(&self.known);
+                    // Toujours inscrit (le blob reste protégé du ramasse-miettes jusqu'au fetch de l'invité). Sans
+                    // empreinte lisible, l'entrée ne sera jamais réutilisée (`now` absent) : nouvel import au prochain appel.
+                    known.insert(sha.to_string(), (tag.hash, now.unwrap_or((u64::MAX, None))));
                     tag.hash
                 }
             };
@@ -728,13 +811,21 @@ mod iroh_impl {
     impl ProtocolHandler for ControlHandler {
         async fn accept(&self, conn: Connection) -> std::result::Result<(), AcceptError> {
             let peer = conn.remote_id().to_string();
+            // Comme les blobs : un pair qui n'est pas ami (ou rien de partagé) est refusé dès la connexion.
+            match (self.host)() {
+                Some(h) if h.check_peer(&peer).is_ok() => h.begin_session(&peer),
+                _ => {
+                    conn.close(1u32.into(), b"unauthorized");
+                    return Ok(());
+                }
+            }
             // Chaque requête = un flux bidi ; le créneau est tenu jusqu'à la fermeture côté invité.
             while let Ok((mut send, mut recv)) = conn.accept_bi().await {
                 let this = self.clone();
                 let peer = peer.clone();
                 tokio::spawn(async move {
                     let mut sha = [0u8; 64];
-                    if recv.read_exact(&mut sha).await.is_err() {
+                    if !matches!(tokio::time::timeout(CONTROL_READ_TIMEOUT, recv.read_exact(&mut sha)).await, Ok(Ok(()))) {
                         return;
                     }
                     let sha = String::from_utf8_lossy(&sha).into_owned();
@@ -747,7 +838,7 @@ mod iroh_impl {
                             }
                             let _ = send.finish();
                             // Attend que l'invité ait terminé (fin de son flux) avant de libérer le créneau.
-                            let _ = recv.read_to_end(16).await;
+                            let _ = tokio::time::timeout(CONTROL_HOLD_TIMEOUT, recv.read_to_end(16)).await;
                         }
                         Err(e) => {
                             let code = if matches!(e, AnswerErr::Changed) { STATUS_CHANGED } else { 1u8 };
@@ -792,7 +883,7 @@ mod iroh_impl {
                 .accept(CONTROL_ALPN, control)
                 .accept(iroh_blobs::ALPN, blobs)
                 .spawn();
-            *self.router.lock().unwrap_or_else(|p| p.into_inner()) = Some(router);
+            *lock(&self.router) = Some(router);
             Ok(())
         }
 
@@ -803,10 +894,7 @@ mod iroh_impl {
             on_bytes: &(dyn Fn(u64) + Send + Sync),
             cancel: &AtomicBool,
         ) -> Result<()> {
-            let addr = self
-                .peers
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
+            let addr = lock(&self.peers)
                 .get(peer)
                 .cloned()
                 .ok_or_else(|| Error::Network(format!("pair inconnu : {peer}")))?;
@@ -824,7 +912,7 @@ mod iroh_impl {
         }
 
         fn via_relay(&self, peer: &str) -> bool {
-            self.relayed.lock().unwrap_or_else(|p| p.into_inner()).get(peer).copied().unwrap_or(false)
+            lock(&self.relayed).get(peer).copied().unwrap_or(false)
         }
     }
 
@@ -878,18 +966,88 @@ mod iroh_impl {
             let (_, h_good) = ctl.answer("p", &sha).await.unwrap();
             assert_eq!(h_good, Hash::new(&good), "le fichier réparé est servi sous son vrai BLAKE3");
         }
+
+        async fn ep(alpns: bool) -> Endpoint {
+            use iroh::endpoint::presets;
+            let b = Endpoint::builder(presets::Minimal).relay_mode(iroh::RelayMode::Disabled);
+            let b = if alpns { b.alpns(vec![CONTROL_ALPN.to_vec(), iroh_blobs::ALPN.to_vec()]) } else { b };
+            b.bind().await.unwrap()
+        }
+
+        fn one_file(dir: &Path, data: &[u8]) -> (ServeIndex, FetchRequest) {
+            std::fs::create_dir_all(dir.join("mods")).unwrap();
+            std::fs::write(dir.join("mods/a.jar"), data).unwrap();
+            let sha = hex::encode(Sha256::digest(data));
+            let m = Manifest {
+                name: "M".into(),
+                minecraft: "1.21.1".into(),
+                loader: LoaderSpec { loader: Loader::Fabric, version: "0.16.0".into() },
+                java_major: 21,
+                files: vec![ManifestFile { path: "mods/a.jar".into(), size: data.len() as u64, sha256: sha.clone(), sha1: None, cf_fingerprint: None }],
+            };
+            let req = FetchRequest { sha256: sha, size: data.len() as u64, dest: dir.join("recu.jar"), resume_from: 0 };
+            (ServeIndex::from_manifest(&m, dir).unwrap(), req)
+        }
+
+        /// S5 : le blob reçu est retiré du magasin de l'invité par le ramasse-miettes une fois exporté ; ce que l'hôte
+        /// sert reste protégé.
+        #[tokio::test]
+        async fn received_blob_is_collected_after_export() {
+            let dir = tempfile::tempdir().unwrap();
+            let data: Vec<u8> = (0..200_000u32).map(|i| (i % 249) as u8).collect();
+            let (idx, req) = one_file(dir.path(), &data);
+            let (ea, eb) = (ep(true).await, ep(false).await);
+            let guest_id = eb.id().to_string();
+            let gc = Duration::from_millis(100);
+            let a = IrohTransport::with_gc(ea, dir.path().join("a"), gc).await.unwrap();
+            let b = IrohTransport::with_gc(eb, dir.path().join("b"), gc).await.unwrap();
+            a.serve(Host::new(idx, Arc::new(AllowList(vec![guest_id])), ServeLimits::default())).await.unwrap();
+            let peer = b.add_peer(a.addr());
+            b.fetch(&peer, &req, &|_| {}, &AtomicBool::new(false)).await.unwrap();
+            assert_eq!(std::fs::read(&req.dest).unwrap(), data);
+            let hash = Hash::new(&data);
+            let mut gone = false;
+            for _ in 0..50 {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                if !b.store.blobs().has(hash).await.unwrap() {
+                    gone = true;
+                    break;
+                }
+            }
+            assert!(gone, "le blob reçu reste dans le magasin de l'invité");
+            assert!(a.store.blobs().has(hash).await.unwrap(), "le blob servi par l'hôte est protégé");
+            a.shutdown().await;
+        }
+
+        /// S8 : un pair qui n'est pas ami est refusé dès la connexion au canal de contrôle.
+        #[tokio::test]
+        async fn control_refuses_non_friend_at_connection() {
+            let dir = tempfile::tempdir().unwrap();
+            let (idx, req) = one_file(dir.path(), b"contenu");
+            let (ea, eb) = (ep(true).await, ep(false).await);
+            let a = IrohTransport::new(ea, dir.path().join("a")).await.unwrap();
+            let b = IrohTransport::new(eb.clone(), dir.path().join("b")).await.unwrap();
+            a.serve(Host::new(idx, Arc::new(AllowList(vec!["quelqu-un-d-autre".into()])), ServeLimits::default())).await.unwrap();
+            let conn = eb.connect(a.addr(), CONTROL_ALPN).await.unwrap();
+            let closed = tokio::time::timeout(Duration::from_secs(10), conn.closed()).await.expect("connexion non fermée");
+            assert!(format!("{closed:?}").contains("unauthorized"), "{closed:?}");
+            let peer = b.add_peer(a.addr());
+            assert!(b.fetch(&peer, &req, &|_| {}, &AtomicBool::new(false)).await.is_err());
+            a.shutdown().await;
+        }
     }
 }
 
 pub use iroh_impl::{ControlHandler, GatedBlobsHandler, HostProvider, IrohTransport};
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use core_lib::types::{Loader, LoaderSpec, ManifestFile};
     use sha2::{Digest, Sha256};
 
-    pub fn sha(data: &[u8]) -> String {
+    /// SHA-256 hexadécimal (aussi utilisé par les tests de `recv` et `resume`).
+    pub(crate) fn sha(data: &[u8]) -> String {
         hex::encode(Sha256::digest(data))
     }
 
@@ -933,6 +1091,16 @@ mod tests {
         // concurrence libérée, mais le total (10 + 10 > 15) est dépassé
         assert!(matches!(host.authorize("p", &sha(b"b")), Err(Error::Invalid(_))));
         assert!(matches!(host.authorize("intrus", &sha(b"a")), Err(Error::Auth(_))));
+        // Une reprise du même fichier ne recompte pas son volume.
+        drop(host.authorize("p", &sha(b"a")).unwrap());
+        // Nouvelle session (aucun transfert en cours) : le quota repart de zéro.
+        host.begin_session("p");
+        drop(host.authorize("p", &sha(b"b")).unwrap());
+        // Pas de remise à zéro tant qu'un transfert est en cours.
+        let held = host.authorize("p", &sha(b"b")).unwrap();
+        host.begin_session("p");
+        drop(held);
+        assert!(matches!(host.authorize("p", &sha(b"a")), Err(Error::Invalid(_))));
     }
 
     fn mem_setup(data: &[u8]) -> (tempfile::TempDir, Arc<Host>, Arc<MemNetwork>) {

@@ -13,6 +13,7 @@ use core_lib::types::{Error, Friend, Manifest, ManifestFile, Presence, TransferP
 use p2p_lib::transfer::plan::Plan;
 use p2p_lib::friend_code::FriendCodePayload;
 use p2p_lib::invite::InviteMessage;
+use p2p_lib::join_request::JoinAnswer;
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 pub type ProgressFn = Arc<dyn Fn(TransferProgress) + Send + Sync>;
@@ -77,16 +78,14 @@ impl TransferControl {
     }
 }
 
-/// Manifeste de l'hôte et, si le transport sait la porter, son indication de mods hors Modrinth (non fiable ;
-/// vide avec p2p actuel : le manifeste ne porte pas de sha1).
+/// Manifeste de l'hôte.
 #[derive(Debug, Clone)]
 pub struct HostManifest {
     pub manifest: Manifest,
-    pub unknown_mods: Vec<String>,
 }
 
 /// Résultat du test « Ta connexion avec tes amis » (Paramètres).
-#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize, specta::Type)]
 pub struct NetTest {
     /// Connecté à un relais (secours quand la connexion directe échoue).
     pub relay_connected: bool,
@@ -128,11 +127,18 @@ pub trait P2pBackend: Send + Sync {
     fn refuse_request(&self, _public_key: String) -> BoxFuture<'_, Result<bool, String>> {
         Box::pin(async { Ok(false) })
     }
-    /// Prévient l'autre côté qu'on a accepté sa demande (repli local).
-    fn notify_accepted(&self, friend: Friend) -> BoxFuture<'_, Result<(), String>>;
     /// Envoie une invitation à rejoindre notre monde à un ami (clé hex). Par défaut : sans effet.
     fn send_invite(&self, _public_key: String, _msg: InviteMessage) -> BoxFuture<'_, Result<(), String>> {
         Box::pin(async { Ok(()) })
+    }
+    /// Invité : demande à l'ami (clé hex) de rejoindre sa partie ; attend sa décision (au plus ~2 min).
+    fn send_join_request(&self, _public_key: String) -> BoxFuture<'_, Result<JoinAnswer, String>> {
+        Box::pin(async { Err(UNAVAILABLE.to_string()) })
+    }
+    /// Hôte : décide de la demande en attente de l'ami (clé hex). Accepter ouvre l'accès à la partie en cours.
+    /// Faux si aucune demande n'attend, ou si rien n'est partagé.
+    fn answer_join_request(&self, _public_key: &str, _accept: bool) -> bool {
+        false
     }
     /// Récupère le manifeste du monde de l'ami.
     fn fetch_manifest(&self, friend_public_key: String) -> BoxFuture<'_, Result<HostManifest, String>>;
@@ -155,6 +161,11 @@ pub trait P2pBackend: Send + Sync {
     /// Invité : ouvre un tunnel local vers le monde de l'ami ; renvoie le port local (127.0.0.1) pour Minecraft.
     fn join_open_tunnel(&self, _friend_public_key: String) -> BoxFuture<'_, Result<u16, String>> {
         Box::pin(async { Err(UNAVAILABLE.to_string()) })
+    }
+    /// Membre d'un groupe Hearth : ouvre un tunnel local vers le serveur du membre `holder` (clé hex) sans exiger
+    /// qu'il soit notre ami. Par défaut comme `join_open_tunnel`.
+    fn hearth_open_tunnel(&self, holder: String) -> BoxFuture<'_, Result<u16, String>> {
+        self.join_open_tunnel(holder)
     }
     /// Invité : ferme le tunnel ouvert (sans effet s'il n'y en a pas).
     fn join_close_tunnel(&self) -> BoxFuture<'_, ()> {
@@ -187,9 +198,6 @@ impl P2pBackend for UnavailableBackend {
     }
     fn send_request(&self, _t: FriendCodePayload, _n: String) -> BoxFuture<'_, Result<VerifyCode, String>> {
         Box::pin(async { Err(UNAVAILABLE.to_string()) })
-    }
-    fn notify_accepted(&self, _f: Friend) -> BoxFuture<'_, Result<(), String>> {
-        Box::pin(async { Ok(()) })
     }
     fn fetch_manifest(&self, _k: String) -> BoxFuture<'_, Result<HostManifest, String>> {
         Box::pin(async { Err(UNAVAILABLE.to_string()) })

@@ -170,7 +170,24 @@ pub fn default_search_dirs(launcher_runtimes_dir: &Path) -> Vec<PathBuf> {
     }
     v.push(PathBuf::from("/usr/lib/jvm"));
     v.push(PathBuf::from("/Library/Java/JavaVirtualMachines"));
+    #[cfg(unix)]
+    v.extend(path_java_homes(std::env::var_os("PATH").as_deref()));
     v
+}
+
+/// Racines de JDK/JRE des `java` trouvés dans le PATH (liens résolus) : couvre NixOS, où les Java vivent dans `/nix/store`
+/// et ne sont dans aucun dossier usuel.
+#[cfg(unix)]
+fn path_java_homes(path: Option<&std::ffi::OsStr>) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    for dir in path.map(|p| std::env::split_paths(p).collect::<Vec<_>>()).unwrap_or_default() {
+        let Ok(real) = fs::canonicalize(dir.join("java")) else { continue };
+        let Some(home) = real.parent().and_then(Path::parent) else { continue };
+        if !out.iter().any(|o| o == home) {
+            out.push(home.to_path_buf());
+        }
+    }
+    out
 }
 
 /// Choisit l'installation : version exacte préférée ; sinon la plus petite version
@@ -294,6 +311,20 @@ mod tests {
         assert!(probe_with(Path::new("java"), |_| Some("nope".into())).is_none());
         let old = probe_with(Path::new("java"), |_| Some("java version \"1.8.0_392\"".into()));
         assert_eq!(old.unwrap().major, 8);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn path_java_resolves_links_to_home() {
+        let tmp = std::env::temp_dir().join(format!("cubelink-pathjava-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(tmp.join("jdk/bin")).unwrap();
+        fs::create_dir_all(tmp.join("sw/bin")).unwrap();
+        fs::write(tmp.join("jdk/bin/java"), "").unwrap();
+        std::os::unix::fs::symlink(tmp.join("jdk/bin/java"), tmp.join("sw/bin/java")).unwrap();
+        let homes = path_java_homes(Some(tmp.join("sw/bin").as_os_str()));
+        assert_eq!(homes, [fs::canonicalize(tmp.join("jdk")).unwrap()]);
+        let _ = fs::remove_dir_all(&tmp);
     }
 
     #[test]

@@ -236,6 +236,22 @@ pub fn run() {
     if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() && std::path::Path::new("/proc/driver/nvidia/version").exists() {
         std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
     }
+    // AppImage : le WebKitGTK embarque plante sur les polices couleur COLRv1 (emojis des descriptions de mods) : on les lui masque.
+    // Aussi avant la creation de la fenetre (fontconfig lit la variable a son initialisation).
+    #[cfg(target_os = "linux")]
+    if core_lib::launch_run::wants_no_colrv1_fonts(
+        std::env::var("APPDIR").ok().as_deref(),
+        std::env::var("FONTCONFIG_FILE").ok().as_deref(),
+    ) {
+        if let Some(root) = linux_data_dir(hooks) {
+            let conf = root.join(core_lib::launch_run::FONTCONFIG_NO_COLRV1);
+            let written = std::fs::create_dir_all(&root).and_then(|_| std::fs::write(&conf, core_lib::launch_run::FONTCONFIG_NO_COLRV1_XML));
+            match written {
+                Ok(()) => std::env::set_var("FONTCONFIG_FILE", &conf),
+                Err(e) => eprintln!("[Cubelink] masquage des polices COLRv1 impossible : {e}"),
+            }
+        }
+    }
     let mut builder = tauri::Builder::default();
     // Une seule instance (hors mode test : les E2E lancent plusieurs applications en parallele, chacune son dossier) :
     // relancer Cubelink alors qu'il tourne en fond montre la fenetre existante au lieu d'ouvrir un second noeud P2P.

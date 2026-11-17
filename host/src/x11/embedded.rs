@@ -474,11 +474,41 @@ pub(super) fn adopt(s: &Shared, win: u32, how: &str) {
     }
 }
 
+/// `_MOTIF_WM_HINTS` « aucune decoration » : drapeau `MWM_HINTS_DECORATIONS` (2), fonctions 0, decorations 0.
+const MOTIF_UNDECORATED: [u32; 5] = [2, 0, 0, 0, 0];
+
+/// Pur : les `_MOTIF_WM_HINTS` lus (`None` : absents) laissent-ils le gestionnaire de fenetres decorer la fenetre ? Alors il faut
+/// les rendre. GLFW (Minecraft 1.21, LWJGL 3.3) les ECRIT lui-meme apres l'adoption (`decorations : toutes`) : Mutter pose alors
+/// un cadre avec barre de titre qui deborde de la zone de jeu et recouvre le launcher, panneau compris.
+pub(super) fn motif_needs_reset(current: Option<&[u32]>) -> bool {
+    current != Some(&MOTIF_UNDECORATED[..])
+}
+
+/// Le jeu transitoire a reecrit ses `_MOTIF_WM_HINTS` : on remet « aucune decoration » (sans effet quand ils sont deja bons, ce
+/// qui evite de se repondre a soi-meme : notre propre ecriture declenche aussi un evenement de propriete).
+pub(super) fn keep_undecorated(s: &Shared, win: u32) {
+    let transient = {
+        let st = s.lock();
+        st.adopted.contains(&win) && st.origin.get(&win).is_some_and(|o| o.transient)
+    };
+    if !transient {
+        return;
+    }
+    let a = &s.atoms;
+    let current = util::prop32(&s.conn, win, a._MOTIF_WM_HINTS, a._MOTIF_WM_HINTS, 5);
+    if !motif_needs_reset(current.as_deref()) {
+        return;
+    }
+    let _ = s.conn.change_property32(PropMode::REPLACE, win, a._MOTIF_WM_HINTS, a._MOTIF_WM_HINTS, &MOTIF_UNDECORATED);
+    s.flush();
+    s.log("le jeu a remis ses decorations : retirees de nouveau".to_string());
+}
+
 /// Repli du reparentage refuse : la fenetre devient transitoire du launcher, sans decoration ni bouton de barre des taches.
 fn transient(s: &Shared, win: u32) {
     let (c, a) = (&s.conn, &s.atoms);
     let _ = c.change_property32(PropMode::REPLACE, win, AtomEnum::WM_TRANSIENT_FOR, AtomEnum::WINDOW, &[s.parent]);
-    let _ = c.change_property32(PropMode::REPLACE, win, a._MOTIF_WM_HINTS, a._MOTIF_WM_HINTS, &[2, 0, 0, 0, 0]); // decorations : aucune
+    let _ = c.change_property32(PropMode::REPLACE, win, a._MOTIF_WM_HINTS, a._MOTIF_WM_HINTS, &MOTIF_UNDECORATED); // decorations : aucune
     let _ = c.change_property32(PropMode::REPLACE, win, a._NET_WM_STATE, AtomEnum::ATOM, &[a._NET_WM_STATE_SKIP_TASKBAR, a._NET_WM_STATE_SKIP_PAGER]);
     if util::is_mapped(c, win) {
         let ev = ClientMessageEvent::new(32, win, a._NET_WM_STATE, [1, a._NET_WM_STATE_SKIP_TASKBAR, a._NET_WM_STATE_SKIP_PAGER, 1, 0]);
@@ -776,5 +806,25 @@ pub(super) fn release(s: &Shared, wins: Vec<Returned>, reason: FallbackReason, d
 pub(super) fn reparented_away(s: &Shared, win: u32) {
     if s.lock().adopted.contains(&win) {
         note_owner(s, win);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decorations_rendues_quand_le_jeu_les_reecrit() {
+        // GLFW (Minecraft 1.21) : drapeau « decorations » + decorations = toutes
+        assert!(motif_needs_reset(Some(&[2, 0, 1, 0, 0])));
+        // proprietes retirees : le gestionnaire de fenetres decore par defaut
+        assert!(motif_needs_reset(None));
+        // trop courtes : mal formees
+        assert!(motif_needs_reset(Some(&[2])));
+    }
+
+    #[test]
+    fn decorations_deja_retirees_rien_a_faire() {
+        assert!(!motif_needs_reset(Some(&MOTIF_UNDECORATED)));
     }
 }

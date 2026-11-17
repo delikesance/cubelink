@@ -65,6 +65,8 @@ fn handle(s: &Shared, ev: Event) {
             let a = &s.atoms;
             if (e.atom == a._NET_WM_PID || e.atom == u32::from(AtomEnum::WM_CLASS)) && watching(s) {
                 consider(s, e.window, "proprietes");
+            } else if e.atom == a._MOTIF_WM_HINTS {
+                embedded::keep_undecorated(s, e.window);
             }
         }
         Event::MapNotify(e) if !s.own(e.window) => {

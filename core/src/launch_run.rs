@@ -276,6 +276,26 @@ fn clean_linux_env(command: &mut Command) {
     }
 }
 
+/// Nom du fichier fontconfig que le launcher (AppImage) pose dans son dossier de données pour masquer les polices COLRv1 : le
+/// WebKitGTK embarqué plante (assertion dans le Skia de `colrv1_configure_skpaint`) à l'affichage d'un émoji couleur COLRv1
+/// (ex. `Noto-COLRv1.ttf` sous Fedora), ce qui fige l'interface sur les pages de descriptions de mods.
+pub const FONTCONFIG_NO_COLRV1: &str = "cubelink-no-colrv1.conf";
+
+/// Contenu de [`FONTCONFIG_NO_COLRV1`] : la configuration du système, moins les polices COLRv1.
+pub const FONTCONFIG_NO_COLRV1_XML: &str = r#"<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
+<fontconfig>
+  <include ignore_missing="yes">/etc/fonts/fonts.conf</include>
+  <selectfont><rejectfont><glob>*COLRv1*</glob></rejectfont></selectfont>
+</fontconfig>
+"#;
+
+/// Pur : le launcher doit-il masquer les polices COLRv1 à son WebKit ? Seulement dans une AppImage (WebKit embarqué, celui du
+/// système n'a pas le défaut) et sans `FONTCONFIG_FILE` déjà choisi par le joueur.
+pub fn wants_no_colrv1_fonts(appdir: Option<&str>, fontconfig_file: Option<&str>) -> bool {
+    appdir.is_some_and(|a| !a.is_empty()) && fontconfig_file.is_none_or(str::is_empty)
+}
+
 /// Environnement du jeu sous Linux : variables à retirer, nouvelles valeurs de `LD_LIBRARY_PATH` et `LD_PRELOAD`
 /// (`None` : variable retirée).
 #[cfg(any(target_os = "linux", test))]
@@ -294,6 +314,10 @@ fn linux_game_env(vars: &std::collections::HashMap<String, String>, nixos_gl: bo
         .filter(|k| ["GDK_", "GTK_", "WEBKIT_", "APPDIR", "APPIMAGE", "ARGV0", "OWD", "GIO_", "GSETTINGS_SCHEMA_DIR"].iter().any(|p| k.starts_with(p)))
         .cloned()
         .collect();
+    // Le réglage de police du launcher ne concerne pas le jeu (il perdrait ses émojis) ; celui du joueur est gardé.
+    if vars.get("FONTCONFIG_FILE").is_some_and(|f| f.ends_with(FONTCONFIG_NO_COLRV1)) {
+        remove.push("FONTCONFIG_FILE".to_string());
+    }
     remove.sort();
     let appdir = vars.get("APPDIR").map(|a| a.trim_end_matches('/')).filter(|a| !a.is_empty());
     // Une entrée vient de l'AppImage si elle est sous `$APPDIR` (le dossier lui-même ou un sous-chemin, pas un voisin au préfixe commun).
@@ -996,6 +1020,25 @@ mod linux_env_tests {
         assert_eq!(env.remove, ["APPDIR", "GDK_BACKEND", "WEBKIT_DISABLE_DMABUF_RENDERER"]);
         assert_eq!(env.ld_library_path.as_deref(), Some("/opt/gl:/run/opengl-driver/lib"));
         assert_eq!(env.ld_preload, None);
+    }
+
+    #[test]
+    fn polices_colrv1_masquees_seulement_en_appimage_sans_choix_du_joueur() {
+        assert!(wants_no_colrv1_fonts(Some("/tmp/.mount_x"), None));
+        assert!(wants_no_colrv1_fonts(Some("/tmp/.mount_x"), Some("")));
+        assert!(!wants_no_colrv1_fonts(None, None), "hors AppImage : WebKit du systeme");
+        assert!(!wants_no_colrv1_fonts(Some(""), None));
+        assert!(!wants_no_colrv1_fonts(Some("/tmp/.mount_x"), Some("/home/j/fonts.conf")), "choix du joueur respecte");
+        assert!(FONTCONFIG_NO_COLRV1_XML.contains("*COLRv1*"));
+    }
+
+    #[test]
+    fn jeu_ne_recoit_pas_le_reglage_de_police_du_launcher_mais_garde_celui_du_joueur() {
+        let mk = |f: &str| -> std::collections::HashMap<String, String> {
+            [("FONTCONFIG_FILE".to_string(), f.to_string())].into_iter().collect()
+        };
+        assert_eq!(linux_game_env(&mk("/d/cubelink-no-colrv1.conf"), false).remove, ["FONTCONFIG_FILE"]);
+        assert!(linux_game_env(&mk("/home/j/fonts.conf"), false).remove.is_empty());
     }
 
     fn vars(list: &[(&str, &str)]) -> std::collections::HashMap<String, String> {

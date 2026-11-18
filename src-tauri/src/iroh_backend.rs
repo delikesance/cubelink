@@ -519,7 +519,7 @@ impl IrohBackend {
         let psink: p2p_lib::presence::EventSink = Arc::new(move |e| {
             // En ligne ou qui vient de partir : l'ami était là à cet instant.
             seen.touch(&hex::encode(e.public_key), crate::state::now_secs());
-            emit("friend://presence", serde_json::json!({ "public_key": hex::encode(e.public_key), "presence": e.presence }));
+            emit("friend://presence", serde_json::json!({ "public_key": hex::encode(e.public_key), "presence": e.presence, "in_game": e.in_game }));
         });
         // Adresses mémorisées lors d'une session précédente : disponibles dès la première sonde.
         let _ = st.friends.prune_friend_addrs();
@@ -537,6 +537,14 @@ impl IrohBackend {
             opts.presence,
             stored.iter().map(|(_, a)| a.clone()).collect(),
         ));
+        // Annonce aux amis qu'un jeu tourne ici (relu à chaque sonde) : « Demander à rejoindre » n'a de sens que pour un ami en jeu.
+        // Référence faible : l'état de l'application possède ce backend.
+        let weak = Arc::downgrade(st);
+        // « En jeu » = un jeu tourne OU je partage une partie (c'est ce que `friend_join_request` exige de l'hôte ; un partage peut
+        // exister sans jeu enregistré, par exemple partage de fichiers seul).
+        presence.set_in_game_source(Arc::new(move || {
+            weak.upgrade().is_some_and(|s| lock(&s.game).is_some() || lock(&s.host).as_ref().is_some_and(|h| h.sharing))
+        }));
 
         // Un transport (magasin de blobs partagé hôte/invité) ; ses handlers lisent l'hôte courant à chaque requête.
         let transport = Arc::new(
@@ -890,6 +898,10 @@ impl P2pBackend for IrohBackend {
             return Presence::Offline;
         };
         self.presence.snapshot().get(&k).copied().unwrap_or(Presence::Offline)
+    }
+
+    fn in_game(&self, public_key: &str) -> bool {
+        hex::decode(public_key).ok().and_then(|b| <[u8; 32]>::try_from(b).ok()).is_some_and(|k| self.presence.in_game(&k))
     }
 
     fn set_display_name(&self, name: &str) {

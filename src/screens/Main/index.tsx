@@ -87,7 +87,7 @@ export default function Main() {
 
   useEffect(() => services.onFriendPresence((e) => {
     const now = Math.floor(Date.now() / 1000);
-    setFriends((l) => l.map((f) => (f.friend.public_key === e.public_key ? { ...f, presence: e.presence, last_seen: now } : f)));
+    setFriends((l) => l.map((f) => (f.friend.public_key === e.public_key ? { ...f, presence: e.presence, in_game: e.in_game, last_seen: now } : f)));
   }), [services]);
   useEffect(() => {
     let alive = true;
@@ -192,7 +192,7 @@ export default function Main() {
     const items: MenuItem[] = [];
     const asked = askStates[key];
     if (on && (g || asked === "accepted")) items.push({ key: "join", label: g ? `Rejoindre ${g.world_name}` : "Rejoindre", icon: <Icon d={ICONS.play} />, onSelect: () => join(key) });
-    else if (on) items.push({ key: "ask", label: asked ? ASK_LABEL[asked] : "Demander à rejoindre", icon: <Icon d={ICONS.play} />, disabled: asked === "pending", onSelect: () => ask(key) });
+    else if (on && f.in_game) items.push({ key: "ask", label: asked ? ASK_LABEL[asked] : "Demander à rejoindre", icon: <Icon d={ICONS.play} />, disabled: asked === "pending", onSelect: () => ask(key) });
     if (on && inviteOk && !g) items.push({ key: "invite", label: "Inviter dans ma partie", icon: <Icon d={ICONS.userPlus} />, onSelect: () => invite(key) });
     items.push({ key: "copy", label: "Copier le pseudo", icon: <Icon d={ICONS.copy} />, separator: items.length > 0, onSelect: () => copy(f.friend.name) });
     items.push({ key: "manage", label: "Gérer mes amis", icon: <Icon d={ICONS.friends} />, onSelect: () => navigate("settings", { tab: "amis" }) });
@@ -391,7 +391,7 @@ export default function Main() {
                   {on && (g || asked === "accepted") && (
                     <Button variant={g ? "primary" : "secondary"} aria-label={`Rejoindre ${f.friend.name}`} onClick={() => join(f.friend.public_key)}>Rejoindre</Button>
                   )}
-                  {on && !g && asked !== "accepted" && (
+                  {on && f.in_game && !g && asked !== "accepted" && (
                     <Button
                       variant="secondary" aria-label={`Demander à rejoindre ${f.friend.name}`} loading={asked === "pending"}
                       onClick={() => ask(f.friend.public_key)}

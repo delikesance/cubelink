@@ -71,7 +71,8 @@ export type FriendRequestsPage = B.RequestsPage;
 // Événements
 export type LaunchStateName = B.LaunchPhase;
 export type LaunchState = B.LaunchStateEvent_Serialize;
-export interface PresenceEvent { public_key: string; presence: Presence }
+/** `in_game` : un jeu tourne chez l'ami (faux hors ligne et pour un ami d'une ancienne version). */
+export interface PresenceEvent { public_key: string; presence: Presence; in_game: boolean }
 
 /** Événement transfer://unknown_mods : mods reçus mais absents des catalogues. */
 export interface UnknownModsEvent { instance_id: string; unknown_mods: string[] }

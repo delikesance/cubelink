@@ -1,4 +1,5 @@
 export { Button, type ButtonProps } from "./Button";
+export { BackButton, type BackButtonProps } from "./BackButton";
 export { IconButton, type IconButtonProps } from "./IconButton";
 export { Field, Input, type FieldProps, type InputProps, type FieldControlProps } from "./Field";
 export { Card, type CardProps } from "./Card";

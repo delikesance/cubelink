@@ -4,7 +4,7 @@ import { useShell } from "../../app/context";
 import { useHearthDetail } from "../../app/useHearth";
 import { useAccounts } from "../../app/useAccounts";
 import type { FriendWithPresence, HearthDetail, HearthProposal, Instance, Services } from "../../services/types";
-import { Badge, Button, Card, Icon, ICONS } from "../../ui";
+import { BackButton, Badge, Button, Card, Icon, ICONS } from "../../ui";
 import { Avatar } from "../Friends/Avatar";
 import { Modal } from "../Main/Modal";
 import { errText, fmtDate, fmtPlayed, fmtSize, mainAction, plural, resumeLabel, stateHint, stateText } from "./format";
@@ -271,14 +271,16 @@ export default function ServerPage({ id }: { id: string }) {
   return (
     <div className="hearth-page">
       <header className="hearth-page-head">
-        <button type="button" className="hearth-link" onClick={() => navigate("main")}>← Accueil</button>
+        <div className="hearth-topbar">
+          <BackButton label="Accueil" onClick={() => navigate("main")} />
+          <Button variant="danger" onClick={leave}>Quitter ce serveur</Button>
+        </div>
         <h1 ref={title} tabIndex={-1}>{c.name}</h1>
         <p className="hearth-meta">{c.minecraft} · {c.loader} · {plural(c.members_total, "membre", "membres")}</p>
         <div className="hearth-state-row">
           <Badge tone={c.state === "hosting" ? "ok" : c.state === "idle" ? "neutral" : c.state === "hosted" ? "accent" : "warn"}>{stateText(c)}</Badge>
           {act.kind === "play" && <Button size="lg" loading={busy} icon={<Icon d={ICONS.play} fill />} onClick={() => { void run(() => services.hearthPlay(c.id)); }}>{act.label}</Button>}
           {act.kind === "stop" && <Button variant="secondary" loading={busy} onClick={() => { void run(() => services.hearthStop(c.id)); }}>{act.label}</Button>}
-          <Button variant="danger" onClick={leave}>Quitter ce serveur</Button>
         </div>
         {hint && <p className="hearth-hint">{hint}</p>}
         {shownError && <p className="hearth-err" role="alert">{shownError}</p>}

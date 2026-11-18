@@ -3,7 +3,7 @@ import "./browse.css";
 import { useBack, useScreenTitle, useShell } from "../../app/context";
 import type { BrowseHit, BrowseKind, BrowseQuery, BrowseSource, Instance } from "../../services/types";
 import { Detail, SOURCE_LABEL, CF_UNAVAILABLE, isCurseForgeDown, messageOf } from "./Detail";
-import { Button } from "../../ui";
+import { BackButton, Button } from "../../ui";
 import { useContextMenu, type MenuItem } from "../../app/useContextMenu";
 import { openExternal } from "../../app/externalLinks";
 import { ICONS, Icon } from "../../ui";
@@ -240,7 +240,7 @@ export default function Browse() {
         ) : (
           <div className="br-state" role="alert">
             <p className="br-error">Cette fiche est introuvable.</p>
-            <Button variant="secondary" onClick={closeDetail}>Retour aux résultats</Button>
+            <BackButton label="Retour aux résultats" onClick={closeDetail} />
           </div>
         )}
       </div>

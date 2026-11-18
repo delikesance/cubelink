@@ -228,7 +228,7 @@ export default function Create({ pickMrpack }: CreateProps = {}) {
             {error && <p className="create-error" role="alert">{error}</p>}
           </div>
           <div className="create-actions">
-            <Button variant="secondary" size="lg" className="create-cancel" icon={<Icon d={ICONS.close} size={20} />} onClick={cancel}>Annuler</Button>
+            <Button variant="secondary" className="create-cancel" icon={<Icon d={ICONS.close} size={20} />} onClick={cancel}>Annuler</Button>
           </div>
         </div>
       ) : (

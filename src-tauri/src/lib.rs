@@ -116,6 +116,7 @@ macro_rules! commands {
             commands_hearth::hearth_add_member,
             commands_hearth::hearth_remove_member,
             commands_hearth::hearth_leave,
+            commands_hearth::hearth_forget,
             commands_hearth::hearth_vote,
             commands_hearth::hearth_continue_without,
             commands_hearth::hearth_pack_update,

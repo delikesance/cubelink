@@ -711,6 +711,12 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
       hearthGroups.delete(id);
       hearthEmit();
     },
+    hearthForget: async (id) => {
+      hearthCalls.push({ kind: "Forget", args: [id] });
+      hearthCard(id);
+      hearthGroups.delete(id);
+      hearthEmit();
+    },
     hearthVote: async (id, proposalId) => {
       hearthCalls.push({ kind: "Vote", args: [id, proposalId] });
       const g = hearthCard(id);

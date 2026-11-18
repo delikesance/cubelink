@@ -250,6 +250,37 @@ describe("Page du serveur", () => {
     return { services, pk: noor };
   }
 
+  it("Réglages : « Supprimer de ce PC » efface le serveur sans prévenir le groupe, et ramène à l'accueil", async () => {
+    const services = createFakeServices({ tickMs: 0 });
+    services.seedHearth({ id: "g3", name: "Les copains" }, {
+      members: [{ public_key: "me", name: "Toi", online: true, is_me: true, is_creator: true, sync: "ok", version: 1, unseen_days: null }],
+    });
+    const s = shell(services, { id: "g3" });
+    render(<ShellContext.Provider value={s.value}><Hearth /></ShellContext.Provider>);
+    fireEvent.click(await screen.findByRole("tab", { name: "Réglages" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Supprimer ce serveur de ce PC" }));
+    const dlg = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dlg).getByRole("button", { name: "Supprimer" }));
+    await waitFor(() => expect(services.hearthCalls).toEqual([{ kind: "Forget", args: ["g3"] }]));
+    await waitFor(() => expect(s.navigate).toHaveBeenCalledWith("main"));
+  });
+
+  it("Quitter refusé (aucun membre joignable) : le message renvoie vers « Supprimer de ce PC »", async () => {
+    const services = createFakeServices({ tickMs: 0 });
+    services.seedHearth({ id: "g4", name: "Les copains" }, {
+      members: [{ public_key: "me", name: "Toi", online: true, is_me: true, is_creator: true, sync: "ok", version: 1, unseen_days: null }],
+    });
+    services.hearthLeave = async () => { throw new Error("Personne du groupe n'a pu être joint."); };
+    const s = shell(services, { id: "g4" });
+    render(<ShellContext.Provider value={s.value}><Hearth /></ShellContext.Provider>);
+    fireEvent.click(await screen.findByRole("tab", { name: "Réglages" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Quitter le groupe" }));
+    const dlg = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dlg).getByRole("button", { name: "Quitter" }));
+    expect((await within(dlg).findByRole("alert")).textContent).toContain("Supprimer de ce PC");
+    expect(s.navigate).not.toHaveBeenCalledWith("main");
+  });
+
   it("Membres : bannière « n'est pas revenu depuis N jours » et vote par majorité", async () => {
     const { services, pk } = await withBlocker();
     await screen.findByText("Noor avait la version la plus récente et n'est pas revenu depuis 9 jours.");

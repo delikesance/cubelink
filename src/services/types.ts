@@ -291,6 +291,8 @@ export interface Services {
   hearthAddMember(id: string, publicKey: string): Promise<void>;
   hearthRemoveMember(id: string, publicKey: string): Promise<void>;
   hearthLeave(id: string): Promise<void>;
+  /** Supprime le serveur de CE PC seulement, sans prévenir le groupe (repli quand quitter est impossible : aucun membre joignable). */
+  hearthForget(id: string): Promise<void>;
   hearthVote(id: string, proposalId: string): Promise<void>;
   hearthContinueWithout(id: string, publicKey: string): Promise<void>;
   hearthPackUpdate(id: string, instanceId: string): Promise<void>;

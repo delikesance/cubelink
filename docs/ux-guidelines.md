@@ -113,11 +113,11 @@ Constats : navigation Général (Comptes, Jeux, Réseau P2P) / Aide (Diagnostic,
 |---|---|---|---|
 | Principal | `primary` (grand, `size="lg"`, seulement pour Jouer) | UNE seule action principale par écran ou section | Jouer, Rejoindre, Créer |
 | Secondaire | `secondary` (44 px) | actions neutres, retour, annuler | Accueil / Retour (`BackButton`), Annuler, Retirer |
-| Destructif, point d'entrée | `danger-quiet` (contour rouge, sans aplat) | ouvre une action qu'on ne défait pas | Quitter ce serveur, Fermer le jeu (overlay) |
+| Destructif, point d'entrée | `danger-quiet` (contour rouge, sans aplat) | ouvre une action qu'on ne défait pas | Quitter le groupe (Réglages, en bas), Fermer le jeu (overlay) |
 | Destructif, confirmation | `danger` (aplat rouge) | le bouton qui CONFIRME, dans sa boîte de confirmation ; ou un arrêt immédiat qui remplace Jouer | Supprimer, Vider le cache, Arrêter |
 | Compact | `secondary`/`primary` réduits par le CSS de la zone | listes denses (amis 32 px, overlay et comptes 36 px) | Rejoindre dans la colonne d'amis |
 
-Règles : le rouge plein n'apparaît jamais à côté de Jouer en dehors d'une confirmation ; le retour est toujours `BackButton` en haut à gauche ; un lien souligné n'est jamais un bouton.
+Règles : une action destructive n'est jamais dans l'en-tête ni en haut à droite (zone de navigation) : elle vit dans une section « Quitter / Zone de danger » en bas de l'écran ou des réglages ; le rouge plein n'apparaît jamais à côté de Jouer en dehors d'une confirmation ; le retour est toujours `BackButton` en haut à gauche ; un lien souligné n'est jamais un bouton.
 
 ## (d) Top 10 des changements à appliquer en premier
 

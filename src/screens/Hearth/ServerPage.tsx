@@ -271,10 +271,7 @@ export default function ServerPage({ id }: { id: string }) {
   return (
     <div className="hearth-page">
       <header className="hearth-page-head">
-        <div className="hearth-topbar">
-          <BackButton label="Accueil" onClick={() => navigate("main")} />
-          <Button variant="danger-quiet" onClick={leave}>Quitter ce serveur</Button>
-        </div>
+        <BackButton label="Accueil" onClick={() => navigate("main")} />
         <h1 ref={title} tabIndex={-1}>{c.name}</h1>
         <p className="hearth-meta">{c.minecraft} · {c.loader} · {plural(c.members_total, "membre", "membres")}</p>
         <div className="hearth-state-row">

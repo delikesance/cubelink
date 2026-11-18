@@ -20,7 +20,6 @@
 
 /* Pages (création et serveur) */
 .hearth-page{box-sizing:border-box;min-height:100%;max-width:var(--page-max);margin:0 auto;padding:var(--screen-pad-y);color:var(--text);font-family:var(--font-ui);display:flex;flex-direction:column;gap:var(--sp-4)}
-.hearth-topbar{display:flex;align-items:center;justify-content:space-between;gap:var(--sp-3);flex-wrap:wrap;align-self:stretch}
 .hearth-page-head{display:flex;flex-direction:column;gap:var(--sp-2);align-items:flex-start}
 .hearth-page h1{margin:0;font:700 28px/1.2 var(--font-display)}
 .hearth-page h1:focus{outline:none}

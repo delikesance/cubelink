@@ -136,7 +136,7 @@ export default function Wizard() {
               <strong>Une copie du monde chez chacun.</strong>{" "}
               {chosen ? `${fmtSize(chosen.size_bytes)} à télécharger chez ${plural(picked.length, "membre", "membres")} (${picked.map((f) => f.friend.name).join(", ")}).` : `Le nouveau monde sera copié chez ${plural(picked.length, "membre", "membres")} (${picked.map((f) => f.friend.name).join(", ")}) après le premier lancement.`}
             </li>
-            <li><strong>Connexion requise.</strong> Jouer hors ligne est interdit sur un serveur de groupe : sinon deux versions du monde pourraient apparaître.</li>
+            <li><strong>Connexion requise.</strong> Il faut Internet pour lancer le serveur. Les amis le rejoignent quand ils sont en ligne, même si tu l'as lancé avant eux.</li>
             <li><strong>Mods figés.</strong> Le modpack « {inst?.name} » ne change que si le groupe vote la mise à jour.</li>
             <li><strong>Un seul bouton Jouer.</strong> Le serveur démarre chez le premier qui joue, les autres le rejoignent.</li>
           </ul>

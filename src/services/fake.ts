@@ -661,7 +661,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
       hearthCalls.push({ kind: "Play", args: [id] });
       const g = hearthCard(id);
       const st = g.card.state;
-      if (st === "idle" || st === "unclean") {
+      if (st === "idle" || st === "unclean" || st === "blocked") {
         if (!hearthEula) throw new Error(HEARTH_EULA_REQUIRED);
         hearthLaunch(id, ["Mise à jour du monde", "Démarrage du serveur", "Ouverture de Minecraft"], { state: "hosting", host: { ...ME }, players: 1, unclean: null });
       } else if (st === "hosted") {

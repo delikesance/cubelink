@@ -107,6 +107,18 @@ Constats : navigation Général (Comptes, Jeux, Réseau P2P) / Aide (Diagnostic,
 - **M** : Le bouton « Tester » doit avoir ses états : en cours, réussi (« Connexion directe possible, 24 ms »), échec avec cause probable et conseil (P1, P3). Le résultat « Connexion directe possible » doit être daté (« testé à 14:03 »).
 - **B** : Pastille numérique « 1 » sur « Comptes » dans la navigation : dire ce qu'elle signifie (infobulle) ou la retirer (P4 [A p.15]).
 
+## Hiérarchie des boutons (composant `Button`, `BackButton`)
+
+| Niveau | Variante | Quand | Exemples |
+|---|---|---|---|
+| Principal | `primary` (grand, `size="lg"`, seulement pour Jouer) | UNE seule action principale par écran ou section | Jouer, Rejoindre, Créer |
+| Secondaire | `secondary` (44 px) | actions neutres, retour, annuler | Accueil / Retour (`BackButton`), Annuler, Retirer |
+| Destructif, point d'entrée | `danger-quiet` (contour rouge, sans aplat) | ouvre une action qu'on ne défait pas | Quitter ce serveur, Fermer le jeu (overlay) |
+| Destructif, confirmation | `danger` (aplat rouge) | le bouton qui CONFIRME, dans sa boîte de confirmation ; ou un arrêt immédiat qui remplace Jouer | Supprimer, Vider le cache, Arrêter |
+| Compact | `secondary`/`primary` réduits par le CSS de la zone | listes denses (amis 32 px, overlay et comptes 36 px) | Rejoindre dans la colonne d'amis |
+
+Règles : le rouge plein n'apparaît jamais à côté de Jouer en dehors d'une confirmation ; le retour est toujours `BackButton` en haut à gauche ; un lien souligné n'est jamais un bouton.
+
 ## (d) Top 10 des changements à appliquer en premier
 
 1. **Join : lier le bouton principal au risque.** Quand un mod est non vérifié, case de confiance explicite ou libellé « Installer le mod d'Alex et rejoindre » (P2, P11).

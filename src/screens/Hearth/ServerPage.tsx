@@ -213,7 +213,7 @@ function Settings({ d, services, instances, ask, onError, leave }: { d: HearthDe
       <section className="hearth-block" aria-label="Quitter">
         <h2>Quitter le groupe</h2>
         <p className="hearth-meta">Le monde copié sur ce PC est supprimé. Le serveur continue pour les autres membres, même si c'est toi qui l'as créé.</p>
-        <Button variant="danger" onClick={leave}>Quitter le groupe</Button>
+        <Button variant="danger-quiet" onClick={leave}>Quitter le groupe</Button>
       </section>
     </div>
   );
@@ -273,7 +273,7 @@ export default function ServerPage({ id }: { id: string }) {
       <header className="hearth-page-head">
         <div className="hearth-topbar">
           <BackButton label="Accueil" onClick={() => navigate("main")} />
-          <Button variant="danger" onClick={leave}>Quitter ce serveur</Button>
+          <Button variant="danger-quiet" onClick={leave}>Quitter ce serveur</Button>
         </div>
         <h1 ref={title} tabIndex={-1}>{c.name}</h1>
         <p className="hearth-meta">{c.minecraft} · {c.loader} · {plural(c.members_total, "membre", "membres")}</p>

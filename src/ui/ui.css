@@ -10,6 +10,9 @@
 .cl-btn-danger{background:var(--danger);color:var(--danger-ink);box-shadow:var(--edge-danger)}
 .cl-btn-danger:hover{background:#F58886}
 .cl-btn-danger:active{transform:translateY(3px);box-shadow:var(--edge-danger-active)}
+.cl-btn-danger-quiet{background:transparent;color:var(--danger);border-color:color-mix(in srgb,var(--danger) 55%,transparent);box-shadow:none}
+.cl-btn-danger-quiet:hover{background:color-mix(in srgb,var(--danger) 14%,transparent)}
+.cl-btn-danger-quiet:active{transform:translateY(1px)}
 .cl-btn:disabled,.cl-btn[aria-disabled="true"]{cursor:not-allowed;transform:none}
 .cl-btn:disabled{background:var(--surface-2);color:var(--muted);box-shadow:none;border-color:var(--line)}
 .cl-btn[aria-disabled="true"]{cursor:progress}

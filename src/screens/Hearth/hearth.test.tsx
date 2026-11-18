@@ -258,8 +258,8 @@ describe("Page du serveur", () => {
     });
     const s = shell(services, { id: "g3" });
     render(<ShellContext.Provider value={s.value}><Hearth /></ShellContext.Provider>);
-    fireEvent.click(await screen.findByRole("tab", { name: "Réglages" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Quitter le groupe" }));
+    // sur ma ligne de l'onglet Membres, sans changer d'onglet
+    fireEvent.click(await screen.findByRole("button", { name: "Quitter" }));
     const dlg = await screen.findByRole("alertdialog");
     expect(within(dlg).getByText(/même si c'est toi qui l'as créé/)).toBeTruthy();
     fireEvent.click(within(dlg).getByRole("button", { name: "Quitter" }));
@@ -275,8 +275,8 @@ describe("Page du serveur", () => {
     services.hearthLeave = async () => { throw new Error("Personne du groupe n'a pu être joint."); };
     const s = shell(services, { id: "g4" });
     render(<ShellContext.Provider value={s.value}><Hearth /></ShellContext.Provider>);
-    fireEvent.click(await screen.findByRole("tab", { name: "Réglages" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Quitter le groupe" }));
+    // sur ma ligne de l'onglet Membres, sans changer d'onglet
+    fireEvent.click(await screen.findByRole("button", { name: "Quitter" }));
     fireEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Quitter" }));
     await waitFor(() => expect(services.hearthCalls).toEqual([{ kind: "Forget", args: ["g4"] }]));
     await waitFor(() => expect(s.navigate).toHaveBeenCalledWith("main"));

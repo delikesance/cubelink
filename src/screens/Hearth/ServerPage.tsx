@@ -69,7 +69,7 @@ function Proposals({ d, services, onError }: { d: HearthDetail; services: Servic
   );
 }
 
-function Members({ d, services, friends, ask, onError }: { d: HearthDetail; services: Services; friends: FriendWithPresence[]; ask: (c: Confirm) => void; onError: (m: string) => void }) {
+function Members({ d, services, friends, ask, onError, leave }: { d: HearthDetail; services: Services; friends: FriendWithPresence[]; ask: (c: Confirm) => void; onError: (m: string) => void; leave: () => void }) {
   const id = d.card.id;
   // Ma tête : le skin de MON compte actif (le libellé « Toi » n'est pas mon pseudo). Compte hors ligne : tête générée.
   const { state: accounts } = useAccounts(services);
@@ -124,6 +124,7 @@ function Members({ d, services, friends, ask, onError }: { d: HearthDetail; serv
                   })}
                 >Retirer</Button>
               )}
+              {m.is_me && <Button variant="danger-quiet" onClick={leave}>Quitter</Button>}
             </li>
           ))}
         </ul>
@@ -333,7 +334,7 @@ export default function ServerPage({ id }: { id: string }) {
           ))}
         </div>
         <div id="hearth-panel" role="tabpanel" aria-labelledby={`hearth-tab-${tab}`} className="hearth-panel">
-          {tab === "membres" && <Members d={detail} services={services} friends={friends} ask={ask} onError={setError} />}
+          {tab === "membres" && <Members d={detail} services={services} friends={friends} ask={ask} onError={setError} leave={leave} />}
           {tab === "historique" && <History d={detail} services={services} ask={ask} />}
           {tab === "reglages" && <Settings d={detail} services={services} instances={instances} ask={ask} onError={setError} leave={leave} />}
         </div>

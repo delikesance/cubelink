@@ -81,7 +81,7 @@ Arguments : clés JSON envoyées à Tauri (snake_case) et leur type TypeScript. 
 | `hearth_invites` | — | `HearthInvite[]` | Invitations à des groupes reçues d'amis. |
 | `hearth_invite_accept` | `id: string` | — | Accepte une invitation à un groupe. |
 | `hearth_invite_dismiss` | `id: string` | — | Écarte une invitation à un groupe. |
-| `hearth_play` | `id: string`, `alone: boolean \| null` | — | Joue sur le serveur du groupe : le rejoint s'il est hébergé, sinon l'héberge sur ce PC ; `alone` : joue seul quand aucun autre membre n'est joignable (après confirmation). |
+| `hearth_play` | `id: string` | — | Joue sur le serveur du groupe : le rejoint s'il est hébergé, sinon l'héberge sur ce PC. |
 | `hearth_stop` | `id: string` | — | Arrête le serveur du groupe hébergé sur ce PC (monde publié, bail relâché). |
 | `hearth_unclean_choice` | `id: string`, `choice: string` | — | Choix du groupe après une partie mal terminée. |
 | `hearth_set_instance` | `id: string`, `instance_id: string` | — | Associe l'instance locale du modpack au groupe. |
@@ -209,8 +209,6 @@ Voir `docs/hearth.md`. Implémentation : `src-tauri/src/hearth.rs` (runtime : so
 | `hearth_set_enabled` | `enabled` | | Active ou coupe Hearth, et émet `hearth://state`. Coupé : toutes les commandes `hearth_*` refusent (« Les serveurs de groupe sont désactivés… ») sauf `hearth_list`, `hearth_detail`, `hearth_invites`, `hearth_eula`, `hearth_stop`, `hearth_enabled` et celle-ci ; le protocole `cubelink/hearth/1` refuse tous les pairs ; un serveur déjà lancé reste arrêtable. |
 
 Erreur spéciale : `eula_required` (chaîne exacte, `HEARTH_EULA_REQUIRED` côté front), renvoyée par `hearth_play` et `hearth_unclean_choice` avant toute préparation. Le front ouvre alors la boîte du contrat puis relance l'action.
-
-Erreur spéciale : `alone_required` (`HEARTH_ALONE_REQUIRED` côté front), renvoyée par `hearth_play` quand aucun autre membre n'est joignable (décision `Blocked`). Le front demande confirmation (« Jouer seul sur ce serveur ? »), puis rappelle `hearth_play` avec `alone: true`, qui héberge sans autre membre (bail « au mieux » ; la version part en file d'envoi, une fourche reste possible si un autre membre joue seul de son côté, docs/hearth.md § 1). La carte `blocked` affiche donc « Jouer seul ».
 
 ### Événements
 

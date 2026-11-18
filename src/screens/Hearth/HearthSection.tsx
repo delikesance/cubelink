@@ -45,7 +45,7 @@ function GroupCard({ card, services, navigate }: { card: HearthCard; services: S
         </ul>
         <div className="hearth-acts">
           {act.kind === "play" && (
-            <Button loading={busy} aria-label={`${act.label} sur ${card.name}`} icon={<Icon d={ICONS.play} fill />} onClick={() => { void run((alone) => services.hearthPlay(card.id, alone)); }}>{act.label}</Button>
+            <Button loading={busy} aria-label={`${act.label} sur ${card.name}`} icon={<Icon d={ICONS.play} fill />} onClick={() => { void run(() => services.hearthPlay(card.id)); }}>{act.label}</Button>
           )}
           {act.kind === "stop" && (
             <Button variant="secondary" loading={busy} aria-label={`Arrêter le serveur ${card.name}`} icon={<Icon d={ICONS.stop} fill />} onClick={() => { void run(() => services.hearthStop(card.id)); }}>{act.label}</Button>

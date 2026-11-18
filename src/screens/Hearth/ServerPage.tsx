@@ -255,7 +255,7 @@ export default function ServerPage({ id }: { id: string }) {
 
   const c = detail.card;
   const act = mainAction(c);
-  const hint = stateHint(c);
+  const hint = stateHint(c, detail.members.filter((m) => !m.is_me && !m.online).map((m) => m.name));
   const ask = (x: Confirm) => setConfirm({ ...x, run: async () => { await x.run(); reload(); } });
   const leave = () => ask({
     title: `Quitter « ${c.name} » ?`, action: "Quitter", danger: true,
@@ -284,6 +284,7 @@ export default function ServerPage({ id }: { id: string }) {
           <Badge tone={c.state === "hosting" ? "ok" : c.state === "idle" ? "neutral" : c.state === "hosted" ? "accent" : "warn"}>{stateText(c)}</Badge>
           {act.kind === "play" && <Button size="lg" loading={busy} icon={<Icon d={ICONS.play} fill />} onClick={() => { void run(() => services.hearthPlay(c.id)); }}>{act.label}</Button>}
           {act.kind === "stop" && <Button variant="secondary" loading={busy} onClick={() => { void run(() => services.hearthStop(c.id)); }}>{act.label}</Button>}
+          <Button variant="danger" onClick={forget}>Supprimer ce serveur</Button>
         </div>
         {hint && <p className="hearth-hint">{hint}</p>}
         {shownError && <p className="hearth-err" role="alert">{shownError}</p>}

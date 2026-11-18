@@ -76,7 +76,8 @@ describe("Accueil : serveurs de groupe", () => {
     await screen.findByText("Mise à jour du monde 42 %");
     expect(screen.getByRole("progressbar", { name: /Sync/ }).getAttribute("aria-valuenow")).toBe("42");
     const blocked = screen.getByRole("listitem", { name: "Serveur Hors ligne" });
-    expect(within(blocked).getByText("Connexion requise")).toBeTruthy();
+    expect(within(blocked).getByText("Aucun membre en ligne")).toBeTruthy();
+    expect(within(blocked).getByText(/au moins un autre membre doit avoir Cubelink ouvert/)).toBeTruthy();
     expect(within(blocked).queryByRole("button", { name: /^Jouer/ })).toBeNull();
     const fork = screen.getByRole("listitem", { name: "Serveur Fourche" });
     expect(within(fork).getByText("Deux versions existent")).toBeTruthy();
@@ -257,8 +258,8 @@ describe("Page du serveur", () => {
     });
     const s = shell(services, { id: "g3" });
     render(<ShellContext.Provider value={s.value}><Hearth /></ShellContext.Provider>);
-    fireEvent.click(await screen.findByRole("tab", { name: "Réglages" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Supprimer ce serveur de ce PC" }));
+    // bouton de l'en-tête : visible sans changer d'onglet
+    fireEvent.click(await screen.findByRole("button", { name: "Supprimer ce serveur" }));
     const dlg = await screen.findByRole("alertdialog");
     fireEvent.click(within(dlg).getByRole("button", { name: "Supprimer" }));
     await waitFor(() => expect(services.hearthCalls).toEqual([{ kind: "Forget", args: ["g3"] }]));

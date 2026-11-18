@@ -66,7 +66,7 @@ export const commands = {
 	friendMyCode: (options?: InvokeOptions) => __TAURI_INVOKE<FriendCode>("friend_my_code", undefined, options),
 	/**  Génère un nouveau code ami (l'ancien ne marche plus). */
 	friendRegenerateCode: (options?: InvokeOptions) => __TAURI_INVOKE<FriendCode>("friend_regenerate_code", undefined, options),
-	/**  Amis, avec leur présence et la dernière fois vus en ligne. */
+	/**  Amis, avec leur présence, `in_game` (un jeu tourne chez l'ami : seul cas où « Demander à rejoindre » est proposé ; faux hors ligne et pour un ami d'une ancienne version) et la dernière fois vus en ligne. */
 	friendList: (options?: InvokeOptions) => __TAURI_INVOKE<FriendWithPresence_Serialize[]>("friend_list", undefined, options),
 	/**  Envoie une demande d'ami à partir de son code ; renvoie le code de vérification à comparer. */
 	friendSendRequest: (code: string, options?: InvokeOptions) => __TAURI_INVOKE<VerifyCode>("friend_send_request", { code }, options),
@@ -492,6 +492,8 @@ export type FriendWithPresence = FriendWithPresence_Serialize | FriendWithPresen
 export type FriendWithPresence_Deserialize = {
 	friend: Friend,
 	presence: Presence,
+	/**  Un jeu tourne chez cet ami : seul cas où on peut lui demander à rejoindre (faux hors ligne et pour une ancienne version). */
+	in_game: boolean,
 	/**  Dernière fois vu en ligne (secondes Unix), si connu. */
 	last_seen?: number | null,
 };
@@ -499,6 +501,8 @@ export type FriendWithPresence_Deserialize = {
 export type FriendWithPresence_Serialize = {
 	friend: Friend,
 	presence: Presence,
+	/**  Un jeu tourne chez cet ami : seul cas où on peut lui demander à rejoindre (faux hors ligne et pour une ancienne version). */
+	in_game: boolean,
 	/**  Dernière fois vu en ligne (secondes Unix), si connu. */
 	last_seen: number | null,
 };

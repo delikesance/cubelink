@@ -257,8 +257,8 @@ describe("Page du serveur", () => {
     });
     const s = shell(services, { id: "g3" });
     render(<ShellContext.Provider value={s.value}><Hearth /></ShellContext.Provider>);
-    fireEvent.click(await screen.findByRole("tab", { name: "Réglages" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Supprimer ce serveur de ce PC" }));
+    // bouton de l'en-tête : visible sans changer d'onglet
+    fireEvent.click(await screen.findByRole("button", { name: "Supprimer ce serveur" }));
     const dlg = await screen.findByRole("alertdialog");
     fireEvent.click(within(dlg).getByRole("button", { name: "Supprimer" }));
     await waitFor(() => expect(services.hearthCalls).toEqual([{ kind: "Forget", args: ["g3"] }]));

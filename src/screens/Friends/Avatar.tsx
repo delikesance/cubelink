@@ -18,8 +18,9 @@ export type AvatarPresence = "online" | "offline" | "none";
  * Pastille ronde avec l'initiale ; `presence` ajoute le point d'état (le libellé d'état doit être lisible à côté).
  * Avec `services`, la vraie tête du skin (retrouvée par pseudo) remplace l'initiale quand elle est disponible.
  */
-export function Avatar({ name, size = 44, presence = "none", tone, services }: { name: string; size?: number; presence?: AvatarPresence; tone?: string; services?: Services }) {
-  const head = useSkinHead(services, services ? "name" : null, name);
+export function Avatar({ name, size = 44, presence = "none", tone, services, skin }: { name: string; size?: number; presence?: AvatarPresence; tone?: string; services?: Services; skin?: { by: "name" | "uuid" | null; id: string } }) {
+  // `skin` remplace la recherche par `name` : le libellé « Toi » n'est pas un pseudo (un autre joueur porte ce pseudo chez Mojang).
+  const head = useSkinHead(services, skin ? skin.by : services ? "name" : null, skin ? skin.id : name);
   const style: CSSProperties = { width: size, height: size, background: tone ?? avatarColor(name), fontSize: Math.round(size * 0.36) };
   return (
     <span className="av" style={style} aria-hidden="true">

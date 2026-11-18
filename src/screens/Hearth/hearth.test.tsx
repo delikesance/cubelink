@@ -281,6 +281,25 @@ describe("Page du serveur", () => {
     expect(s.navigate).not.toHaveBeenCalledWith("main");
   });
 
+  it("Membres : ma tête vient de mon compte actif, jamais du libellé « Toi » (un autre joueur porte ce pseudo)", async () => {
+    const services = createFakeServices({ tickMs: 0 });
+    const byName = vi.fn(async () => null);
+    const byUuid = vi.fn(async () => null);
+    services.skinHeadByName = byName;
+    services.authSkinHead = byUuid;
+    const acc = await services.authAccounts();
+    const active = acc.accounts.find((a) => a.id === acc.active);
+    services.seedHearth({ id: "g2", name: "Les copains" }, {
+      members: [{ public_key: "me", name: "Toi", online: true, is_me: true, is_creator: true, sync: "ok", version: 1, unseen_days: null }],
+    });
+    const s = shell(services, { id: "g2" });
+    render(<ShellContext.Provider value={s.value}><Hearth /></ShellContext.Provider>);
+    await screen.findByText(/Toi \(toi\)/);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(byName).not.toHaveBeenCalledWith("Toi");
+    if (active?.kind === "online") expect(byUuid).toHaveBeenCalledWith(active.uuid);
+  });
+
   it("Membres : bannière « n'est pas revenu depuis N jours » et vote par majorité", async () => {
     const { services, pk } = await withBlocker();
     await screen.findByText("Noor avait la version la plus récente et n'est pas revenu depuis 9 jours.");

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import "./hearth.css";
 import { useShell } from "../../app/context";
 import { useHearthDetail } from "../../app/useHearth";
+import { useAccounts } from "../../app/useAccounts";
 import type { FriendWithPresence, HearthDetail, HearthProposal, Instance, Services } from "../../services/types";
 import { Badge, Button, Card, Icon, ICONS } from "../../ui";
 import { Avatar } from "../Friends/Avatar";
@@ -70,6 +71,10 @@ function Proposals({ d, services, onError }: { d: HearthDetail; services: Servic
 
 function Members({ d, services, friends, ask, onError }: { d: HearthDetail; services: Services; friends: FriendWithPresence[]; ask: (c: Confirm) => void; onError: (m: string) => void }) {
   const id = d.card.id;
+  // Ma tête : le skin de MON compte actif (le libellé « Toi » n'est pas mon pseudo). Compte hors ligne : tête générée.
+  const { state: accounts } = useAccounts(services);
+  const active = accounts?.accounts.find((a) => a.id === accounts.active);
+  const myskin: { by: "uuid" | null; id: string } = active ? { by: active.kind === "online" ? "uuid" : null, id: active.uuid } : { by: null, id: "" };
   const addable = friends.filter((f) => !d.members.some((m) => m.public_key === f.friend.public_key));
   const [toAdd, setToAdd] = useState("");
   const [adding, setAdding] = useState(false);
@@ -101,7 +106,7 @@ function Members({ d, services, friends, ask, onError }: { d: HearthDetail; serv
         <ul className="hearth-rows">
           {d.members.map((m) => (
             <li key={m.public_key} className="hearth-row">
-              <Avatar name={m.name} size={36} presence={m.online ? "online" : "offline"} services={services} />
+              <Avatar name={m.name} size={36} presence={m.online ? "online" : "offline"} services={services} skin={m.is_me ? myskin : undefined} />
               <span className="hearth-row-txt">
                 <strong>{m.name}{m.is_me ? " (toi)" : ""}{m.is_creator ? " · créateur" : ""}</strong>
                 <span className="hearth-meta">

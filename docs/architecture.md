@@ -40,7 +40,7 @@ Les catalogues ne servent qu'à **construire sa propre instance** avant de jouer
 
 - **Identité** : paire de clés ed25519 générée au premier lancement ; la clé publique = ID du nœud. L'auth Microsoft se fait directement client ↔ Microsoft.
 - **Liste d'amis** : stockée en local (SQLite).
-- **Présence** : le launcher contacte directement les clés de ses amis ; s'ils répondent, ils sont en ligne.
+- **Présence** : le launcher contacte directement les clés de ses amis ; s'ils répondent, ils sont en ligne.  La réponse porte aussi « un jeu tourne chez moi » (un octet facultatif après `PONG`, ignoré par les anciennes versions) : on ne propose « Demander à rejoindre » qu'à un ami en jeu.
 - **Découverte d'IP** : relais d'attache indiqué dans le code ami ; la découverte publique d'Iroh (pkarr/DNS n0) est prévue mais désactivée par défaut (voir §4 et §7).
 - **Relais** : nécessaire car le hole punching échoue dans ~10-20 % des cas (NAT symétrique, réseaux stricts). Il établit la connexion puis transporte le trafic en dernier recours. Binaire `iroh-relay`, ne stocke rien.
 

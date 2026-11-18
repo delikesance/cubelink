@@ -1,8 +1,10 @@
 //! Tâche N8 : présence des amis par ping direct sur l'ALPN `cubelink/presence/1`.
 //!
 //! Protocole minuscule et sans donnée personnelle : le client ouvre un flux bidirectionnel et envoie
-//! `PING` (4 octets) ; l'ami répond `PONG` + version (5 octets). Le serveur ne répond qu'aux amis
-//! acceptés ; pour les autres il ferme la connexion aussitôt, sans un octet de réponse.
+//! `PING` (4 octets) ; l'ami répond `PONG` + version (5 octets), puis UN octet d'indicateurs facultatif (bit 0 : « un jeu
+//! tourne chez lui »). Compatibilité : une ancienne version lit exactement 5 octets et ignore le suivant ; une nouvelle version
+//! qui ne reçoit pas cet octet (ancien ami) le lit comme « pas en jeu ». Le serveur ne répond qu'aux amis acceptés ; pour les
+//! autres il ferme la connexion aussitôt, sans un octet de réponse.
 //!
 //! Limite iroh : la poignée de main QUIC a lieu avant notre code, donc un inconnu qui sait dialer la
 //! clé voit l'établissement de la connexion ; il n'apprend rien de plus (aucun message, aucune donnée).
@@ -34,6 +36,8 @@ pub const PRESENCE_ALPN: &[u8] = b"cubelink/presence/1";
 
 const PING: &[u8; 4] = b"PING";
 const PONG: &[u8; 5] = b"PONG\x01";
+/// Bit 0 de l'octet d'indicateurs qui suit `PONG` : un jeu tourne chez l'ami.
+const FLAG_IN_GAME: u8 = 1;
 /// Délai maximal laissé à un pair pour envoyer son ping / fermer la connexion côté serveur.
 const SERVER_IO_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -66,6 +70,8 @@ fn decode_key(hex_key: &str) -> Option<PeerKey> {
 pub struct PresenceEvent {
     pub public_key: PeerKey,
     pub presence: Presence,
+    /// Un jeu tourne chez l'ami (toujours faux hors ligne, et pour un ami d'une ancienne version).
+    pub in_game: bool,
 }
 
 /// Destinataire des événements (appelé de façon synchrone, ne doit pas bloquer).
@@ -121,11 +127,17 @@ pub fn observed_addr(conn: &Connection) -> EndpointAddr {
     addr
 }
 
-type PingFn = Arc<dyn Fn(PeerKey) -> BoxFuture<'static, bool> + Send + Sync>;
+/// Sonde d'un ami : `None` = pas de réponse, `Some(en_jeu)` = il a répondu.
+type PingFn = Arc<dyn Fn(PeerKey) -> BoxFuture<'static, Option<bool>> + Send + Sync>;
+
+/// Dit au serveur si un jeu tourne ici (relu à chaque `PING`).
+pub type InGameSource = Arc<dyn Fn() -> bool + Send + Sync>;
+type InGameSlot = Arc<Mutex<Option<InGameSource>>>;
 
 #[derive(Debug, Clone, Copy)]
 struct PeerState {
     presence: Presence,
+    in_game: bool,
     failures: u32,
 }
 
@@ -141,11 +153,11 @@ struct Inner {
 impl Inner {
     /// Sonde un ami (concurrence bornée) et met à jour son état.
     async fn probe(&self, key: PeerKey) -> Presence {
-        let ok = {
+        let reply = {
             let Ok(_permit) = self.permits.acquire().await else { return self.current(&key) };
-            matches!(tokio::time::timeout(self.cfg.timeout, (self.pinger)(key)).await, Ok(true))
+            tokio::time::timeout(self.cfg.timeout, (self.pinger)(key)).await.ok().flatten()
         };
-        self.record(key, ok)
+        self.record(key, reply)
     }
 
     fn current(&self, key: &PeerKey) -> Presence {
@@ -156,25 +168,35 @@ impl Inner {
         crate::util::lock(&self.states)
     }
 
-    /// Applique un résultat de sonde ; émet un événement uniquement si l'état change.
-    fn record(&self, key: PeerKey, ok: bool) -> Presence {
-        let (now, changed) = {
+    fn in_game(&self, key: &PeerKey) -> bool {
+        self.lock().get(key).is_some_and(|s| s.in_game)
+    }
+
+    /// Applique un résultat de sonde (`None` : pas de réponse) ; émet un événement uniquement si la présence ou
+    /// « en jeu » change.
+    fn record(&self, key: PeerKey, reply: Option<bool>) -> Presence {
+        let (now, in_game, changed) = {
             let mut states = self.lock();
-            let st = states.entry(key).or_insert(PeerState { presence: Presence::Offline, failures: 0 });
-            let before = st.presence;
-            if ok {
-                st.failures = 0;
-                st.presence = Presence::Online;
-            } else {
-                st.failures = st.failures.saturating_add(1);
-                if st.failures >= self.cfg.failures_to_offline {
-                    st.presence = Presence::Offline;
+            let st = states.entry(key).or_insert(PeerState { presence: Presence::Offline, in_game: false, failures: 0 });
+            let (before, game_before) = (st.presence, st.in_game);
+            match reply {
+                Some(in_game) => {
+                    st.failures = 0;
+                    st.presence = Presence::Online;
+                    st.in_game = in_game;
+                }
+                None => {
+                    st.failures = st.failures.saturating_add(1);
+                    if st.failures >= self.cfg.failures_to_offline {
+                        st.presence = Presence::Offline;
+                        st.in_game = false;
+                    }
                 }
             }
-            (st.presence, st.presence != before)
+            (st.presence, st.in_game, st.presence != before || st.in_game != game_before)
         };
         if changed {
-            (self.sink)(PresenceEvent { public_key: key, presence: now });
+            (self.sink)(PresenceEvent { public_key: key, presence: now, in_game });
         }
         now
     }
@@ -196,6 +218,7 @@ pub struct PresenceService {
     inner: Arc<Inner>,
     addrs: Arc<Mutex<HashMap<PeerKey, EndpointAddr>>>,
     sink: SharedSink,
+    in_game: InGameSlot,
     stop: watch::Sender<bool>,
     task: Mutex<Option<JoinHandle<()>>>,
     /// Utilisé par `Drop` : évite d'attendre une tâche déjà arrêtée.
@@ -272,7 +295,7 @@ impl PresenceService {
                 }
             }
         });
-        Self { inner, addrs, sink: sink_slot, stop, task: Mutex::new(Some(task)), stopped: AtomicBool::new(false) }
+        Self { inner, addrs, sink: sink_slot, in_game: Arc::default(), stop, task: Mutex::new(Some(task)), stopped: AtomicBool::new(false) }
     }
 
     /// Indique comment joindre un ami (sans découverte réseau, p. ex. adresses directes).
@@ -285,9 +308,19 @@ impl PresenceService {
         *crate::util::lock(&self.sink) = Some(sink);
     }
 
+    /// Dit si un jeu tourne ici : annoncé aux amis dans la réponse à chaque `PING` (sans source : « pas en jeu »).
+    pub fn set_in_game_source(&self, source: InGameSource) {
+        *crate::util::lock(&self.in_game) = Some(source);
+    }
+
+    /// Un jeu tourne-t-il chez cet ami (d'après sa dernière réponse) ?
+    pub fn in_game(&self, key: &PeerKey) -> bool {
+        self.inner.in_game(key)
+    }
+
     /// Serveur : à enregistrer dans le `Router` sous `PRESENCE_ALPN`.
     pub fn handler(&self) -> PresenceHandler {
-        PresenceHandler { friends: Arc::clone(&self.inner.friends), sink: Arc::clone(&self.sink) }
+        PresenceHandler { friends: Arc::clone(&self.inner.friends), sink: Arc::clone(&self.sink), in_game: Arc::clone(&self.in_game) }
     }
 
     /// Présence de chaque ami (hors ligne tant qu'aucune sonde n'a réussi).
@@ -333,19 +366,24 @@ impl Drop for PresenceService {
 }
 
 /// Sonde réelle : connexion iroh, `PING`, attente de `PONG`.
-async fn iroh_ping(endpoint: &Endpoint, key: PeerKey, hint: Option<EndpointAddr>, slot: &SharedSink) -> bool {
-    match ping_reach(endpoint, key, hint).await {
-        Ok(addr) => {
+async fn iroh_ping(endpoint: &Endpoint, key: PeerKey, hint: Option<EndpointAddr>, slot: &SharedSink) -> Option<bool> {
+    match ping_status(endpoint, key, hint).await {
+        Ok((addr, in_game)) => {
             notify(slot, addr);
-            true
+            Some(in_game)
         }
-        Err(_) => false,
+        Err(_) => None,
     }
 }
 
 /// Sonde un ami et dit POURQUOI il ne répond pas : `Offline` (injoignable) ou `NotFriend` (il nous a refusé).
 /// En cas de succès, renvoie l'adresse observée de l'ami (à mémoriser). Sans délai propre : l'appelant borne.
 pub async fn ping_reach(endpoint: &Endpoint, key: PeerKey, hint: Option<EndpointAddr>) -> Result<EndpointAddr, Reach> {
+    ping_status(endpoint, key, hint).await.map(|(addr, _)| addr)
+}
+
+/// Comme [`ping_reach`], avec en plus « un jeu tourne chez l'ami » (faux pour une ancienne version, qui n'envoie pas l'octet).
+pub async fn ping_status(endpoint: &Endpoint, key: PeerKey, hint: Option<EndpointAddr>) -> Result<(EndpointAddr, bool), Reach> {
     let addr = match hint {
         Some(a) => a,
         None => match EndpointId::from_bytes(&key) {
@@ -354,21 +392,27 @@ pub async fn ping_reach(endpoint: &Endpoint, key: PeerKey, hint: Option<Endpoint
         },
     };
     let Ok(conn) = endpoint.connect(addr, PRESENCE_ALPN).await else { return Err(Reach::Offline) };
-    let ok = async {
+    let reply = async {
         let (mut send, mut recv) = conn.open_bi().await.ok()?;
         send.write_all(PING).await.ok()?;
         send.finish().ok()?;
         let mut buf = [0u8; 5];
         recv.read_exact(&mut buf).await.ok()?;
-        (&buf == PONG).then_some(())
+        if &buf != PONG {
+            return None;
+        }
+        // Octet d'indicateurs : absent chez une ancienne version (le flux se termine), lu alors comme « pas en jeu ».
+        let mut flags = [0u8; 1];
+        let in_game = recv.read_exact(&mut flags).await.is_ok() && flags[0] & FLAG_IN_GAME != 0;
+        Some(in_game)
     }
-    .await
-    .is_some();
+    .await;
+    let ok = reply.is_some();
     let observed = observed_addr(&conn);
     let reason = if ok { None } else { Reach::from_conn_settled(&conn).await };
     conn.close(0u32.into(), b"");
-    if ok {
-        Ok(observed)
+    if let Some(in_game) = reply {
+        Ok((observed, in_game))
     } else {
         Err(reason.unwrap_or(Reach::Offline))
     }
@@ -379,6 +423,7 @@ pub async fn ping_reach(endpoint: &Endpoint, key: PeerKey, hint: Option<Endpoint
 pub struct PresenceHandler {
     friends: Arc<dyn FriendLookup>,
     sink: SharedSink,
+    in_game: InGameSlot,
 }
 
 impl std::fmt::Debug for PresenceHandler {
@@ -403,7 +448,9 @@ impl ProtocolHandler for PresenceHandler {
             if &buf != PING {
                 return None;
             }
+            let in_game = crate::util::lock(&self.in_game).as_ref().is_some_and(|f| f());
             send.write_all(PONG).await.ok()?;
+            send.write_all(&[if in_game { FLAG_IN_GAME } else { 0 }]).await.ok()?;
             send.finish().ok()?;
             // Laisse au client le temps de lire la réponse avant de fermer.
             let _ = tokio::time::timeout(SERVER_IO_TIMEOUT, conn.closed()).await;
@@ -471,7 +518,7 @@ mod tests {
         let a2 = Arc::clone(&answers);
         let pinger: PingFn = Arc::new(move |_| {
             let a = a2.lock().unwrap().remove(0);
-            Box::pin(async move { a })
+            Box::pin(async move { a.then_some(false) })
         });
         let (sink, events) = collector();
         let svc = fake(pinger, Friends::new(vec![]), sink, fast_cfg());
@@ -488,6 +535,28 @@ mod tests {
         assert_eq!(seq, [N, N, N, F, F, N, N, N]);
         let ev: Vec<Presence> = events.lock().unwrap().iter().map(|e| e.presence).collect();
         assert_eq!(ev, [N, F, N]);
+        svc.stop().await;
+    }
+
+    #[tokio::test]
+    async fn en_jeu_retombe_a_faux_quand_l_ami_passe_hors_ligne() {
+        let answers = Arc::new(Mutex::new(vec![Some(true), None, None]));
+        let a2 = Arc::clone(&answers);
+        let pinger: PingFn = Arc::new(move |_| {
+            let a = a2.lock().unwrap().remove(0);
+            Box::pin(async move { a })
+        });
+        let (sink, events) = collector();
+        let svc = fake(pinger, Friends::new(vec![]), sink, fast_cfg());
+        svc.probe_now(key(1)).await;
+        assert!(svc.in_game(&key(1)));
+        // Un seul échec : encore en ligne, donc encore en jeu (même seuil que la présence).
+        assert_eq!(svc.probe_now(key(1)).await, Presence::Online);
+        assert!(svc.in_game(&key(1)));
+        assert_eq!(svc.probe_now(key(1)).await, Presence::Offline);
+        assert!(!svc.in_game(&key(1)));
+        let last = *events.lock().unwrap().last().unwrap();
+        assert!(last.presence == Presence::Offline && !last.in_game);
         svc.stop().await;
     }
 
@@ -514,7 +583,7 @@ mod tests {
                 m.fetch_max(now, Ordering::SeqCst);
                 tokio::time::sleep(Duration::from_millis(20)).await;
                 c.fetch_sub(1, Ordering::SeqCst);
-                true
+                Some(false)
             })
         });
         let keys: Vec<PeerKey> = (0..40u8).map(key).collect();
@@ -540,7 +609,7 @@ mod tests {
         let pinger: PingFn = Arc::new(move |_| {
             let _keep = Arc::clone(&t2);
             c2.fetch_add(1, Ordering::SeqCst);
-            Box::pin(async { true })
+            Box::pin(async { Some(false) })
         });
         let cfg = PresenceConfig { interval: Duration::from_millis(20), ..fast_cfg() };
         let (sink, events) = collector();
@@ -596,6 +665,109 @@ mod tests {
 
         svc_a.stop().await;
         svc_b.stop().await;
+    }
+
+    #[tokio::test]
+    async fn en_jeu_annonce_par_le_pong_et_evenement_au_changement() {
+        let (sink_a, _) = collector();
+        let (sink_b, events_b) = collector();
+        let ep_a = Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled).bind().await.unwrap();
+        let (ep_b, _) = node(None).await;
+        let key_a = *ep_a.id().as_bytes();
+        let key_b = *ep_b.id().as_bytes();
+        let svc_a = PresenceService::start_with_config(ep_a.clone(), Friends::new(vec![key_b]), sink_a, fast_cfg());
+        let router_a = Router::builder(ep_a.clone()).accept(PRESENCE_ALPN, svc_a.handler()).spawn();
+        let svc_b = PresenceService::start_with_config(ep_b.clone(), Friends::new(vec![key_a]), sink_b, fast_cfg());
+        svc_b.add_addr(ep_a.addr());
+
+        // Sans source : pas en jeu.
+        assert_eq!(svc_b.probe_now(key_a).await, Presence::Online);
+        assert!(!svc_b.in_game(&key_a));
+
+        // Un jeu démarre chez A : B le voit à la sonde suivante, avec un événement (la présence, elle, ne change pas).
+        let playing = Arc::new(AtomicBool::new(true));
+        let p2 = Arc::clone(&playing);
+        svc_a.set_in_game_source(Arc::new(move || p2.load(Ordering::SeqCst)));
+        assert_eq!(svc_b.probe_now(key_a).await, Presence::Online);
+        assert!(svc_b.in_game(&key_a));
+        {
+            let ev = events_b.lock().unwrap();
+            assert_eq!(ev.len(), 2, "en ligne, puis en jeu");
+            assert!(!ev[0].in_game && ev[1].in_game && ev[1].presence == Presence::Online);
+        }
+
+        // Le jeu se ferme : événement « plus en jeu ».
+        playing.store(false, Ordering::SeqCst);
+        svc_b.probe_now(key_a).await;
+        assert!(!svc_b.in_game(&key_a));
+        assert_eq!(events_b.lock().unwrap().len(), 3);
+
+        // Rien de nouveau : pas d'événement de plus.
+        svc_b.probe_now(key_a).await;
+        assert_eq!(events_b.lock().unwrap().len(), 3);
+
+        router_a.shutdown().await.unwrap();
+        svc_a.stop().await;
+        svc_b.stop().await;
+    }
+
+    /// Ancien ami (serveur d'avant l'octet d'indicateurs) : `PONG` seul puis fin du flux. Il reste « en ligne », pas « en jeu ».
+    #[tokio::test]
+    async fn ancien_serveur_sans_octet_d_indicateurs_reste_en_ligne() {
+        #[derive(Debug, Clone)]
+        struct OldServer;
+        impl ProtocolHandler for OldServer {
+            async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
+                let served = async {
+                    let (mut send, mut recv) = conn.accept_bi().await.ok()?;
+                    let mut buf = [0u8; 4];
+                    recv.read_exact(&mut buf).await.ok()?;
+                    send.write_all(PONG).await.ok()?;
+                    send.finish().ok()?;
+                    let _ = tokio::time::timeout(Duration::from_secs(2), conn.closed()).await;
+                    Some(())
+                };
+                let _ = served.await;
+                Ok(())
+            }
+        }
+        let ep_a = Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled).bind().await.unwrap();
+        let router_a = Router::builder(ep_a.clone()).accept(PRESENCE_ALPN, OldServer).spawn();
+        let (ep_b, _) = node(None).await;
+        let key_a = *ep_a.id().as_bytes();
+        let (sink, _) = collector();
+        let svc_b = PresenceService::start_with_config(ep_b.clone(), Friends::new(vec![key_a]), sink, fast_cfg());
+        svc_b.add_addr(ep_a.addr());
+        assert_eq!(svc_b.probe_now(key_a).await, Presence::Online);
+        assert!(!svc_b.in_game(&key_a));
+        router_a.shutdown().await.unwrap();
+        svc_b.stop().await;
+    }
+
+    /// Ancien client (lit exactement 5 octets) face à un nouveau serveur : il accepte le `PONG` et ignore l'octet en plus.
+    #[tokio::test]
+    async fn ancien_client_ignore_l_octet_d_indicateurs() {
+        let (sink, _) = collector();
+        let ep_a = Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled).bind().await.unwrap();
+        let (ep_c, _) = node(None).await;
+        let key_c = *ep_c.id().as_bytes();
+        let svc_a = PresenceService::start_with_config(ep_a.clone(), Friends::new(vec![key_c]), sink, fast_cfg());
+        svc_a.set_in_game_source(Arc::new(|| true));
+        let router_a = Router::builder(ep_a.clone()).accept(PRESENCE_ALPN, svc_a.handler()).spawn();
+        let conn = ep_c.connect(ep_a.addr(), PRESENCE_ALPN).await.unwrap();
+        let got = async {
+            let (mut s, mut r) = conn.open_bi().await.ok()?;
+            s.write_all(PING).await.ok()?;
+            s.finish().ok()?;
+            let mut buf = [0u8; 5];
+            r.read_exact(&mut buf).await.ok()?;
+            Some(buf)
+        }
+        .await;
+        assert_eq!(got.as_ref(), Some(PONG));
+        conn.close(0u32.into(), b"");
+        router_a.shutdown().await.unwrap();
+        svc_a.stop().await;
     }
 
     #[tokio::test]

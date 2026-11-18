@@ -14,6 +14,8 @@ use crate::state::{lock, now_secs, AppState};
 pub struct FriendWithPresence {
     pub friend: Friend,
     pub presence: Presence,
+    /// Un jeu tourne chez cet ami : seul cas où on peut lui demander à rejoindre (faux hors ligne et pour une ancienne version).
+    pub in_game: bool,
     /// Dernière fois vu en ligne (secondes Unix), si connu.
     pub last_seen: Option<i64>,
 }
@@ -84,7 +86,8 @@ impl AppState {
                     self.last_seen.touch(&f.public_key, now_secs());
                 }
                 let last_seen = self.last_seen.get(&f.public_key);
-                FriendWithPresence { friend: f, presence, last_seen }
+                let in_game = presence == Presence::Online && self.backend().in_game(&f.public_key);
+                FriendWithPresence { friend: f, presence, in_game, last_seen }
             })
             .collect())
     }
@@ -180,7 +183,7 @@ pub fn friend_regenerate_code(state: State<'_, Arc<AppState>>) -> Result<FriendC
     state.friend_regenerate_code()
 }
 
-/// Amis, avec leur présence et la dernière fois vus en ligne.
+/// Amis, avec leur présence, `in_game` (un jeu tourne chez l'ami : seul cas où « Demander à rejoindre » est proposé ; faux hors ligne et pour un ami d'une ancienne version) et la dernière fois vus en ligne.
 #[tauri::command(rename_all = "snake_case")]
 #[specta::specta(rename_all = "snake_case")]
 pub fn friend_list(state: State<'_, Arc<AppState>>) -> Result<Vec<FriendWithPresence>, String> {

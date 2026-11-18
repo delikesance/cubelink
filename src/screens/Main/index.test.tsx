@@ -138,21 +138,39 @@ describe("Main", () => {
 
   it("amis hors ligne : dernière connexion sous le nom", async () => {
     const now = Math.floor(Date.now() / 1000);
-    setup({ friendList: async () => [{ friend: { public_key: "k1", name: "Noor", trust: "always", added_at: now }, presence: "offline", last_seen: now - 3 * 3600 }] });
+    setup({ friendList: async () => [{ friend: { public_key: "k1", name: "Noor", trust: "always", added_at: now }, presence: "offline", in_game: false, last_seen: now - 3 * 3600 }] });
     await screen.findByRole("group", { name: "Instances" });
     expect(await within(side()).findByText("Vu il y a 3 h")).toBeTruthy();
   });
 
   it("met à jour la présence des amis en direct", async () => {
-    let push: (e: { public_key: string; presence: "online" | "offline" }) => void = () => {};
+    let push: (e: { public_key: string; presence: "online" | "offline"; in_game: boolean }) => void = () => {};
     const base = createFakeServices({ tickMs: 0, requestCount: 0 });
     setup({ onFriendPresence: (cb) => { push = cb; return () => {}; } });
     await screen.findByRole("group", { name: "Instances" });
     await waitFor(() => expect(screen.getByText(/1 en ligne/)).toBeTruthy());
     const list = await base.friendList();
     const noor = list.find((f) => f.presence === "offline")!.friend;
-    act(() => push({ public_key: noor.public_key, presence: "online" }));
+    act(() => push({ public_key: noor.public_key, presence: "online", in_game: false }));
     expect(screen.getByText(/2 en ligne/)).toBeTruthy();
+  });
+
+  it("« Demander » seulement pour un ami en jeu : en ligne hors jeu, pas de bouton ; il lance Minecraft, le bouton apparaît", async () => {
+    let push: (e: { public_key: string; presence: "online" | "offline"; in_game: boolean }) => void = () => {};
+    const base = createFakeServices({ tickMs: 0, requestCount: 0 });
+    const alex = (await base.friendList()).find((f) => f.presence === "online")!.friend;
+    setup({
+      friendList: async () => (await base.friendList()).map((f) => (f.friend.public_key === alex.public_key ? { ...f, in_game: false } : f)),
+      onFriendPresence: (cb) => { push = cb; return () => {}; },
+    });
+    await screen.findByRole("group", { name: "Instances" });
+    const list = side();
+    await within(list).findByText(alex.name);
+    expect(within(list).queryByRole("button", { name: `Demander à rejoindre ${alex.name}` })).toBeNull();
+    act(() => push({ public_key: alex.public_key, presence: "online", in_game: true }));
+    expect(await within(list).findByRole("button", { name: `Demander à rejoindre ${alex.name}` })).toBeTruthy();
+    act(() => push({ public_key: alex.public_key, presence: "online", in_game: false }));
+    await waitFor(() => expect(within(list).queryByRole("button", { name: `Demander à rejoindre ${alex.name}` })).toBeNull());
   });
 
   it("demande à rejoindre : « Demande envoyée… » pendant l'attente, puis refusée : on peut redemander", async () => {

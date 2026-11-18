@@ -244,8 +244,8 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
   const artOf = (id: string) => need(id);
   let requests: FriendRequest[] = Array.from({ length: requestCount }, (_, i) => makeRequest(i));
   const friends: FriendWithPresence[] = [
-    { friend: { public_key: hex(1, 64), name: "Alex", trust: "ask", added_at: NOW - 86400 }, presence: "online", last_seen: null },
-    { friend: { public_key: hex(2, 64), name: "Noor", trust: "always", added_at: NOW - 172800 }, presence: "offline", last_seen: NOW - 3 * 3600 },
+    { friend: { public_key: hex(1, 64), name: "Alex", trust: "ask", added_at: NOW - 86400 }, presence: "online", in_game: true, last_seen: null },
+    { friend: { public_key: hex(2, 64), name: "Noor", trust: "always", added_at: NOW - 172800 }, presence: "offline", in_game: false, last_seen: NOW - 3 * 3600 },
   ];
 
   let invites: Invite[] = [];
@@ -612,7 +612,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     netTest: async () => ({ relay_connected: true, relay: "euc1-1.relay.n0.iroh.link", relay_ms: 28, udp: true, ipv6: false, direct: true, relay_only: false, partial: false }),
     friendMyCode: async () => `mcl1-${hex(codeN * 7, 24)}`,
     friendRegenerateCode: async () => { codeN += 1; return `mcl1-${hex(codeN * 7, 24)}`; },
-    friendList: async () => friends.map((f) => ({ friend: { ...f.friend }, presence: f.presence, last_seen: f.last_seen })),
+    friendList: async () => friends.map((f) => ({ friend: { ...f.friend }, presence: f.presence, in_game: f.in_game, last_seen: f.last_seen })),
     friendInvite: async (pk) => {
       if (!friends.some((f) => f.friend.public_key === pk)) throw new Error("Ami introuvable.");
       gameCalls.push({ kind: "invite", arg: pk });
@@ -839,7 +839,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
       requests = requests.filter((x) => x !== r);
       friends.push({
         friend: { public_key: r.public_key, name: r.name, trust: "ask", added_at: NOW },
-        presence: "offline", last_seen: null,
+        presence: "offline", in_game: false, last_seen: null,
       });
     },
     friendRefuse: async (pk) => {

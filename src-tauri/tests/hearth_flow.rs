@@ -427,9 +427,9 @@ async fn serveur_de_groupe_de_la_creation_a_la_fourche() {
     }
 }
 
-/// Seul dans le groupe, ou sans personne en ligne : le jeu hors ligne est interdit, sauf pour un groupe d'un seul membre.
+/// Personne d'autre en ligne : on peut quand même lancer le serveur (les amis le rejoindront), sans second clic.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn jeu_hors_ligne_interdit_sur_un_serveur_de_groupe() {
+async fn on_peut_heberger_sans_personne_d_autre_en_ligne() {
     let (a, b) = (Peer::start("Alice").await, Peer::start("Bob").await);
     befriend(&a.node, &b.node).await;
     wait_for("ami chez Bob", 20, || b.node.st.friends.is_friend(&a.node.key()).unwrap()).await;
@@ -437,10 +437,11 @@ async fn jeu_hors_ligne_interdit_sur_un_serveur_de_groupe() {
     let g = GroupId::from_hex(&card.id).unwrap();
     a.node.st.hearth_eula_accept();
     b.stop().await;
-    let e = a.node.st.hearth_play(&card.id).await.unwrap_err();
-    assert!(e.contains("Connexion requise"), "{e}");
+    // Bob est hors ligne : la carte le dit (bloquée), mais un seul clic sur Jouer démarre quand même le serveur et le jeu.
     assert_eq!(a.state_of(&g), HearthStateKind::Blocked);
     assert!(a.launcher.launched.lock().unwrap().is_empty());
+    a.node.st.hearth_play(&card.id).await.unwrap();
+    assert!(!a.launcher.launched.lock().unwrap().is_empty(), "le serveur et le jeu ont démarré");
     a.stop().await;
 }
 

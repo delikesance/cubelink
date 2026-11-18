@@ -357,8 +357,15 @@ impl AppState {
                 return Err("Deux versions du monde existent : choisis laquelle garder depuis la page du serveur.".into());
             }
             match rt.decision_for(&g, &round).ok_or("ce groupe n'existe plus")? {
+                // Personne d'autre n'est joignable : on héberge quand même (docs/hearth.md § 1). Les amis rejoignent mon nœud à leur
+                // arrivée ; le monde leur parvient par la file d'envoi. Le bail « au mieux » demande une seconde confirmation
+                // (`best_effort_pending`) : le clic sur Jouer vaut pour les deux, on ne fait pas cliquer deux fois.
                 Decision::Blocked => {
-                    return Err("Connexion requise : aucun membre du groupe n'est joignable. Le jeu hors ligne n'est pas possible sur un serveur de groupe.".into())
+                    let r = self.hearth_host(g, instance, None).await;
+                    if r.is_err() && rt.best_effort_pending(&g) {
+                        return self.hearth_host(g, instance, None).await;
+                    }
+                    return r;
                 }
                 Decision::Unclean { holder, .. } => {
                     let name = rt.name_of(&holder);

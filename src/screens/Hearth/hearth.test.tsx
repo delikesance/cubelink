@@ -67,7 +67,7 @@ describe("Accueil : serveurs de groupe", () => {
     await waitFor(() => expect(services.hearthCalls.map((c) => c.kind)).toEqual(["Play"]));
   });
 
-  it("états sans bouton de jeu : mise à jour, connexion requise, deux versions", async () => {
+  it("états : mise à jour sans bouton, personne en ligne (on peut lancer), deux versions", async () => {
     const services = createFakeServices({ tickMs: 0 });
     services.seedHearth({ id: "a", name: "Sync", state: "syncing", progress: 42 });
     services.seedHearth({ id: "b", name: "Hors ligne", state: "blocked" });
@@ -77,8 +77,8 @@ describe("Accueil : serveurs de groupe", () => {
     expect(screen.getByRole("progressbar", { name: /Sync/ }).getAttribute("aria-valuenow")).toBe("42");
     const blocked = screen.getByRole("listitem", { name: "Serveur Hors ligne" });
     expect(within(blocked).getByText("Aucun membre en ligne")).toBeTruthy();
-    expect(within(blocked).getByText(/au moins un autre membre doit avoir Cubelink ouvert/)).toBeTruthy();
-    expect(within(blocked).queryByRole("button", { name: /^Jouer/ })).toBeNull();
+    expect(within(blocked).getByText(/Tu peux lancer le serveur : ils le rejoindront à leur arrivée/)).toBeTruthy();
+    expect(within(blocked).getByRole("button", { name: "Jouer sur Hors ligne" })).toBeTruthy();
     const fork = screen.getByRole("listitem", { name: "Serveur Fourche" });
     expect(within(fork).getByText("Deux versions existent")).toBeTruthy();
     expect(within(fork).getByRole("button", { name: "Choisir une version" })).toBeTruthy();

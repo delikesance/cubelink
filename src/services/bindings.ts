@@ -170,6 +170,8 @@ export const commands = {
 	hearthRemoveMember: (id: string, publicKey: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_remove_member", { id, public_key: publicKey }, options),
 	/**  Quitte le groupe. */
 	hearthLeave: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_leave", { id }, options),
+	/**  Supprime le serveur de ce PC seulement, sans prévenir le groupe : arrête mon serveur, libère les blobs et efface le dossier (repli quand quitter est impossible). */
+	hearthForget: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_forget", { id }, options),
 	/**  Approuve une décision du groupe en attente. */
 	hearthVote: (id: string, proposalId: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_vote", { id, proposal_id: proposalId }, options),
 	/**  Propose de continuer sans la version d'un membre absent. */

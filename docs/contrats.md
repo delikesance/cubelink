@@ -88,6 +88,7 @@ Arguments : clés JSON envoyées à Tauri (snake_case) et leur type TypeScript. 
 | `hearth_add_member` | `id: string`, `public_key: string` | — | Propose d'ajouter un ami au groupe. |
 | `hearth_remove_member` | `id: string`, `public_key: string` | — | Propose de retirer un membre du groupe. |
 | `hearth_leave` | `id: string` | — | Quitte le groupe. |
+| `hearth_forget` | `id: string` | — | Supprime le serveur de ce PC seulement, sans prévenir le groupe : arrête mon serveur, libère les blobs et efface le dossier (repli quand quitter est impossible). |
 | `hearth_vote` | `id: string`, `proposal_id: string` | — | Approuve une décision du groupe en attente. |
 | `hearth_continue_without` | `id: string`, `public_key: string` | — | Propose de continuer sans la version d'un membre absent. |
 | `hearth_pack_update` | `id: string`, `instance_id: string` | — | Propose de passer le groupe à une nouvelle version du modpack. |

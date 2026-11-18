@@ -173,7 +173,7 @@ function History({ d, services, ask }: { d: HearthDetail; services: Services; as
   );
 }
 
-function Settings({ d, services, instances, ask, onError, leave }: { d: HearthDetail; services: Services; instances: Instance[]; ask: (c: Confirm) => void; onError: (m: string) => void; leave: () => void }) {
+function Settings({ d, services, instances, ask, onError, leave, forget }: { d: HearthDetail; services: Services; instances: Instance[]; ask: (c: Confirm) => void; onError: (m: string) => void; leave: () => void; forget: () => void }) {
   const id = d.card.id;
   const [inst, setInst] = useState("");
   const pick = inst || d.card.instance_id || instances[0]?.id || "";
@@ -214,6 +214,9 @@ function Settings({ d, services, instances, ask, onError, leave }: { d: HearthDe
         <h2>Quitter le groupe</h2>
         <p className="hearth-meta">Le monde copié sur ce PC est supprimé. Les autres membres gardent le leur.</p>
         <Button variant="danger" onClick={leave}>Quitter le groupe</Button>
+        <h2>Supprimer de ce PC</h2>
+        <p className="hearth-meta">Efface ce serveur de ce PC sans prévenir le groupe : à utiliser quand quitter est impossible (aucun ami joignable). Les autres membres te comptent toujours dans le groupe, tu peux être réinvité.</p>
+        <Button variant="danger" onClick={forget}>Supprimer ce serveur de ce PC</Button>
       </section>
     </div>
   );
@@ -257,7 +260,17 @@ export default function ServerPage({ id }: { id: string }) {
   const leave = () => ask({
     title: `Quitter « ${c.name} » ?`, action: "Quitter", danger: true,
     text: "Le monde copié sur ce PC est supprimé. Tu pourras être réinvité plus tard.",
-    run: async () => { await services.hearthLeave(c.id); navigate("main"); },
+    run: async () => {
+      try { await services.hearthLeave(c.id); } catch (e) {
+        throw new Error(`${errText(e)} Tu peux aussi supprimer ce serveur de ce PC (Réglages, « Supprimer de ce PC »).`);
+      }
+      navigate("main");
+    },
+  });
+  const forget = () => ask({
+    title: `Supprimer « ${c.name} » de ce PC ?`, action: "Supprimer", danger: true,
+    text: "Le serveur et le monde copié sur ce PC sont supprimés, sans prévenir le groupe. Les autres membres te comptent toujours dans le groupe.",
+    run: async () => { await services.hearthForget(c.id); navigate("main"); },
   });
   const shownError = error ?? runError;
 
@@ -328,7 +341,7 @@ export default function ServerPage({ id }: { id: string }) {
         <div id="hearth-panel" role="tabpanel" aria-labelledby={`hearth-tab-${tab}`} className="hearth-panel">
           {tab === "membres" && <Members d={detail} services={services} friends={friends} ask={ask} onError={setError} />}
           {tab === "historique" && <History d={detail} services={services} ask={ask} />}
-          {tab === "reglages" && <Settings d={detail} services={services} instances={instances} ask={ask} onError={setError} leave={leave} />}
+          {tab === "reglages" && <Settings d={detail} services={services} instances={instances} ask={ask} onError={setError} leave={leave} forget={forget} />}
         </div>
       </Card>
       {confirm && <ConfirmDialog c={confirm} onClose={() => setConfirm(null)} />}

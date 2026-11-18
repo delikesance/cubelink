@@ -21,7 +21,7 @@ use serde::Serialize;
 use tauri::State;
 
 use crate::error::{sanitize, user_msg};
-use crate::hearth::{key_hex, parse_key, Begin, HearthRuntime, HostParams, Play, EULA_REQUIRED, HOST_STEPS, JOIN_STEPS};
+use crate::hearth::{key_hex, parse_key, Begin, HearthRuntime, HostParams, Play, ALONE_REQUIRED, EULA_REQUIRED, HOST_STEPS, JOIN_STEPS};
 use crate::state::AppState;
 
 /// Longueur maximale du nom d'un groupe (caractères).
@@ -311,7 +311,7 @@ impl AppState {
     // --- Jouer -----------------------------------------------------------------------------------------------
 
     /// Le bouton Jouer (docs/hearth.md § 3.3 et § 7) : rejoint la partie en cours, ou démarre le serveur sur ce PC.
-    pub async fn hearth_play(self: &Arc<Self>, id: &str) -> Result<(), String> {
+    pub async fn hearth_play(self: &Arc<Self>, id: &str, alone: bool) -> Result<(), String> {
         self.hearth.require_enabled()?;
         let g = gid(id)?;
         let rt = self.hearth.clone();
@@ -328,7 +328,7 @@ impl AppState {
         if !rt.try_begin_play(&g, HOST_STEPS) {
             return Err("un lancement de ce serveur est déjà en cours".into());
         }
-        let r = self.hearth_play_inner(g, &instance).await;
+        let r = self.hearth_play_inner(g, &instance, alone).await;
         if r.is_err() {
             rt.set_play(&g, None);
         }
@@ -347,7 +347,7 @@ impl AppState {
         }
     }
 
-    async fn hearth_play_inner(self: &Arc<Self>, g: GroupId, instance: &str) -> Result<(), String> {
+    async fn hearth_play_inner(self: &Arc<Self>, g: GroupId, instance: &str, alone: bool) -> Result<(), String> {
         let rt = self.hearth.clone();
         for _ in 0..3 {
             // Ronde `Hello` parallèle à tous les membres (4 s chacun) : on décide sur leurs réponses et la liste des
@@ -357,8 +357,19 @@ impl AppState {
                 return Err("Deux versions du monde existent : choisis laquelle garder depuis la page du serveur.".into());
             }
             match rt.decision_for(&g, &round).ok_or("ce groupe n'existe plus")? {
+                // Aucun autre membre joignable : on ne joue seul qu'après confirmation explicite (`alone`), car un autre membre
+                // qui jouerait seul de son côté créerait une fourche visible (docs/hearth.md § 1).
+                Decision::Blocked if alone => {
+                    // Le bail « au mieux » demande lui aussi une seconde confirmation (`best_effort_pending`) : la confirmation
+                    // « jouer seul » de l'écran vaut pour les deux, on ne fait pas cliquer deux fois.
+                    let r = self.hearth_host(g, instance, None).await;
+                    if r.is_err() && rt.best_effort_pending(&g) {
+                        return self.hearth_host(g, instance, None).await;
+                    }
+                    return r;
+                }
                 Decision::Blocked => {
-                    return Err("Connexion requise : aucun membre du groupe n'est joignable. Le jeu hors ligne n'est pas possible sur un serveur de groupe.".into())
+                    return Err(format!("{ALONE_REQUIRED} : aucun autre membre du groupe n'est joignable. Tu peux jouer seul ; le monde sera mis à jour chez les autres à leur retour."))
                 }
                 Decision::Unclean { holder, .. } => {
                     let name = rt.name_of(&holder);
@@ -700,11 +711,11 @@ pub fn hearth_invite_dismiss(state: S<'_>, id: String) -> Result<(), String> {
     state.hearth_invite_dismiss(&id)
 }
 
-/// Joue sur le serveur du groupe : le rejoint s'il est hébergé, sinon l'héberge sur ce PC.
+/// Joue sur le serveur du groupe : le rejoint s'il est hébergé, sinon l'héberge sur ce PC ; `alone` : joue seul quand aucun autre membre n'est joignable (après confirmation).
 #[tauri::command(rename_all = "snake_case")]
 #[specta::specta(rename_all = "snake_case")]
-pub async fn hearth_play(state: S<'_>, id: String) -> Result<(), String> {
-    state.inner().hearth_play(&id).await
+pub async fn hearth_play(state: S<'_>, id: String, alone: Option<bool>) -> Result<(), String> {
+    state.inner().hearth_play(&id, alone.unwrap_or(false)).await
 }
 
 /// Arrête le serveur du groupe hébergé sur ce PC (monde publié, bail relâché).

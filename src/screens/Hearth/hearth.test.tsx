@@ -67,7 +67,28 @@ describe("Accueil : serveurs de groupe", () => {
     await waitFor(() => expect(services.hearthCalls.map((c) => c.kind)).toEqual(["Play"]));
   });
 
-  it("états sans bouton de jeu : mise à jour, connexion requise, deux versions", async () => {
+  it("aucun autre membre en ligne : « Jouer seul » demande confirmation, puis lance en jouant seul", async () => {
+    const services = createFakeServices({ tickMs: 0 });
+    services.seedHearth({ id: "b", name: "Hors ligne", state: "blocked" });
+    render(<HearthSection services={services} navigate={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Jouer seul sur Hors ligne" }));
+    const dlg = await screen.findByRole("dialog");
+    expect(within(dlg).getByText(/Aucun autre membre du groupe n'est en ligne/)).toBeTruthy();
+    fireEvent.click(within(dlg).getByRole("button", { name: "Jouer seul" }));
+    await waitFor(() => expect(services.hearthCalls).toEqual([{ kind: "Play", args: ["b"] }, { kind: "Play", args: ["b", "alone"] }]));
+  });
+
+  it("jouer seul annulé : rien n'est lancé", async () => {
+    const services = createFakeServices({ tickMs: 0 });
+    services.seedHearth({ id: "b", name: "Hors ligne", state: "blocked" });
+    render(<HearthSection services={services} navigate={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Jouer seul sur Hors ligne" }));
+    fireEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Annuler" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(services.hearthCalls).toEqual([{ kind: "Play", args: ["b"] }]);
+  });
+
+  it("états sans bouton de jeu : mise à jour, aucun membre en ligne, deux versions", async () => {
     const services = createFakeServices({ tickMs: 0 });
     services.seedHearth({ id: "a", name: "Sync", state: "syncing", progress: 42 });
     services.seedHearth({ id: "b", name: "Hors ligne", state: "blocked" });
@@ -78,7 +99,7 @@ describe("Accueil : serveurs de groupe", () => {
     const blocked = screen.getByRole("listitem", { name: "Serveur Hors ligne" });
     expect(within(blocked).getByText("Aucun membre en ligne")).toBeTruthy();
     expect(within(blocked).getByText(/au moins un autre membre doit avoir Cubelink ouvert/)).toBeTruthy();
-    expect(within(blocked).queryByRole("button", { name: /^Jouer/ })).toBeNull();
+    expect(within(blocked).getByRole("button", { name: /^Jouer seul/ })).toBeTruthy();
     const fork = screen.getByRole("listitem", { name: "Serveur Fourche" });
     expect(within(fork).getByText("Deux versions existent")).toBeTruthy();
     expect(within(fork).getByRole("button", { name: "Choisir une version" })).toBeTruthy();

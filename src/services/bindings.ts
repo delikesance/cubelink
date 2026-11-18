@@ -156,8 +156,8 @@ export const commands = {
 	hearthInviteAccept: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_invite_accept", { id }, options),
 	/**  Écarte une invitation à un groupe. */
 	hearthInviteDismiss: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_invite_dismiss", { id }, options),
-	/**  Joue sur le serveur du groupe : le rejoint s'il est hébergé, sinon l'héberge sur ce PC. */
-	hearthPlay: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_play", { id }, options),
+	/**  Joue sur le serveur du groupe : le rejoint s'il est hébergé, sinon l'héberge sur ce PC ; `alone` : joue seul quand aucun autre membre n'est joignable (après confirmation). */
+	hearthPlay: (id: string, alone: boolean | null, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_play", { id, alone }, options),
 	/**  Arrête le serveur du groupe hébergé sur ce PC (monde publié, bail relâché). */
 	hearthStop: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_stop", { id }, options),
 	/**  Choix du groupe après une partie mal terminée. */

@@ -47,6 +47,8 @@ use crate::state::{lock, now_secs, EventSink};
 
 /// Erreur renvoyée par `hearth_play` quand l'EULA de Minecraft n'a pas encore été acceptée (l'écran la propose).
 pub const EULA_REQUIRED: &str = "eula_required";
+/// Erreur renvoyée par `hearth_play` quand aucun autre membre n'est joignable : l'écran propose de jouer seul (`alone`), après confirmation.
+pub const ALONE_REQUIRED: &str = "alone_required";
 /// Délai entre deux sondes des membres.
 pub const PROBE_INTERVAL: Duration = Duration::from_secs(60);
 /// Délai d'une sonde d'un membre.

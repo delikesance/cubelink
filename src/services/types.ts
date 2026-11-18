@@ -148,6 +148,8 @@ export type HearthUncleanChoice = "wait" | "checkpoint" | "last";
 
 /** Erreur renvoyée par `hearthPlay` tant que le contrat d'utilisation de Minecraft n'est pas accepté. */
 export const HEARTH_EULA_REQUIRED = "eula_required";
+/** Erreur renvoyée par `hearthPlay` quand aucun autre membre n'est joignable : l'écran demande confirmation, puis rappelle avec `alone`. */
+export const HEARTH_ALONE_REQUIRED = "alone_required";
 
 export interface Services {
   authStatus(): Promise<Profile | null>;
@@ -284,7 +286,8 @@ export interface Services {
   hearthInviteAccept(groupId: string): Promise<void>;
   hearthInviteDismiss(groupId: string): Promise<void>;
   /** Le bouton unique de la carte : jouer ou rejoindre selon l'état. Rejette avec `eula_required` au premier hébergement. */
-  hearthPlay(id: string): Promise<void>;
+  /** `alone` : joue seul quand aucun autre membre n'est joignable (sinon rejette avec `alone_required`). */
+  hearthPlay(id: string, alone?: boolean): Promise<void>;
   hearthStop(id: string): Promise<void>;
   hearthUncleanChoice(id: string, choice: HearthUncleanChoice): Promise<void>;
   /** Associe le modpack du groupe à une instance locale. */

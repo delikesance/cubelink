@@ -278,10 +278,10 @@ async fn serveur_de_groupe_de_la_creation_a_la_fourche() {
 
     // 3. Jouer chez A : EULA d'abord, puis Héberger (un membre en ligne, version à jour).
     a.rt().probe_all().await;
-    assert_eq!(a.node.st.hearth_play(&card.id).await.unwrap_err(), EULA_REQUIRED);
+    assert_eq!(a.node.st.hearth_play(&card.id, false).await.unwrap_err(), EULA_REQUIRED);
     assert!(!a.node.st.hearth_eula().accepted);
     a.node.st.hearth_eula_accept();
-    a.node.st.hearth_play(&card.id).await.unwrap();
+    a.node.st.hearth_play(&card.id, false).await.unwrap();
     assert_eq!(a.state_of(&g), HearthStateKind::Hosting);
     let (inst_a, port_a) = a.launcher.launched.lock().unwrap()[0].clone();
     assert_eq!(inst_a, a.instance);
@@ -299,7 +299,7 @@ async fn serveur_de_groupe_de_la_creation_a_la_fourche() {
     let hosted = b.rt().card(&g).unwrap();
     assert_eq!(hosted.host.as_ref().unwrap().public_key, a.node.key());
     b.node.st.hearth_eula_accept();
-    b.node.st.hearth_play(&card.id).await.unwrap();
+    b.node.st.hearth_play(&card.id, false).await.unwrap();
     let (inst_b, port_b) = b.launcher.launched.lock().unwrap()[0].clone();
     assert_eq!(inst_b, b.instance);
     assert_ne!(port_b, port_a, "B passe par son tunnel local, pas par le port du serveur d'Alice");
@@ -320,7 +320,7 @@ async fn serveur_de_groupe_de_la_creation_a_la_fourche() {
 
     // 6. Seconde partie : B quitte pendant qu'Alice joue. La version part dans la file, puis arrive chez C.
     a.rt().probe_all().await;
-    a.node.st.hearth_play(&card.id).await.unwrap();
+    a.node.st.hearth_play(&card.id, false).await.unwrap();
     assert_eq!(a.state_of(&g), HearthStateKind::Hosting);
     b.stop().await;
     a.close_game();
@@ -352,7 +352,7 @@ async fn serveur_de_groupe_de_la_creation_a_la_fourche() {
     assert_eq!(unclean.unclean.as_ref().unwrap().holder.public_key, a.node.key());
     assert!(unclean.unclean.as_ref().unwrap().checkpoint_at.is_none(), "aucun point de reprise : « Attendre » ou « dernière version »");
     // Jouer ne devine pas : il faut choisir.
-    let refus = b.node.st.hearth_play(&card.id).await.unwrap_err();
+    let refus = b.node.st.hearth_play(&card.id, false).await.unwrap_err();
     assert!(refus.contains("pas terminée proprement"), "refus inattendu : {refus}");
     // Reprendre depuis la dernière version connue : B héberge, sa version 4 part chez les autres.
     b.node.st.hearth_eula_accept();
@@ -404,7 +404,7 @@ async fn serveur_de_groupe_de_la_creation_a_la_fourche() {
     assert_eq!(a.state_of(&g), HearthStateKind::Fork);
     let fork = a.node.st.hearth_detail(&card.id).await.unwrap().fork;
     assert_eq!(fork.len(), 2);
-    assert!(a.node.st.hearth_play(&card.id).await.unwrap_err().contains("Deux versions"));
+    assert!(a.node.st.hearth_play(&card.id, false).await.unwrap_err().contains("Deux versions"));
     // Alice garde la sienne : Bob reçoit la restauration et n'a plus qu'un monde.
     a.node.st.hearth_resolve_fork(&card.id, &va.id().to_hex()).await.unwrap();
     wait_for("fourche tranchée chez Alice", 10, || !a.rt().is_fork(&g)).await;
@@ -437,10 +437,13 @@ async fn jeu_hors_ligne_interdit_sur_un_serveur_de_groupe() {
     let g = GroupId::from_hex(&card.id).unwrap();
     a.node.st.hearth_eula_accept();
     b.stop().await;
-    let e = a.node.st.hearth_play(&card.id).await.unwrap_err();
-    assert!(e.contains("Connexion requise"), "{e}");
+    let e = a.node.st.hearth_play(&card.id, false).await.unwrap_err();
+    assert!(e.contains("alone_required"), "{e}");
     assert_eq!(a.state_of(&g), HearthStateKind::Blocked);
     assert!(a.launcher.launched.lock().unwrap().is_empty());
+    // Après confirmation explicite (`alone`), le membre seul peut héberger.
+    a.node.st.hearth_play(&card.id, true).await.unwrap();
+    assert!(!a.launcher.launched.lock().unwrap().is_empty(), "le serveur et le jeu ont démarré");
     a.stop().await;
 }
 
@@ -481,7 +484,7 @@ async fn group_of(names: &[&'static str]) -> (Vec<Peer>, GroupId, String) {
 async fn deux_candidats_simultanes_un_seul_heberge() {
     let (peers, g, id) = group_of(&["Alice", "Bob", "Chloe"]).await;
     let (a, b, c) = (&peers[0], &peers[1], &peers[2]);
-    let (ra, rb) = tokio::join!(a.node.st.hearth_play(&id), b.node.st.hearth_play(&id));
+    let (ra, rb) = tokio::join!(a.node.st.hearth_play(&id, false), b.node.st.hearth_play(&id, false));
     // Celui qui a cédé peut avoir reçu une erreur (« réessaie »), jamais celle d'un second serveur.
     for r in [&ra, &rb] {
         if let Err(e) = r {
@@ -499,7 +502,7 @@ async fn deux_candidats_simultanes_un_seul_heberge() {
     assert_ne!(loser.state_of(&g), HearthStateKind::Hosting);
     if loser.launcher.launched.lock().unwrap().is_empty() {
         loser.rt().probe_all().await;
-        loser.node.st.hearth_play(&id).await.unwrap();
+        loser.node.st.hearth_play(&id, false).await.unwrap();
     }
     assert_eq!(started(loser), 0, "le perdant ne démarre aucun serveur");
     assert_eq!(loser.launcher.launched.lock().unwrap().len(), 1, "le perdant rejoint la partie de l'hôte");
@@ -521,7 +524,7 @@ async fn auto_exclusion_apres_veille() {
     let (a, b) = (&peers[0], &peers[1]);
     let clock = Arc::new(ManualClock::default());
     a.rt().set_clock(clock.clone());
-    a.node.st.hearth_play(&id).await.unwrap();
+    a.node.st.hearth_play(&id, false).await.unwrap();
     assert_eq!(a.state_of(&g), HearthStateKind::Hosting);
     let host = a.rt().active(&g).expect("serveur d'Alice");
     let first = lock(&host.lease).clone();
@@ -574,7 +577,7 @@ async fn interrupteur_coupe_refuse_les_commandes_et_les_pairs() {
     assert!(a.rt().group_state(&g).is_some());
     a.rt().set_enabled(false);
     assert!(!a.node.st.hearth_enabled());
-    let e = a.node.st.hearth_play(&id).await.unwrap_err();
+    let e = a.node.st.hearth_play(&id, false).await.unwrap_err();
     assert!(e.contains("désactivés"), "{e}");
     assert!(a.node.st.hearth_create("X", &a.instance, None, vec![]).await.unwrap_err().contains("désactivés"));
     assert!(a.node.st.hearth_leave(&id).await.unwrap_err().contains("désactivés"));
@@ -593,7 +596,7 @@ async fn interrupteur_coupe_refuse_les_commandes_et_les_pairs() {
 async fn oublier_un_groupe_arrete_l_hote_et_supprime_les_donnees() {
     let (peers, g, id) = group_of(&["Alice", "Bob"]).await;
     let a = &peers[0];
-    a.node.st.hearth_play(&id).await.unwrap();
+    a.node.st.hearth_play(&id, false).await.unwrap();
     assert_eq!(a.state_of(&g), HearthStateKind::Hosting);
     let dir = a.rt().server_dir(&g);
     assert!(dir.is_dir());

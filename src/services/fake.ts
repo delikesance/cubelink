@@ -1,5 +1,5 @@
 import { validateOfflineName } from "./accounts";
-import { HEARTH_EULA_REQUIRED } from "./types";
+import { HEARTH_ALONE_REQUIRED, HEARTH_EULA_REQUIRED } from "./types";
 import type {
   AccountInfo, AccountsState, BrowseHit, BrowseInstallResult, BrowseKind, BrowseProgressEvent, BrowseSource, BrowseVersion, FixPlan, FixProgressEvent, FixResult, ModCheck, ModEntry, ModIssue,
   CreateInstanceInput, DeviceCode, HostState, Invite, JoinAnswer, JoinRequest, ImportWarningEvent, LaunchLogEvent, FriendRequest, FriendWithPresence, Instance, InstanceArt,
@@ -657,11 +657,12 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
       hearthInvs = hearthInvs.filter((i) => i.group_id !== id);
       emit(listeners.hearthInvites, hearthInvs.map((i) => ({ ...i })));
     },
-    hearthPlay: async (id) => {
-      hearthCalls.push({ kind: "Play", args: [id] });
+    hearthPlay: async (id, alone) => {
+      hearthCalls.push({ kind: "Play", args: alone ? [id, "alone"] : [id] });
       const g = hearthCard(id);
       const st = g.card.state;
-      if (st === "idle" || st === "unclean") {
+      if (st === "blocked" && !alone) throw new Error(HEARTH_ALONE_REQUIRED);
+      if (st === "idle" || st === "unclean" || st === "blocked") {
         if (!hearthEula) throw new Error(HEARTH_EULA_REQUIRED);
         hearthLaunch(id, ["Mise à jour du monde", "Démarrage du serveur", "Ouverture de Minecraft"], { state: "hosting", host: { ...ME }, players: 1, unclean: null });
       } else if (st === "hosted") {

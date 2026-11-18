@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import type { Services } from "../../services/types";
 import { Button } from "../../ui";
 import { Modal } from "../Main/Modal";
-import { errText, isEulaRequired } from "./format";
+import { errText, isAloneRequired, isEulaRequired } from "./format";
 
 /**
  * Lance une action Hearth qui peut démarrer un serveur (jouer, reprise après partie mal terminée).
@@ -10,7 +10,8 @@ import { errText, isEulaRequired } from "./format";
  * « J'accepte » enregistre le choix puis relance l'action.
  */
 export function useHearthRun(services: Services): {
-  run: (action: () => Promise<void>) => Promise<void>;
+  /** `action` reçoit `alone` : vrai une fois la confirmation « jouer seul » donnée. */
+  run: (action: (alone?: boolean) => Promise<void>) => Promise<void>;
   error: string | null;
   busy: boolean;
   clearError: () => void;
@@ -19,18 +20,21 @@ export function useHearthRun(services: Services): {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [pending, setPending] = useState<(() => Promise<void>) | null>(null);
+  const [aloneAction, setAloneAction] = useState<((alone?: boolean) => Promise<void>) | null>(null);
   const [url, setUrl] = useState("https://aka.ms/MinecraftEULA");
   const alive = useRef(true);
   useEffect(() => () => { alive.current = false; }, []);
 
-  const run = useCallback(async (action: () => Promise<void>) => {
+  const run = useCallback(async (action: (alone?: boolean) => Promise<void>) => {
     setError(null);
     setBusy(true);
     try {
       await action();
     } catch (e) {
       if (!alive.current) return;
-      if (isEulaRequired(e)) {
+      if (isAloneRequired(e)) {
+        setAloneAction(() => action);
+      } else if (isEulaRequired(e)) {
         services.hearthEula().then((x) => { if (alive.current) setUrl(x.url); }, () => {});
         setPending(() => action);
       } else {
@@ -55,6 +59,25 @@ export function useHearthRun(services: Services): {
     await run(action);
   };
 
+  const confirmAlone = async () => {
+    const action = aloneAction;
+    setAloneAction(null);
+    if (action) await run(() => action(true));
+  };
+
+  const alone = aloneAction ? (
+    <Modal title="Jouer seul sur ce serveur ?" onClose={() => setAloneAction(null)}>
+      <div className="home-modal-text">
+        <p>Aucun autre membre du groupe n'est en ligne : tu vas démarrer le serveur seul, sur ton PC.</p>
+        <p>Le monde sera envoyé aux autres membres à leur retour. Si l'un d'eux joue seul de son côté en même temps, deux versions du monde existeront et le groupe devra choisir laquelle garder.</p>
+      </div>
+      <div className="home-modal-foot">
+        <Button variant="secondary" data-autofocus onClick={() => setAloneAction(null)}>Annuler</Button>
+        <Button onClick={() => { void confirmAlone(); }}>Jouer seul</Button>
+      </div>
+    </Modal>
+  ) : null;
+
   const eula = pending ? (
     <Modal title="Contrat d'utilisation de Minecraft" onClose={() => setPending(null)}>
       <div className="home-modal-text hearth-eula">
@@ -72,5 +95,5 @@ export function useHearthRun(services: Services): {
     </Modal>
   ) : null;
 
-  return { run, error, busy, clearError: () => setError(null), eula };
+  return { run, error, busy, clearError: () => setError(null), eula: <>{eula}{alone}</> };
 }

@@ -174,7 +174,7 @@ function History({ d, services, ask }: { d: HearthDetail; services: Services; as
   );
 }
 
-function Settings({ d, services, instances, ask, onError, leave }: { d: HearthDetail; services: Services; instances: Instance[]; ask: (c: Confirm) => void; onError: (m: string) => void; leave: () => void }) {
+function Settings({ d, services, instances, ask, onError }: { d: HearthDetail; services: Services; instances: Instance[]; ask: (c: Confirm) => void; onError: (m: string) => void }) {
   const id = d.card.id;
   const [inst, setInst] = useState("");
   const pick = inst || d.card.instance_id || instances[0]?.id || "";
@@ -210,11 +210,6 @@ function Settings({ d, services, instances, ask, onError, leave }: { d: HearthDe
         </label>
         <p className="hearth-meta">Place prise sur ce disque : {fmtSize(d.settings.disk_bytes)}.</p>
         {d.settings.outbox_pending > 0 && <p className="hearth-meta">{plural(d.settings.outbox_pending, "version attend", "versions attendent")} d'être envoyée aux autres membres.</p>}
-      </section>
-      <section className="hearth-block" aria-label="Quitter">
-        <h2>Quitter le groupe</h2>
-        <p className="hearth-meta">Le monde copié sur ce PC est supprimé. Le serveur continue pour les autres membres, même si c'est toi qui l'as créé.</p>
-        <Button variant="danger-quiet" onClick={leave}>Quitter le groupe</Button>
       </section>
     </div>
   );
@@ -336,7 +331,7 @@ export default function ServerPage({ id }: { id: string }) {
         <div id="hearth-panel" role="tabpanel" aria-labelledby={`hearth-tab-${tab}`} className="hearth-panel">
           {tab === "membres" && <Members d={detail} services={services} friends={friends} ask={ask} onError={setError} leave={leave} />}
           {tab === "historique" && <History d={detail} services={services} ask={ask} />}
-          {tab === "reglages" && <Settings d={detail} services={services} instances={instances} ask={ask} onError={setError} leave={leave} />}
+          {tab === "reglages" && <Settings d={detail} services={services} instances={instances} ask={ask} onError={setError} />}
         </div>
       </Card>
       {confirm && <ConfirmDialog c={confirm} onClose={() => setConfirm(null)} />}

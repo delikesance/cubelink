@@ -251,7 +251,7 @@ describe("Page du serveur", () => {
     return { services, pk: noor };
   }
 
-  it("Quitter le groupe (Réglages) : départ annoncé au groupe, retour à l'accueil", async () => {
+  it("Quitter (ma ligne de Membres) : départ annoncé au groupe, retour à l'accueil", async () => {
     const services = createFakeServices({ tickMs: 0 });
     services.seedHearth({ id: "g3", name: "Les copains" }, {
       members: [{ public_key: "me", name: "Toi", online: true, is_me: true, is_creator: true, sync: "ok", version: 1, unseen_days: null }],
@@ -347,7 +347,7 @@ describe("Page du serveur", () => {
     await screen.findByText(/Version 4 · Restauration · actuelle/);
   });
 
-  it("Réglages : garder le serveur, proposer la mise à jour du modpack, quitter le groupe", async () => {
+  it("Réglages : garder le serveur, proposer la mise à jour du modpack (pas de bouton Quitter ici)", async () => {
     const { services, navigate } = page({ id: "g1" }, { id: "g1", name: "Les copains" });
     fireEvent.click(await screen.findByRole("tab", { name: "Réglages" }));
     fireEvent.click(await screen.findByRole("checkbox", { name: /Garder le serveur ouvert/ }));
@@ -356,10 +356,9 @@ describe("Page du serveur", () => {
     fireEvent.click(screen.getByRole("button", { name: "Proposer la mise à jour au groupe" }));
     fireEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Proposer au groupe" }));
     await waitFor(() => expect(services.hearthCalls[1]).toEqual({ kind: "PackUpdate", args: ["g1", "inst-aeronautics"] }));
-    fireEvent.click(screen.getByRole("button", { name: "Quitter le groupe" }));
-    fireEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Quitter" }));
-    await waitFor(() => expect(navigate).toHaveBeenCalledWith("main"));
-    expect(services.hearthCalls[2]).toEqual({ kind: "Leave", args: ["g1"] });
+    // un seul « Quitter » sur la page : celui de ma ligne dans Membres, pas de doublon dans Réglages
+    expect(screen.queryByRole("button", { name: /^Quitter/ })).toBeNull();
+    expect(navigate).not.toHaveBeenCalled();
   });
 
   it("deux versions : choisir celle à garder résout la fourche", async () => {

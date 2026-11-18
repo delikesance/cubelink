@@ -30,7 +30,7 @@ export function stateText(c: HearthCard): string {
     case "idle": return "Personne ne joue";
     case "hosted": return `${c.host?.name ?? "Un ami"} héberge · ${plural(c.players, "joueur", "joueurs")}`;
     case "syncing": return `Mise à jour du monde ${c.progress ?? 0} %`;
-    case "blocked": return "Connexion requise";
+    case "blocked": return "Aucun membre en ligne";
     case "unclean": return "Partie mal terminée";
     case "fork": return "Deux versions existent";
     case "launching": return c.step ?? "Lancement";
@@ -40,9 +40,12 @@ export function stateText(c: HearthCard): string {
 }
 
 /** Détail sous l'état : la raison, en une phrase. */
-export function stateHint(c: HearthCard): string | null {
+export function stateHint(c: HearthCard, offline: string[] = []): string | null {
   switch (c.state) {
-    case "blocked": return "Personne du groupe n'est joignable : le jeu hors ligne est interdit sur un serveur de groupe.";
+    case "blocked": {
+      const who = offline.length > 0 ? ` (${offline.join(", ")} ${offline.length > 1 ? "sont hors ligne" : "est hors ligne"})` : "";
+      return `Aucun autre membre du groupe n'est joignable${who}. Pour lancer ce serveur, au moins un autre membre doit avoir Cubelink ouvert : sinon deux versions du monde pourraient apparaître. Demande à un ami d'ouvrir Cubelink.`;
+    }
     case "unclean": return c.unclean ? `La partie de ${c.unclean.holder.name} ne s'est pas terminée proprement.` : null;
     case "fork": return "Deux membres ont joué en même temps : le groupe choisit la version à garder.";
     case "pack_missing": return "Installe le modpack du groupe pour pouvoir jouer.";

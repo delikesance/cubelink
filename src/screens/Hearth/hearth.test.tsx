@@ -76,7 +76,8 @@ describe("Accueil : serveurs de groupe", () => {
     await screen.findByText("Mise à jour du monde 42 %");
     expect(screen.getByRole("progressbar", { name: /Sync/ }).getAttribute("aria-valuenow")).toBe("42");
     const blocked = screen.getByRole("listitem", { name: "Serveur Hors ligne" });
-    expect(within(blocked).getByText("Connexion requise")).toBeTruthy();
+    expect(within(blocked).getByText("Aucun membre en ligne")).toBeTruthy();
+    expect(within(blocked).getByText(/au moins un autre membre doit avoir Cubelink ouvert/)).toBeTruthy();
     expect(within(blocked).queryByRole("button", { name: /^Jouer/ })).toBeNull();
     const fork = screen.getByRole("listitem", { name: "Serveur Fourche" });
     expect(within(fork).getByText("Deux versions existent")).toBeTruthy();

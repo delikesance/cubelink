@@ -8,7 +8,6 @@ use cubelink_app::iroh_backend::{start_app, IrohBackend, IrohOptions, ManifestUn
 use cubelink_app::p2p_backend::P2pBackend;
 use cubelink_app::state::{AppState, EventSink};
 use p2p_lib::presence::PresenceConfig;
-use p2p_lib::relay::RelayChoice;
 use p2p_lib::transfer::resume::{ResumeConfig, RetryPolicy};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -50,8 +49,7 @@ impl Node {
         });
         let opts = IrohOptions {
             manifest_unknown_finder: pre,
-            relay: RelayChoice::Disabled,
-            advertise_addrs: Some(true),
+            portmap: false,
             unknown_finder: unknown,
             resume: ResumeConfig {
                 retry: RetryPolicy { max_retries: 5, base: Duration::from_millis(20), cap: Duration::from_millis(100), jitter: 0.0 },

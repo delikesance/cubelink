@@ -1,8 +1,9 @@
 //! Backend P2P réel (tâches INT / INT2) : UN `Endpoint` iroh, UN `Router`.
 //!
 //! Décisions :
-//! - Endpoint créé par `relay::build_endpoint` avec la clé de `Identity::secret_bytes()` et les réglages
-//!   `allow_relay` / `relay_only` (lus au démarrage ; un changement demande un redémarrage).
+//! - Endpoint créé par `relay::build_endpoint` avec la clé de `Identity::secret_bytes()` : aucun relais et aucune
+//!   découverte d'adresses (#55, plus rien n'est contacté chez un tiers). Le port UDP est ouvert sur la box par
+//!   `portmap::DirectPortmap` (UPnP / NAT-PMP / PCP), et le code ami porte toujours les adresses IP.
 //! - Le Router enregistre, tous fournis par p2p : ami, présence, contrôle de transfert + blobs
 //!   (`IrohTransport::handlers_dynamic`, hôte courant lu à chaque requête), manifeste (`ManifestServer`)
 //!   et tunnel (`HostTunnel::attach/handler`).
@@ -34,7 +35,7 @@ use p2p_lib::join_request::{send_join_request as p2p_send_join_request, Decision
 use p2p_lib::presence::PeerKey;
 use p2p_lib::presence::{ping_reach, PresenceConfig, PresenceService, PRESENCE_ALPN};
 use p2p_lib::reach::Reach;
-use p2p_lib::relay::{self, PathKind, PathObserver, RelayChoice, RelaySettings};
+use p2p_lib::relay::{self, PathKind, PathObserver};
 use p2p_lib::transfer::plan::Plan;
 use p2p_lib::transfer::recv::RecvOptions;
 use p2p_lib::transfer::resume::{ResumableReceive, ResumeConfig};
@@ -82,9 +83,9 @@ fn default_manifest_unknown() -> ManifestUnknownFn {
 
 #[derive(Clone)]
 pub struct IrohOptions {
-    pub relay: RelayChoice,
-    /// Adresses directes dans le code ami. `None` : seulement si le relais est désactivé.
-    pub advertise_addrs: Option<bool>,
+    /// Ouvre le port UDP sur la box (UPnP / NAT-PMP / PCP). `false` dans les tests : ne rien ouvrir sur la box de la
+    /// machine de test.
+    pub portmap: bool,
     pub unknown_finder: UnknownFn,
     pub manifest_unknown_finder: ManifestUnknownFn,
     pub resume: ResumeConfig,
@@ -99,8 +100,7 @@ pub struct IrohOptions {
 impl Default for IrohOptions {
     fn default() -> Self {
         Self {
-            relay: RelayChoice::Default,
-            advertise_addrs: None,
+            portmap: true,
             unknown_finder: default_unknown(),
             manifest_unknown_finder: default_manifest_unknown(),
             resume: ResumeConfig::default(),
@@ -316,17 +316,14 @@ pub fn merge_addr(old: Option<&EndpointAddr>, new: &EndpointAddr) -> EndpointAdd
 }
 
 fn to_peer_addr(a: &EndpointAddr) -> PeerAddr {
-    let info = relay::endpoint_addr_info(a);
-    PeerAddr { relay: info.relay, addrs: info.addrs }
+    PeerAddr { relay: None, addrs: relay::endpoint_addr_info(a).addrs }
 }
 
-/// Reconstruit une adresse iroh depuis la base ; relais ou IP illisibles : ignorés.
+/// Reconstruit une adresse iroh depuis la base ; IP illisibles : ignorées. Le relais mémorisé (anciennes versions :
+/// relais n0) est ignoré, on ne contacte aucun relais.
 pub fn addr_from_stored(key_hex: &str, p: &PeerAddr) -> Option<EndpointAddr> {
     let bytes: [u8; 32] = hex::decode(key_hex).ok()?.try_into().ok()?;
     let mut a = EndpointAddr::new(EndpointId::from_bytes(&bytes).ok()?);
-    if let Some(r) = p.relay.as_deref().and_then(|r| relay::validate_relay_url(r).ok()) {
-        a = a.with_relay_url(r);
-    }
     for ip in p.addrs.iter().filter_map(|s| s.parse::<SocketAddr>().ok()) {
         a = a.with_ip_addr(ip);
     }
@@ -438,16 +435,14 @@ pub struct IrohBackend {
     join_requests: JoinRequestHandler,
     hearth: Arc<crate::hearth::HearthRuntime>,
     opts: IrohOptions,
-    advertise: bool,
     cut_at: Arc<Mutex<Option<usize>>>,
     /// Dossier des instantanés de config servis (un sous-dossier par instance partagée).
     snap_root: PathBuf,
     /// Instance actuellement partagée (pour recalculer son manifeste si un fichier dérive).
     current_share: Mutex<Option<String>>,
     resharing: AtomicBool,
-    /// Port ouvert sur la box par nous (relais coupé par l'utilisateur : Iroh ne le fait alors pas). Tenu tant que le
-    /// backend vit.
-    _portmap: Option<p2p_lib::portmap::DirectPortmap>,
+    /// Port ouvert sur la box par nous (sans relais, Iroh ne le fait pas lui-même). Tenu tant que le backend vit.
+    portmap: Option<p2p_lib::portmap::DirectPortmap>,
     me: std::sync::Weak<IrohBackend>,
 }
 
@@ -469,22 +464,14 @@ pub async fn start_app(
 
 impl IrohBackend {
     pub async fn start(st: &Arc<AppState>, opts: IrohOptions) -> std::result::Result<Arc<Self>, String> {
-        let (allow_relay, relay_only) = {
-            let s = lock(&st.settings);
-            (s.allow_relay, s.relay_only)
-        };
-        // Aucune découverte d'adresses publique (n0, pkarr, DNS) : voir `p2p/src/relay.rs`.
-        let rs = RelaySettings { mode: opts.relay.clone(), relay_only, allow_relay };
         let alpns: Vec<Vec<u8>> = [friend_proto::ALPN, PRESENCE_ALPN, INVITE_ALPN, JOIN_REQUEST_ALPN, CONTROL_ALPN, iroh_blobs::ALPN, MANIFEST_ALPN, TUNNEL_ALPN, HEARTH_ALPN, HEARTH_BLOBS_ALPN]
             .iter()
             .map(|a| a.to_vec())
             .collect();
         let secret = SecretKey::from_bytes(&st.identity.secret_bytes());
-        let endpoint = relay::build_endpoint(secret, &rs, alpns).await.map_err(|e| user_msg(&e))?;
-        let advertise = opts.advertise_addrs.unwrap_or(!allow_relay);
-        // Relais coupé par l'utilisateur : Iroh n'ouvre plus de port sur la box, on le fait (jamais dans les tests hors
-        // réseau, `RelayChoice::Disabled`, pour ne rien ouvrir sur la box de la machine de test).
-        let portmap = (!allow_relay && opts.relay != RelayChoice::Disabled)
+        let endpoint = relay::build_endpoint(secret, alpns).await.map_err(|e| user_msg(&e))?;
+        // Sans relais, Iroh n'ouvre pas de port sur la box : on le fait toujours (sauf dans les tests, `opts.portmap`).
+        let portmap = opts.portmap
             .then(|| p2p_lib::portmap::DirectPortmap::spawn(endpoint.clone()))
             .flatten();
 
@@ -627,7 +614,7 @@ impl IrohBackend {
         }));
 
         let be = Arc::new_cyclic(|me| Self {
-            _portmap: portmap,
+            portmap,
             endpoint,
             router,
             friends_svc,
@@ -648,7 +635,6 @@ impl IrohBackend {
             join_requests,
             hearth: st.hearth.clone(),
             opts,
-            advertise,
             cut_at: Arc::default(),
             snap_root: st.paths.p2p.join("share-snapshot"),
             current_share: Mutex::new(None),
@@ -830,35 +816,33 @@ impl IrohBackend {
     }
 }
 
-/// Durée maximale d'attente du premier rapport réseau et du relais.
-const NET_TEST_WAIT: Duration = Duration::from_secs(8);
+/// Durée maximale d'attente de l'ouverture du port sur la box.
+const NET_TEST_WAIT: Duration = Duration::from_secs(5);
+
+/// Pur : une de ces adresses est-elle une IPv6 publique (ni locale au lien, ni ULA, ni loopback) ?
+pub fn has_public_ipv6(addrs: &[SocketAddr]) -> bool {
+    addrs.iter().any(|a| match a.ip() {
+        std::net::IpAddr::V6(ip) => {
+            let first = ip.segments()[0];
+            !(ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() || first & 0xffc0 == 0xfe80 || first & 0xfe00 == 0xfc00)
+        }
+        std::net::IpAddr::V4(_) => false,
+    })
+}
 
 impl IrohBackend {
+    /// Ce qui rend l'appareil joignable sans aucun tiers : une IPv6 publique, ou un port ouvert sur la box.
     async fn net_test_impl(&self) -> NetTest {
-        use iroh::Watcher as _;
-        let ep = &self.endpoint;
-        let report = tokio::time::timeout(NET_TEST_WAIT, ep.net_report().initialized()).await.ok();
-        // Le relais : on lui laisse le reste du délai pour se connecter.
-        let _ = tokio::time::timeout(Duration::from_secs(3), ep.online()).await;
-        let relays = ep.home_relay_status().get();
-        let connected = relays.iter().find(|r| r.is_connected());
-        let relay_url = connected.or(relays.first()).map(|r| r.url().clone());
-        let mut t = NetTest {
-            relay_connected: connected.is_some(),
-            relay: relay_url.as_ref().and_then(|u| u.host_str().map(|h| h.trim_end_matches('.').to_string())),
-            relay_only: lock(&self.settings).relay_only,
-            partial: report.is_none(),
-            ..NetTest::default()
-        };
-        if let Some(r) = report {
-            t.udp = r.has_udp();
-            t.ipv6 = r.udp_v6;
-            t.direct = if t.udp { r.mapping_varies_by_dest().map(|v| !v) } else { Some(false) };
-            if let Some(u) = relay_url.as_ref() {
-                t.relay_ms = r.relay_latency.iter().filter(|(_, ru, _)| *ru == u).map(|(_, _, d)| d.as_millis() as u32).min();
+        let ips: Vec<SocketAddr> = self.endpoint.addr().ip_addrs().copied().collect();
+        let deadline = tokio::time::Instant::now() + NET_TEST_WAIT;
+        let port_mapped = loop {
+            let mapped = self.portmap.as_ref().is_some_and(|p| p.external().is_some());
+            if mapped || self.portmap.is_none() || tokio::time::Instant::now() >= deadline {
+                break mapped;
             }
-        }
-        t
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        };
+        NetTest { ipv6: has_public_ipv6(&ips), port_mapped }
     }
 }
 
@@ -909,9 +893,9 @@ impl P2pBackend for IrohBackend {
 
     fn code_hints(&self) -> (Option<String>, Vec<String>) {
         let info = relay::endpoint_addr_info(&self.endpoint.addr());
-        // Adresses directes seulement si le relais est désactivé (elles révèlent nos IP à qui reçoit le code).
-        let addrs = if self.advertise { info.addrs } else { vec![] };
-        (info.relay, addrs)
+        // Les IP sont le seul moyen de nous joindre (aucun relais, aucune découverte) : elles partent dans le code ami,
+        // donc chez quiconque le reçoit (un ami).
+        (None, info.addrs)
     }
 
     fn send_request(&self, target: FriendCodePayload, my_name: String) -> BoxFuture<'_, std::result::Result<VerifyCode, String>> {
@@ -919,9 +903,6 @@ impl P2pBackend for IrohBackend {
             let _ = self.friends_svc.set_name(&my_name);
             let id = EndpointId::from_bytes(&target.public_key).map_err(|_| "code ami invalide".to_string())?;
             let mut addr = EndpointAddr::new(id);
-            if let Some(r) = relay::relay_hint(&target) {
-                addr = addr.with_relay_url(r);
-            }
             for a in target.addrs.iter().filter_map(|a| a.parse::<SocketAddr>().ok()) {
                 addr = addr.with_ip_addr(a);
             }
@@ -1204,13 +1185,29 @@ mod tests {
         assert_eq!(m.ip_addrs().copied().collect::<Vec<_>>(), vec![ip1]);
         // Sans ancien : tel quel.
         assert_eq!(merge_addr(None, &old), old);
-        // Aller-retour base : relais et IP restitués ; valeurs illisibles ignorées.
+        // Aller-retour base : les IP sont restituées, jamais le relais (#55 : aucun relais contacté, même un ancien relais
+        // n0 mémorisé) ; valeurs illisibles ignorées.
         let key = hex::encode(id.as_bytes());
-        let back = addr_from_stored(&key, &to_peer_addr(&old)).unwrap();
-        assert_eq!(back, old);
+        let stored = to_peer_addr(&old);
+        assert!(stored.relay.is_none(), "plus de relais écrit en base");
+        let back = addr_from_stored(&key, &stored).unwrap();
+        assert_eq!(back, EndpointAddr::new(id).with_ip_addr(ip1));
+        let legacy = PeerAddr { relay: Some("https://euc1-1.relay.n0.iroh.link./".into()), addrs: vec![ip1.to_string()] };
+        assert_eq!(addr_from_stored(&key, &legacy).unwrap().relay_urls().count(), 0, "relais mémorisé par une ancienne version ignoré");
         let junk = PeerAddr { relay: Some("pas une url".into()), addrs: vec!["x".into()] };
         assert_eq!(addr_from_stored(&key, &junk).unwrap(), EndpointAddr::new(id));
         assert!(addr_from_stored("zz", &junk).is_none());
+    }
+
+    #[test]
+    fn ipv6_publique_seulement_si_globale() {
+        let a = |s: &str| s.parse::<SocketAddr>().unwrap();
+        assert!(has_public_ipv6(&[a("[2a01:e0a:1:2::3]:4000")]));
+        assert!(has_public_ipv6(&[a("192.168.1.2:1"), a("[2001:db8::1]:1")]));
+        for local in ["[::1]:1", "[fe80::1]:1", "[fd12:3456::1]:1", "[ff02::1]:1", "192.168.1.2:1", "8.8.8.8:1"] {
+            assert!(!has_public_ipv6(&[a(local)]), "{local}");
+        }
+        assert!(!has_public_ipv6(&[]));
     }
 
     #[test]

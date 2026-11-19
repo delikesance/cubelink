@@ -33,9 +33,6 @@ pub fn validate_with(s: &Settings, test_mode: bool) -> Result<(), String> {
     if !(MIN_RAM_MB..=MAX_RAM_MB).contains(&s.default_ram_mb) {
         return Err(format!("la mémoire doit être comprise entre {MIN_RAM_MB} et {MAX_RAM_MB} Mo"));
     }
-    if s.relay_only && !s.allow_relay {
-        return Err("« Toujours le relais » est incompatible avec un relais désactivé : autorisez le relais ou désactivez « Toujours le relais »".into());
-    }
     crate::hotkey::validate_hotkey(&s.overlay_hotkey)?;
     if let Some(j) = &s.java_path {
         let p = Path::new(j);
@@ -88,10 +85,7 @@ pub struct SettingsInput {
     #[serde(default)]
     pub java_path: Option<String>,
     pub trust_default: TrustLevel,
-    pub allow_relay: bool,
     pub close_on_launch: bool,
-    #[serde(default)]
-    pub relay_only: Option<bool>,
     #[serde(default)]
     pub share_mods: Option<bool>,
     #[serde(default)]
@@ -119,9 +113,7 @@ pub fn settings_set(state: State<'_, Arc<AppState>>, settings: SettingsInput, ap
         default_ram_mb: i.default_ram_mb,
         java_path: i.java_path.filter(|j| !j.trim().is_empty()),
         trust_default: i.trust_default,
-        allow_relay: i.allow_relay,
         close_on_launch: i.close_on_launch,
-        relay_only: i.relay_only.unwrap_or(cur.relay_only),
         share_mods: i.share_mods.unwrap_or(cur.share_mods),
         lan_auto: i.lan_auto.unwrap_or(cur.lan_auto),
         overlay_enabled: i.overlay_enabled.unwrap_or(cur.overlay_enabled),
@@ -168,21 +160,23 @@ mod tests {
         assert_eq!(st.settings_get(), default_settings());
     }
 
+    /// #55 : plus aucun relais n0 ; `allow_relay` et `relay_only` n'existent plus. Un ancien fichier qui les contient
+    /// (même contradictoires) se charge sans erreur, ses autres champs sont gardés, et ils disparaissent à la
+    /// réécriture.
     #[test]
-    fn refuse_relais_seul_sans_relais() {
+    fn anciens_reglages_relais_ignores_puis_supprimes() {
         let dir = tempfile::tempdir().unwrap();
         let (st, _) = test_state(dir.path());
-        let mut s = default_settings();
-        s.relay_only = true;
-        s.allow_relay = false;
-        let e = st.settings_set(s.clone()).unwrap_err();
-        assert!(e.contains("relais"), "{e}");
-        assert_eq!(st.settings_get(), default_settings(), "rien n'est enregistré");
-        s.allow_relay = true;
-        assert!(st.settings_set(s.clone()).is_ok());
-        s.relay_only = false;
-        s.allow_relay = false;
-        assert!(st.settings_set(s).is_ok());
+        let f = &st.paths.settings_file;
+        std::fs::write(f, br#"{"language":"fr","default_ram_mb":6144,"java_path":null,"trust_default":"ask","allow_relay":false,"close_on_launch":true,"relay_only":true,"share_mods":true,"discovery":true}"#).unwrap();
+        let s = load_settings(f);
+        assert_eq!(s.default_ram_mb, 6144, "l'ancien fichier est bien lu, pas remplacé par les défauts");
+        assert!(s.close_on_launch);
+        st.settings_set(s).unwrap();
+        let rewritten = std::fs::read_to_string(f).unwrap();
+        for k in ["allow_relay", "relay_only", "discovery"] {
+            assert!(!rewritten.contains(k), "{k} doit disparaître à la réécriture : {rewritten}");
+        }
     }
 
     #[test]

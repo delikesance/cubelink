@@ -1,136 +1,45 @@
-//! Tâche N17 : configuration et observation du relais.
+//! Endpoint iroh sans aucun tiers (#55) et observation du chemin d'une connexion.
 //!
-//! - [`RelaySettings`] / [`build_endpoint`] : applique « direct seul », « relais seul »,
-//!   relais par défaut (n0) ou personnalisé (URL validée).
+//! - [`build_endpoint`] : crée l'endpoint **sans relais et sans service de découverte d'adresses** (ni relais
+//!   publics n0, ni pkarr, ni DNS n0) : il ne contacte aucun serveur tiers et ne publie rien. Un pair n'est joignable
+//!   que par les indices de son code ami (adresses IP : LAN, IPv6, adresse ouverte sur la box par UPnP/NAT-PMP/PCP,
+//!   voir `portmap`) et par les adresses mémorisées. Deux amis derrière un NAT strict ou un CGNAT, sans IPv6 ni UPnP,
+//!   peuvent donc ne pas se joindre, en attendant la découverte par DHT Mainline (#136) et des relais Cubelink.
 //! - [`PathObserver`] : expose le type de chemin d'une connexion (direct / relais) et ses bascules.
 //! - [`SlowRelayAdvisor`] : décide d'afficher « plus lentement » (fonction pure, temps injecté).
-//! - [`relay_hint_from_code`] : relais d'attache éventuel d'un code ami.
 //!
-//! Aucun service de découverte d'adresses n'est configuré (ni n0, ni DNS, ni pkarr) : l'endpoint ne publie rien
-//! et n'interroge aucun annuaire. Un pair n'est joignable que par les indices de son code ami (relais d'attache,
-//! IP) et par les adresses mémorisées.
-//!
-//! Honnêteté : le relais ne déchiffre pas le trafic QUIC (chiffré de bout en bout), mais il voit
-//! les adresses IP des deux pairs et le volume échangé. Les messages n'affirment pas le contraire.
+//! Les indices de relais d'un code ami ou d'une adresse mémorisée sont ignorés : un ancien code peut encore porter un
+//! relais n0, et on ne contacte jamais un relais que l'utilisateur n'a pas choisi.
 
-use std::net::IpAddr;
 use std::time::Duration;
 
 use core_lib::types::{Error, Result};
 use iroh::endpoint::{presets, Connection, PathList};
-use iroh::{Endpoint, RelayMode, RelayUrl, SecretKey};
+use iroh::{Endpoint, RelayMode, SecretKey};
 use n0_future::StreamExt;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use crate::friend_code::{self, FriendCodePayload};
 
-// ---------- réglages et mapping des modes ----------
-
-/// Relais utilisé quand il est autorisé.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RelayChoice {
-    /// Relais publics n0 (best effort, ~1 Mo/s : inadapté aux mods).
-    Default,
-    /// Relais personnalisé (`https://…`, `http://` seulement en loopback pour les tests).
-    Custom(String),
-    /// Aucun relais.
-    Disabled,
-}
-
-/// Réglages relais ; `allow_relay` / `relay_only` correspondent aux champs de `Settings`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RelaySettings {
-    pub mode: RelayChoice,
-    /// « Passer toujours par le relais » : aucun transport IP.
-    pub relay_only: bool,
-    pub allow_relay: bool,
-}
-
-impl Default for RelaySettings {
-    fn default() -> Self {
-        Self { mode: RelayChoice::Default, relay_only: false, allow_relay: true }
-    }
-}
-
-/// Résultat du mapping, sans réseau : ce qui sera appliqué au builder iroh.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EndpointPlan {
-    pub relay_mode: RelayMode,
-    /// `false` : `clear_ip_transports()` (relais seul).
-    pub ip_transports: bool,
-}
-
-fn invalid(msg: impl std::fmt::Display) -> Error {
-    Error::Invalid(format!("relais : {msg}"))
-}
-
-fn is_loopback_host(host: &str) -> bool {
-    let h = host.trim_start_matches('[').trim_end_matches(']');
-    h.eq_ignore_ascii_case("localhost") || h.parse::<IpAddr>().map(|ip| ip.is_loopback()).unwrap_or(false)
-}
-
-/// Valide l'URL d'un relais : https obligatoire, http toléré uniquement en loopback,
-/// hôte requis, pas d'identifiants dans l'URL.
-pub fn validate_relay_url(s: &str) -> Result<RelayUrl> {
-    let url: RelayUrl = s.trim().parse().map_err(|_| invalid(format!("URL invalide « {s} »")))?;
-    let host = url.host_str().ok_or_else(|| invalid("hôte manquant"))?.to_owned();
-    if host.is_empty() {
-        return Err(invalid("hôte manquant"));
-    }
-    if !url.username().is_empty() || url.password().is_some() {
-        return Err(invalid("identifiants interdits dans l'URL"));
-    }
-    match url.scheme() {
-        "https" => {}
-        "http" if is_loopback_host(&host) => {}
-        "http" => return Err(invalid("http refusé (https obligatoire hors loopback)")),
-        other => return Err(invalid(format!("schéma « {other} » non supporté"))),
-    }
-    Ok(url)
-}
-
-/// Mapping pur des réglages vers la configuration iroh.
-/// - `allow_relay=false` => relais désactivé (direct uniquement) ;
-/// - `relay_only` => pas de transport IP ; contradictoire avec `allow_relay=false` ou `Disabled`.
-pub fn plan(settings: &RelaySettings) -> Result<EndpointPlan> {
-    let disabled = !settings.allow_relay || settings.mode == RelayChoice::Disabled;
-    if settings.relay_only && disabled {
-        return Err(invalid(
-            "contradiction : « toujours passer par le relais » est activé alors que le relais est désactivé",
-        ));
-    }
-    let relay_mode = if disabled {
-        RelayMode::Disabled
-    } else {
-        match &settings.mode {
-            RelayChoice::Default => RelayMode::Default,
-            RelayChoice::Custom(url) => RelayMode::custom([validate_relay_url(url)?]),
-            RelayChoice::Disabled => RelayMode::Disabled,
-        }
-    };
-    Ok(EndpointPlan { relay_mode, ip_transports: !settings.relay_only })
-}
-
-/// Crée l'endpoint iroh selon les réglages. `secret` est la clé secrète de l'identité
-/// (`Identity` n'expose pas encore ses octets secrets : voir rapport N17).
-pub async fn build_endpoint(secret: SecretKey, settings: &RelaySettings, alpns: Vec<Vec<u8>>) -> Result<Endpoint> {
-    let plan = plan(settings)?;
-    let mut b = Endpoint::builder(presets::Minimal).secret_key(secret).relay_mode(plan.relay_mode);
-    if !plan.ip_transports {
-        b = b.clear_ip_transports();
-    }
-    b.alpns(alpns).bind().await.map_err(|e| Error::Network(format!("création de l'endpoint : {e}")))
+/// Crée l'endpoint iroh : aucun relais, aucune découverte d'adresses (voir l'en-tête du module). `secret` est la clé
+/// secrète de l'identité.
+pub async fn build_endpoint(secret: SecretKey, alpns: Vec<Vec<u8>>) -> Result<Endpoint> {
+    Endpoint::builder(presets::Minimal)
+        .secret_key(secret)
+        .relay_mode(RelayMode::Disabled)
+        .alpns(alpns)
+        .bind()
+        .await
+        .map_err(|e| Error::Network(format!("création de l'endpoint : {e}")))
 }
 
 // ---------- code ami ----------
 
-/// Adresses d'un endpoint, prêtes à mettre dans un code ami ([`FriendCodePayload`]) : bornées
-/// aux limites du format (chaînes <= `MAX_STR_LEN`, au plus `MAX_ADDRS` adresses).
+/// Adresses IP d'un endpoint, prêtes à mettre dans un code ami ([`FriendCodePayload`]) : bornées aux limites du
+/// format (chaînes <= `MAX_STR_LEN`, au plus `MAX_ADDRS` adresses). Jamais de relais : le code n'en porte plus.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct EndpointAddrInfo {
-    /// URL du relais d'attache.
-    pub relay: Option<String>,
     /// Adresses IP `ip:port`, les non-loopback d'abord.
     pub addrs: Vec<String>,
 }
@@ -138,48 +47,32 @@ pub struct EndpointAddrInfo {
 impl EndpointAddrInfo {
     /// Construit le payload de code ami (à passer à `friend_code::encode`).
     pub fn into_payload(self, public_key: [u8; 32], epoch: u32) -> FriendCodePayload {
-        FriendCodePayload { public_key, epoch, relay: self.relay, addrs: self.addrs }
+        FriendCodePayload { public_key, epoch, relay: None, addrs: self.addrs }
     }
 }
 
-/// Extrait relais + adresses IP d'une `EndpointAddr` (typiquement `endpoint.addr()`) pour le code
-/// ami. Ce que cela révèle : tes adresses IP à quiconque reçoit le code (un ami).
+/// Extrait les adresses IP d'une `EndpointAddr` (typiquement `endpoint.addr()`) pour le code ami. Ce que cela
+/// révèle : tes adresses IP à quiconque reçoit le code (un ami).
 pub fn endpoint_addr_info(addr: &iroh::EndpointAddr) -> EndpointAddrInfo {
     let ok = |s: &str| s.len() <= friend_code::MAX_STR_LEN;
-    let relay = addr.relay_urls().map(|u| u.to_string()).find(|u| ok(u));
     let mut ips: Vec<std::net::SocketAddr> = addr.ip_addrs().copied().collect();
     ips.sort_by_key(|a| (a.ip().is_loopback() || a.ip().is_unspecified(), a.is_ipv6()));
     let addrs = ips.iter().map(|a| a.to_string()).filter(|s| ok(s)).take(friend_code::MAX_ADDRS).collect();
-    EndpointAddrInfo { relay, addrs }
+    EndpointAddrInfo { addrs }
 }
 
-/// Inverse : `EndpointAddr` joignable depuis un code ami. Relais invalide ou adresse illisible :
-/// ignorés (indices seulement).
+/// Inverse : `EndpointAddr` joignable depuis un code ami. Le relais éventuel du code est ignoré (voir l'en-tête) ;
+/// une adresse illisible aussi.
 pub fn endpoint_addr_from_payload(payload: &FriendCodePayload) -> Result<iroh::EndpointAddr> {
-    let id = iroh::EndpointId::from_bytes(&payload.public_key).map_err(|e| invalid(format!("clé publique : {e}")))?;
+    let id = iroh::EndpointId::from_bytes(&payload.public_key)
+        .map_err(|e| Error::Invalid(format!("clé publique : {e}")))?;
     let mut addr = iroh::EndpointAddr::new(id);
-    if let Some(r) = relay_hint(payload) {
-        addr = addr.with_relay_url(r);
-    }
     for a in &payload.addrs {
         if let Ok(sa) = a.parse::<std::net::SocketAddr>() {
             addr = addr.with_ip_addr(sa);
         }
     }
     Ok(addr)
-}
-
-/// Relais d'attache d'un code ami déjà parsé (`host[:port]` ou URL). Invalide => `None`.
-/// Ce n'est qu'un indice : s'y connecter expose l'IP au relais d'un tiers, à l'appelant de décider.
-pub fn relay_hint(payload: &FriendCodePayload) -> Option<RelayUrl> {
-    let r = payload.relay.as_deref()?.trim();
-    let candidate = if r.contains("://") { r.to_owned() } else { format!("https://{r}") };
-    validate_relay_url(&candidate).ok()
-}
-
-/// Parse un code ami (ou lien) puis extrait son relais d'attache.
-pub fn relay_hint_from_code(code: &str) -> Result<Option<RelayUrl>> {
-    Ok(relay_hint(&friend_code::parse(code)?))
 }
 
 // ---------- observation du chemin ----------
@@ -402,70 +295,6 @@ mod tests {
     }
     const MB: u64 = 1024 * 1024;
 
-    fn settings(mode: RelayChoice, relay_only: bool, allow_relay: bool) -> RelaySettings {
-        RelaySettings { mode, relay_only, allow_relay }
-    }
-
-    // --- mapping pur ---
-
-    #[test]
-    fn plan_modes() {
-        let p = plan(&settings(RelayChoice::Default, false, true)).unwrap();
-        assert_eq!(p, EndpointPlan { relay_mode: RelayMode::Default, ip_transports: true });
-        let p = plan(&settings(RelayChoice::Default, false, false)).unwrap();
-        assert_eq!(p, EndpointPlan { relay_mode: RelayMode::Disabled, ip_transports: true });
-        let p = plan(&settings(RelayChoice::Disabled, false, true)).unwrap();
-        assert_eq!(p.relay_mode, RelayMode::Disabled);
-        let p = plan(&settings(RelayChoice::Default, true, true)).unwrap();
-        assert!(!p.ip_transports);
-        let p = plan(&settings(RelayChoice::Custom("https://relay.example.org".into()), false, true)).unwrap();
-        assert!(matches!(p.relay_mode, RelayMode::Custom(_)));
-        // allow_relay=false l'emporte sur un relais personnalisé
-        let p = plan(&settings(RelayChoice::Custom("https://relay.example.org".into()), false, false)).unwrap();
-        assert_eq!(p.relay_mode, RelayMode::Disabled);
-    }
-
-    #[test]
-    fn contradiction_rejected() {
-        for (mode, allow) in [(RelayChoice::Default, false), (RelayChoice::Disabled, true)] {
-            let e = plan(&settings(mode, true, allow)).unwrap_err().to_string();
-            assert!(e.contains("contradiction"), "{e}");
-        }
-    }
-
-    #[test]
-    fn relay_url_validation() {
-        assert!(validate_relay_url("https://relay.example.org").is_ok());
-        assert!(validate_relay_url("https://relay.example.org:4433/").is_ok());
-        assert!(validate_relay_url("http://127.0.0.1:3340").is_ok());
-        assert!(validate_relay_url("http://localhost:3340").is_ok());
-        assert!(validate_relay_url("http://[::1]:3340").is_ok());
-        assert!(validate_relay_url("http://relay.example.org").is_err());
-        assert!(validate_relay_url("ftp://relay.example.org").is_err());
-        assert!(validate_relay_url("https://user:pw@relay.example.org").is_err());
-        assert!(validate_relay_url("relay.example.org").is_err());
-        assert!(validate_relay_url("").is_err());
-        assert!(plan(&settings(RelayChoice::Custom("http://evil.example".into()), false, true)).is_err());
-    }
-
-    #[test]
-    fn hint_from_friend_code() {
-        let mk = |relay: Option<&str>| {
-            friend_code::encode(&FriendCodePayload {
-                public_key: [1; 32],
-                epoch: 1,
-                relay: relay.map(String::from),
-                addrs: vec![],
-            })
-        };
-        let h = relay_hint_from_code(&mk(Some("relay.example.org:4433"))).unwrap().unwrap();
-        assert_eq!(h.host_str(), Some("relay.example.org"));
-        assert_eq!(h.port(), Some(4433));
-        assert!(relay_hint_from_code(&mk(None)).unwrap().is_none());
-        assert!(relay_hint_from_code(&mk(Some("http://evil.example"))).unwrap().is_none());
-        assert!(relay_hint_from_code("n'importe quoi").is_err());
-    }
-
     // --- advisor ---
 
     /// Simule un transfert à `bps` octets/s, un échantillon par seconde, de t=from à t=to inclus.
@@ -552,96 +381,40 @@ mod tests {
 
     const TEST_ALPN: &[u8] = b"cubelink/relay-test/0";
 
+    /// Non-régression #55 : l'endpoint n'a ni relais (aucun relais n0, aucun relais du tout) ni service de
+    /// découverte (n0, pkarr, DNS) : il ne publie rien, n'interroge aucun annuaire et ne contacte aucun relais.
     #[tokio::test]
-    async fn direct_only_connects_direct() {
-        let direct = settings(RelayChoice::Default, false, false);
-        let a = build_endpoint(SecretKey::generate(), &direct, vec![TEST_ALPN.to_vec()]).await.unwrap();
-        let b = build_endpoint(SecretKey::generate(), &direct, vec![]).await.unwrap();
-        let a2 = a.clone();
-        let acc = tokio::spawn(async move {
-            let inc = a2.accept().await.unwrap();
-            let c = inc.await.unwrap();
-            c.closed().await;
-        });
-        let conn = b.connect(a.addr(), TEST_ALPN).await.unwrap();
-        assert_eq!(wait_kind(&conn).await, PathKind::Direct);
-        let mut obs = PathObserver::spawn(conn.clone());
-        assert_eq!(obs.current(), PathKind::Direct);
-        conn.close(0u32.into(), b"done");
-        // la connexion fermée termine l'observateur sans bascule
-        assert!(tokio::time::timeout(Duration::from_secs(5), obs.changed()).await.unwrap().is_none());
-        let _ = acc.await;
-        b.close().await;
-        a.close().await;
+    async fn endpoint_has_no_relay_and_no_address_lookup() {
+        let ep = build_endpoint(SecretKey::generate(), vec![]).await.unwrap();
+        use iroh::Watcher as _;
+        assert!(ep.home_relay_status().get().is_empty(), "aucun relais attendu");
+        assert!(ep.addr().relay_urls().next().is_none(), "aucun relais d'attache");
+        assert!(ep.address_lookup().unwrap().is_empty(), "aucun service de découverte attendu");
+        ep.close().await;
     }
 
+    /// Connexion directe loopback : sans relais ni annuaire, un pair se joint par les seuls indices de son code ami
+    /// (adresses IP), et le chemin est direct.
     #[tokio::test]
-    async fn contradiction_and_bad_url_fail_in_build() {
-        let k = || SecretKey::generate();
-        let e = build_endpoint(k(), &settings(RelayChoice::Default, true, false), vec![]).await.unwrap_err();
-        assert!(e.to_string().contains("contradiction"), "{e}");
-        for url in ["http://relay.example.org", "pas une url", "https://u:p@relay.example.org"] {
-            assert!(build_endpoint(k(), &settings(RelayChoice::Custom(url.into()), false, true), vec![]).await.is_err());
-        }
-    }
-
-    /// Relais seul. Le crate n'active pas la feature `test-utils` d'iroh (Cargo.toml hors périmètre N17),
-    /// donc pas de relais local de test ici : ce test utilise les relais publics n0 (Internet requis).
-    /// À lancer à la main : `cargo test -p cubelink-p2p relay_only -- --ignored`.
-    /// Avec la feature : remplacer par `iroh::test_utils::run_relay_server()` + `RelayChoice::Custom(url)`.
-    #[tokio::test]
-    #[ignore = "Internet requis (relais publics n0)"]
-    async fn relay_only_uses_relay_path() {
-        let ro = settings(RelayChoice::Default, true, true);
-        let a = build_endpoint(SecretKey::generate(), &ro, vec![TEST_ALPN.to_vec()]).await.unwrap();
-        let b = build_endpoint(SecretKey::generate(), &ro, vec![]).await.unwrap();
-        let _ = tokio::time::timeout(Duration::from_secs(15), a.online()).await;
-        let a2 = a.clone();
-        tokio::spawn(async move {
-            if let Some(inc) = a2.accept().await {
-                if let Ok(c) = inc.await {
-                    c.closed().await;
-                }
-            }
-        });
-        let conn = b.connect(a.addr(), TEST_ALPN).await.unwrap();
-        assert_eq!(wait_kind(&conn).await, PathKind::Relay);
-        conn.close(0u32.into(), b"done");
-    }
-
-    /// Non-régression #55 : aucun service de découverte (n0, pkarr, DNS) n'est branché sur l'endpoint, quels que
-    /// soient les réglages : il ne publie rien et n'interroge aucun annuaire.
-    #[tokio::test]
-    async fn endpoint_has_no_address_lookup() {
-        for s in [
-            RelaySettings::default(),
-            settings(RelayChoice::Default, false, true),
-            settings(RelayChoice::Default, true, true),
-            settings(RelayChoice::Disabled, false, false),
-        ] {
-            let ep = build_endpoint(SecretKey::generate(), &s, vec![]).await.unwrap();
-            assert!(ep.address_lookup().unwrap().is_empty(), "aucun service de découverte attendu : {s:?}");
-            ep.close().await;
-        }
-    }
-
-    /// Sans relais ni annuaire, un pair se joint par les seuls indices de son code ami (adresses IP).
-    #[tokio::test]
-    async fn friend_code_hints_alone_connect_without_discovery() {
-        let off = settings(RelayChoice::Disabled, false, false);
-        let a = build_endpoint(SecretKey::generate(), &off, vec![TEST_ALPN.to_vec()]).await.unwrap();
-        let b = build_endpoint(SecretKey::generate(), &off, vec![]).await.unwrap();
+    async fn friend_code_hints_alone_connect_directly() {
+        let a = build_endpoint(SecretKey::generate(), vec![TEST_ALPN.to_vec()]).await.unwrap();
+        let b = build_endpoint(SecretKey::generate(), vec![]).await.unwrap();
         let a2 = a.clone();
         let acc = tokio::spawn(async move {
             let c = a2.accept().await.unwrap().await.unwrap();
             c.closed().await;
         });
         let payload = endpoint_addr_info(&a.addr()).into_payload(*a.id().as_bytes(), 0);
-        assert!(!payload.addrs.is_empty(), "le code doit porter les IP quand le relais est désactivé");
+        assert!(!payload.addrs.is_empty(), "le code doit porter les IP");
+        assert!(payload.relay.is_none(), "le code ne porte plus de relais");
         let target = endpoint_addr_from_payload(&friend_code::parse(&friend_code::encode(&payload)).unwrap()).unwrap();
         let conn = tokio::time::timeout(Duration::from_secs(15), b.connect(target, TEST_ALPN)).await.unwrap().unwrap();
         assert_eq!(wait_kind(&conn).await, PathKind::Direct);
+        let mut obs = PathObserver::spawn(conn.clone());
+        assert_eq!(obs.current(), PathKind::Direct);
         conn.close(0u32.into(), b"done");
+        // la connexion fermée termine l'observateur sans bascule
+        assert!(tokio::time::timeout(Duration::from_secs(5), obs.changed()).await.unwrap().is_none());
         let _ = acc.await;
         b.close().await;
         a.close().await;
@@ -656,12 +429,28 @@ mod tests {
             .with_ip_addr("192.168.1.5:4001".parse().unwrap());
         let info = endpoint_addr_info(&addr);
         assert_eq!(info.addrs, ["192.168.1.5:4001", "127.0.0.1:4000"], "non-loopback d'abord");
-        assert!(info.relay.as_deref().unwrap().contains("relay.example.org"));
         let payload = info.into_payload(*id.as_bytes(), 0);
+        assert!(payload.relay.is_none(), "un relais de l'adresse n'entre jamais dans le code");
         let parsed = friend_code::parse(&friend_code::encode(&payload)).unwrap();
         let back = endpoint_addr_from_payload(&parsed).unwrap();
         assert_eq!(back.id, id);
         assert_eq!(back.ip_addrs().count(), 2);
-        assert_eq!(back.relay_urls().count(), 1);
+        assert_eq!(back.relay_urls().count(), 0);
+    }
+
+    /// Un ancien code ami porte le relais n0 de son émetteur : il est ignoré, seules les IP servent.
+    #[test]
+    fn old_friend_code_relay_is_ignored() {
+        let payload = FriendCodePayload {
+            public_key: [3u8; 32],
+            epoch: 1,
+            relay: Some("euc1-1.relay.n0.iroh.link".into()),
+            addrs: vec!["192.168.1.5:4001".into()],
+        };
+        let parsed = friend_code::parse(&friend_code::encode(&payload)).unwrap();
+        assert_eq!(parsed.relay.as_deref(), Some("euc1-1.relay.n0.iroh.link"), "le format reste lisible");
+        let addr = endpoint_addr_from_payload(&parsed).unwrap();
+        assert_eq!(addr.relay_urls().count(), 0);
+        assert_eq!(addr.ip_addrs().count(), 1);
     }
 }

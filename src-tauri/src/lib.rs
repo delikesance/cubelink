@@ -165,22 +165,14 @@ fn select_handler<R: tauri::Runtime>(
 }
 
 pub(crate) fn iroh_options(h: &test_hooks::Hooks) -> iroh_backend::IrohOptions {
-    use p2p_lib::relay::RelayChoice;
     let mut o = iroh_backend::IrohOptions::default();
     if let Some(s) = h.transfer_idle_secs {
         o.inactivity = std::time::Duration::from_secs(s);
         o.stall_retry = o.stall_retry.min(o.inactivity / 2);
     }
-    if let Some(r) = &h.relay {
-        // Mode test, relais coupé : le code ami contient les adresses directes (sinon aucun chemin sans relais).
-        if h.test_mode && *r == test_hooks::RelayMode::Disabled {
-            o.advertise_addrs = Some(true);
-        }
-        o.relay = match r {
-            test_hooks::RelayMode::Disabled => RelayChoice::Disabled,
-            test_hooks::RelayMode::Default => RelayChoice::Default,
-            test_hooks::RelayMode::Custom(u) => RelayChoice::Custom(u.clone()),
-        };
+    // Mode test : ne rien ouvrir sur la box de la machine de test (UPnP / NAT-PMP / PCP).
+    if h.test_mode {
+        o.portmap = false;
     }
     o
 }
@@ -407,8 +399,8 @@ fn merge_browser_args(window: Option<String>, env: Option<&str>) -> Option<Strin
 mod tests {
     use super::*;
 
-    fn hooks(test_mode: bool, relay: Option<test_hooks::RelayMode>) -> test_hooks::Hooks {
-        test_hooks::Hooks { test_mode, relay, ..Default::default() }
+    fn hooks(test_mode: bool) -> test_hooks::Hooks {
+        test_hooks::Hooks { test_mode, ..Default::default() }
     }
 
     #[test]
@@ -425,25 +417,21 @@ mod tests {
     }
 
     #[test]
-    fn relais_coupe_en_test_publie_les_adresses_directes() {
-        let o = iroh_options(&hooks(true, Some(test_hooks::RelayMode::Disabled)));
-        assert_eq!(o.advertise_addrs, Some(true));
-        assert!(matches!(o.relay, p2p_lib::relay::RelayChoice::Disabled));
-        // Autres modes de test : comportement inchangé.
-        assert_eq!(iroh_options(&hooks(true, Some(test_hooks::RelayMode::Default))).advertise_addrs, None);
-        assert_eq!(iroh_options(&hooks(true, None)).advertise_addrs, None);
-        // Hors mode test, le relais coupé ne change rien.
-        assert_eq!(iroh_options(&hooks(false, Some(test_hooks::RelayMode::Disabled))).advertise_addrs, None);
+    fn portmap_actif_sauf_en_mode_test() {
+        // Production : le port est toujours ouvert sur la box (plus de relais pour servir de secours).
+        assert!(iroh_options(&hooks(false)).portmap);
+        // Mode test : rien n'est ouvert sur la box de la machine de test.
+        assert!(!iroh_options(&hooks(true)).portmap);
     }
 
     #[test]
     fn delai_d_inactivite_configurable_en_test() {
-        let mut h = hooks(true, None);
+        let mut h = hooks(true);
         h.transfer_idle_secs = Some(4);
         let o = iroh_options(&h);
         assert_eq!(o.inactivity, std::time::Duration::from_secs(4));
         assert!(o.stall_retry <= std::time::Duration::from_secs(2));
-        assert_eq!(iroh_options(&hooks(true, None)).inactivity, iroh_backend::DEFAULT_INACTIVITY);
+        assert_eq!(iroh_options(&hooks(true)).inactivity, iroh_backend::DEFAULT_INACTIVITY);
     }
 
     #[test]

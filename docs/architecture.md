@@ -36,50 +36,45 @@ Les catalogues ne servent qu'à **construire sa propre instance** avant de jouer
 ## 3. Architecture système
 
 ### Besoin de serveur central ?
-**Non pour les comptes, la liste d'amis et la présence.** Seul un **relais** (sans état) est nécessaire.
+**Non pour les comptes, la liste d'amis et la présence.** Aucun serveur n'est utilisé pour relier deux amis (#55 : n0 retiré, ni relais ni découverte).
 
 - **Identité** : paire de clés ed25519 générée au premier lancement ; la clé publique = ID du nœud. L'auth Microsoft se fait directement client ↔ Microsoft.
 - **Liste d'amis** : stockée en local (SQLite).
 - **Présence** : le launcher contacte directement les clés de ses amis ; s'ils répondent, ils sont en ligne.  La réponse porte aussi « un jeu tourne chez moi » (un octet facultatif après `PONG`, ignoré par les anciennes versions) : on ne propose « Demander à rejoindre » qu'à un ami en jeu.
-- **Découverte d'IP** : relais d'attache indiqué dans le code ami ; aucune découverte publique (ni n0, ni DNS, ni pkarr) : un ami n'est joignable que par ces indices et par les adresses mémorisées. La découverte par DHT Mainline, sans tiers, est une piste future non implémentée (voir §7).
-- **Relais** : nécessaire car le hole punching échoue dans ~10-20 % des cas (NAT symétrique, réseaux stricts). Il établit la connexion puis transporte le trafic en dernier recours. Binaire `iroh-relay`, ne stocke rien.
+- **Découverte d'IP** : les adresses IP du code ami (jusqu'à 8 : LAN, IPv6, adresse ouverte sur la box) ; aucune découverte publique (ni n0, ni DNS, ni pkarr) : un ami n'est joignable que par ces indices et par les adresses mémorisées. La découverte par DHT Mainline, sans tiers, est une piste future non implémentée (#136, voir §7).
+- **Relais : aucun** (#55). L'endpoint est créé avec `RelayMode::Disabled` (`build_endpoint`, `p2p/src/relay.rs`) : ni relais publics n0, ni relais d'attache, ni réglage « relais » (les anciens `allow_relay` / `relay_only` / `discovery` des `settings.json` sont ignorés puis supprimés à la réécriture). Sans relais, iroh ne fait plus de hole punching coordonné ni de mappage de port : Cubelink ouvre lui-même le port UDP sur la box (UPnP, NAT-PMP, PCP, `p2p/src/portmap.rs`, toujours actif sauf en mode test) et annonce l'adresse obtenue.
+- **Régression de joignabilité assumée** : deux amis derrière un NAT strict ou un CGNAT, sans IPv6 ni UPnP, peuvent ne pas se joindre ; il suffit que l'un des deux soit joignable (IPv6 publique ou port ouvert). En attendant la DHT Mainline (#136) et des relais Cubelink, c'est le prix de zéro tiers. L'écran Réglages → Réseau (« Tester ma connexion ») indique si l'appareil est joignable (`net_test` : IPv6 publique, port ouvert).
 
 ### Schéma
 ```
-[Launcher A] <-- QUIC direct (hole punching) --> [Launcher B]
-      |                                              |
-      +---- relais (fallback uniquement) ------------+
-                     ^
-          1 petit serveur iroh-relay
-          (ou relais publics au début)
+[Launcher A] <-- QUIC direct (IPv6, LAN ou port ouvert sur la box) --> [Launcher B]
+
+          aucun relais, aucun annuaire, aucun tiers
 ```
 
 Chaque launcher contient : client Tauri, nœud P2P (Iroh), store de blobs adressé par hash, tunnel QUIC <-> localhost pour Minecraft (l'hôte ouvre son monde en LAN), base SQLite locale (amis, cache).
 
 ### Hébergement
-- **Vercel : non** pour le relais (serverless, pas de connexions longues). OK pour un site vitrine.
 - **Mises à jour du launcher** : GitHub Releases (gratuit).
-- **Petit hébergement (PaaS 256-512 Mo ou VPS)** : largement suffisant pour ~100 joueurs simultanés. Un relais ne fait que transférer des paquets ; le jeu consomme ~50-200 kbit/s par joueur.
-- **Piège** : le transfert de mods via le relais coûte de la bande passante. Règle : transfert de gros fichiers **en direct uniquement**, ou débit plafonné sur le relais.
-- Un **VPS** (type Hetzner) est préférable à un PaaS pour le coût du trafic.
+- **Relais Cubelink (futur, pas encore décidé ni implémenté)** : si on en héberge un jour, Vercel ne convient pas (serverless, pas de connexions longues) ; un petit VPS suffirait pour ~100 joueurs simultanés (le jeu consomme ~50-200 kbit/s par joueur). Piège : le transfert de mods via un relais coûte de la bande passante ; règle : gros fichiers **en direct uniquement**, ou débit plafonné.
 
 ### Trajectoire de coût
-1. **0 €** : relais publics gratuits d'Iroh (best effort, pas pour la production) + GitHub Releases.
-2. **3-5 €/mois** : son propre relais sur petit VPS (dizaines à centaines d'utilisateurs).
+1. **0 €** : aucun serveur, connexions directes + GitHub Releases (situation actuelle).
+2. **3-5 €/mois** : plus tard, des relais Cubelink sur petit VPS (dizaines à centaines d'utilisateurs), avec la DHT Mainline (#136) pour la découverte.
 3. **Plus tard, si besoin** : API légère (SQLite/Postgres) pour des fonctions optionnelles (synchro d'amis multi-appareils, découverte publique). Pas requis pour le MVP.
 
 ### Limites connues
 - Pas d'**invitation hors ligne** (pas de boîte aux lettres sans serveur).
 - Rien ne **prouve l'identité Minecraft** d'un pair sur le réseau P2P (le serveur de l'hôte vérifie toutefois la session Mojang à la connexion).
 - Rejoindre des **inconnus** (IP exposée, griefing, code arbitraire) : commencer par amis uniquement.
-- L'état actuel d'Iroh (version, relais publics, stabilité de `iroh-blobs`) est à **valider par un prototype** avant de s'y engager.
+- L'état actuel d'Iroh (version, stabilité de `iroh-blobs`) est à **valider par un prototype** avant de s'y engager.
 
 ## 4. Ajouter un ami
 
 **Flux :**
-1. B clique sur « Mon code ami » : il obtient une chaîne courte (`mcl1-…`) ou un lien `launcher://add/…`. Le code contient sa clé publique ed25519, un `epoch` (régénération) et des indices de connexion : l'URL du relais d'attache et, **seulement si le relais est désactivé**, jusqu'à 8 adresses IP directes (`code_hints`, `src-tauri/src/iroh_backend.rs`). Aucun secret ; par défaut pas d'IP : il peut être posté sur Discord. Le CRC-32 ne détecte que les fautes de frappe, il n'apporte aucune sécurité.
+1. B clique sur « Mon code ami » : il obtient une chaîne courte (`mcl1-…`) ou un lien `launcher://add/…`. Le code contient sa clé publique ed25519, un `epoch` (régénération) et des indices de connexion : jusqu'à 8 adresses IP directes (`code_hints`, `src-tauri/src/iroh_backend.rs`), jamais de relais. Il révèle donc tes adresses IP à quiconque le reçoit : ne le poste pas en public (Discord, etc.), seulement à des personnes de confiance. Le CRC-32 ne détecte que les fautes de frappe, il n'apporte aucune sécurité.
 2. A colle le code dans « Ajouter un ami ».
-3. Le launcher de A contacte B par sa clé publique, via le relais d'attache du code puis hole punching (Iroh/QUIC). A n'a jamais besoin de connaître l'IP. Aucun service de découverte n'est configuré sur l'endpoint (`build_endpoint`, `p2p/src/relay.rs` : preset `Minimal`, rien n'est publié ni interrogé) : un pair n'est joignable que par les indices de son code. Le relais par défaut reste celui d'n0 (tiers : il voit l'IP et des métadonnées, jamais le contenu).
+3. Le launcher de A contacte B par sa clé publique, directement, aux adresses IP du code (Iroh/QUIC). Aucun relais ni service de découverte n'est configuré sur l'endpoint (`build_endpoint`, `p2p/src/relay.rs` : preset `Minimal`, `RelayMode::Disabled`, rien n'est publié ni interrogé) : un pair n'est joignable que par les indices de son code et ses adresses mémorisées. Un relais présent dans un ancien code (celui d'n0) est ignoré.
 4. A et B échangent des messages signés sur l'ALPN `cubelink/friend/1` (`p2p/src/friend_proto.rs`) : demande (pseudo + engagement `H(clé|nonce)`), engagement de B, révélation des deux nonces, puis décision signée de B. Les engagements empêchent de « grinder » le code de vérification.
 5. Les deux côtés calculent le même **code de vérification** (64 bits, « 3F9A · C21B · 77D0 · 5E14 ») à comparer à l'oral : c'est la seule protection contre un homme du milieu.
 6. B accepte ; A crée l'ami à la réception d'une acceptation signée valide, B le crée dans `accept`. Les amis sont créés avec le niveau de confiance « demander ».
@@ -93,7 +88,7 @@ Chaque launcher contient : client Tauri, nœud P2P (Iroh), store de blobs adress
 - Toute communication est authentifiée par les clés : messages signés (séparation de domaine), expéditeur = clé de la connexion QUIC, horodatage à ±300 s, cache anti-rejeu des engagements.
 - Anti-spam : 3 demandes par pair et par heure, 64 demandes en attente, 32 poignées de main simultanées, 1000 demandes stockées, trames de 4 Kio, délais de 15 s, décision attendue 10 min, rejet silencieux.
 - Autorisation (`src-tauri/src/authz.rs`) : seuls les amis **acceptés** ouvrent le tunnel de jeu ; les fichiers de mods demandent en plus « envoyer des mods à mes amis ».
-- L'ami voit techniquement l'IP (comme toute connexion P2P directe) ; option « relais uniquement » pour la masquer, au prix de la latence.
+- L'ami voit techniquement l'IP (comme toute connexion P2P directe) et son code ami la contient ; il n'y a plus d'option « relais uniquement » (plus de relais). Masquer l'IP passera par de futurs relais Cubelink.
 - Le pseudo Minecraft affiché est **déclaratif** (non vérifié) ; seule la clé fait foi.
 - La comparaison du code de vérification n'est pas imposée par le protocole : si l'utilisateur accepte sans comparer, un homme du milieu passe.
 
@@ -114,9 +109,9 @@ Chaque launcher contient : client Tauri, nœud P2P (Iroh), store de blobs adress
 **Prochaine étape suggérée : spike de 1-2 jours** : deux machines, un tunnel Iroh vers un monde en LAN, et un transfert de fichier par hash, pour valider le hole punching avant de construire le reste.
 
 ## 7. Points ouverts
-- Politique de limitation du relais (débit, taille).
+- Politique de limitation d'un futur relais Cubelink (débit, taille).
 - **Reconnexion après redémarrage** : traitée. `FriendsDb` passe en schéma v2 (migration automatique de la v1) avec une table `friend_addrs` ; les adresses d'amis sont rechargées au démarrage et rafraîchies à chaque connexion reçue, et l'adresse du demandeur est conservée à l'acceptation (test `src-tauri/tests/friend_reconnect.rs`). **Limites restantes** : si les DEUX nœuds changent d'adresse en même temps, seul le relais d'attache du code ami permet de se retrouver (plus de découverte publique n0). Si le relais le plus proche d'un ami change (changement de réseau) et que nous n'avons pas d'adresse fraîche mémorisée, il reste injoignable jusqu'à un nouvel échange de code. Un membre de groupe Hearth qui n'est pas ami n'a ni relais ni IP mémorisés tant qu'il ne nous a pas contactés depuis le démarrage : il est joignable seulement s'il se connecte d'abord à nous ; sonde, rapatriement de monde et tunnel vers lui affichent « hors ligne » sinon (`addr_of` et `addr_for` dans `src-tauri/src/iroh_backend.rs`). Piste : faire porter le relais d'attache par l'adhésion au groupe, ou la DHT Mainline (#136).
-- **Découverte publique** : décision prise, pas de découverte n0 (pkarr/DNS). Le réglage `discovery` et le code associé ont été supprimés. Piste future, sans tiers : la DHT Mainline (ticket séparé, non implémentée).
+- **n0 retiré complètement** (#55) : ni découverte (pkarr/DNS), ni relais publics n0. Les réglages `discovery`, `allow_relay` et `relay_only` et le code associé ont été supprimés. Piste future, sans tiers : la DHT Mainline (ticket séparé, non implémentée).
 - **Limites connues de confidentialité** : le statut « en jeu » est visible de tous les amis acceptés (octet facultatif du `PONG`) ; un membre de groupe Hearth qui n'est pas ami peut ouvrir un tunnel vers le monde du groupe ; la poignée de main QUIC est ouverte à qui connaît la clé publique (`p2p/src/presence.rs`) ; sans relais, le code ami contient des IP ; les images des descriptions de mods sont chargées depuis des hôtes tiers (`img-src https:`, `core/src/art.rs`) ; les sondes de présence (30 s) ne ralentissent pas pour un ami hors ligne.
 - Fonction « amis ayant joué au modpack » : nouvelle donnée réseau, à cadrer (opt-in, amis acceptés seulement, protocole versionné et signé).
 - Code de vérification : la comparaison est maintenant imposée dans l'interface (case à cocher avant « Accepter »), mais pas par le protocole ; code de 64 bits à allonger ?
@@ -142,7 +137,7 @@ Workspace Rust `core` (logique), `p2p` (réseau), `src-tauri` (commandes et int�
 | Manifeste hôte, transfert par hash, reprise | fait | `core/src/manifest.rs`, `p2p/src/transfer/`, `manifest_channel.rs` |
 | Profil invité, mods inconnus | fait | `core/src/guest.rs`, `unknown_mods.rs` |
 | Tunnel de jeu | fait | `p2p/src/tunnel.rs` |
-| Relais (réglages, indices du code) | fait | `p2p/src/relay.rs` |
+| Endpoint sans relais ni découverte, indices du code (IP), observateur de chemin | fait | `p2p/src/relay.rs` |
 | Installeur Windows | NSIS + CLI Tauri (`target/release/bundle/nsis/`) | |
 
 Tests : `npm test` (clippy `-D warnings`, `cargo test --workspace`, `tsc`, vitest) ; `npm run e2e` (Playwright, scénarios `e2e/01` à `11`).

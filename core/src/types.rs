@@ -411,16 +411,17 @@ pub struct TransferProgress {
 }
 
 /// Paramètres de l'application (écran Paramètres). Forme alignée sur `src/services/types.ts`.
+///
+/// #55 : les anciens champs `allow_relay`, `relay_only` (relais publics n0) et `discovery` (découverte n0) n'existent
+/// plus. Un ancien `settings.json` qui les contient se charge sans erreur (champs inconnus ignorés) et ils
+/// disparaissent à la réécriture.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct Settings {
     pub language: String,
     pub default_ram_mb: u32,
     pub java_path: Option<String>,
     pub trust_default: TrustLevel,
-    pub allow_relay: bool,
     pub close_on_launch: bool,
-    /// Réglage du design : toujours passer par le relais.
-    pub relay_only: bool,
     /// Réglage du design : envoyer des mods à mes amis.
     pub share_mods: bool,
     /// Ouvrir automatiquement mon monde solo au réseau local (agent Java Cubelink, instances `Own`) pour que mes
@@ -485,14 +486,16 @@ mod tests {
         assert!(s.start_with_os);
     }
 
-    /// #55 : le réglage `discovery` (découverte n0) n'existe plus ; un ancien fichier qui le contient se charge
-    /// sans erreur et il disparaît à la réécriture.
+    /// #55 : les réglages `discovery`, `allow_relay` et `relay_only` (n0) n'existent plus ; un ancien fichier qui les
+    /// contient se charge sans erreur et ils disparaissent à la réécriture.
     #[test]
-    fn ancien_reglage_discovery_est_ignore_puis_supprime() {
-        let old = r#"{"language":"fr","default_ram_mb":4096,"java_path":null,"trust_default":"ask","allow_relay":true,"close_on_launch":false,"relay_only":false,"share_mods":true,"discovery":true}"#;
+    fn anciens_reglages_n0_sont_ignores_puis_supprimes() {
+        let old = r#"{"language":"fr","default_ram_mb":4096,"java_path":null,"trust_default":"ask","allow_relay":true,"close_on_launch":false,"relay_only":true,"share_mods":true,"discovery":true}"#;
         let s: Settings = serde_json::from_str(old).unwrap();
         let rewritten = serde_json::to_string(&s).unwrap();
-        assert!(!rewritten.contains("discovery"), "{rewritten}");
+        for k in ["discovery", "allow_relay", "relay_only"] {
+            assert!(!rewritten.contains(k), "{k} : {rewritten}");
+        }
     }
 
     #[test]

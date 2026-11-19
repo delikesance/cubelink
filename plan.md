@@ -3,7 +3,7 @@
 > Mis à jour le 2026-11-10. Architecture et décisions : `docs/architecture.md` (état d'implémentation en §8). Contrats front/back : `docs/contrats.md`.
 
 ## Contexte
-Launcher Minecraft (Tauri/Rust + React) avec catalogues Modrinth/CurseForge, cache de mods par hash, et join d'un ami en P2P : le launcher installe le loader et les mods exacts de l'hôte, sans serveur central (seulement les relais publics Iroh, qui ne gardent aucun état).
+Launcher Minecraft (Tauri/Rust + React) avec catalogues Modrinth/CurseForge, cache de mods par hash, et join d'un ami en P2P : le launcher installe le loader et les mods exacts de l'hôte, sans serveur central ni relais (n0 retiré complètement, #55).
 
 ## Statut des phases
 
@@ -13,7 +13,7 @@ Launcher Minecraft (Tauri/Rust + React) avec catalogues Modrinth/CurseForge, cac
 | 1 | MVP solo : auth, Mojang, Java, loaders, cache, Modrinth, UI | fait |
 | 2 | CurseForge et import de modpacks (`.mrpack`) | fait (couverture CurseForge à revérifier) |
 | 3 | Social P2P : identité, code ami, présence, manifeste, transfert, profil invité, tunnel, sécurité des mods | fait |
-| 4 | Infra : plafonnement, mises à jour via GitHub Releases (pas de relais auto-hébergé : aucune infra tierce ni propre) | non fait (relais publics Iroh par défaut) |
+| 4 | Infra : plafonnement, mises à jour via GitHub Releases (pas de relais auto-hébergé : aucune infra tierce ni propre) | non fait (aucun relais : n0 retiré, #55 ; relais Cubelink à décider) |
 | 5 | Refonte UX/UI et corrections (voir ci-dessous) | en cours : design en validation, code non lancé |
 
 ## Phase 5 : refonte et corrections

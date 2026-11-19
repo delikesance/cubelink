@@ -40,7 +40,7 @@ export type ManifestFile = B.ManifestFile_Serialize;
 export type ModCheck = B.ModCheck_Serialize;
 /** `kind` : "missing_dep", "incompatible", "wrong_minecraft", "wrong_loader" ou "duplicate" ; `severity` : "error" ou "warning". */
 export type ModIssue = B.ModIssue_Serialize;
-export type NetTest = B.NetTest_Serialize;
+export type NetTest = B.NetTest;
 export type Settings = B.Settings_Serialize;
 export type TransferProgress = B.TransferProgress_Serialize;
 export type UpdateState = B.UpdateState_Serialize;

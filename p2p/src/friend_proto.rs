@@ -24,7 +24,7 @@ use core_lib::types::{Error, Friend, FriendRequest, Result, TrustLevel, VerifyCo
 use ed25519_dalek::Signature;
 use iroh::endpoint::{Connection, RecvStream, SendStream};
 use iroh::protocol::{AcceptError, ProtocolHandler, Router};
-use iroh::{Endpoint, EndpointAddr, EndpointId, RelayUrl};
+use iroh::{Endpoint, EndpointAddr, EndpointId};
 use rand::Rng;
 use sha2::{Digest, Sha256};
 use tokio::sync::{oneshot, OwnedSemaphorePermit, Semaphore};
@@ -615,9 +615,7 @@ impl FriendService {
 
         let id = EndpointId::from_bytes(&peer_bytes).map_err(|_| Error::Invalid("clé publique invalide".into()))?;
         let mut addr = EndpointAddr::new(id);
-        if let Some(r) = payload.relay.as_deref().and_then(|r| r.parse::<RelayUrl>().ok()) {
-            addr = addr.with_relay_url(r);
-        }
+        // Le relais éventuel du code est ignoré (#55) : aucun relais n'est contacté, un ancien code porte celui de n0.
         for a in payload.addrs.iter().filter_map(|a| a.parse::<SocketAddr>().ok()) {
             addr = addr.with_ip_addr(a);
         }

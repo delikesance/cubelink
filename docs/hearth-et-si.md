@@ -21,7 +21,7 @@ Voici les cas qui peuvent mal tourner dans un serveur de groupe Hearth (127 au t
 - **Et si** je ne reçois plus les renouvellements de bail alors que la partie continue chez les autres ?
   Avant d'afficher « partie mal terminée », Cubelink interroge les membres en ligne : si l'un voit un bail valide, je rejoins. Sinon, deux sondes directes espacées de 10 secondes doivent échouer avant de proposer la reprise. [impact : dégradé] [conception modifiée]
 - **Et si** aucun ami n'a de PC joignable pour servir de relais ?
-  Seuls les nœuds qui réussissent un auto-test de connexion entrante s'annoncent relais. Tant que le pool est vide, Cubelink affiche le repli utilisé (relais public ou relais d'un membre), et l'absence de chemin a sa propre raison. [impact : blocage] [conception modifiée]
+  Seuls les nœuds qui réussissent un auto-test de connexion entrante s'annoncent relais. Tant que le pool est vide, Cubelink affiche le repli utilisé (relais Cubelink, à venir, ou relais d'un membre ; jamais de relais public n0, #55), et l'absence de chemin a sa propre raison. [impact : blocage] [conception modifiée]
 - **Et si** l'hôte met son PC en veille puis le réveille alors qu'un autre membre a repris la partie ?
   Au réveil, Cubelink ne renouvelle pas le bail : il lance une ronde de sondage. Si un autre bail ou une version plus récente existe, il fait flush, stop et publie sa session en branche ; sinon il continue avec un nouvel identifiant de bail. Pendant un bail, il empêche la veille automatique. [impact : perte de données] [conception modifiée]
 - **Et si** un renouvellement de bail arrive après la fin de partie ?

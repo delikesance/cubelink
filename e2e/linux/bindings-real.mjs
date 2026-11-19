@@ -84,7 +84,7 @@ const SCENARIO = async () => {
   if (s) {
     await step("settingsSet", () => svc.settingsSet({ ...s, close_on_launch: !s.close_on_launch, overlay_hotkey: "Ctrl+Alt+F9", start_with_os: false, open_to_all_friends: true }));
     await step("settingsGet (relu)", () => svc.settingsGet());
-    await step("settingsSet (refus français)", () => svc.settingsSet({ ...s, allow_relay: false, relay_only: true }), true);
+    await step("settingsSet (refus français)", () => svc.settingsSet({ ...s, default_ram_mb: 1 }), true);
   }
   await step("instancesList", () => svc.instancesList());
   await step("minecraftVersions (hors réseau)", () => svc.minecraftVersions(), true);
@@ -137,7 +137,6 @@ try {
   const driver = start(DRIVER, [], {
     CUBELINK_TEST_MODE: "1",
     CUBELINK_DATA_DIR: dataDir,
-    CUBELINK_RELAY_MODE: "disabled",
     CUBELINK_SKIP_JAVA_PROBE: "1",
   });
   await waitHttp(`${WD}/status`, 30_000).catch((e) => { throw new Error(`${e.message}\n${driver.log.join("")}`); });

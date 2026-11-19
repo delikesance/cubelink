@@ -61,7 +61,7 @@ export const commands = {
 	/**  Description longue du modpack, en HTML déjà nettoyé ; `None` sans projet d'origine. */
 	instancesDescription: (instanceId: string, options?: InvokeOptions) => __TAURI_INVOKE<string | null>("instances_description", { instance_id: instanceId }, options),
 	/**  Test de connexion réseau (Paramètres → « Tester ma connexion »). */
-	netTest: (options?: InvokeOptions) => __TAURI_INVOKE<NetTest_Serialize>("net_test", undefined, options),
+	netTest: (options?: InvokeOptions) => __TAURI_INVOKE<NetTest>("net_test", undefined, options),
 	/**  Mon code ami (`mcl1-…`). */
 	friendMyCode: (options?: InvokeOptions) => __TAURI_INVOKE<FriendCode>("friend_my_code", undefined, options),
 	/**  Génère un nouveau code ami (l'ancien ne marche plus). */
@@ -1113,45 +1113,15 @@ export type ModIssue_Serialize = {
 	related?: string,
 };
 
-/**  Résultat du test « Ta connexion avec tes amis » (Paramètres). */
-export type NetTest = NetTest_Serialize | NetTest_Deserialize;
-
-/**  Résultat du test « Ta connexion avec tes amis » (Paramètres). */
-export type NetTest_Deserialize = {
-	/**  Connecté à un relais (secours quand la connexion directe échoue). */
-	relay_connected: boolean,
-	/**  Nom d'hôte du relais (« euc1-1.relay.n0.iroh.link »). */
-	relay?: string | null,
-	/**  Latence vers ce relais, en millisecondes. */
-	relay_ms?: number | null,
-	/**  L'UDP passe (indispensable à la connexion directe). */
-	udp: boolean,
+/**
+ *  Résultat du test « Ta connexion avec tes amis » (Paramètres). Aucun relais ni serveur tiers : ce test dit seulement
+ *  si cet appareil est joignable directement par un ami (IPv6 publique ou port ouvert sur la box).
+ */
+export type NetTest = {
+	/**  Une adresse IPv6 publique est disponible : un ami peut s'y connecter sans que la box ouvre quoi que ce soit. */
 	ipv6: boolean,
-	/**  Connexion directe : `Some(true)` facile, `Some(false)` routeur strict (adresse publique changeante), `None` inconnu. */
-	direct?: boolean | null,
-	/**  Réglage « Passer toujours par le relais ». */
-	relay_only: boolean,
-	/**  Le rapport réseau n'est pas arrivé à temps : `udp` et `direct` ne sont pas fiables. */
-	partial: boolean,
-};
-
-/**  Résultat du test « Ta connexion avec tes amis » (Paramètres). */
-export type NetTest_Serialize = {
-	/**  Connecté à un relais (secours quand la connexion directe échoue). */
-	relay_connected: boolean,
-	/**  Nom d'hôte du relais (« euc1-1.relay.n0.iroh.link »). */
-	relay: string | null,
-	/**  Latence vers ce relais, en millisecondes. */
-	relay_ms: number | null,
-	/**  L'UDP passe (indispensable à la connexion directe). */
-	udp: boolean,
-	ipv6: boolean,
-	/**  Connexion directe : `Some(true)` facile, `Some(false)` routeur strict (adresse publique changeante), `None` inconnu. */
-	direct: boolean | null,
-	/**  Réglage « Passer toujours par le relais ». */
-	relay_only: boolean,
-	/**  Le rapport réseau n'est pas arrivé à temps : `udp` et `direct` ne sont pas fiables. */
-	partial: boolean,
+	/**  La box a ouvert le port UDP de Cubelink (UPnP, NAT-PMP ou PCP). */
+	port_mapped: boolean,
 };
 
 export type Presence = "online" | "offline";
@@ -1164,7 +1134,13 @@ export type RequestsPage = {
 	total: number,
 };
 
-/**  Paramètres de l'application (écran Paramètres). Forme alignée sur `src/services/types.ts`. */
+/**
+ *  Paramètres de l'application (écran Paramètres). Forme alignée sur `src/services/types.ts`.
+ * 
+ *  #55 : les anciens champs `allow_relay`, `relay_only` (relais publics n0) et `discovery` (découverte n0) n'existent
+ *  plus. Un ancien `settings.json` qui les contient se charge sans erreur (champs inconnus ignorés) et ils
+ *  disparaissent à la réécriture.
+ */
 export type Settings = Settings_Serialize | Settings_Deserialize;
 
 /**  Entrée de `settings_set` : les champs de `Settings` ; les plus récents sont facultatifs (absents : valeur actuelle gardée). */
@@ -1176,9 +1152,7 @@ export type SettingsInput_Deserialize = {
 	default_ram_mb: number,
 	java_path?: string | null,
 	trust_default: TrustLevel,
-	allow_relay: boolean,
 	close_on_launch: boolean,
-	relay_only?: boolean | null,
 	share_mods?: boolean | null,
 	lan_auto?: boolean | null,
 	overlay_enabled?: boolean | null,
@@ -1194,9 +1168,7 @@ export type SettingsInput_Serialize = {
 	default_ram_mb: number,
 	java_path: string | null,
 	trust_default: TrustLevel,
-	allow_relay: boolean,
 	close_on_launch: boolean,
-	relay_only: boolean | null,
 	share_mods: boolean | null,
 	lan_auto: boolean | null,
 	overlay_enabled: boolean | null,
@@ -1206,16 +1178,19 @@ export type SettingsInput_Serialize = {
 	open_to_all_friends: boolean | null,
 };
 
-/**  Paramètres de l'application (écran Paramètres). Forme alignée sur `src/services/types.ts`. */
+/**
+ *  Paramètres de l'application (écran Paramètres). Forme alignée sur `src/services/types.ts`.
+ * 
+ *  #55 : les anciens champs `allow_relay`, `relay_only` (relais publics n0) et `discovery` (découverte n0) n'existent
+ *  plus. Un ancien `settings.json` qui les contient se charge sans erreur (champs inconnus ignorés) et ils
+ *  disparaissent à la réécriture.
+ */
 export type Settings_Deserialize = {
 	language: string,
 	default_ram_mb: number,
 	java_path?: string | null,
 	trust_default: TrustLevel,
-	allow_relay: boolean,
 	close_on_launch: boolean,
-	/**  Réglage du design : toujours passer par le relais. */
-	relay_only: boolean,
 	/**  Réglage du design : envoyer des mods à mes amis. */
 	share_mods: boolean,
 	/**
@@ -1244,16 +1219,19 @@ export type Settings_Deserialize = {
 	start_with_os?: boolean,
 };
 
-/**  Paramètres de l'application (écran Paramètres). Forme alignée sur `src/services/types.ts`. */
+/**
+ *  Paramètres de l'application (écran Paramètres). Forme alignée sur `src/services/types.ts`.
+ * 
+ *  #55 : les anciens champs `allow_relay`, `relay_only` (relais publics n0) et `discovery` (découverte n0) n'existent
+ *  plus. Un ancien `settings.json` qui les contient se charge sans erreur (champs inconnus ignorés) et ils
+ *  disparaissent à la réécriture.
+ */
 export type Settings_Serialize = {
 	language: string,
 	default_ram_mb: number,
 	java_path: string | null,
 	trust_default: TrustLevel,
-	allow_relay: boolean,
 	close_on_launch: boolean,
-	/**  Réglage du design : toujours passer par le relais. */
-	relay_only: boolean,
 	/**  Réglage du design : envoyer des mods à mes amis. */
 	share_mods: boolean,
 	/**

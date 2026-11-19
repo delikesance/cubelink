@@ -1,18 +1,16 @@
-// Multijoueur EN REEL : relais public n0, Internet requis. Active par E2E_REAL=1 (sinon ignore).
+// Multijoueur EN REEL, sans aucun relais ni serveur tiers (n0 retire, #55). Active par E2E_REAL=1 (sinon ignore).
 //   E2E_REAL=1 npx playwright test -c e2e 12-multiplayer-real --workers=1
-// Deux apps A (hote) et B (invite), toutes deux en « toujours le relais » (relay_only : aucun transport IP,
-// donc chemin relaye comme deux reseaux differents) et decouverte activee. Parcours complet :
-// ajout d'ami (code, verification, acceptation), partage auto, join_plan, transfert (via_relay === true,
-// hash verifies), tunnel TCP reel jusqu'au faux monde. Les temps mesures sont journalises (console + annotations).
+// Deux apps A (hote) et B (invite) sur la meme machine : connexion directe par les adresses IP du code ami (aucun relais,
+// aucun annuaire). Parcours complet : ajout d'ami (code, verification, acceptation), partage auto, join_plan, transfert
+// (via_relay === false, hash verifies), tunnel TCP reel jusqu'au faux monde. Les temps mesures sont journalises
+// (console + annotations).
 import net from 'node:net';
 import path from 'node:path';
 import { test, expect, invoke, inviteAllFriends, joinStart, testState, makeHostInstance, startFakeWorld, loginOffline } from './harness/fixtures';
 import { makeBigHost, recordEvents, waitProgress, lastProgress, guestInstance, sha256File, waitOnline, events } from './helpers/e2e2-common';
 import { NAME_A, NAME_B, keyOfCode, makeFriends as makeFriendsUi, readMyCode } from './helpers/e2e1-common';
 
-test.skip(process.env.E2E_REAL !== '1', 'Reserve a E2E_REAL=1 : Internet et relais public n0 requis.');
-
-test.use({ appOptions: { relayMode: 'default', settings: { relay_only: true, allow_relay: true } } });
+test.skip(process.env.E2E_REAL !== '1', 'Reserve a E2E_REAL=1 (deux apps reelles, longue).');
 
 const timings: Record<string, number> = {};
 async function timed<T>(label: string, f: () => Promise<T>): Promise<T> {
@@ -31,20 +29,19 @@ function tunnelRoundTrip(port: number): Promise<number> {
   });
 }
 
-test('multijoueur reel via le relais public : ami, partage, join, transfert relaye, tunnel', async ({ appA, appB }) => {
+test('multijoueur reel sans relais : ami, partage, join, transfert direct, tunnel', async ({ appA, appB }) => {
   test.setTimeout(600_000);
   for (const [app, name] of [[appA, NAME_A], [appB, NAME_B]] as const) {
     await app.page.waitForSelector('main[data-route="login"]');
     await loginOffline(app.page, name);
-    const s = await invoke<{ relay_only: boolean }>(app.page, 'settings_get');
-    expect(s.relay_only, 'relay_only lu depuis settings.json au demarrage').toBe(true);
-    expect(JSON.stringify((await testState(app.page)).relay_mode)).toMatch(/default/i);
+    const s = await invoke<Record<string, unknown>>(app.page, 'settings_get');
+    expect(s, 'plus de reglage relais').not.toHaveProperty('relay_only');
+    expect(await testState(app.page)).not.toHaveProperty('relay_mode');
   }
 
-  // 1. Ajout d'ami complet par l'interface (code, verification, acceptation) via le relais.
+  // 1. Ajout d'ami complet par l'interface (code, verification, acceptation), en direct.
   await timed('ajout_ami', async () => {
     const codeA = await readMyCode(appA);
-    // Le code de A ne contient que le relais (pas d'IP : relay_only) : on le verifie via sa cle seulement.
     expect(codeA).toMatch(/^mcl1-/);
     await makeFriendsUi(appA, appB);
   });
@@ -75,7 +72,7 @@ test('multijoueur reel via le relais public : ami, partage, join, transfert rela
   const prog = await (await import('./helpers/e2e2-common')).events<{ phase: string; via_relay: boolean; speed_bps: number }>(appB.page, 'transfer://progress');
   const rcv = prog.filter((p) => p.phase === 'receiving');
   expect(rcv.length).toBeGreaterThan(0);
-  expect(rcv.every((p) => p.via_relay), 'tous les evenements de reception passent par le relais').toBe(true);
+  expect(rcv.some((p) => p.via_relay), 'aucun relais : aucune reception relayee').toBe(false);
   const maxSpeed = Math.max(...prog.map((p) => p.speed_bps ?? 0));
   console.log(`[real] debit max observe : ${(maxSpeed / 1e6).toFixed(2)} Mo/s ; octets : ${last.bytes_done}`);
   timings['debit_max_Mo_s'] = Math.round(maxSpeed / 1e4) / 100;
@@ -85,7 +82,7 @@ test('multijoueur reel via le relais public : ami, partage, join, transfert rela
   expect(g, 'instance invitee creee').not.toBeNull();
   for (const f of host.files) expect(sha256File(path.join(g!.gameDir, ...f.path.split('/')))).toBe(f.sha256);
 
-  // 5. Tunnel : echange TCP reel (poignee de main du faux monde) a travers le relais.
+  // 5. Tunnel : echange TCP reel (poignee de main du faux monde), en direct.
   const port = await timed('ouverture_tunnel', () => invoke<number>(appB.page, 'join_open_tunnel', { friend_public_key: keyA }));
   expect(port).toBeGreaterThan(0);
   try {
@@ -96,7 +93,7 @@ test('multijoueur reel via le relais public : ami, partage, join, transfert rela
     timings['tunnel_latence_mediane_ms'] = Math.round(sorted[Math.floor(sorted.length / 2)]);
     console.log(`[real] latences tunnel (ms) : ${lat.map((x) => x.toFixed(0)).join(', ')}`);
 
-    // 5b. Coupure de la connexion iroh invite -> hote (hook de test) : reconnexion via le relais, MEME port local.
+    // 5b. Coupure de la connexion iroh invite -> hote (hook de test) : reconnexion directe, MEME port local.
     await recordEvents(appB.page, 'tunnel://state');
     expect(await invoke<boolean>(appB.page, 'test_cut_guest_connection'), 'un tunnel est ouvert').toBe(true);
     const tCut = Date.now();

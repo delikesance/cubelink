@@ -1,99 +1,70 @@
-// T7 : mode relais. Le relais public n0 exige Internet (et ~1 Mo/s) : aucun relais local n'est disponible dans le
-// harnais (feature iroh `test-utils` non activee, voir N17). Le chemin reel « direct impossible -> relais » est donc
-// reserve a E2E_RELAY=1 ; le reste (reglages, contradiction, indication « via un relais ») est verifie SANS Internet.
+// T7 : plus aucun relais (n0 retire, #55). L'application n'utilise ni relais public, ni decouverte d'adresses : les
+// reglages « relais » (allow_relay, relay_only) n'existent plus. Verifie SANS Internet : un ancien settings.json qui les
+// contient se charge et ils disparaissent a la reecriture, l'ecran n'a plus de case « relais », le test de connexion ne
+// parle plus de relais, et l'indication « via un relais » (evenement de transfert) reste coherente.
 import fs from 'node:fs';
 import { test, expect, invoke, testState, waitForRoute, loginOffline } from './harness/fixtures';
 
-type Settings = { allow_relay: boolean; relay_only?: boolean; [k: string]: unknown };
-const relayCheckbox = (page: import('@playwright/test').Page) => page.getByRole('checkbox', { name: /Passer toujours par le relais/ });
+type Settings = Record<string, unknown>;
+const lanCheckbox = (page: import('@playwright/test').Page) => page.getByRole('checkbox', { name: /Ouvrir mon monde au réseau local automatiquement/ });
 
 async function openSettings(page: import('@playwright/test').Page) {
   await page.evaluate(() => { window.location.hash = '#/settings?tab=reseau'; });
   await waitForRoute(page, 'settings');
-  await relayCheckbox(page).waitFor({ state: 'visible' });
-  await expect(relayCheckbox(page)).toBeEnabled(); // reglages charges
+  await lanCheckbox(page).waitFor({ state: 'visible' });
+  await expect(lanCheckbox(page)).toBeEnabled(); // reglages charges
 }
 
-test.describe('T7 relais : reglages (sans Internet)', () => {
-  test.use({ appOptions: { relayMode: 'disabled' } });
+test.describe('T7 sans relais : reglages (sans Internet)', () => {
+  // Ancien fichier de reglages d'une version avec relais n0 : champs contradictoires, ignores.
+  test.use({ appOptions: { settings: { allow_relay: false, relay_only: true, discovery: true, default_ram_mb: 6144 } } });
 
-  test('« Passer toujours par le relais » : persiste (ecran, commande, fichier) et survit au rechargement', async ({ appA }) => {
+  test('un ancien settings.json avec allow_relay/relay_only se charge, et ces champs disparaissent a la reecriture', async ({ appA }) => {
     const page = appA.page;
     await waitForRoute(page, 'login');
     await loginOffline(page, 'Alex');
     const st = await testState(page);
-    expect(st.relay_mode).toBeTruthy(); // mode relais impose par CUBELINK_RELAY_MODE, visible dans test_state
+    expect(st).not.toHaveProperty('relay_mode');
     const before = await invoke<Settings>(page, 'settings_get');
-    expect(before.relay_only).toBe(false);
-    expect(before.allow_relay).toBe(true);
+    expect(before.default_ram_mb, "l'ancien fichier est lu, pas remplace par les defauts").toBe(6144);
+    for (const k of ['allow_relay', 'relay_only', 'discovery']) expect(before).not.toHaveProperty(k);
 
     await openSettings(page);
-    await expect(relayCheckbox(page)).not.toBeChecked();
-    await relayCheckbox(page).check();
-    await expect(page.locator('[role=status]', { hasText: 'Enregistré' })).toBeVisible();
-
-    // pris en compte cote Rust : commande + fichier de reglages du dossier de donnees
-    expect((await invoke<Settings>(page, 'settings_get')).relay_only).toBe(true);
-    const file = JSON.parse(fs.readFileSync(st.paths.settings_file, 'utf8'));
-    expect(file.relay_only).toBe(true);
-    expect(file.allow_relay).toBe(true); // l'autre reglage n'est pas modifie
-
-    // persistance : rechargement de la fenetre
-    await page.reload();
-    await waitForRoute(page, 'settings'); // le hash est conserve
-    await openSettings(page);
-    await expect(relayCheckbox(page)).toBeChecked();
-
-    // plus de reglage de decouverte publique (n0 coupe) : ni case, ni champ dans settings.json
+    // plus aucune case relais ni decouverte publique
+    await expect(page.getByRole('checkbox', { name: /relais/i })).toHaveCount(0);
     await expect(page.getByRole('checkbox', { name: /Retrouver mes amis même si leur adresse change/ })).toHaveCount(0);
 
-    // ouverture auto au reseau local : persistance, sans ecraser les autres champs
-    const lan = page.getByRole('checkbox', { name: /Ouvrir mon monde au réseau local automatiquement/ });
+    // un enregistrement reecrit le fichier sans les anciens champs, les autres sont gardes
+    const lan = lanCheckbox(page);
     await expect(lan).toBeChecked();
     await lan.uncheck();
     await expect(page.locator('[role=status]', { hasText: 'Enregistré' })).toBeVisible();
-    const f2 = JSON.parse(fs.readFileSync(st.paths.settings_file, 'utf8'));
-    expect(f2.lan_auto).toBe(false);
-    expect(f2).not.toHaveProperty('discovery');
-    await lan.check();
-    await expect(page.locator('[role=status]', { hasText: 'Enregistré' })).toBeVisible();
+    const file = JSON.parse(fs.readFileSync(st.paths.settings_file, 'utf8'));
+    expect(file.lan_auto).toBe(false);
+    expect(file.default_ram_mb).toBe(6144);
+    for (const k of ['allow_relay', 'relay_only', 'discovery']) expect(file).not.toHaveProperty(k);
 
-    // retour arriere
-    await relayCheckbox(page).uncheck();
-    await expect(page.locator('[role=status]', { hasText: 'Enregistré' })).toBeVisible();
-    expect((await invoke<Settings>(page, 'settings_get')).relay_only).toBe(false);
-    expect(JSON.parse(fs.readFileSync(st.paths.settings_file, 'utf8')).relay_only).toBe(false);
-
-    // le mode de relais du harnais (hors reglages utilisateur) n'est pas modifie par l'ecran
-    expect((await testState(page)).relay_mode).toEqual(st.relay_mode);
-    test.info().annotations.push({ type: 'note', description: 'allow_relay/relay_only sont lus au demarrage du backend P2P (iroh_backend.rs) : leur effet reseau n\'est pas observable sans redemarrage ni relais.' });
-  });
-
-  test('l\'ecran n\'expose pas allow_relay : l\'interface ne peut pas creer la contradiction', async ({ appA }) => {
-    const page = appA.page;
-    await waitForRoute(page, 'login');
-    await loginOffline(page, 'Alex');
+    // persistance : rechargement de la fenetre
+    await page.reload();
+    await waitForRoute(page, 'settings');
     await openSettings(page);
-    await relayCheckbox(page).check();
+    await expect(lanCheckbox(page)).not.toBeChecked();
+    await lanCheckbox(page).check();
     await expect(page.locator('[role=status]', { hasText: 'Enregistré' })).toBeVisible();
-    // cocher « toujours le relais » ne coupe jamais allow_relay
-    const s = await invoke<Settings>(page, 'settings_get');
-    expect(s.relay_only).toBe(true);
-    expect(s.allow_relay).toBe(true);
-    expect(await page.getByRole('checkbox', { name: /allow_relay|autoriser le relais|relais public/i }).count()).toBe(0);
   });
 
-  test('contradiction « toujours le relais » + relais desactive refusee avec un message clair', async ({ appA }) => {
-    test.fixme(!process.env.E2E_RUN_FIXME, 'BOGUE : settings_set accepte relay_only=true avec allow_relay=false. src-tauri/src/commands_settings.rs:30 (validate_with) ne verifie pas la coherence ; la contradiction n\'est detectee qu\'au demarrage du backend (p2p/src/relay.rs:103, « contradiction : … ») et fait alors echouer le P2P au lieu d\'etre refusee a l\'enregistrement. Mesure : settings_set({relay_only:true, allow_relay:false}) renvoie les reglages (OK), settings_get les relit, le fichier est ecrit.');
+  test('« Tester ma connexion » : plus de relais, seulement IPv6 publique et port ouvert sur la box', async ({ appA }) => {
     const page = appA.page;
     await waitForRoute(page, 'login');
     await loginOffline(page, 'Alex');
-    const cur = await invoke<Settings>(page, 'settings_get');
-    const err = await invoke(page, 'settings_set', { settings: { ...cur, allow_relay: false, relay_only: true } }).then(() => null, (e) => String(e));
-    expect(err, 'la contradiction doit etre refusee').not.toBeNull();
-    expect(err).toMatch(/relais/i);
-    expect(err).toMatch(/contradict|incompatible|désactiv|desactiv/i);
-    expect(await invoke<Settings>(page, 'settings_get')).toEqual(cur); // rien n'est enregistre
+    const r = await invoke<Record<string, unknown>>(page, 'net_test');
+    expect(Object.keys(r).sort()).toEqual(['ipv6', 'port_mapped']);
+    expect(r.port_mapped, 'mode test : rien n\'est ouvert sur la box').toBe(false);
+    await openSettings(page);
+    await page.getByRole('button', { name: 'Tester ma connexion' }).click();
+    await expect(page.getByText(/Adresse IPv6 publique/)).toBeVisible();
+    await expect(page.getByText(/Port ouvert sur la box/)).toBeVisible();
+    await expect(page.getByText(/relais de secours/i)).toHaveCount(0);
   });
 
   test('indication « via un relais » dans Installation (evenement injecte) et absence sans relais', async ({ appA }) => {
@@ -123,14 +94,4 @@ test.describe('T7 relais : reglages (sans Internet)', () => {
     test.info().annotations.push({ type: 'note', description: 'Le message dedie « plus lentement » (SlowViaRelay, p2p/src/relay.rs SlowRelayAdvisor) n\'est pas branche : aucun evenement ni texte cote front/src-tauri (grep « lentement » : seulement la note statique de Install et le texte de Parametres). Seule la note « plus lent » liee a via_relay est testee.' });
   });
 });
-
-test.describe('T7 relais : mode relais personnalise du harnais', () => {
-  test.use({ appOptions: { relayMode: 'custom:http://127.0.0.1:9' } });
-  test('CUBELINK_RELAY_MODE custom est expose dans test_state et l\'app demarre hors Internet', async ({ appA }) => {
-    await waitForRoute(appA.page, 'login');
-    const st = await testState(appA.page);
-    expect(JSON.stringify(st.relay_mode)).toContain('127.0.0.1:9');
-  });
-});
-
-// Le parcours reel (ami, partage, join, transfert relaye, tunnel TCP) est dans e2e/12-multiplayer-real.spec.ts (E2E_REAL=1).
+// Le parcours reel (ami, partage, join, transfert direct, tunnel TCP) est dans e2e/12-multiplayer-real.spec.ts (E2E_REAL=1).

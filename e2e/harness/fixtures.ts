@@ -79,8 +79,8 @@ async function startServer(name: string, script: string): Promise<FakeServer> {
 export interface Servers { auth: FakeServer; mojang: FakeServer; modrinth: FakeServer }
 
 // ---------- application ----------
-/** `settings` : champs de Settings ecrits dans settings.json AVANT le demarrage (relay_only... sont lus au demarrage du backend). */
-export interface AppOptions { relayMode?: string; env?: Record<string, string>; settings?: Record<string, unknown> }
+/** `settings` : champs de Settings ecrits dans settings.json AVANT le demarrage. */
+export interface AppOptions { env?: Record<string, string>; settings?: Record<string, unknown> }
 
 export interface App {
   label: 'A' | 'B';
@@ -114,7 +114,7 @@ async function startApp(label: 'A' | 'B', bin: string, servers: Servers, tmpRoot
   fs.mkdirSync(dataDir, { recursive: true });
   fs.mkdirSync(userDataDir, { recursive: true });
   if (opts.settings) {
-    const base = { language: 'fr', default_ram_mb: 4096, java_path: null, trust_default: 'ask', allow_relay: true, close_on_launch: false, relay_only: false, share_mods: true };
+    const base = { language: 'fr', default_ram_mb: 4096, java_path: null, trust_default: 'ask', close_on_launch: false, share_mods: true };
     fs.writeFileSync(path.join(dataDir, 'settings.json'), JSON.stringify({ ...base, ...opts.settings }));
   }
   const cdpPort = await freePort();
@@ -134,7 +134,6 @@ async function startApp(label: 'A' | 'B', bin: string, servers: Servers, tmpRoot
     CUBELINK_MODRINTH_API_URL: servers.modrinth.base,
     CUBELINK_JAVA_PATH: FAKE_JAVA,
     CUBELINK_SKIP_JAVA_PROBE: '1',
-    CUBELINK_RELAY_MODE: opts.relayMode ?? 'disabled',
     ...opts.env,
   };
   const log: string[] = [];
@@ -266,7 +265,7 @@ async function dumpFailure(app: App, dir: string) {
   try { fs.cpSync(path.join(app.dataDir, 'logs'), path.join(dir, `${tag}-data-logs`), { recursive: true }); } catch { /* pas de logs */ }
 }
 
-/** Option par test : `test.use({ appOptions: { relayMode: 'default' } })`. */
+/** Option par test : `test.use({ appOptions: { settings: { … } } })`. */
 export const test = base.extend<{ appOptions: AppOptions; world: World; appA: App; appB: App; servers: Servers }, { binary: string }>({
   appOptions: [{}, { option: true }],
 

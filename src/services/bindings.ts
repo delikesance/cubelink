@@ -72,12 +72,14 @@ export const commands = {
 	friendSendRequest: (code: string, options?: InvokeOptions) => __TAURI_INVOKE<VerifyCode>("friend_send_request", { code }, options),
 	/**  Demandes d'amis reçues, par page, filtrées par nom. */
 	friendRequests: (offset: number, limit: number, query: string | null, options?: InvokeOptions) => __TAURI_INVOKE<RequestsPage>("friend_requests", { offset, limit, query }, options),
-	/**  Accepte une demande d'ami. */
+	/**  Accepte une demande d'ami. Si la demande n'est plus décidable (expirée, redémarrage), la ligne est retirée et l'erreur est « Cette demande a expiré : demande à ton ami de la renvoyer. » */
 	friendAccept: (publicKey: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("friend_accept", { public_key: publicKey }, options),
-	/**  Refuse une demande d'ami. */
+	/**  Refuse une demande d'ami. Réussit aussi si la demande a expiré (la ligne est simplement retirée). */
 	friendRefuse: (publicKey: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("friend_refuse", { public_key: publicKey }, options),
 	/**  Refuse toutes les demandes ; renvoie leur nombre. */
 	friendRefuseAll: (options?: InvokeOptions) => __TAURI_INVOKE<number>("friend_refuse_all", undefined, options),
+	/**  Retire un ami : accès d'invité en cours révoqué (le tunnel se coupe, la sonde de présence est refusée), invitations, demandes à rejoindre et demande en file de cet ami oubliées. Réussit aussi s'il n'est déjà plus ami ; les groupes Hearth ne sont pas touchés. */
+	friendRemove: (publicKey: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("friend_remove", { public_key: publicKey }, options),
 	/**  Plan du « Rejoindre » d'un ami : manifeste, fichiers à recevoir, fichiers à accepter et hash du manifeste montré. */
 	joinPlan: (friendPublicKey: string, options?: InvokeOptions) => __TAURI_INVOKE<JoinPlan_Serialize>("join_plan", { friend_public_key: friendPublicKey }, options),
 	/**  Démarre le transfert du plan montré (`manifest_hash`) ; `accept_unknown` exigé s'il y a des fichiers à accepter. Progression par `transfer://progress`. */

@@ -12,6 +12,7 @@ import { Icon } from "../../ui";
 import "../Friends/friends.css";
 import MyCode from "../Friends/MyCode";
 import Requests from "../Friends/Requests";
+import FriendsList from "../Friends/FriendsList";
 import Add from "../Friends/Add";
 
 /** Icônes Iconoir du menu des réglages. */
@@ -378,6 +379,7 @@ export default function Settings({ testConnection, clearCache }: SettingsProps =
       <div {...panel("amis")}>
         {section === "amis" && <>
           <Requests />
+          <FriendsList />
           <div className="fr-cards">
             <Card as="div" className="fr-card"><Add /></Card>
             <Card as="div" className="fr-card"><MyCode /></Card>

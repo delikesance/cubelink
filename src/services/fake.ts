@@ -850,6 +850,10 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
       requests = requests.filter((x) => x.public_key !== pk);
     },
     friendRefuseAll: async () => { const n = requests.length; requests = []; return n; },
+    friendRemove: async (pk) => {
+      const i = friends.findIndex((f) => f.friend.public_key === pk);
+      if (i >= 0) friends.splice(i, 1);
+    },
 
     joinPlan: async (): Promise<JoinPlan> => ({
       manifest: makeManifest(), manifest_hash: FAKE_MANIFEST_HASH, cached: 91, to_receive: 3, to_receive_bytes: bytes_total,

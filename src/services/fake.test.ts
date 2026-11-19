@@ -50,6 +50,15 @@ describe("faux service", () => {
     await expect(s.friendRefuse("zzz")).rejects.toThrow();
   });
 
+  it("retirer un ami le sort de la liste, sans erreur s'il est déjà parti", async () => {
+    const s = svc();
+    const [a, b] = await s.friendList();
+    await s.friendRemove(a.friend.public_key);
+    await s.friendRemove(a.friend.public_key);
+    expect((await s.friendList()).map((f) => f.friend.public_key)).not.toContain(a.friend.public_key);
+    expect((await s.friendList()).map((f) => f.friend.public_key)).toContain(b.friend.public_key);
+  });
+
   it("code ami : régénération et envoi", async () => {
     const s = svc();
     const a = await s.friendMyCode();

@@ -146,6 +146,24 @@ impl AppState {
         Ok(())
     }
 
+    /// Retire un ami : il disparaît de la base (adresses comprises), perd l'accès d'invité en cours, et tout ce qui
+    /// venait de lui est oublié (invitations, demandes à rejoindre, demande d'ami en file, dernière présence).
+    /// Sans l'amitié, la sonde de présence est refusée et la revérification du tunnel (500 ms) coupe sa connexion.
+    /// Idempotent : un ami déjà retiré n'est pas une erreur. Les groupes Hearth ne sont pas touchés.
+    pub fn friend_remove(&self, public_key: &str) -> Result<(), String> {
+        valid_key(public_key)?;
+        let key = public_key;
+        // Base d'abord : sans l'amitié, `may_join` refuse déjà, même si la révocation arrivait après.
+        self.friends.remove_friend(key).map_err(|e| user_msg(&e))?;
+        if let Some(k) = hex::decode(key).ok().and_then(|b| <[u8; 32]>::try_from(b).ok()) {
+            self.access.revoke_guest(&k);
+        }
+        self.last_seen.forget(key);
+        self.invites_forget_friend(key);
+        self.friends.remove_request(key).map_err(|e| user_msg(&e))?;
+        Ok(())
+    }
+
     /// Refuse toutes les demandes. Les 20 premiers demandeurs sont prévenus (refus signé via le protocole ami,
     /// 3 s max chacun, au mieux) ; les autres, et ceux injoignables, sont simplement retirés localement.
     pub async fn friend_refuse_all(&self) -> Result<usize, String> {
@@ -209,14 +227,14 @@ pub fn friend_requests(
     state.friend_requests(offset, limit, query)
 }
 
-/// Accepte une demande d'ami.
+/// Accepte une demande d'ami. Si la demande n'est plus décidable (expirée, redémarrage), la ligne est retirée et l'erreur est « Cette demande a expiré : demande à ton ami de la renvoyer. »
 #[tauri::command(rename_all = "snake_case")]
 #[specta::specta(rename_all = "snake_case")]
 pub async fn friend_accept(state: State<'_, Arc<AppState>>, public_key: String) -> Result<(), String> {
     state.friend_accept(&public_key).await
 }
 
-/// Refuse une demande d'ami.
+/// Refuse une demande d'ami. Réussit aussi si la demande a expiré (la ligne est simplement retirée).
 #[tauri::command(rename_all = "snake_case")]
 #[specta::specta(rename_all = "snake_case")]
 pub async fn friend_refuse(state: State<'_, Arc<AppState>>, public_key: String) -> Result<(), String> {
@@ -228,6 +246,13 @@ pub async fn friend_refuse(state: State<'_, Arc<AppState>>, public_key: String) 
 #[specta::specta(rename_all = "snake_case")]
 pub async fn friend_refuse_all(state: State<'_, Arc<AppState>>) -> Result<usize, String> {
     state.friend_refuse_all().await
+}
+
+/// Retire un ami : accès d'invité en cours révoqué (le tunnel se coupe, la sonde de présence est refusée), invitations, demandes à rejoindre et demande en file de cet ami oubliées. Réussit aussi s'il n'est déjà plus ami ; les groupes Hearth ne sont pas touchés.
+#[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
+pub fn friend_remove(state: State<'_, Arc<AppState>>, public_key: String) -> Result<(), String> {
+    state.friend_remove(&public_key)
 }
 
 #[cfg(test)]
@@ -296,5 +321,74 @@ mod tests {
         st.friend_refuse(&"b".repeat(64)).await.unwrap();
         assert_eq!(st.friend_refuse_all().await.unwrap(), 1);
         assert!(st.friend_accept("pas-une-cle").await.is_err());
+    }
+
+    fn add_friend(st: &AppState, c: char) -> String {
+        let key = c.to_string().repeat(64);
+        st.friends
+            .add_friend(&Friend { public_key: key.clone(), name: format!("Ami-{c}"), trust: core_lib::types::TrustLevel::Ask, added_at: 1 })
+            .unwrap();
+        key
+    }
+
+    #[tokio::test]
+    async fn retrait_d_un_ami_oublie_tout_ce_qui_venait_de_lui() {
+        let dir = tempfile::tempdir().unwrap();
+        let (st, events) = test_state(dir.path());
+        let (a, b) = (add_friend(&st, 'a'), add_friend(&st, 'b'));
+        let bytes = |c: u8| [c; 32];
+        st.friends.set_friend_addr(&a, &p2p_lib::friends_db::PeerAddr { relay: None, addrs: vec!["1.2.3.4:5".into()] }).unwrap();
+        st.access.allow_friend(&bytes(0xaa));
+        st.access.allow_friend(&bytes(0xbb));
+        st.last_seen.touch(&a, 5000);
+        st.last_seen.touch(&b, 5000);
+        for k in [&a, &b] {
+            st.invite_received(k, p2p_lib::invite::InviteMessage { world_name: "M".into(), minecraft: "1.21.1".into(), expires_at: now_secs() + 60, revoke: false, pack: None, icon: None });
+            st.join_request_received(k);
+        }
+        st.friends
+            .upsert_request(&FriendRequest { public_key: a.clone(), name: "Ami-a".into(), verify_code: Vc("3F9A · C21B · 77D0 · 5E14".into()), received_at: 1 }, Direction::In)
+            .unwrap();
+
+        st.friend_remove(&a).unwrap();
+
+        assert!(!st.friends.is_friend(&a).unwrap());
+        assert_eq!(st.friends.get_friend_addr(&a).unwrap(), None, "adresse oubliée");
+        assert!(!st.access.contains(&bytes(0xaa)), "accès d'invité révoqué");
+        assert!(st.access.contains(&bytes(0xbb)), "l'autre ami n'est pas touché");
+        assert_eq!(st.last_seen.get(&a), None);
+        assert_eq!(st.last_seen.get(&b), Some(5000));
+        assert_eq!(st.friend_invites().iter().map(|i| i.public_key.clone()).collect::<Vec<_>>(), std::slice::from_ref(&b));
+        assert_eq!(st.friend_join_requests().iter().map(|r| r.public_key.clone()).collect::<Vec<_>>(), std::slice::from_ref(&b));
+        assert_eq!(st.friend_requests(0, 10, None).unwrap().total, 0);
+        let list = st.friend_list().unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].friend.public_key, b);
+        assert!(events.lock().unwrap().iter().any(|(n, _)| n == "friend://invites"));
+    }
+
+    #[test]
+    fn retrait_idempotent_et_cle_invalide_refusee() {
+        let dir = tempfile::tempdir().unwrap();
+        let (st, _) = test_state(dir.path());
+        let a = add_friend(&st, 'a');
+        st.friend_remove(&a).unwrap();
+        st.friend_remove(&a).unwrap();
+        st.friend_remove(&"c".repeat(64)).unwrap();
+        assert!(st.friend_remove("pas-une-cle").unwrap_err().contains("invalide"));
+        assert!(st.friend_remove(&"A".repeat(64)).is_err(), "majuscules refusées comme ailleurs");
+    }
+
+    #[test]
+    fn retrait_garde_l_acces_de_groupe() {
+        let dir = tempfile::tempdir().unwrap();
+        let (st, _) = test_state(dir.path());
+        let a = add_friend(&st, 'a');
+        let g = p2p_lib::hearth::model::GroupId([1; 16]);
+        st.access.allow_friend(&[0xaa; 32]);
+        st.access.allow_members(g, [[0xaa; 32]]);
+        st.friend_remove(&a).unwrap();
+        assert!(st.access.contains(&[0xaa; 32]), "il reste membre du groupe");
+        assert!(!st.access.allows(&crate::authz::SessionTarget::Solo, &[0xaa; 32]));
     }
 }

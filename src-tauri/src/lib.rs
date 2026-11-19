@@ -70,6 +70,7 @@ macro_rules! commands {
             commands_friends::friend_accept,
             commands_friends::friend_refuse,
             commands_friends::friend_refuse_all,
+            commands_friends::friend_remove,
             commands_join::join_plan,
             commands_join::join_start,
             commands_join::join_pause,

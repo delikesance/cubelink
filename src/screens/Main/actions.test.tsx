@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { ShellContext, type ShellContextValue } from "../../app/context";
 import { setImportWarning } from "../../app/importWarning";
 import { createFakeServices } from "../../services/fake";
@@ -56,5 +56,19 @@ describe("Main : avertissement d'import", () => {
     setImportWarning(["jei"]);
     setup();
     expect(await screen.findByText(/1 mod introuvable : jei/)).toBeTruthy();
+  });
+});
+
+describe("Main : retirer un ami", () => {
+  it("clic droit > Retirer des amis > confirmer : friendRemove appelé, l'ami quitte la colonne", async () => {
+    const friendRemove = vi.fn(async () => {});
+    const { services } = setup({ friendRemove });
+    const [first] = await services.friendList();
+    const row = (await screen.findByText(first.friend.name, { selector: ".n" })).closest("li")!;
+    fireEvent.contextMenu(row);
+    fireEvent.click(screen.getByRole("menuitem", { name: "Retirer des amis" }));
+    fireEvent.click(within(screen.getByRole("alertdialog", { name: "Retirer cet ami ?" })).getByRole("button", { name: "Retirer" }));
+    await waitFor(() => expect(friendRemove).toHaveBeenCalledWith(first.friend.public_key));
+    await waitFor(() => expect(screen.queryByText(first.friend.name, { selector: ".n" })).toBeNull());
   });
 });

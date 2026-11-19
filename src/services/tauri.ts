@@ -63,6 +63,7 @@ export function createTauriServices(): Services {
     friendAccept: (publicKey) => done(commands.friendAccept(publicKey)),
     friendRefuse: (publicKey) => done(commands.friendRefuse(publicKey)),
     friendRefuseAll: () => commands.friendRefuseAll(),
+    friendRemove: (publicKey) => done(commands.friendRemove(publicKey)),
     friendInvite: (publicKey) => done(commands.friendInvite(publicKey)),
     friendInvites: () => commands.friendInvites(),
     friendInviteDismiss: (id) => done(commands.friendInviteDismiss(id)),

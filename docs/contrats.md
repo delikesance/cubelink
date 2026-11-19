@@ -42,6 +42,7 @@ Arguments : clés JSON envoyées à Tauri (snake_case) et leur type TypeScript. 
 | `friend_accept` | `public_key: string` | — | Accepte une demande d'ami. Si la demande n'est plus décidable (expirée, redémarrage), la ligne est retirée et l'erreur est « Cette demande a expiré : demande à ton ami de la renvoyer. » |
 | `friend_refuse` | `public_key: string` | — | Refuse une demande d'ami. Réussit aussi si la demande a expiré (la ligne est simplement retirée). |
 | `friend_refuse_all` | — | `number` | Refuse toutes les demandes ; renvoie leur nombre. |
+| `friend_remove` | `public_key: string` | — | Retire un ami : accès d'invité en cours révoqué (le tunnel se coupe, la sonde de présence est refusée), invitations, demandes à rejoindre et demande en file de cet ami oubliées. Réussit aussi s'il n'est déjà plus ami ; les groupes Hearth ne sont pas touchés. |
 | `join_plan` | `friend_public_key: string` | `JoinPlan_Serialize` | Plan du « Rejoindre » d'un ami : manifeste, fichiers à recevoir, fichiers à accepter et hash du manifeste montré. |
 | `join_start` | `friend_public_key: string`, `ram_mb: number \| null`, `manifest_hash: string`, `accept_unknown: boolean \| null` | — | Démarre le transfert du plan montré (`manifest_hash`) ; `accept_unknown` exigé s'il y a des fichiers à accepter. Progression par `transfer://progress`. |
 | `join_pause` | — | — | Met le transfert en pause. |

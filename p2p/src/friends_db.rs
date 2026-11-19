@@ -227,6 +227,19 @@ impl FriendsDb {
         Ok(Self { conn: Mutex::new(conn) })
     }
 
+    /// Ferme la connexion au fichier : le fichier (et son journal WAL) est libéré, sans attendre que tous les `Arc`
+    /// de la base disparaissent. Sous Windows, SQLite ouvre le fichier sans partage de renommage : tant qu'une
+    /// connexion vit, `friends.db` ne peut ni être renommé ni remplacé (restauration d'identité).
+    ///
+    /// La base reste utilisable en apparence mais vide et sans schéma : tout appel ultérieur renvoie une erreur
+    /// (jamais de lecture ou d'écriture sur le fichier). À réserver à l'arrêt de l'application.
+    pub fn close(&self) {
+        if let Ok(mem) = Connection::open_in_memory() {
+            // L'ancienne connexion est détruite ici (dernière connexion : SQLite fait le checkpoint du WAL).
+            drop(std::mem::replace(&mut *self.lock(), mem));
+        }
+    }
+
     fn lock(&self) -> MutexGuard<'_, Connection> {
         crate::util::lock(&self.conn)
     }
@@ -762,5 +775,35 @@ mod tests {
         assert_eq!(d.prune_friend_addrs().unwrap(), 0);
         assert!(d.remove_friend(&key(1)).unwrap());
         assert!(d.get_friend_addr(&key(1)).unwrap().is_none());
+    }
+
+    /// Fichiers de la base encore ouverts par ce processus (Linux : lecture de `/proc/self/fd`).
+    #[cfg(target_os = "linux")]
+    fn open_db_files(dir: &Path) -> Vec<std::path::PathBuf> {
+        std::fs::read_dir("/proc/self/fd")
+            .unwrap()
+            .filter_map(|e| std::fs::read_link(e.ok()?.path()).ok())
+            .filter(|p| p.starts_with(dir))
+            .collect()
+    }
+
+    /// Une connexion ouverte bloque renommage et remplacement du fichier sous Windows : `close` doit la libérer même
+    /// si d'autres `Arc` de la base sont encore vivants (tâches de fond, états qui ne se détruisent pas).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn close_releases_the_file_even_while_shared() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("friends.db");
+        let d = std::sync::Arc::new(FriendsDb::open(&path).unwrap());
+        let autre = d.clone();
+        d.add_friend(&friend(1, "A")).unwrap();
+        assert!(!open_db_files(dir.path()).is_empty(), "précondition : la base tient le fichier");
+        d.close();
+        assert!(open_db_files(dir.path()).is_empty(), "{:?}", open_db_files(dir.path()));
+        // Le fichier peut être renommé et rouvert : les données écrites y sont (checkpoint à la fermeture).
+        std::fs::rename(&path, dir.path().join("friends.db.bak")).unwrap();
+        assert!(autre.list_friends().is_err(), "une base fermée ne répond plus");
+        let r = FriendsDb::open(dir.path().join("friends.db.bak")).unwrap();
+        assert_eq!(r.list_friends().unwrap()[0].name, "A");
     }
 }

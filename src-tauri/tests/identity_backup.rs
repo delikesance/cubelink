@@ -54,6 +54,10 @@ async fn l_identite_et_les_amis_passent_sur_un_autre_pc() {
     b.st.identity_check_restart().unwrap();
     b.be.shutdown().await;
     drop(b);
+    // Sous Windows un fichier ouvert ne peut pas être renommé : l'arrêt doit avoir libéré friends.db, même si des
+    // tâches de fond gardent encore un `Arc` de la base. On le vérifie sous Linux via les descripteurs ouverts.
+    #[cfg(target_os = "linux")]
+    assert_eq!(open_files_named(&db.path().join("p2p"), "friends.db"), Vec::<String>::new(), "fichiers encore ouverts après l'arrêt");
 
     // Redémarrage : même clé publique, amis restaurés, anciens fichiers gardés en .bak.
     let b2 = Node::start(db.path(), "Bob").await;
@@ -69,4 +73,16 @@ async fn l_identite_et_les_amis_passent_sur_un_autre_pc() {
     let bak = files.iter().find(|f| f.starts_with("identity.key.bak-")).unwrap();
     assert_eq!(hex::encode(std::fs::read(p2p.join(bak)).unwrap()).len(), 64);
     b2.be.shutdown().await;
+}
+
+/// Fichiers ouverts par ce processus dans `dir` et dont le nom commence par `prefix` (Linux). Le magasin de blobs
+/// libère le sien de façon asynchrone après l'arrêt : seuls les fichiers qu'une restauration renomme sont regardés.
+#[cfg(target_os = "linux")]
+fn open_files_named(dir: &std::path::Path, prefix: &str) -> Vec<String> {
+    std::fs::read_dir("/proc/self/fd")
+        .unwrap()
+        .filter_map(|e| std::fs::read_link(e.ok()?.path()).ok())
+        .filter(|p| p.parent() == Some(dir) && p.file_name().is_some_and(|n| n.to_string_lossy().starts_with(prefix)))
+        .map(|p| p.display().to_string())
+        .collect()
 }

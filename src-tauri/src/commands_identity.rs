@@ -84,5 +84,8 @@ pub async fn identity_import(st: State<'_, Arc<AppState>>, path: String, passphr
 #[specta::specta(rename_all = "snake_case")]
 pub async fn identity_restart(app: AppHandle, st: State<'_, Arc<AppState>>) -> Result<(), String> {
     st.identity_check_restart()?;
+    // Sous Windows, le nouveau processus ne peut pas renommer `friends.db` tant que celui-ci la tient ouverte : elle
+    // est fermée avant le relancement (le nouveau processus réessaie de toute façon si l'ancien met du temps à sortir).
+    st.friends.close();
     app.restart();
 }

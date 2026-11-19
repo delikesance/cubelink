@@ -61,8 +61,7 @@ export default function Login() {
   const { params } = useShell();
   const [offlineOpen, setOfflineOpen] = useState(false);
   const h1 = useRef<HTMLHeadingElement>(null);
-  useEffect(() => { h1.current?.focus(); }, []);
-  const { state, left, copied, start, copy } = useDeviceLogin(services, (message) => {
+  const { state, left, copied, start, cancel, copy } = useDeviceLogin(services, (message) => {
     const kind = classifyLoginFailure(message);
     if (!kind) return false;
     navigate("error", { state: kind });
@@ -78,6 +77,18 @@ export default function Login() {
   }, [connected]);
 
   const onCode = state.step === "code" || state.step === "expired" || state.step === "connected" || state.step === "error";
+
+  // Au premier affichage et au retour à l'accueil (Annuler), le titre reprend le focus.
+  useEffect(() => { if (!onCode) h1.current?.focus(); }, [onCode]);
+
+  // Échap sur l'écran du code = Annuler (pas pendant « Connecté » : l'écran part tout seul vers l'accueil).
+  const cancellable = state.step === "code" || state.step === "expired" || state.step === "error";
+  useEffect(() => {
+    if (!cancellable) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape" && !e.defaultPrevented) { e.preventDefault(); cancel(); } };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [cancellable, cancel]);
 
   return (
     <div className="login">
@@ -140,7 +151,8 @@ export default function Login() {
                     <a className="cl-btn cl-btn-primary" href={state.code.verification_uri} target="_blank" rel="noopener noreferrer">
                       Ouvrir {state.code.verification_uri.replace(/^https?:\/\//, "")}
                     </a>
-                    <button type="button" className="login-link" style={{ alignSelf: "center" }} onClick={() => { void start(); }}>Problème lors de la connexion ?</button>
+                    <button type="button" className="login-link" style={{ alignSelf: "center" }} onClick={() => { void start(); }}>Obtenir un nouveau code</button>
+                    <Button variant="secondary" onClick={cancel}>Annuler</Button>
                   </div>
                 </>
               )}
@@ -150,7 +162,10 @@ export default function Login() {
                   <Ring label="Code expiré" progress={null}><span className="lc-time is-bad">00:00</span></Ring>
                   <p className="lc-code is-dead">{state.code.user_code}</p>
                   <p className="lc-msg" role="alert">Le code a expiré. Ce code n'est plus valable : demande un nouveau code pour te connecter.</p>
-                  <div className="lc-actions"><Button onClick={() => { void start(); }}>Réessayer</Button></div>
+                  <div className="lc-actions">
+                    <Button onClick={() => { void start(); }}>Réessayer</Button>
+                    <Button variant="secondary" onClick={cancel}>Annuler</Button>
+                  </div>
                 </>
               )}
               {state.step === "error" && (
@@ -158,7 +173,10 @@ export default function Login() {
                   <span className="lc-state">Échec</span>
                   <Ring label="Connexion échouée" progress={null} color="var(--danger)"><span className="lc-time is-bad" aria-hidden="true">!</span></Ring>
                   <p className="lc-msg" role="alert">{state.message}</p>
-                  <div className="lc-actions"><Button onClick={() => { void start(); }}>Réessayer</Button></div>
+                  <div className="lc-actions">
+                    <Button onClick={() => { void start(); }}>Réessayer</Button>
+                    <Button variant="secondary" onClick={cancel}>Annuler</Button>
+                  </div>
                 </>
               )}
               {state.step === "connected" && (

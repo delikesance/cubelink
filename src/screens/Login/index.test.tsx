@@ -42,14 +42,89 @@ describe("écran Connexion", () => {
     await waitFor(() => expect(window.location.hash).toBe(`#/error?state=${state}`));
   });
 
-  it("« Problème lors de la connexion ? » relance une demande de code", async () => {
+  it("« Obtenir un nouveau code » relance une demande de code", async () => {
     const base = createFakeServices({ tickMs: 0, loginDelayMs: 500 });
     const begin = vi.fn(base.authBeginLogin);
     render(<Shell services={{ ...base, authBeginLogin: begin }} />);
+    expect(screen.queryByRole("button", { name: "Obtenir un nouveau code" })).toBeNull();
     expect(screen.queryByRole("button", { name: /Problème lors de la connexion/ })).toBeNull();
     fireEvent.click(btn());
-    fireEvent.click(await screen.findByRole("button", { name: /Problème lors de la connexion/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Obtenir un nouveau code" }));
     await waitFor(() => expect(begin).toHaveBeenCalledTimes(2));
+  });
+
+  /** Services dont le sondage ne répond qu'à la demande : permet de simuler une réponse tardive. */
+  function lateServices() {
+    const base = createFakeServices({ tickMs: 0 });
+    let finish: (p: Awaited<ReturnType<Services["authPollLogin"]>>) => void = () => {};
+    const svc: Services = {
+      ...base,
+      authBeginLogin: async () => ({ user_code: "ABCD-1234", verification_uri: "https://x.test", expires_in: 900 }),
+      authPollLogin: () => new Promise((resolve) => { finish = resolve; }),
+    };
+    return { svc, finish: (p: Awaited<ReturnType<Services["authPollLogin"]>>) => finish(p) };
+  }
+  const profile: Awaited<ReturnType<Services["authPollLogin"]>> = { kind: "offline", name: "Alex", uuid: "00000000-0000-0000-0000-000000000000" };
+
+  async function expectBackAtWelcome(finish: (p: typeof profile) => void) {
+    expect(await screen.findByRole("button", { name: /Se connecter avec Microsoft/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Jouer hors ligne" })).toBeTruthy();
+    expect(screen.queryByLabelText(/^Code :/)).toBeNull();
+    // Une réponse tardive du sondage ne ramène ni l'écran « Connecté » ni l'accueil.
+    await act(async () => { finish(profile); await Promise.resolve(); });
+    expect(screen.queryByText(/^Bienvenue /)).toBeNull();
+    await new Promise((r) => setTimeout(r, 50));
+    expect(window.location.hash).toBe("#/login");
+  }
+
+  it("Annuler sur l'écran du code : retour à l'accueil, hors ligne accessible, réponse tardive ignorée", async () => {
+    const { svc, finish } = lateServices();
+    render(<Shell services={svc} />);
+    fireEvent.click(btn());
+    expect(await screen.findByLabelText(/^Code :/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Annuler" }));
+    await expectBackAtWelcome(finish);
+    expect(document.activeElement?.tagName).toBe("H1");
+    fireEvent.click(screen.getByRole("button", { name: "Jouer hors ligne" }));
+    expect(screen.getByLabelText("Pseudo hors ligne")).toBeTruthy();
+  });
+
+  it("Échap sur l'écran du code fait la même chose qu'Annuler", async () => {
+    const { svc, finish } = lateServices();
+    render(<Shell services={svc} />);
+    fireEvent.click(btn());
+    expect(await screen.findByLabelText(/^Code :/)).toBeTruthy();
+    fireEvent.keyDown(document, { key: "Escape" });
+    await expectBackAtWelcome(finish);
+  });
+
+  it("Échap déjà pris en charge par un autre composant (defaultPrevented) n'annule pas", async () => {
+    const { svc } = lateServices();
+    render(<Shell services={svc} />);
+    fireEvent.click(btn());
+    expect(await screen.findByLabelText(/^Code :/)).toBeTruthy();
+    const taken = (e: KeyboardEvent) => e.preventDefault();
+    document.addEventListener("keydown", taken, true);
+    fireEvent.keyDown(document, { key: "Escape" });
+    document.removeEventListener("keydown", taken, true);
+    expect(screen.getByLabelText(/^Code :/)).toBeTruthy();
+  });
+
+  it("Échap sur l'accueil (rien à annuler) ne change rien", async () => {
+    render(<Shell services={createFakeServices({ tickMs: 0 })} />);
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(btn()).toBeTruthy();
+    expect(window.location.hash).toBe("#/login");
+  });
+
+  it("Annuler sur l'écran d'échec : retour à l'accueil", async () => {
+    const base = createFakeServices({ tickMs: 0, loginDelayMs: 20 });
+    const svc: Services = { ...base, authPollLogin: () => Promise.reject(new Error("Compte sans droit daccès.")) };
+    render(<Shell services={svc} />);
+    fireEvent.click(btn());
+    expect((await screen.findByRole("alert")).textContent).toContain("Compte sans droit daccès.");
+    fireEvent.click(screen.getByRole("button", { name: "Annuler" }));
+    expect(await screen.findByRole("button", { name: "Jouer hors ligne" })).toBeTruthy();
   });
 
   it("flux en échec : message clair et Réessayer", async () => {
@@ -81,6 +156,9 @@ describe("écran Connexion", () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(3100); });
     expect(screen.getByRole("alert").textContent).toContain("expiré");
     expect(screen.getByRole("button", { name: "Réessayer" })).toBeTruthy();
+    // Un code expiré s'annule aussi (Annuler ou Échap) : retour à l'accueil.
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.getByRole("button", { name: "Jouer hors ligne" })).toBeTruthy();
   });
 
   it("jouer hors ligne : pseudo requis puis accueil", async () => {

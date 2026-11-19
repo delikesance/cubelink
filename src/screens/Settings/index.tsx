@@ -192,6 +192,7 @@ export default function Settings({ testConnection, clearCache }: SettingsProps =
   const [section, setSection] = useState<SectionId>(initial);
   const [settings, setSettings] = useState<SettingsData | null>(null);
   const [saved, setSaved] = useState("");
+  const [friendsRev, setFriendsRev] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [netMsg, setNetMsg] = useState("");
   const [confirmClear, setConfirmClear] = useState(false);
@@ -378,8 +379,8 @@ export default function Settings({ testConnection, clearCache }: SettingsProps =
 
       <div {...panel("amis")}>
         {section === "amis" && <>
-          <Requests />
-          <FriendsList />
+          <Requests onAnswered={(accepted) => { if (accepted) setFriendsRev((n) => n + 1); }} />
+          <FriendsList refreshKey={friendsRev} />
           <div className="fr-cards">
             <Card as="div" className="fr-card"><Add /></Card>
             <Card as="div" className="fr-card"><MyCode /></Card>

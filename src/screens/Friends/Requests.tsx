@@ -32,7 +32,7 @@ function Avatar({ name }: { name: string }) {
   return <span className="rq-avatar" aria-hidden="true">{name.slice(0, 1).toUpperCase()}</span>;
 }
 
-export default function Requests() {
+export default function Requests({ onAnswered }: { onAnswered?: (accepted: boolean) => void } = {}) {
   const services: Services = useServices();
   const [items, setItems] = useState<FriendRequest[]>([]);
   const [total, setTotal] = useState(0);
@@ -148,6 +148,7 @@ export default function Requests() {
       setTotal((t) => Math.max(0, t - 1));
       setGrand((g) => Math.max(0, g - 1));
       setOpenKey((k) => (k === r.public_key ? (rest[idx] ?? rest[idx - 1] ?? null)?.public_key ?? null : k));
+      onAnswered?.(accept);
       setNotice(accept ? `${r.name} est maintenant ton ami.` : `Demande de ${r.name} refusée.`);
     } catch (e) {
       setError(messageOf(e));

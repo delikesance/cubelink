@@ -9,7 +9,7 @@ import { lastSeenText } from "./lastSeen";
 import { RemoveFriendDialog } from "./RemoveFriend";
 
 /** Paramètres > Amis : « Mes amis », avec Retirer (confirmation). */
-export default function FriendsList() {
+export default function FriendsList({ refreshKey = 0 }: { refreshKey?: number } = {}) {
   const services = useServices();
   const [friends, setFriends] = useState<FriendWithPresence[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -27,7 +27,7 @@ export default function FriendsList() {
       setFriends((l) => l && l.map((f) => (f.friend.public_key === e.public_key ? { ...f, presence: e.presence, in_game: e.in_game, last_seen: now } : f)));
     });
     return () => { alive = false; off(); };
-  }, [services]);
+  }, [services, refreshKey]);
 
   const nowSec = Math.floor(Date.now() / 1000);
   return (

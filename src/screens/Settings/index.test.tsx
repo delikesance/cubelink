@@ -218,6 +218,31 @@ describe("Échap", () => {
     expect(out).not.toHaveBeenCalled();
     expect(screen.getByRole("button", { name: "Retirer Alex" })).toBeTruthy();
   });
+
+  it("Retirer un ami : Échap annule la boîte sans quitter Paramètres ni retirer", async () => {
+    const svc = createFakeServices({ tickMs: 0, requestCount: 0 });
+    const remove = vi.spyOn(svc, "friendRemove");
+    const [first] = await svc.friendList();
+    render(<Shell services={svc} />);
+    goTab("Amis");
+    fireEvent.click(await screen.findByRole("button", { name: `Retirer ${first.friend.name} de mes amis` }));
+    expect(screen.getByRole("alertdialog", { name: "Retirer cet ami ?" })).toBeTruthy();
+    fireEvent.keyDown(document.activeElement as HTMLElement, { key: "Escape" });
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(window.location.hash).toBe("#/settings");
+    expect(remove).not.toHaveBeenCalled();
+  });
+
+  it("Mes amis : un ami accepté dans les demandes apparaît sans changer d'onglet", async () => {
+    const svc = createFakeServices({ tickMs: 0, requestCount: 2 });
+    const before = (await svc.friendList()).length;
+    render(<Shell services={svc} />);
+    goTab("Amis");
+    await screen.findByText(`Mes amis (${before})`);
+    fireEvent.click(await screen.findByRole("checkbox", { name: /J'ai comparé ce code/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /^Accepter / }));
+    await screen.findByText(`Mes amis (${before + 1})`);
+  });
 });
 });
 

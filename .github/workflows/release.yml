@@ -4,7 +4,7 @@
 # les vérifications réussies. Le n° de run du tag est donc celui du run `ci`. Une relance après publication échoue sur
 # « le tag existe déjà » (voulu : pas de double publication).
 # Flux de travail : les PR sont fusionnées dans `canary`, puis `canary` est fusionnée dans `main` (voir docs/release.md).
-# `workflow_dispatch` (depuis n'importe quelle branche) construit tout SANS publier, pour vérifier les builds.
+# `workflow_dispatch` (depuis n'importe quelle branche) construit tout SANS jamais publier, pour vérifier les builds.
 # Windows : .msi (updater) + paquet .msix à téléverser dans le Microsoft Store (qui le signe).
 name: release
 
@@ -22,12 +22,10 @@ on:
       TAURI_SIGNING_PRIVATE_KEY_PASSWORD: { required: false }
       CUBELINK_CF_API_KEY: { required: false }
       CUBELINK_MS_CLIENT_ID: { required: false }
+  # Pas d'input `publish` sur workflow_dispatch : une publication manuelle contournerait les vérifications de ci et,
+  # avec le n° de run de ce workflow (compteur propre, petit), publierait un patch plus ancien que la dernière release
+  # (l'updater ne proposerait rien). Seul l'appel de ci.yml publie.
   workflow_dispatch:
-    inputs:
-      publish:
-        description: 'Publier la release (tag + fichiers) ; sinon build seul. Refusé hors de main'
-        type: boolean
-        default: false
 
 concurrency:
   group: release

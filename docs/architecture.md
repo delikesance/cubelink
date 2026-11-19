@@ -41,7 +41,7 @@ Les catalogues ne servent qu'à **construire sa propre instance** avant de jouer
 - **Identité** : paire de clés ed25519 générée au premier lancement ; la clé publique = ID du nœud. L'auth Microsoft se fait directement client ↔ Microsoft.
 - **Liste d'amis** : stockée en local (SQLite).
 - **Présence** : le launcher contacte directement les clés de ses amis ; s'ils répondent, ils sont en ligne.  La réponse porte aussi « un jeu tourne chez moi » (un octet facultatif après `PONG`, ignoré par les anciennes versions) : on ne propose « Demander à rejoindre » qu'à un ami en jeu.
-- **Découverte d'IP** : relais d'attache indiqué dans le code ami ; la découverte publique d'Iroh (pkarr/DNS n0) est prévue mais désactivée par défaut (voir §4 et §7).
+- **Découverte d'IP** : relais d'attache indiqué dans le code ami ; aucune découverte publique (ni n0, ni DNS, ni pkarr) : un ami n'est joignable que par ces indices et par les adresses mémorisées. La découverte par DHT Mainline, sans tiers, est une piste future non implémentée (voir §7).
 - **Relais** : nécessaire car le hole punching échoue dans ~10-20 % des cas (NAT symétrique, réseaux stricts). Il établit la connexion puis transporte le trafic en dernier recours. Binaire `iroh-relay`, ne stocke rien.
 
 ### Schéma
@@ -79,7 +79,7 @@ Chaque launcher contient : client Tauri, nœud P2P (Iroh), store de blobs adress
 **Flux :**
 1. B clique sur « Mon code ami » : il obtient une chaîne courte (`mcl1-…`) ou un lien `launcher://add/…`. Le code contient sa clé publique ed25519, un `epoch` (régénération) et des indices de connexion : l'URL du relais d'attache et, **seulement si le relais est désactivé**, jusqu'à 8 adresses IP directes (`code_hints`, `src-tauri/src/iroh_backend.rs`). Aucun secret ; par défaut pas d'IP : il peut être posté sur Discord. Le CRC-32 ne détecte que les fautes de frappe, il n'apporte aucune sécurité.
 2. A colle le code dans « Ajouter un ami ».
-3. Le launcher de A contacte B par sa clé publique, via le relais d'attache du code puis hole punching (Iroh/QUIC). A n'a jamais besoin de connaître l'IP. La découverte publique (pkarr/DNS n0) existe dans `p2p/src/relay.rs` mais est **désactivée en dur** (`address_lookup: false`, `iroh_backend.rs`) : un pair n'est joignable que par les indices de son code.
+3. Le launcher de A contacte B par sa clé publique, via le relais d'attache du code puis hole punching (Iroh/QUIC). A n'a jamais besoin de connaître l'IP. Aucun service de découverte n'est configuré sur l'endpoint (`build_endpoint`, `p2p/src/relay.rs` : preset `Minimal`, rien n'est publié ni interrogé) : un pair n'est joignable que par les indices de son code. Le relais par défaut reste celui d'n0 (tiers : il voit l'IP et des métadonnées, jamais le contenu).
 4. A et B échangent des messages signés sur l'ALPN `cubelink/friend/1` (`p2p/src/friend_proto.rs`) : demande (pseudo + engagement `H(clé|nonce)`), engagement de B, révélation des deux nonces, puis décision signée de B. Les engagements empêchent de « grinder » le code de vérification.
 5. Les deux côtés calculent le même **code de vérification** (64 bits, « 3F9A · C21B · 77D0 · 5E14 ») à comparer à l'oral : c'est la seule protection contre un homme du milieu.
 6. B accepte ; A crée l'ami à la réception d'une acceptation signée valide, B le crée dans `accept`. Les amis sont créés avec le niveau de confiance « demander ».
@@ -116,7 +116,8 @@ Chaque launcher contient : client Tauri, nœud P2P (Iroh), store de blobs adress
 ## 7. Points ouverts
 - Politique de limitation du relais (débit, taille).
 - **Reconnexion après redémarrage** : traitée. `FriendsDb` passe en schéma v2 (migration automatique de la v1) avec une table `friend_addrs` ; les adresses d'amis sont rechargées au démarrage et rafraîchies à chaque connexion reçue, et l'adresse du demandeur est conservée à l'acceptation (test `src-tauri/tests/friend_reconnect.rs`). **Limite restante** : si les DEUX nœuds changent d'adresse en même temps, il faut le relais (ou une découverte publique) pour se retrouver.
-- Découverte publique optionnelle (pkarr/DNS n0) : décision de confidentialité à prendre (n0 voit la clé, le relais et l'IP).
+- **Découverte publique** : décision prise, pas de découverte n0 (pkarr/DNS). Le réglage `discovery` et le code associé ont été supprimés. Piste future, sans tiers : la DHT Mainline (ticket séparé, non implémentée).
+- **Limites connues de confidentialité** : le statut « en jeu » est visible de tous les amis acceptés (octet facultatif du `PONG`) ; un membre de groupe Hearth qui n'est pas ami peut ouvrir un tunnel vers le monde du groupe ; la poignée de main QUIC est ouverte à qui connaît la clé publique (`p2p/src/presence.rs`) ; sans relais, le code ami contient des IP ; les images des descriptions de mods sont chargées depuis des hôtes tiers (`img-src https:`, `core/src/art.rs`) ; les sondes de présence (30 s) ne ralentissent pas pour un ami hors ligne.
 - Fonction « amis ayant joué au modpack » : nouvelle donnée réseau, à cadrer (opt-in, amis acceptés seulement, protocole versionné et signé).
 - Code de vérification : la comparaison est maintenant imposée dans l'interface (case à cocher avant « Accepter »), mais pas par le protocole ; code de 64 bits à allonger ?
 - Cache anti-rejeu en mémoire (vidé au redémarrage) ; sauvegarde de `identity.key`.

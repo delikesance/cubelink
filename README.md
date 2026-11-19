@@ -161,9 +161,8 @@ Le dépôt est prêt pour les agents : [`CLAUDE.md`](CLAUDE.md) décrit le flux 
 - [x] Refonte de l'interface, distribution via le Microsoft Store
 - [x] La Scène : le jeu dans la fenêtre du lanceur (Windows, Linux X11)
 - [ ] Essai réel à deux machines distantes, pour valider le jeu à plusieurs de bout en bout
-- [ ] Relais auto-hébergé et plafonné (aujourd'hui : relais publics d'Iroh)
 - [ ] Validation de la version Linux
-- [ ] Découverte publique optionnelle des amis (décision de confidentialité à prendre)
+- [ ] Retrouver un ami dont l'adresse a changé par la DHT Mainline, sans serveur tiers (aujourd'hui : indices du code ami et adresses mémorisées)
 
 L'état détaillé vit dans [`plan.md`](plan.md) et [`docs/architecture.md`](docs/architecture.md).
 

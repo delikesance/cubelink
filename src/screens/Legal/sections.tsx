@@ -30,10 +30,11 @@ export const SECTIONS: LegalSection[] = [
         <ul>
           <li>Ton pseudo Minecraft, affiché à tes amis. Cubelink ne le vérifie pas auprès d'eux.</li>
           <li>Une clé publique générée au premier lancement, qui identifie ton installation.</li>
-          <li>Ton adresse IP, visible de tes amis en connexion directe et du relais quand il transmet ton trafic.</li>
-          <li>Un cache local de mods, sur ton disque.</li>
+          <li>Ton adresse IP, visible de tes amis en connexion directe et du relais quand il transmet ton trafic. Si tu désactives le relais, elle est aussi écrite dans ton code ami.</li>
+          <li>Le fait qu'un jeu tourne chez toi (statut «&nbsp;en jeu&nbsp;»), visible de tes amis.</li>
+          <li>Un cache local de mods, sur ton disque. Pour un monde de groupe Hearth, une copie du monde est conservée chez les autres membres du groupe.</li>
         </ul>
-        <p>Cubelink ne stocke ni ton compte ni ta liste d'amis sur un serveur. Un relais peut transmettre ton trafic quand la connexion directe échoue.</p>
+        <p>Cubelink ne stocke ni ton compte ni ta liste d'amis sur un serveur, et ne publie ni ta clé ni ton adresse dans un annuaire public. Un relais peut transmettre ton trafic quand la connexion directe échoue. Cubelink peut démarrer avec ta session (réglage modifiable) pour que tes amis te retrouvent. Les images des descriptions de mods viennent de sites tiers, qui voient ton adresse IP.</p>
         <details className="legal-more">
           <summary>En savoir plus</summary>
           <p>Ta liste d'amis reste sur ton ordinateur, et aucune donnée de compte n'est conservée sur un serveur du projet. La connexion à ton compte Microsoft se fait directement entre ton ordinateur et Microsoft.</p>
@@ -47,6 +48,7 @@ export const SECTIONS: LegalSection[] = [
       <>
         <h3>Le relais</h3>
         <p>Un relais est un serveur intermédiaire. Il transmet ton trafic quand la connexion directe échoue, ou si tu as choisi «&nbsp;Passer toujours par le relais&nbsp;». Il voit alors ton adresse IP.</p>
+        <p>Par défaut, Cubelink utilise les relais publics du projet Iroh, gérés par la société n0 et non par Cubelink. Ils voient ton adresse IP et des informations techniques sur la connexion.</p>
         <p>Ce que le relais peut lire du contenu transmis n'est pas encore établi&nbsp;: ne pars pas du principe qu'il ne voit rien. Cette partie sera précisée une fois le fonctionnement du relais validé.</p>
       </>
     ),

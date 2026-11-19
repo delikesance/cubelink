@@ -1,6 +1,6 @@
 # Cubelink Privacy Policy
 
-**Last updated:** November 11, 2026
+**Last updated:** November 19, 2026
 **Developer:** Delikesance
 **Contact:** open an issue at https://github.com/delikesance/cubelink/issues
 
@@ -24,14 +24,21 @@ To work, Cubelink connects to third-party services. These services receive your 
 - **Modrinth and CurseForge:** searching and downloading mods and modpacks.
 - **Adoptium:** downloading a Java runtime if one is needed.
 - **GitHub (github.com/delikesance/cubelink):** checking for updates, when the app was not installed from the Microsoft Store.
+- **Third-party image hosts:** the description of a mod or modpack (from Modrinth or CurseForge) can contain images. They are loaded directly from the host that serves them, which sees your IP address.
+- **Public relay servers operated by n0 (the Iroh project):** used by default to connect you with friends (see "Playing with friends"). They see your IP address and technical metadata, never the content of your traffic.
+
+Cubelink does not publish your key or your IP address in any public directory (no DNS or pkarr directory, no DHT), and does not query one to find your friends.
 
 ## Playing with friends
 Cubelink lets you share a modpack and a Minecraft world with friends, directly between devices (peer to peer). When you add a friend:
 - you exchange a short verification code and the device keys needed to recognise each other;
-- your friend can see whether you are online and, when you share, your instance name, mod list and the files needed to join;
-- connections are made directly between devices when possible, or through a relay server when a direct connection is not possible. A relay only forwards encrypted traffic; it cannot read its content. The relay operator sees technical metadata such as IP addresses.
+- your friend can see whether you are online and whether a game is running on your device (the "in game" status), and, when you share, your instance name, mod list and the files needed to join;
+- Cubelink can start with your computer session (option in Settings) so that your friends can reach you; while it runs, it answers your friends' presence checks;
+- connections are made directly between devices when possible, or through a relay server when a direct connection is not possible. A relay only forwards encrypted traffic; it cannot read its content. The relay operator (n0 by default) sees technical metadata such as IP addresses;
+- your friend code contains your public key and the address of your relay. If you turn the relay off in Settings, it also contains your IP addresses (up to 8): share it only with people you trust. Your friends' devices remember your last known addresses to find you again; nothing is published for this;
+- with Hearth group worlds, copies of the world are kept on the devices of the other group members.
 
-Only people you accept as friends can connect to you. You can remove a friend at any time.
+Only people you accept as friends can ask to join your world. Members of one of your Hearth groups who are not your friends can open a game tunnel to the group's world, and the connection handshake (QUIC) is visible to anyone who knows your public key, without any data being exchanged. You can remove a friend at any time.
 
 ## What we do not do
 - We do not sell or share your data.

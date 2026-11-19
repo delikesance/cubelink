@@ -201,7 +201,7 @@ export function Shell({ services }: { services?: Services } = {}) {
         {/* Monté (et déjà dessiné) sous la fenêtre du jeu tant que le jeu est affiché : la découpe animée de la fenêtre du jeu
             le révèle, sans flash. Fermé : inerte (ni focus ni clic). */}
         {stage.attached && stage.game && (
-          <div className="ov-dock" data-open={stage.panel || undefined} {...(stage.panel ? {} : { inert: "" })}>
+          <div className="ov-dock" data-open={stage.panel || undefined} inert={!stage.panel}>
             <InGamePanel open={stage.panel} />
           </div>
         )}

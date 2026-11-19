@@ -113,6 +113,9 @@ pub struct AppState {
     pub game: Mutex<Option<String>>,
     /// Processus de jeu en cours (id de l'instance + poignée d'arrêt) ; vide pendant la préparation.
     pub game_handle: Mutex<Option<(String, Arc<RunningGame>)>>,
+    /// Drapeau d'annulation de la préparation en cours (id de l'instance + drapeau). Posé avec `game` au clic sur « Jouer »,
+    /// levé par `instances_kill` tant que le jeu n'est pas démarré, remis à vide par `GameGuard`.
+    pub launch_cancel: Mutex<Option<(String, Arc<AtomicBool>)>>,
     /// Zone de jeu integree a la fenetre du launcher (Windows) : rideau et adoption de la fenetre du jeu.
     pub stage: crate::stage::Stage,
     pub join: Mutex<Option<JoinSession>>,
@@ -407,6 +410,7 @@ impl AppState {
             pending_login: Mutex::new(None),
             game: Mutex::new(None),
             game_handle: Mutex::new(None),
+            launch_cancel: Mutex::new(None),
             stage,
             join: Mutex::new(None),
             lan_agent: Mutex::new(None),

@@ -42,7 +42,7 @@ export const commands = {
 	instancesLaunch: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("instances_launch", { id }, options),
 	/**  Versions de Minecraft disponibles. */
 	minecraftVersions: (options?: InvokeOptions) => __TAURI_INVOKE<string[]>("minecraft_versions", undefined, options),
-	/**  Arrête le jeu de l'instance. */
+	/**  Arrête le jeu de l'instance. Pendant la préparation (état `preparing`), annule le lancement : `launch://state` passe à `exited` sans message. */
 	instancesKill: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("instances_kill", { id }, options),
 	/**  Supprime l'instance (refusé si elle est en lancement ou en jeu). */
 	instancesDelete: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("instances_delete", { id }, options),

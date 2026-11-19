@@ -2,14 +2,15 @@
 //! Idempotent : tout ce qui est déjà présent et valide est sauté.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use core_lib::java::{default_search_dirs, find_installed, required_java_major, select_for};
 use core_lib::java_install;
 use core_lib::launch_args::LaunchVersion;
 use core_lib::loader::{fabric, forge, neoforge, quilt};
-use core_lib::mojang::assets::{download_assets, fetch_asset_index};
+use core_lib::mojang::assets::{download_assets_with, fetch_asset_index, DownloadOptions};
 use core_lib::loader::fabric::FabricClient;
 use core_lib::mojang::libraries::{self, Arch, Library, Os};
 use core_lib::mojang::natives::extract_natives;
@@ -113,6 +114,30 @@ async fn fetch_bytes(client: &reqwest::Client, url: &str) -> Result<Vec<u8>> {
     Ok(b.to_vec())
 }
 
+/// Intervalle de lecture du drapeau d'annulation pendant une requête réseau.
+const CANCEL_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+
+fn check_cancel(cancel: &AtomicBool) -> Result<()> {
+    if cancel.load(Ordering::SeqCst) {
+        Err(Error::Cancelled)
+    } else {
+        Ok(())
+    }
+}
+
+/// Attend `fut`, mais rend `Error::Cancelled` dès que `cancel` est levé (le futur est abandonné : la connexion se ferme).
+/// Réservé aux étapes réseau dont l'abandon est sans danger (écritures atomiques) : jamais autour d'un `spawn_blocking`.
+pub(crate) async fn cancellable<T>(cancel: &AtomicBool, fut: impl Future<Output = Result<T>>) -> Result<T> {
+    check_cancel(cancel)?;
+    tokio::pin!(fut);
+    loop {
+        tokio::select! {
+            r = &mut fut => return r,
+            _ = tokio::time::sleep(CANCEL_POLL) => check_cancel(cancel)?,
+        }
+    }
+}
+
 fn valid_on_disk(dest: &Path, size: Option<u64>) -> bool {
     std::fs::metadata(dest).map(|m| m.is_file() && m.len() > 0 && size.is_none_or(|s| s == m.len())).unwrap_or(false)
 }
@@ -167,7 +192,7 @@ async fn vanilla_json(paths: &Paths, client: &reqwest::Client, mc: &str) -> Resu
     Ok(parsed)
 }
 
-async fn resolve_java(paths: &Paths, required: u32, setting: Option<&str>) -> Result<PathBuf> {
+async fn resolve_java(paths: &Paths, required: u32, setting: Option<&str>, cancel: &Arc<AtomicBool>) -> Result<PathBuf> {
     // Mode test : chemin de java imposé (faux java).
     let forced = crate::test_hooks::hooks().java_path.as_ref().map(|p| p.display().to_string());
     if let Some(p) = forced.as_deref().or(setting) {
@@ -182,11 +207,15 @@ async fn resolve_java(paths: &Paths, required: u32, setting: Option<&str>) -> Re
         return Ok(i.path.clone());
     }
     let (os, arch) = (java_install::host_os(), java_install::host_arch());
-    let pkg = match &crate::test_hooks::hooks().adoptium {
-        Some(u) => java_install::resolve_package_from(u, required, os, arch).await?,
-        None => java_install::resolve_package(required, os, arch).await?,
-    };
-    let cancel = Arc::new(AtomicBool::new(false));
+    let pkg = cancellable(cancel, async {
+        match &crate::test_hooks::hooks().adoptium {
+            Some(u) => java_install::resolve_package_from(u, required, os, arch).await,
+            None => java_install::resolve_package(required, os, arch).await,
+        }
+    })
+    .await?;
+    // `install` lit le drapeau pendant le téléchargement et avant l'extraction.
+    let cancel = cancel.clone();
     let done = if crate::test_hooks::hooks().skip_java_probe {
         let probe = Arc::new(crate::test_hooks::FakeProbe(pkg.major));
         java_install::install_with(&pkg, &paths.java, |_, _| {}, cancel, probe).await?
@@ -249,6 +278,7 @@ async fn install_loader(
     spec: &LoaderSpec,
     vanilla: &VersionJson,
     java: &Path,
+    cancel: &AtomicBool,
 ) -> Result<LaunchVersion> {
     let dir = paths.loaders.join(loader_key(mc, spec));
     tokio::fs::create_dir_all(&dir).await?;
@@ -261,19 +291,19 @@ async fn install_loader(
                 Some(p) => p,
                 None => {
                     let p = if spec.loader == Loader::Fabric {
-                        fabric_client().fetch_profile(mc, &spec.version).await?
+                        cancellable(cancel, fabric_client().fetch_profile(mc, &spec.version)).await?
                     } else {
-                        quilt_client().fetch_profile(mc, &spec.version).await?
+                        cancellable(cancel, quilt_client().fetch_profile(mc, &spec.version)).await?
                     };
                     write_atomic(&profile_file, p.to_string().as_bytes()).await?;
                     p
                 }
             };
             if spec.loader == Loader::Fabric {
-                fabric_client().install(&profile, &paths.libraries, &versions_dir).await?;
+                cancellable(cancel, fabric_client().install(&profile, &paths.libraries, &versions_dir)).await?;
                 Ok(LaunchVersion::Merged(fabric::merge_with_vanilla(vanilla, &profile)))
             } else {
-                quilt_client().install(&profile, &paths.libraries, &versions_dir).await?;
+                cancellable(cancel, quilt_client().install(&profile, &paths.libraries, &versions_dir)).await?;
                 Ok(LaunchVersion::Merged(quilt::merge_with_vanilla(vanilla, &profile)))
             }
         }
@@ -282,9 +312,9 @@ async fn install_loader(
             let is_neo = spec.loader == Loader::NeoForge;
             if !valid_on_disk(&installer, None) {
                 if is_neo {
-                    neoforge_client().download_installer(&spec.version, &installer).await?;
+                    cancellable(cancel, neoforge_client().download_installer(&spec.version, &installer)).await?;
                 } else {
-                    forge_client().download_installer(mc, &spec.version, &installer).await?;
+                    cancellable(cancel, forge_client().download_installer(mc, &spec.version, &installer)).await?;
                 }
             }
             let ctx = neoforge::ProcessContext {
@@ -297,8 +327,10 @@ async fn install_loader(
             let merged = if is_neo {
                 let profile = neoforge::parse_installer(&installer)?;
                 if !marker.exists() {
-                    neoforge_client().install_libraries(&profile, &paths.libraries).await?;
+                    cancellable(cancel, neoforge_client().install_libraries(&profile, &paths.libraries)).await?;
                     neoforge::write_version_json(&profile, &versions_dir).await?;
+                    // Les processeurs (Java synchrone) ne s'interrompent pas : on ne les démarre pas si l'annulation est déjà demandée.
+                    check_cancel(cancel)?;
                     run_processors_blocking(installer.clone(), ctx, java.to_path_buf(), true).await?;
                     tokio::fs::write(&marker, b"ok").await?;
                 }
@@ -309,10 +341,11 @@ async fn install_loader(
                     match inst.era {
                         forge::Era::Legacy => forge::extract_universal(&inst, &paths.libraries)?,
                         forge::Era::Modern => {
-                            neoforge_client().install_libraries(&inst.profile, &paths.libraries).await?
+                            cancellable(cancel, neoforge_client().install_libraries(&inst.profile, &paths.libraries)).await?
                         }
                     }
                     neoforge::write_version_json(&inst.profile, &versions_dir).await?;
+                    check_cancel(cancel)?;
                     run_processors_blocking(installer.clone(), ctx, java.to_path_buf(), false).await?;
                     tokio::fs::write(&marker, b"ok").await?;
                 }
@@ -342,29 +375,43 @@ async fn run_processors_blocking(installer: PathBuf, ctx: neoforge::ProcessConte
     .map_err(|_| Error::Other("installation du loader interrompue".into()))?
 }
 
-/// Prépare tout ce qu'il faut pour lancer `inst`.
+/// Prépare tout ce qu'il faut pour lancer `inst` (sans annulation possible : création, import, rejoindre un ami).
 pub async fn ensure_game(paths: &Paths, inst: &Instance, java_setting: Option<String>, progress: Progress) -> Result<Prepared> {
+    ensure_game_with(paths, inst, java_setting, progress, Arc::new(AtomicBool::new(false))).await
+}
+
+/// Comme [`ensure_game`], mais `cancel` levé => `Error::Cancelled` : tout de suite pour les requêtes réseau (le futur est
+/// abandonné), à l'étape suivante pour l'installation des processeurs du loader et l'extraction des natives (blocs bloquants,
+/// courts ou idempotents, qu'on ne coupe jamais au milieu).
+pub async fn ensure_game_with(
+    paths: &Paths,
+    inst: &Instance,
+    java_setting: Option<String>,
+    progress: Progress,
+    cancel: Arc<AtomicBool>,
+) -> Result<Prepared> {
+    check_cancel(&cancel)?;
     if !safe_version(&inst.minecraft) || (inst.loader.loader != Loader::Vanilla && !safe_version(&inst.loader.version)) {
         return Err(Error::Invalid("version de Minecraft ou de loader invalide".into()));
     }
     let client = http()?;
     progress("Récupération de la version Minecraft…".into());
-    let vanilla = vanilla_json(paths, &client, &inst.minecraft).await?;
+    let vanilla = cancellable(&cancel, vanilla_json(paths, &client, &inst.minecraft)).await?;
 
     progress("Recherche de Java…".into());
     let required = required_java_major(&inst.minecraft, vanilla.java_version.as_ref().map(|j| j.major_version));
-    let java = resolve_java(paths, required, java_setting.as_deref()).await?;
+    let java = resolve_java(paths, required, java_setting.as_deref(), &cancel).await?;
 
     progress("Téléchargement du jeu…".into());
     let client_jar = paths.versions.join(&inst.minecraft).join(format!("{}.jar", inst.minecraft));
     let dl = &vanilla.downloads.client;
-    download_verified(&client, &dl.url, &client_jar, Some(&dl.sha1), Some(dl.size)).await?;
+    cancellable(&cancel, download_verified(&client, &dl.url, &client_jar, Some(&dl.sha1), Some(dl.size))).await?;
 
     let spec = LoaderSpec { loader: inst.loader.loader, version: inst.loader.version.clone() };
     if spec.loader != Loader::Vanilla {
         progress("Installation du loader…".into());
     }
-    let version = install_loader(paths, &client_jar, &inst.minecraft, &spec, &vanilla, &java).await?;
+    let version = install_loader(paths, &client_jar, &inst.minecraft, &spec, &vanilla, &java, &cancel).await?;
 
     progress("Téléchargement des bibliothèques…".into());
     let raw_libs = match &version {
@@ -372,8 +419,9 @@ pub async fn ensure_game(paths: &Paths, inst: &Instance, java_setting: Option<St
         LaunchVersion::Merged(m) => m.libraries.clone(),
     };
     let libs = libraries::resolve(&raw_libs, Os::current(), Arch::current())?;
-    missing_libs(&client, &libs, &paths.libraries).await?;
+    cancellable(&cancel, missing_libs(&client, &libs, &paths.libraries)).await?;
 
+    check_cancel(&cancel)?;
     let natives_dir = paths.natives.join(&inst.id);
     let (l, ld, nd) = (libs.clone(), paths.libraries.clone(), natives_dir.clone());
     tokio::task::spawn_blocking(move || extract_natives(&l, &ld, &nd))
@@ -381,9 +429,11 @@ pub async fn ensure_game(paths: &Paths, inst: &Instance, java_setting: Option<St
         .map_err(|_| Error::Other("extraction des natives interrompue".into()))??;
 
     progress("Téléchargement des ressources…".into());
-    let index = fetch_asset_index(&vanilla.asset_index, &paths.assets).await?;
+    let index = cancellable(&cancel, fetch_asset_index(&vanilla.asset_index, &paths.assets)).await?;
     let resources = crate::test_hooks::hooks().resources_url();
-    download_assets(&index, &paths.assets, resources.as_deref(), |_| {}, 8).await?;
+    // `download_assets_with` lit le drapeau entre les objets ; les requêtes en vol sont abandonnées avec lui.
+    let opts = DownloadOptions { cancel: cancel.clone(), ..DownloadOptions::default() };
+    cancellable(&cancel, download_assets_with(&index, &paths.assets, resources.as_deref(), |_| {}, &opts)).await?;
 
     Ok(Prepared {
         java,
@@ -418,6 +468,49 @@ mod tests {
         assert!(t.elapsed() < Duration::from_secs(3), "{:?}", t.elapsed());
         assert!(matches!(&err, Error::Network(m) if m.contains("délai dépassé")), "{err:?}");
         srv.abort();
+    }
+
+    /// Une requête qui ne répond jamais s'interrompt dès que le drapeau est levé (et pas au bout du délai réseau).
+    #[tokio::test]
+    async fn annulation_interrompt_une_requete_bloquee() {
+        use std::time::{Duration, Instant};
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/lib.jar", l.local_addr().unwrap());
+        let srv = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((s, _)) = l.accept().await {
+                held.push(s);
+            }
+        });
+        let client = core_lib::http::builder_with(Duration::from_secs(30), Duration::from_secs(30)).build().unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let c2 = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            c2.store(true, Ordering::SeqCst);
+        });
+        let t = Instant::now();
+        let err = cancellable(&cancel, fetch_bytes(&client, &url)).await.unwrap_err();
+        assert!(matches!(err, Error::Cancelled), "{err:?}");
+        assert!(t.elapsed() >= Duration::from_millis(200) && t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
+        srv.abort();
+    }
+
+    #[tokio::test]
+    async fn drapeau_deja_leve_rien_n_est_lance() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path());
+        let cancel = Arc::new(AtomicBool::new(true));
+        // `cancellable` refuse de démarrer
+        let r: Result<()> = cancellable(&cancel, async { panic!("ne doit pas être lancé") }).await;
+        assert!(matches!(r, Err(Error::Cancelled)));
+        // `ensure_game_with` rend `Cancelled` avant tout accès réseau ou disque
+        let store = core_lib::instance::InstanceStore::new(paths.instances.clone());
+        let inst = store.create("T", "1.21.1", LoaderSpec { loader: Loader::Vanilla, version: String::new() }, 2048).unwrap();
+        let progress: Progress = Arc::new(|m| panic!("aucune étape ne doit démarrer : {m}"));
+        let err = ensure_game_with(&paths, &inst, None, progress, cancel).await.unwrap_err();
+        assert!(matches!(err, Error::Cancelled), "{err:?}");
+        assert!(!paths.versions.join("1.21.1").exists());
     }
 
     #[test]

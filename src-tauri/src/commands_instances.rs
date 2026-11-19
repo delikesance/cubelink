@@ -14,7 +14,7 @@ use core_lib::types::{Instance, Loader, LoaderSpec, Profile};
 use tauri::State;
 
 use crate::error::{sanitize, user_msg};
-use crate::install::{ensure_game, resolve_loader_version, safe_version, Progress};
+use crate::install::{ensure_game, ensure_game_with, resolve_loader_version, safe_version, Progress};
 use crate::state::{lock, AppState};
 
 pub(crate) fn valid_id(id: &str) -> bool {
@@ -287,6 +287,7 @@ impl Drop for GameGuard {
         // Sans effet si la fin du jeu a deja ete annoncee.
         self.0.stage.run_finished();
         *lock(&self.0.game_handle) = None;
+        *lock(&self.0.launch_cancel) = None;
         *lock(&self.0.game) = None;
     }
 }
@@ -453,6 +454,8 @@ impl AppState {
                 return Err("une partie est déjà en cours de préparation ou de jeu".into());
             }
             *g = Some(inst.id.clone());
+            // Sous le verrou `game` : un seul lancement à la fois, donc un seul drapeau.
+            *lock(&self.launch_cancel) = Some((inst.id.clone(), Arc::new(AtomicBool::new(false))));
         }
         // Zone de jeu integree : les panneaux se ferment des le clic (sur le launcher, ou sur le jeu qui vient de se fermer).
         let what = format!("{} ({}, {:?})", inst.id, inst.minecraft, inst.loader.loader);
@@ -483,49 +486,79 @@ impl AppState {
             self.stage.abort_switch("le jeu suivant s'ouvre hors de la fenetre du launcher");
         }
         let me = self.clone();
+        let cancel = lock(&self.launch_cancel).as_ref().map(|(_, f)| f.clone()).unwrap_or_default();
         // Runtime de Tauri (et non `tokio::spawn`) : valable même appelée hors d'un runtime tokio.
         tauri::async_runtime::spawn(async move {
-            let _guard = GameGuard(me.clone());
-            let joined = join.is_some();
-            me.run_game(inst, profile, token, join).await;
-            me.stage.run_finished();
-            if joined {
-                me.join_close_tunnel().await;
+            let id = inst.id.clone();
+            let cancelled = {
+                let _guard = GameGuard(me.clone());
+                let joined = join.is_some();
+                let cancelled = me.run_game(inst, profile, token, join, cancel).await;
+                me.stage.run_finished();
+                if joined {
+                    me.join_close_tunnel().await;
+                }
+                cancelled
+            };
+            // Annulé pendant la préparation : `exited` part une fois `game` libéré, pour qu'un nouveau clic sur « Jouer » passe.
+            if cancelled {
+                me.emit_state(&id, LaunchPhase::Exited, None);
             }
         });
         Ok(())
     }
 
-    fn emit_state(&self, id: &str, state: LaunchPhase, message: Option<String>) {
+    pub(crate) fn emit_state(&self, id: &str, state: LaunchPhase, message: Option<String>) {
         self.emit_event("launch://state", &LaunchStateEvent { id: id.to_string(), state, message });
     }
 
     /// Lance le jeu ; si l'agent LAN fait planter la JVM au chargement (erreur native impossible à attraper côté
     /// Java), relance UNE fois la même instance sans agent et désactive l'agent pour la session.
-    async fn run_game(self: &Arc<Self>, inst: Instance, profile: Profile, token: Option<String>, join_server: Option<(String, u16)>) {
+    /// Renvoie `true` si le lancement a été annulé avant le démarrage du jeu (l'événement `exited` reste à émettre).
+    async fn run_game(
+        self: &Arc<Self>,
+        inst: Instance,
+        profile: Profile,
+        token: Option<String>,
+        join_server: Option<(String, u16)>,
+        cancel: Arc<AtomicBool>,
+    ) -> bool {
         let mut crashed = false;
-        self.run_game_once(inst.clone(), profile.clone(), token.clone(), join_server.clone(), &mut crashed).await;
+        if self.run_game_once(inst.clone(), profile.clone(), token.clone(), join_server.clone(), &mut crashed, &cancel).await {
+            return true;
+        }
         if crashed {
             self.lan_agent_off.store(true, std::sync::atomic::Ordering::SeqCst);
             eprintln!("[Cubelink] LAN: l'agent a fait planter la JVM, relance sans agent");
-            self.run_game_once(inst, profile, token, join_server, &mut false).await;
+            return self.run_game_once(inst, profile, token, join_server, &mut false, &cancel).await;
         }
+        false
     }
 
-    async fn run_game_once(self: &Arc<Self>, inst: Instance, profile: Profile, token: Option<String>, join_server: Option<(String, u16)>, crashed: &mut bool) {
+    /// `true` : annulé pendant la préparation, avant le démarrage du jeu (rien n'a été émis : voir `run_game`).
+    async fn run_game_once(
+        self: &Arc<Self>,
+        inst: Instance,
+        profile: Profile,
+        token: Option<String>,
+        join_server: Option<(String, u16)>,
+        crashed: &mut bool,
+        cancel: &Arc<AtomicBool>,
+    ) -> bool {
         let id = inst.id.clone();
         self.emit_state(&id, LaunchPhase::Preparing, None);
         let me = self.clone();
         let pid = id.clone();
         let progress: Progress = Arc::new(move |m| me.emit_state(&pid, LaunchPhase::Preparing, Some(m)));
         let java_setting = inst.java_path.clone().filter(|j| !j.trim().is_empty()).or_else(|| self.settings_get().java_path);
-        let prepared = match ensure_game(&self.paths, &inst, java_setting, progress).await {
+        let prepared = match ensure_game_with(&self.paths, &inst, java_setting, progress, cancel.clone()).await {
             Ok(p) => p,
-            Err(e) => return self.emit_state(&id, LaunchPhase::Failed, Some(user_msg(&e))),
+            Err(core_lib::types::Error::Cancelled) => return true,
+            Err(e) => return self.fail(&id, user_msg(&e)),
         };
         let game_dir = match self.instances.game_dir(&id) {
             Ok(d) => d,
-            Err(e) => return self.emit_state(&id, LaunchPhase::Failed, Some(user_msg(&e))),
+            Err(e) => return self.fail(&id, user_msg(&e)),
         };
         // Rejoindre : l'écran d'accueil « accessibilité » d'un dossier neuf bloquerait la connexion directe.
         if join_server.is_some() {
@@ -581,17 +614,21 @@ impl AppState {
         };
         let mut cmd = match build_command(&spec) {
             Ok(c) => c,
-            Err(e) => return self.emit_state(&id, LaunchPhase::Failed, Some(user_msg(&e))),
+            Err(e) => return self.fail(&id, user_msg(&e)),
         };
         drop(spec);
         // Essai : fenetre du jeu cachee des sa creation (jamais hors de la zone integree, voir `Stage::hide_start`).
         cmd.hide_first_window = self.stage.hide_start(crate::stage::hide_start_switch());
         let log_dir = self.paths.logs.join(&id);
+        // « Annuler le lancement » arrivé pendant la dernière étape : on ne démarre pas le jeu.
+        if cancel.load(std::sync::atomic::Ordering::SeqCst) {
+            return true;
+        }
         // Le launcher se ferme (fenetre fermee pendant la preparation) : on ne demarre pas un jeu que plus rien ne suivrait.
         // `pass` est garde jusqu'a ce que le jeu soit suivi : une fermeture qui arrive entre-temps attend (voir `QuitGate`).
         let Some(pass) = self.quit.enter_spawn() else {
             self.stage.note("fermeture du launcher pendant la preparation : le jeu n'est pas demarre");
-            return self.emit_state(&id, LaunchPhase::Failed, Some("Cubelink est en train de se fermer".into()));
+            return self.fail(&id, "Cubelink est en train de se fermer".into());
         };
         // Le jeu reste vivant (via `game_handle`) jusqu'à la fin de la boucle : le lâcher l'arrêterait.
         // Linux : un jeu de la Scene est force en X11/XWayland (Wayland natif non adoptable), voir `RunOptions::force_x11`.
@@ -603,16 +640,16 @@ impl AppState {
         };
         let mut game = match launch_run::spawn_with(&cmd, &log_dir, run_opts).await {
             Ok(g) => g,
-            Err(e) => return self.emit_state(&id, LaunchPhase::Failed, Some(user_msg(&e))),
+            Err(e) => return self.fail(&id, user_msg(&e)),
         };
         if self.quit.quitting() {
             // La fermeture est arrivee pendant le demarrage du processus : il est arrete tout de suite, avant toute fenetre.
             self.stage.note("fermeture du launcher pendant le demarrage du jeu : processus arrete");
             let _ = game.kill().await;
-            return self.emit_state(&id, LaunchPhase::Failed, Some("Cubelink est en train de se fermer".into()));
+            return self.fail(&id, "Cubelink est en train de se fermer".into());
         }
         let Some(mut rx) = game.events() else {
-            return self.emit_state(&id, LaunchPhase::Failed, Some("suivi du jeu indisponible".into()));
+            return self.fail(&id, "suivi du jeu indisponible".into());
         };
         let game = Arc::new(game);
         // Invité : Dynamic FPS (et autres) bride le rendu hors premier plan et retarde le quickPlay (voir `foreground`).
@@ -621,6 +658,11 @@ impl AppState {
             cubelink_host::foreground::bring_game_to_front(game.pid);
         }
         *lock(&self.game_handle) = Some((id.clone(), game.clone()));
+        // Clic sur « Annuler le lancement » entre le démarrage du processus et la pose de `game_handle` : on arrête le jeu
+        // tout juste lancé (la boucle ci-dessous émet `exited`).
+        if cancel.load(std::sync::atomic::Ordering::SeqCst) {
+            let _ = game.kill().await;
+        }
         // `stage.staged()` est relu a chaque usage : un repli en cours de lancement rend sa fenetre au jeu, et tout le pilotage
         // du rideau devient alors sans objet (les appels eux-memes sont inertes hors de la zone integree).
         let mut revealed = false;
@@ -684,6 +726,12 @@ impl AppState {
             self.emit_state(&id, LaunchPhase::Exited, None);
         }
         game.wait().await;
+        false
+    }
+
+    fn fail(&self, id: &str, message: String) -> bool {
+        self.emit_state(id, LaunchPhase::Failed, Some(message));
+        false
     }
 }
 
@@ -899,6 +947,74 @@ mod tests {
 
     fn vanilla() -> LoaderSpec {
         LoaderSpec { loader: Loader::Vanilla, version: String::new() }
+    }
+
+    /// Réel (disque, sockets, tâche de lancement) : le jeu à télécharger ne répond jamais ; « Annuler le lancement »
+    /// interrompt la préparation tout de suite, émet `exited` (jamais `failed`), libère l'instance, qui se relance aussitôt.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn annuler_pendant_la_preparation_libere_l_instance() {
+        use std::time::{Duration, Instant};
+        let dir = tempfile::tempdir().unwrap();
+        let (st, events) = test_state(dir.path());
+        // Serveur muet : la connexion TLS vers le jar du jeu reste en attente.
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        let srv = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((s, _)) = l.accept().await {
+                held.push(s);
+            }
+        });
+        let inst = st.instances.create("Lent", "1.21.1", vanilla(), 2048).unwrap();
+        let vdir = st.paths.versions.join("1.21.1");
+        std::fs::create_dir_all(&vdir).unwrap();
+        std::fs::write(
+            vdir.join("1.21.1.json"),
+            serde_json::json!({
+                "id": "1.21.1", "mainClass": "net.minecraft.client.main.Main",
+                "assetIndex": { "id": "17", "url": format!("https://127.0.0.1:{port}/i.json"), "sha1": "0".repeat(40), "size": 1 },
+                "downloads": { "client": { "url": format!("https://127.0.0.1:{port}/c.jar"), "sha1": "0".repeat(40), "size": 10 } },
+                "javaVersion": { "majorVersion": 21 }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        // Java imposé par le réglage : la recherche de Java ne touche pas au réseau.
+        std::fs::create_dir_all(dir.path().join("faux-java")).unwrap();
+        let java = dir.path().join("faux-java").join("java");
+        std::fs::write(&java, b"#!/bin/sh\n").unwrap();
+        lock(&st.settings).java_path = Some(java.display().to_string());
+        *lock(&st.profile) = Some(Profile::Offline { name: "Test".into(), uuid: "00000000-0000-0000-0000-000000000000".into() });
+
+        let states = |events: &crate::state::test_support::Events| -> Vec<(String, Option<String>)> {
+            lock(events)
+                .iter()
+                .filter(|(n, _)| n == "launch://state")
+                .map(|(_, v)| (v["state"].as_str().unwrap().to_string(), v["message"].as_str().map(str::to_string)))
+                .collect()
+        };
+        for tour in 1..=2 {
+            let before = states(&events).len();
+            st.launch_with(&inst.id, None).await.unwrap_or_else(|e| panic!("tour {tour} : {e}"));
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            assert_eq!(lock(&st.game).as_deref(), Some(inst.id.as_str()), "préparation en cours");
+            let t = Instant::now();
+            st.instances_kill(&inst.id).await.unwrap();
+            loop {
+                if states(&events)[before..].iter().any(|(s, _)| s == "exited") {
+                    break;
+                }
+                assert!(t.elapsed() < Duration::from_secs(3), "pas d'exited : {:?}", states(&events));
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            let seq = states(&events)[before..].to_vec();
+            assert!(seq.iter().all(|(s, _)| s != "failed"), "{seq:?}");
+            assert_eq!(seq.last().unwrap(), &("exited".to_string(), None), "{seq:?}");
+            assert!(seq.iter().any(|(s, m)| s == "preparing" && m.as_deref() == Some("Annulation en cours…")), "{seq:?}");
+            // `exited` part après la libération : un nouveau clic sur « Jouer » passe tout de suite.
+            assert!(lock(&st.game).is_none() && lock(&st.launch_cancel).is_none() && lock(&st.game_handle).is_none());
+        }
+        srv.abort();
     }
 
     #[tokio::test]

@@ -367,7 +367,6 @@ pub fn default_settings() -> Settings {
         close_on_launch: false,
         relay_only: false,
         share_mods: true,
-        discovery: true,
         lan_auto: true,
         overlay_enabled: true,
         overlay_hotkey: core_lib::types::DEFAULT_OVERLAY_HOTKEY.into(),

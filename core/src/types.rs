@@ -423,11 +423,6 @@ pub struct Settings {
     pub relay_only: bool,
     /// Réglage du design : envoyer des mods à mes amis.
     pub share_mods: bool,
-    /// Découverte d'adresses publique (pkarr + DNS n0) : retrouver un ami dont l'adresse a changé.
-    /// Publie la clé publique, le relais et les IP auprès de n0. Lu à la création de l'endpoint
-    /// (redémarrage requis). `true` par défaut (fichiers de réglages anciens : `true`).
-    #[serde(default = "default_discovery")]
-    pub discovery: bool,
     /// Ouvrir automatiquement mon monde solo au réseau local (agent Java Cubelink, instances `Own`) pour que mes
     /// amis puissent le rejoindre sans manipulation. `true` par défaut (fichiers de réglages anciens : `true`).
     #[serde(default = "default_lan_auto")]
@@ -462,10 +457,6 @@ fn default_overlay_hotkey() -> String {
     DEFAULT_OVERLAY_HOTKEY.to_string()
 }
 
-fn default_discovery() -> bool {
-    true
-}
-
 fn default_lan_auto() -> bool {
     true
 }
@@ -489,9 +480,19 @@ mod tests {
         assert!(s.overlay_enabled);
         assert!(!s.open_to_all_friends, "anciens réglages : pas d'invitation automatique de tous les amis");
         assert_eq!(s.overlay_hotkey, "Ctrl+Shift+C");
-        assert!(s.discovery && s.lan_auto);
+        assert!(s.lan_auto);
         assert!(s.embedded_game);
         assert!(s.start_with_os);
+    }
+
+    /// #55 : le réglage `discovery` (découverte n0) n'existe plus ; un ancien fichier qui le contient se charge
+    /// sans erreur et il disparaît à la réécriture.
+    #[test]
+    fn ancien_reglage_discovery_est_ignore_puis_supprime() {
+        let old = r#"{"language":"fr","default_ram_mb":4096,"java_path":null,"trust_default":"ask","allow_relay":true,"close_on_launch":false,"relay_only":false,"share_mods":true,"discovery":true}"#;
+        let s: Settings = serde_json::from_str(old).unwrap();
+        let rewritten = serde_json::to_string(&s).unwrap();
+        assert!(!rewritten.contains("discovery"), "{rewritten}");
     }
 
     #[test]

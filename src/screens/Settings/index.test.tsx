@@ -176,19 +176,22 @@ describe("Échap", () => {
 });
 
 describe("découverte des amis", () => {
-  it("case cochée par défaut, décochable, aide mentionnant le redémarrage", async () => {
-    render(<Shell services={createFakeServices({ tickMs: 0 })} />);
+  it("plus de réglage de découverte publique (n0 coupé), et l'envoi ne transmet pas discovery", async () => {
+    const set = vi.fn(async (x) => x);
+    const services = { ...createFakeServices({ tickMs: 0 }), settingsSet: set };
+    render(<Shell services={services} />);
     goTab("Réseau");
-    const box = (await screen.findByLabelText(/Retrouver mes amis même si leur adresse change/)) as HTMLInputElement;
-    expect(box.checked).toBe(true);
-    expect(screen.getByText(/Appliqué au prochain démarrage/)).toBeTruthy();
-    fireEvent.click(box);
-    await waitFor(() => expect(box.checked).toBe(false));
+    await screen.findByLabelText(/Ouvrir mon monde au réseau local automatiquement/);
+    expect(screen.queryByLabelText(/Retrouver mes amis même si leur adresse change/)).toBeNull();
+    expect(screen.queryByText(/serveurs n0/)).toBeNull();
+    fireEvent.click(screen.getByLabelText(/Ouvrir mon monde au réseau local automatiquement/));
+    await waitFor(() => expect(set).toHaveBeenCalled());
+    expect(set.mock.calls[0][0]).not.toHaveProperty("discovery");
   });
 });
 
 describe("ouverture automatique au réseau local", () => {
-  it("case cochée par défaut, envoie tous les champs sans écraser discovery", async () => {
+  it("case cochée par défaut, envoie tous les champs", async () => {
     const set = vi.fn(async (x) => x);
     const services = { ...createFakeServices({ tickMs: 0 }), settingsSet: set };
     render(<Shell services={services} />);
@@ -197,6 +200,6 @@ describe("ouverture automatique au réseau local", () => {
     expect(box.checked).toBe(true);
     fireEvent.click(box);
     await waitFor(() => expect(set).toHaveBeenCalled());
-    expect(set.mock.calls[0][0]).toMatchObject({ lan_auto: false, discovery: true, share_mods: true });
+    expect(set.mock.calls[0][0]).toMatchObject({ lan_auto: false, share_mods: true });
   });
 });

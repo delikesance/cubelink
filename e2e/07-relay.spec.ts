@@ -44,24 +44,17 @@ test.describe('T7 relais : reglages (sans Internet)', () => {
     await openSettings(page);
     await expect(relayCheckbox(page)).toBeChecked();
 
-    // decouverte des amis : persistance dans settings.json
-    const disc = page.getByRole('checkbox', { name: /Retrouver mes amis même si leur adresse change/ });
-    await expect(disc).toBeChecked();
-    await disc.uncheck();
-    await expect(page.locator('[role=status]', { hasText: 'Enregistré' })).toBeVisible();
-    expect(JSON.parse(fs.readFileSync(st.paths.settings_file, 'utf8')).discovery).toBe(false);
-    await disc.check();
-    await expect(page.locator('[role=status]', { hasText: 'Enregistré' })).toBeVisible();
-    expect(JSON.parse(fs.readFileSync(st.paths.settings_file, 'utf8')).discovery).toBe(true);
+    // plus de reglage de decouverte publique (n0 coupe) : ni case, ni champ dans settings.json
+    await expect(page.getByRole('checkbox', { name: /Retrouver mes amis même si leur adresse change/ })).toHaveCount(0);
 
-    // ouverture auto au reseau local : persistance, sans ecraser discovery
+    // ouverture auto au reseau local : persistance, sans ecraser les autres champs
     const lan = page.getByRole('checkbox', { name: /Ouvrir mon monde au réseau local automatiquement/ });
     await expect(lan).toBeChecked();
     await lan.uncheck();
     await expect(page.locator('[role=status]', { hasText: 'Enregistré' })).toBeVisible();
     const f2 = JSON.parse(fs.readFileSync(st.paths.settings_file, 'utf8'));
     expect(f2.lan_auto).toBe(false);
-    expect(f2.discovery).toBe(true);
+    expect(f2).not.toHaveProperty('discovery');
     await lan.check();
     await expect(page.locator('[role=status]', { hasText: 'Enregistré' })).toBeVisible();
 

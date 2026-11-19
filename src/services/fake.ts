@@ -221,7 +221,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
   let codeN = 1;
   let settings: Settings = {
     language: "fr", default_ram_mb: 4096, java_path: null,
-    trust_default: "ask", allow_relay: true, close_on_launch: false, relay_only: false, share_mods: true, discovery: true, lan_auto: true,
+    trust_default: "ask", allow_relay: true, close_on_launch: false, relay_only: false, share_mods: true, lan_auto: true,
     overlay_enabled: true, overlay_hotkey: "Ctrl+Shift+C", embedded_game: true, start_with_os: true, open_to_all_friends: false,
   };
   // Champs que Rust renvoie toujours (voir `Instance` dans bindings.ts), vides par défaut.

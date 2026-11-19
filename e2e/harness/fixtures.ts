@@ -79,7 +79,7 @@ async function startServer(name: string, script: string): Promise<FakeServer> {
 export interface Servers { auth: FakeServer; mojang: FakeServer; modrinth: FakeServer }
 
 // ---------- application ----------
-/** `settings` : champs de Settings ecrits dans settings.json AVANT le demarrage (relay_only, discovery... sont lus au demarrage du backend). */
+/** `settings` : champs de Settings ecrits dans settings.json AVANT le demarrage (relay_only... sont lus au demarrage du backend). */
 export interface AppOptions { relayMode?: string; env?: Record<string, string>; settings?: Record<string, unknown> }
 
 export interface App {
@@ -114,7 +114,7 @@ async function startApp(label: 'A' | 'B', bin: string, servers: Servers, tmpRoot
   fs.mkdirSync(dataDir, { recursive: true });
   fs.mkdirSync(userDataDir, { recursive: true });
   if (opts.settings) {
-    const base = { language: 'fr', default_ram_mb: 4096, java_path: null, trust_default: 'ask', allow_relay: true, close_on_launch: false, relay_only: false, share_mods: true, discovery: true };
+    const base = { language: 'fr', default_ram_mb: 4096, java_path: null, trust_default: 'ask', allow_relay: true, close_on_launch: false, relay_only: false, share_mods: true };
     fs.writeFileSync(path.join(dataDir, 'settings.json'), JSON.stringify({ ...base, ...opts.settings }));
   }
   const cdpPort = await freePort();

@@ -402,10 +402,6 @@ export default function Settings({ testConnection, clearCache }: SettingsProps =
             <input type="checkbox" className="set-check" disabled={dis} checked={!!settings?.relay_only} onChange={(e) => void update({ relay_only: e.target.checked })} />
           </label>
           <label className="set-row" style={{ cursor: "pointer" }}>
-            <div className="set-txt"><b>Retrouver mes amis même si leur adresse change</b><span>Publie ta présence via les serveurs n0 pour que tes amis te retrouvent. Désactive pour rester totalement privé. Appliqué au prochain démarrage.</span></div>
-            <input type="checkbox" className="set-check" disabled={dis} checked={settings?.discovery !== false} onChange={(e) => void update({ discovery: e.target.checked })} />
-          </label>
-          <label className="set-row" style={{ cursor: "pointer" }}>
             <div className="set-txt"><b>Ouvrir mon monde au réseau local automatiquement</b><span>Quand tu entres dans un monde solo, Cubelink l'ouvre pour que tes amis puissent te rejoindre. Appliqué au prochain lancement du jeu.</span></div>
             <input type="checkbox" className="set-check" disabled={dis} checked={settings?.lan_auto !== false} onChange={(e) => void update({ lan_auto: e.target.checked })} />
           </label>

@@ -12,7 +12,7 @@ import { NAME_A, NAME_B, keyOfCode, makeFriends as makeFriendsUi, readMyCode } f
 
 test.skip(process.env.E2E_REAL !== '1', 'Reserve a E2E_REAL=1 : Internet et relais public n0 requis.');
 
-test.use({ appOptions: { relayMode: 'default', settings: { relay_only: true, allow_relay: true, discovery: true } } });
+test.use({ appOptions: { relayMode: 'default', settings: { relay_only: true, allow_relay: true } } });
 
 const timings: Record<string, number> = {};
 async function timed<T>(label: string, f: () => Promise<T>): Promise<T> {
@@ -36,9 +36,8 @@ test('multijoueur reel via le relais public : ami, partage, join, transfert rela
   for (const [app, name] of [[appA, NAME_A], [appB, NAME_B]] as const) {
     await app.page.waitForSelector('main[data-route="login"]');
     await loginOffline(app.page, name);
-    const s = await invoke<{ relay_only: boolean; discovery: boolean }>(app.page, 'settings_get');
+    const s = await invoke<{ relay_only: boolean }>(app.page, 'settings_get');
     expect(s.relay_only, 'relay_only lu depuis settings.json au demarrage').toBe(true);
-    expect(s.discovery).toBe(true);
     expect(JSON.stringify((await testState(app.page)).relay_mode)).toMatch(/default/i);
   }
 

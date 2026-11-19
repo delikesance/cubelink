@@ -469,13 +469,12 @@ pub async fn start_app(
 
 impl IrohBackend {
     pub async fn start(st: &Arc<AppState>, opts: IrohOptions) -> std::result::Result<Arc<Self>, String> {
-        let (allow_relay, relay_only, discovery) = {
+        let (allow_relay, relay_only) = {
             let s = lock(&st.settings);
-            (s.allow_relay, s.relay_only, s.discovery)
+            (s.allow_relay, s.relay_only)
         };
-        // Découverte publique (pkarr + DNS n0) : réglage `discovery`, jamais en mode « sans réseau » des tests.
-        let address_lookup = discovery && opts.relay != RelayChoice::Disabled;
-        let rs = RelaySettings { mode: opts.relay.clone(), relay_only, allow_relay, address_lookup };
+        // Aucune découverte d'adresses publique (n0, pkarr, DNS) : voir `p2p/src/relay.rs`.
+        let rs = RelaySettings { mode: opts.relay.clone(), relay_only, allow_relay };
         let alpns: Vec<Vec<u8>> = [friend_proto::ALPN, PRESENCE_ALPN, INVITE_ALPN, JOIN_REQUEST_ALPN, CONTROL_ALPN, iroh_blobs::ALPN, MANIFEST_ALPN, TUNNEL_ALPN, HEARTH_ALPN, HEARTH_BLOBS_ALPN]
             .iter()
             .map(|a| a.to_vec())

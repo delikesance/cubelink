@@ -1,10 +1,14 @@
 //! Tâche N17 : configuration et observation du relais.
 //!
 //! - [`RelaySettings`] / [`build_endpoint`] : applique « direct seul », « relais seul »,
-//!   relais par défaut (n0) ou auto-hébergé (URL validée).
+//!   relais par défaut (n0) ou personnalisé (URL validée).
 //! - [`PathObserver`] : expose le type de chemin d'une connexion (direct / relais) et ses bascules.
 //! - [`SlowRelayAdvisor`] : décide d'afficher « plus lentement » (fonction pure, temps injecté).
 //! - [`relay_hint_from_code`] : relais d'attache éventuel d'un code ami.
+//!
+//! Aucun service de découverte d'adresses n'est configuré (ni n0, ni DNS, ni pkarr) : l'endpoint ne publie rien
+//! et n'interroge aucun annuaire. Un pair n'est joignable que par les indices de son code ami (relais d'attache,
+//! IP) et par les adresses mémorisées.
 //!
 //! Honnêteté : le relais ne déchiffre pas le trafic QUIC (chiffré de bout en bout), mais il voit
 //! les adresses IP des deux pairs et le volume échangé. Les messages n'affirment pas le contraire.
@@ -28,7 +32,7 @@ use crate::friend_code::{self, FriendCodePayload};
 pub enum RelayChoice {
     /// Relais publics n0 (best effort, ~1 Mo/s : inadapté aux mods).
     Default,
-    /// Relais auto-hébergé (`https://…`, `http://` seulement en loopback pour les tests).
+    /// Relais personnalisé (`https://…`, `http://` seulement en loopback pour les tests).
     Custom(String),
     /// Aucun relais.
     Disabled,
@@ -41,19 +45,11 @@ pub struct RelaySettings {
     /// « Passer toujours par le relais » : aucun transport IP.
     pub relay_only: bool,
     pub allow_relay: bool,
-    /// Service de découverte d'adresses public (n0 : pkarr + DNS). Désactivé dans `Default` (tests, hors
-    /// réseau) ; l'application le pilote par le réglage `Settings.discovery` (activé par défaut).
-    /// Activé, l'endpoint PUBLIE auprès de n0 (`dns.iroh.link`) sa clé publique, son relais
-    /// d'attache et ses adresses IP, et interroge ce service pour retrouver un pair par sa seule
-    /// clé : n0 voit donc qui tu es (clé) et d'où tu te connectes (IP), et peut observer qui tu
-    /// cherches. Désactivé, un pair n'est joignable que via les adresses/relais de son code ami
-    /// (voir [`endpoint_addr_info`]) : aucune fuite vers un tiers.
-    pub address_lookup: bool,
 }
 
 impl Default for RelaySettings {
     fn default() -> Self {
-        Self { mode: RelayChoice::Default, relay_only: false, allow_relay: true, address_lookup: false }
+        Self { mode: RelayChoice::Default, relay_only: false, allow_relay: true }
     }
 }
 
@@ -123,13 +119,6 @@ pub async fn build_endpoint(secret: SecretKey, settings: &RelaySettings, alpns: 
     let mut b = Endpoint::builder(presets::Minimal).secret_key(secret).relay_mode(plan.relay_mode);
     if !plan.ip_transports {
         b = b.clear_ip_transports();
-    }
-    if settings.address_lookup {
-        use iroh::address_lookup::{DnsAddressLookup, PkarrPublisher, PkarrResolver};
-        b = b
-            .address_lookup(PkarrPublisher::n0_dns())
-            .address_lookup(PkarrResolver::n0_dns())
-            .address_lookup(DnsAddressLookup::n0_dns());
     }
     b.alpns(alpns).bind().await.map_err(|e| Error::Network(format!("création de l'endpoint : {e}")))
 }
@@ -414,7 +403,7 @@ mod tests {
     const MB: u64 = 1024 * 1024;
 
     fn settings(mode: RelayChoice, relay_only: bool, allow_relay: bool) -> RelaySettings {
-        RelaySettings { mode, relay_only, allow_relay, address_lookup: false }
+        RelaySettings { mode, relay_only, allow_relay }
     }
 
     // --- mapping pur ---
@@ -620,9 +609,42 @@ mod tests {
         conn.close(0u32.into(), b"done");
     }
 
-    #[test]
-    fn address_lookup_is_off_by_default() {
-        assert!(!RelaySettings::default().address_lookup);
+    /// Non-régression #55 : aucun service de découverte (n0, pkarr, DNS) n'est branché sur l'endpoint, quels que
+    /// soient les réglages : il ne publie rien et n'interroge aucun annuaire.
+    #[tokio::test]
+    async fn endpoint_has_no_address_lookup() {
+        for s in [
+            RelaySettings::default(),
+            settings(RelayChoice::Default, false, true),
+            settings(RelayChoice::Default, true, true),
+            settings(RelayChoice::Disabled, false, false),
+        ] {
+            let ep = build_endpoint(SecretKey::generate(), &s, vec![]).await.unwrap();
+            assert!(ep.address_lookup().unwrap().is_empty(), "aucun service de découverte attendu : {s:?}");
+            ep.close().await;
+        }
+    }
+
+    /// Sans relais ni annuaire, un pair se joint par les seuls indices de son code ami (adresses IP).
+    #[tokio::test]
+    async fn friend_code_hints_alone_connect_without_discovery() {
+        let off = settings(RelayChoice::Disabled, false, false);
+        let a = build_endpoint(SecretKey::generate(), &off, vec![TEST_ALPN.to_vec()]).await.unwrap();
+        let b = build_endpoint(SecretKey::generate(), &off, vec![]).await.unwrap();
+        let a2 = a.clone();
+        let acc = tokio::spawn(async move {
+            let c = a2.accept().await.unwrap().await.unwrap();
+            c.closed().await;
+        });
+        let payload = endpoint_addr_info(&a.addr()).into_payload(*a.id().as_bytes(), 0);
+        assert!(!payload.addrs.is_empty(), "le code doit porter les IP quand le relais est désactivé");
+        let target = endpoint_addr_from_payload(&friend_code::parse(&friend_code::encode(&payload)).unwrap()).unwrap();
+        let conn = tokio::time::timeout(Duration::from_secs(15), b.connect(target, TEST_ALPN)).await.unwrap().unwrap();
+        assert_eq!(wait_kind(&conn).await, PathKind::Direct);
+        conn.close(0u32.into(), b"done");
+        let _ = acc.await;
+        b.close().await;
+        a.close().await;
     }
 
     #[test]

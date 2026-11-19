@@ -1180,7 +1180,6 @@ export type SettingsInput_Deserialize = {
 	close_on_launch: boolean,
 	relay_only?: boolean | null,
 	share_mods?: boolean | null,
-	discovery?: boolean | null,
 	lan_auto?: boolean | null,
 	overlay_enabled?: boolean | null,
 	overlay_hotkey?: string | null,
@@ -1199,7 +1198,6 @@ export type SettingsInput_Serialize = {
 	close_on_launch: boolean,
 	relay_only: boolean | null,
 	share_mods: boolean | null,
-	discovery: boolean | null,
 	lan_auto: boolean | null,
 	overlay_enabled: boolean | null,
 	overlay_hotkey: string | null,
@@ -1220,12 +1218,6 @@ export type Settings_Deserialize = {
 	relay_only: boolean,
 	/**  Réglage du design : envoyer des mods à mes amis. */
 	share_mods: boolean,
-	/**
-	 *  Découverte d'adresses publique (pkarr + DNS n0) : retrouver un ami dont l'adresse a changé.
-	 *  Publie la clé publique, le relais et les IP auprès de n0. Lu à la création de l'endpoint
-	 *  (redémarrage requis). `true` par défaut (fichiers de réglages anciens : `true`).
-	 */
-	discovery?: boolean,
 	/**
 	 *  Ouvrir automatiquement mon monde solo au réseau local (agent Java Cubelink, instances `Own`) pour que mes
 	 *  amis puissent le rejoindre sans manipulation. `true` par défaut (fichiers de réglages anciens : `true`).
@@ -1264,12 +1256,6 @@ export type Settings_Serialize = {
 	relay_only: boolean,
 	/**  Réglage du design : envoyer des mods à mes amis. */
 	share_mods: boolean,
-	/**
-	 *  Découverte d'adresses publique (pkarr + DNS n0) : retrouver un ami dont l'adresse a changé.
-	 *  Publie la clé publique, le relais et les IP auprès de n0. Lu à la création de l'endpoint
-	 *  (redémarrage requis). `true` par défaut (fichiers de réglages anciens : `true`).
-	 */
-	discovery: boolean,
 	/**
 	 *  Ouvrir automatiquement mon monde solo au réseau local (agent Java Cubelink, instances `Own`) pour que mes
 	 *  amis puissent le rejoindre sans manipulation. `true` par défaut (fichiers de réglages anciens : `true`).

@@ -95,8 +95,6 @@ pub struct SettingsInput {
     #[serde(default)]
     pub share_mods: Option<bool>,
     #[serde(default)]
-    pub discovery: Option<bool>,
-    #[serde(default)]
     pub lan_auto: Option<bool>,
     #[serde(default)]
     pub overlay_enabled: Option<bool>,
@@ -125,7 +123,6 @@ pub fn settings_set(state: State<'_, Arc<AppState>>, settings: SettingsInput, ap
         close_on_launch: i.close_on_launch,
         relay_only: i.relay_only.unwrap_or(cur.relay_only),
         share_mods: i.share_mods.unwrap_or(cur.share_mods),
-        discovery: i.discovery.unwrap_or(cur.discovery),
         lan_auto: i.lan_auto.unwrap_or(cur.lan_auto),
         overlay_enabled: i.overlay_enabled.unwrap_or(cur.overlay_enabled),
         overlay_hotkey: i.overlay_hotkey.map(|h| h.trim().to_string()).unwrap_or(cur.overlay_hotkey),

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import "./mycode.css";
 import { useServices } from "../../app/context";
 import { Button } from "../../ui";
+import { useEscapeCancel } from "../../ui/useEscapeCancel";
 
 type State =
   | { step: "loading" }
@@ -32,6 +33,9 @@ export default function MyCode() {
       if (timer.current) clearTimeout(timer.current);
     };
   }, []);
+
+  // Échap annule la confirmation (sans quitter Paramètres) ; avalé sans effet pendant la régénération.
+  useEscapeCancel(confirming, () => { if (!busy) setConfirming(false); });
 
   const load = useCallback(async () => {
     setState({ step: "loading" });

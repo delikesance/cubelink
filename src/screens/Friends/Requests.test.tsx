@@ -1,5 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ShellContext } from "../../app/context";
 import { navigate } from "../../app/router";
 import { createFakeServices } from "../../services/fake";
@@ -80,6 +80,34 @@ describe("Demandes", () => {
     fireEvent.click(within(group).getByRole("button", { name: "Refuser les 30 demandes" }));
     expect(await screen.findByText("Aucune demande en attente.")).toBeTruthy();
     expect((await svc.friendRequests({ offset: 0, limit: 1 })).total).toBe(0);
+  });
+
+  it("Échap annule la confirmation « Tout refuser » et est avalé (pas d'annulation) pendant le refus", async () => {
+    const svc = fake(30);
+    let release!: (n: number) => void;
+    const spy = vi.spyOn(svc, "friendRefuseAll").mockImplementation(() => new Promise<number>((r) => { release = r; }));
+    const leaked = vi.fn();
+    document.addEventListener("keydown", leaked);
+    try {
+      mount(svc);
+      await screen.findByText("Demande de Alex0");
+      fireEvent.click(screen.getByRole("button", { name: "Tout refuser" }));
+      fireEvent.keyDown(document.activeElement as HTMLElement, { key: "Escape" });
+      expect(screen.queryByRole("group")).toBeNull();
+      expect(spy).not.toHaveBeenCalled();
+      expect(leaked.mock.calls.filter(([e]) => (e as KeyboardEvent).key === "Escape")).toHaveLength(0);
+
+      fireEvent.click(screen.getByRole("button", { name: "Tout refuser" }));
+      fireEvent.click(within(screen.getByRole("group")).getByRole("button", { name: "Refuser les 30 demandes" }));
+      await screen.findByText("Refus…");
+      fireEvent.keyDown(document, { key: "Escape" });
+      expect(screen.getByRole("group")).toBeTruthy();
+      expect(leaked.mock.calls.filter(([e]) => (e as KeyboardEvent).key === "Escape")).toHaveLength(0);
+      await act(async () => { release(30); });
+      expect(await screen.findByText("Aucune demande en attente.")).toBeTruthy();
+    } finally {
+      document.removeEventListener("keydown", leaked);
+    }
   });
 
   it("pagination par lots", async () => {

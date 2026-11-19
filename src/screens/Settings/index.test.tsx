@@ -172,6 +172,52 @@ describe("Échap", () => {
     expect(screen.queryByRole("alertdialog")).toBeNull();
     expect(window.location.hash).toBe("#/settings");
   });
+
+  it("Tout refuser : Échap annule la confirmation sans quitter Paramètres ni refuser", async () => {
+    const svc = createFakeServices({ tickMs: 0, requestCount: 3 });
+    const refuse = vi.spyOn(svc, "friendRefuseAll");
+    render(<Shell services={svc} />);
+    goTab("Amis");
+    fireEvent.click(await screen.findByRole("button", { name: "Tout refuser" }));
+    const group = screen.getByRole("group", { name: /refus de toutes les demandes/ });
+    expect(group.contains(document.activeElement)).toBe(true);
+    fireEvent.keyDown(document.activeElement as HTMLElement, { key: "Escape" });
+    expect(screen.queryByRole("group", { name: /refus de toutes les demandes/ })).toBeNull();
+    expect(window.location.hash).toBe("#/settings");
+    expect(refuse).not.toHaveBeenCalled();
+    // Sans confirmation ouverte, Échap revient en arrière comme avant.
+    fireEvent.keyDown(document.body, { key: "Escape" });
+    expect(window.location.hash).toBe("#/main");
+  });
+
+  it("Générer un nouveau code : Échap annule la confirmation sans quitter Paramètres", async () => {
+    const svc = createFakeServices({ tickMs: 0 });
+    const regen = vi.spyOn(svc, "friendRegenerateCode");
+    render(<Shell services={svc} />);
+    goTab("Amis");
+    const open = await screen.findByRole("button", { name: "Générer un nouveau code" });
+    await waitFor(() => expect((open as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(open);
+    expect(screen.getByRole("group", { name: "Confirmer le nouveau code" })).toBeTruthy();
+    fireEvent.keyDown(document.body, { key: "Escape" });
+    expect(screen.queryByRole("group", { name: "Confirmer le nouveau code" })).toBeNull();
+    expect(window.location.hash).toBe("#/settings");
+    expect(regen).not.toHaveBeenCalled();
+  });
+
+  it("Retirer un compte : Échap annule la confirmation sans quitter Paramètres", async () => {
+    const svc = createFakeServices({ tickMs: 0 });
+    await svc.authOfflineLogin("Alex");
+    const out = vi.spyOn(svc, "authRemove");
+    render(<Shell services={svc} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Retirer Alex" }));
+    expect(screen.getByRole("group", { name: "Retirer Alex" })).toBeTruthy();
+    fireEvent.keyDown(document.activeElement as HTMLElement, { key: "Escape" });
+    expect(screen.queryByRole("group", { name: "Retirer Alex" })).toBeNull();
+    expect(window.location.hash).toBe("#/settings");
+    expect(out).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Retirer Alex" })).toBeTruthy();
+  });
 });
 });
 

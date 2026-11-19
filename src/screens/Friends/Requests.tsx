@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import "./requests.css";
 import { useServices } from "../../app/context";
 import { Button } from "../../ui";
+import { useEscapeCancel } from "../../ui/useEscapeCancel";
 import type { FriendRequest, Services } from "../../services/types";
 
 const PAGE = 20;
@@ -112,6 +113,8 @@ export default function Requests() {
   }), [services]);
 
   useEffect(() => { if (confirming) cancelRef.current?.focus(); }, [confirming]);
+  // Échap annule la confirmation (sans quitter Paramètres) ; avalé sans effet pendant le refus.
+  useEscapeCancel(confirming, () => { if (!bulkBusy) setConfirming(false); });
 
   const loadMore = async () => {
     const id = seq.current;

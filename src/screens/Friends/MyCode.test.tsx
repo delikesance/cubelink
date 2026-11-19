@@ -52,6 +52,27 @@ describe("Mon code ami", () => {
     expect(await screen.findByText(/Copie impossible/)).toBeTruthy();
   });
 
+  it("Échap annule la confirmation sans régénérer et sans propager la touche", async () => {
+    const svc = fake();
+    const old = await svc.friendMyCode();
+    const regen = vi.spyOn(svc, "friendRegenerateCode");
+    const leaked = vi.fn();
+    document.addEventListener("keydown", leaked);
+    try {
+      mount(svc);
+      await screen.findByText(old);
+      fireEvent.click(screen.getByRole("button", { name: "Générer un nouveau code" }));
+      expect(screen.getByRole("group")).toBeTruthy();
+      fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
+      expect(screen.queryByRole("group")).toBeNull();
+      expect(regen).not.toHaveBeenCalled();
+      expect(leaked).not.toHaveBeenCalled();
+      expect(screen.getByText(old)).toBeTruthy();
+    } finally {
+      document.removeEventListener("keydown", leaked);
+    }
+  });
+
   it("régénération annulable puis confirmée", async () => {
     const svc = fake();
     const old = await svc.friendMyCode();

@@ -178,11 +178,11 @@ impl<K: KeyProvider> TokenStore<K> {
 /// Chiffre `plain` au format `MAGIC || nonce || chiffré+tag` (partagé avec le stockage des comptes).
 pub(crate) fn encrypt_blob<K: KeyProvider>(keys: &K, plain: &[u8]) -> Result<Vec<u8>> {
     let key = keys.key()?;
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key));
+    let cipher = Aes256Gcm::new(&Key::<Aes256Gcm>::from(key));
     let mut nonce = [0u8; NONCE_LEN];
     OsRng.fill_bytes(&mut nonce);
     let ct = cipher
-        .encrypt(Nonce::from_slice(&nonce), Payload { msg: plain, aad: MAGIC })
+        .encrypt(&Nonce::from(nonce), Payload { msg: plain, aad: MAGIC })
         .map_err(|_| Error::Auth("chiffrement des jetons impossible".into()))?;
     let mut out = Vec::with_capacity(MAGIC.len() + NONCE_LEN + ct.len());
     out.extend_from_slice(MAGIC);
@@ -197,10 +197,11 @@ pub(crate) fn decrypt_blob<K: KeyProvider>(keys: &K, data: &[u8]) -> Result<Vec<
         return Err(Error::Auth("fichier de jetons invalide ou tronqué".into()));
     }
     let key = keys.key()?;
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key));
+    let cipher = Aes256Gcm::new(&Key::<Aes256Gcm>::from(key));
     let (nonce, ct) = data[MAGIC.len()..].split_at(NONCE_LEN);
+    let nonce = Nonce::try_from(nonce).map_err(|_| Error::Auth("fichier de jetons invalide ou tronqué".into()))?;
     cipher
-        .decrypt(Nonce::from_slice(nonce), Payload { msg: ct, aad: MAGIC })
+        .decrypt(&nonce, Payload { msg: ct, aad: MAGIC })
         .map_err(|_| Error::Auth("déchiffrement impossible : fichier altéré ou clé incorrecte".into()))
 }
 
@@ -358,5 +359,18 @@ mod tests {
         let p = d.path().join("key.bin");
         fs::write(&p, b"short").unwrap();
         assert!(matches!(FileKeyProvider::new(p).key(), Err(Error::Auth(_))));
+    }
+
+    /// Vecteur produit par une implémentation AES-256-GCM indépendante (Python `cryptography`) :
+    /// les fichiers chiffrés avant une montée de version d'aes-gcm doivent toujours se lire.
+    #[test]
+    fn known_answer_blob_still_decrypts() {
+        let blob: Vec<u8> = (0..94)
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&"434c54316465666768696a6b6c6d6e6f2b6ebc03158038f513013085aa041ede18d4dae080fd0bd2ae8c7a57648005"[i..i + 2], 16).unwrap())
+            .collect();
+        let mut key = [0u8; KEY_LEN];
+        key.iter_mut().enumerate().for_each(|(i, b)| *b = i as u8);
+        assert_eq!(decrypt_blob(&StaticKeyProvider(key), &blob).unwrap(), b"cubelink-compat");
     }
 }

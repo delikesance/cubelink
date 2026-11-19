@@ -83,7 +83,7 @@ impl NeoForgeClient {
 
     /// `url` : base du Maven (ex. `https://maven.neoforged.net`).
     pub fn with_maven_url(url: impl Into<String>) -> Self {
-        Self { http: reqwest::Client::new(), maven_url: url.into().trim_end_matches('/').to_string() }
+        Self { http: crate::http::client(), maven_url: url.into().trim_end_matches('/').to_string() }
     }
 
     async fn get_bytes(&self, url: &str) -> Result<Vec<u8>> {

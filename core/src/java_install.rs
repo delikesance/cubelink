@@ -81,8 +81,8 @@ pub fn host_arch() -> &'static str {
     }
 }
 
-fn net(e: impl std::fmt::Display) -> Error {
-    Error::Network(e.to_string())
+fn net(e: reqwest::Error) -> Error {
+    crate::http::net_error(e)
 }
 
 fn java_exe_rel() -> &'static str {
@@ -136,7 +136,7 @@ pub async fn resolve_package_from(base_url: &str, major: u32, os: &str, arch: &s
         return Err(Error::Invalid(format!("plateforme {os}/{arch} non supportée")));
     }
     let url = format!("{}/v3/assets/latest/{major}/hotspot", base_url.trim_end_matches('/'));
-    let resp = reqwest::Client::new()
+    let resp = crate::http::client()
         .get(&url)
         .query(&[("architecture", arch), ("image_type", "jre"), ("os", os)])
         .send()
@@ -239,7 +239,7 @@ where
     let _guard = Cleanup(vec![part.clone(), staging.clone()]);
     let _ = tokio::fs::remove_dir_all(&staging).await;
 
-    download(package, &part, &progress, &cancel).await?;
+    download(&crate::http::client(), package, &part, &progress, &cancel).await?;
 
     let (zip_path, stage, c2) = (part.clone(), staging.clone(), cancel.clone());
     let home_in_stage = tokio::task::spawn_blocking(move || if targz { extract_tar_gz(&zip_path, &stage, &c2) } else { extract_zip(&zip_path, &stage, &c2) })
@@ -268,14 +268,14 @@ where
     Ok(InstalledJava { home: final_dir, java_exe: final_exe, major })
 }
 
-async fn download<F>(package: &JrePackage, part: &Path, progress: &F, cancel: &AtomicBool) -> Result<()>
+async fn download<F>(client: &reqwest::Client, package: &JrePackage, part: &Path, progress: &F, cancel: &AtomicBool) -> Result<()>
 where
     F: Fn(u64, u64) + Send + Sync,
 {
     if package.size > MAX_DOWNLOAD_BYTES {
         return Err(Error::Invalid(format!("taille annoncée excessive : {}", package.size)));
     }
-    let resp = reqwest::Client::new().get(&package.url).send().await.map_err(net)?;
+    let resp = client.get(&package.url).send().await.map_err(net)?;
     let status = resp.status();
     if status == reqwest::StatusCode::NOT_FOUND {
         return Err(Error::NotFound(package.url.clone()));
@@ -707,5 +707,24 @@ mod tests {
         let r = install_with(&p, root.path(), |_, _| {}, Arc::new(AtomicBool::new(false)), Arc::new(FakeProbe(None))).await;
         assert!(matches!(r, Err(Error::Invalid(_))));
         assert!(leftovers(root.path()).is_empty());
+    }
+
+    #[tokio::test]
+    async fn telechargement_du_jre_bloque_echoue_en_network() {
+        let server = MockServer::start().await;
+        let data = jre_zip();
+        Mock::given(method("GET"))
+            .and(path("/dl/jre.zip"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(data.clone()).set_delay(Duration::from_secs(5)))
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let part = dir.path().join("jre.part");
+        let client = crate::http::builder_with(Duration::from_secs(5), Duration::from_millis(200)).build().unwrap();
+        let t = std::time::Instant::now();
+        let err = download(&client, &pkg(&server, &data), &part, &|_, _| {}, &AtomicBool::new(false)).await.unwrap_err();
+        assert!(t.elapsed() < Duration::from_secs(3), "{:?}", t.elapsed());
+        assert!(matches!(&err, Error::Network(m) if m.contains("délai dépassé")), "{err:?}");
+        assert!(!part.exists(), "pas de .part laissé par un téléchargement qui n'a rien reçu");
     }
 }

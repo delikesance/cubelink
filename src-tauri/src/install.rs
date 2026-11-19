@@ -91,21 +91,25 @@ fn forge_client() -> forge::ForgeClient {
 }
 
 fn http() -> Result<reqwest::Client> {
-    reqwest::Client::builder()
+    core_lib::http::builder()
         .user_agent(concat!("Cubelink/", env!("CARGO_PKG_VERSION")))
         .build()
-        .map_err(|e| Error::Network(e.without_url().to_string()))
+        .map_err(core_lib::http::net_error)
 }
 
 async fn get_bytes(client: &reqwest::Client, url: &str) -> Result<Vec<u8>> {
     if !url.starts_with("https://") && !crate::test_hooks::http_allowed(url) {
         return Err(Error::Invalid("téléchargement refusé : seul https est accepté".into()));
     }
-    let resp = client.get(url).send().await.map_err(|e| Error::Network(e.without_url().to_string()))?;
+    fetch_bytes(client, url).await
+}
+
+async fn fetch_bytes(client: &reqwest::Client, url: &str) -> Result<Vec<u8>> {
+    let resp = client.get(url).send().await.map_err(core_lib::http::net_error)?;
     if !resp.status().is_success() {
         return Err(Error::Network(format!("réponse HTTP {}", resp.status().as_u16())));
     }
-    let b = resp.bytes().await.map_err(|e| Error::Network(e.without_url().to_string()))?;
+    let b = resp.bytes().await.map_err(core_lib::http::net_error)?;
     Ok(b.to_vec())
 }
 
@@ -394,6 +398,27 @@ pub async fn ensure_game(paths: &Paths, inst: &Instance, java_setting: Option<St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Une connexion qui accepte puis ne répond plus doit échouer en `Network` (le lancement ne reste pas figé).
+    /// Délai court injecté ; le client de production utilise `core_lib::http::builder()` (30 s).
+    #[tokio::test]
+    async fn telechargement_bloque_echoue_en_network() {
+        use std::time::{Duration, Instant};
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/lib.jar", l.local_addr().unwrap());
+        let srv = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((s, _)) = l.accept().await {
+                held.push(s);
+            }
+        });
+        let client = core_lib::http::builder_with(Duration::from_secs(5), Duration::from_millis(300)).build().unwrap();
+        let t = Instant::now();
+        let err = fetch_bytes(&client, &url).await.unwrap_err();
+        assert!(t.elapsed() < Duration::from_secs(3), "{:?}", t.elapsed());
+        assert!(matches!(&err, Error::Network(m) if m.contains("délai dépassé")), "{err:?}");
+        srv.abort();
+    }
 
     #[test]
     fn chemins_et_versions() {

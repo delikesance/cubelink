@@ -151,14 +151,14 @@ impl ForgeClient {
     /// `maven_url` : base du Maven Forge ; `files_url` : base de `files.minecraftforge.net` (promotions).
     pub fn with_urls(maven_url: impl Into<String>, files_url: impl Into<String>) -> Self {
         Self {
-            http: reqwest::Client::new(),
+            http: crate::http::client(),
             maven_url: maven_url.into().trim_end_matches('/').to_string(),
             files_url: files_url.into().trim_end_matches('/').to_string(),
         }
     }
 
     async fn get_bytes(&self, url: &str, limit: usize) -> Result<Vec<u8>> {
-        let resp = self.http.get(url).send().await.map_err(|e| Error::Network(e.to_string()))?;
+        let resp = self.http.get(url).send().await.map_err(crate::http::net_error)?;
         let status = resp.status();
         if status.as_u16() == 404 {
             return Err(Error::NotFound(url.to_string()));
@@ -169,7 +169,7 @@ impl ForgeClient {
         if resp.content_length().is_some_and(|l| l > limit as u64) {
             return Err(Error::Invalid(format!("réponse trop volumineuse pour {url}")));
         }
-        let bytes = resp.bytes().await.map_err(|e| Error::Network(e.to_string()))?;
+        let bytes = resp.bytes().await.map_err(crate::http::net_error)?;
         if bytes.len() > limit {
             return Err(Error::Invalid(format!("réponse trop volumineuse pour {url}")));
         }

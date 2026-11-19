@@ -254,7 +254,7 @@ async fn lan_map_path(st: &AppState, inst: &Instance, version: &LaunchVersion, l
         Loader::NeoForge | Loader::Forge => return None,
     };
     let mappings = downloads.client_mappings.as_ref()?; // absent : jeu non obfusqué (26.x)
-    match ensure_lanmap(&dir, &reqwest::Client::new(), &inst.minecraft, runtime, mappings, inter.as_deref()).await {
+    match ensure_lanmap(&dir, &core_lib::http::client(), &inst.minecraft, runtime, mappings, inter.as_deref()).await {
         Ok(p) => Some(p),
         Err(e) => {
             eprintln!("[Cubelink] LAN: correspondance de noms indisponible ({e}), l'ouverture auto peut échouer");

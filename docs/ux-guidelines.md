@@ -113,7 +113,7 @@ Constats : navigation Général (Comptes, Jeux, Réseau P2P) / Aide (Diagnostic,
 |---|---|---|---|
 | Principal | `primary` (grand, `size="lg"`, seulement pour Jouer) | UNE seule action principale par écran ou section | Jouer, Rejoindre, Créer |
 | Secondaire | `secondary` (44 px) | actions neutres, retour, annuler | Accueil / Retour (`BackButton`), Annuler, Retirer |
-| Destructif, point d'entrée | `danger-quiet` (contour rouge, sans aplat) | ouvre une action qu'on ne défait pas | Quitter (ma ligne de Membres), Fermer le jeu (overlay) |
+| Destructif, point d'entrée | `danger-quiet` (contour rouge, sans aplat) | ouvre une action qu'on ne défait pas | Retirer et Quitter (lignes de Membres), Fermer le jeu (overlay) |
 | Destructif, confirmation | `danger` (aplat rouge) | le bouton qui CONFIRME, dans sa boîte de confirmation ; ou un arrêt immédiat qui remplace Jouer | Supprimer, Vider le cache, Arrêter |
 | Compact | `secondary`/`primary` réduits par le CSS de la zone | listes denses (amis 32 px, overlay et comptes 36 px) | Rejoindre dans la colonne d'amis |
 

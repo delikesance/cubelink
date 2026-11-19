@@ -4,7 +4,7 @@ import { useShell } from "../../app/context";
 import { useHearthDetail } from "../../app/useHearth";
 import { useAccounts } from "../../app/useAccounts";
 import type { FriendWithPresence, HearthDetail, HearthProposal, Instance, Services } from "../../services/types";
-import { BackButton, Badge, Button, Card, Icon, ICONS } from "../../ui";
+import { BackButton, Badge, Button, Card, Icon, ICONS, StatusDot } from "../../ui";
 import { Avatar } from "../Friends/Avatar";
 import { Modal } from "../Main/Modal";
 import { errText, fmtDate, fmtPlayed, fmtSize, mainAction, plural, resumeLabel, stateHint, stateText } from "./format";
@@ -102,7 +102,7 @@ function Members({ d, services, friends, ask, onError, leave }: { d: HearthDetai
       )}
       <Proposals d={d} services={services} onError={onError} />
       <section aria-label="Membres" className="hearth-block">
-        <h2>{plural(d.members.length, "membre", "membres")}</h2>
+        <h2 className="hearth-sr">{plural(d.members.length, "membre", "membres")}</h2>
         <ul className="hearth-rows">
           {d.members.map((m) => (
             <li key={m.public_key} className="hearth-row">
@@ -116,7 +116,7 @@ function Members({ d, services, friends, ask, onError, leave }: { d: HearthDetai
               </span>
               {!m.is_me && (
                 <Button
-                  variant="secondary" aria-label={`Retirer ${m.name}`}
+                  variant="danger-quiet" aria-label={`Retirer ${m.name}`}
                   onClick={() => ask({
                     title: `Retirer ${m.name} ?`, action: "Retirer", danger: true,
                     text: `${m.name} ne pourra plus rejoindre ce serveur. Selon les règles du groupe, le retrait peut demander l'accord de la majorité.`,
@@ -268,14 +268,18 @@ export default function ServerPage({ id }: { id: string }) {
     <div className="hearth-page">
       <header className="hearth-page-head">
         <BackButton label="Accueil" onClick={() => navigate("main")} />
-        <h1 ref={title} tabIndex={-1}>{c.name}</h1>
-        <p className="hearth-meta">{c.minecraft} · {c.loader} · {plural(c.members_total, "membre", "membres")}</p>
-        <div className="hearth-state-row">
-          <Badge tone={c.state === "hosting" ? "ok" : c.state === "idle" ? "neutral" : c.state === "hosted" ? "accent" : "warn"}>{stateText(c)}</Badge>
-          {act.kind === "play" && <Button size="lg" loading={busy} icon={<Icon d={ICONS.play} fill />} onClick={() => { void run(() => services.hearthPlay(c.id)); }}>{act.label}</Button>}
-          {act.kind === "stop" && <Button variant="secondary" loading={busy} onClick={() => { void run(() => services.hearthStop(c.id)); }}>{act.label}</Button>}
+        <div className="hearth-hero">
+          <div className="hearth-hero-id">
+            <h1 ref={title} tabIndex={-1}>{c.name}</h1>
+            <p className="hearth-meta">{c.minecraft} · {c.loader}</p>
+            <StatusDot tone={c.state === "hosting" ? "ok" : c.state === "idle" ? "neutral" : c.state === "hosted" ? "accent" : "warn"} label={stateText(c)} />
+          </div>
+          <div className="hearth-hero-cta">
+            {act.kind === "play" && <Button size="lg" loading={busy} icon={<Icon d={ICONS.play} fill />} onClick={() => { void run(() => services.hearthPlay(c.id)); }}>{act.label}</Button>}
+            {act.kind === "stop" && <Button variant="secondary" loading={busy} onClick={() => { void run(() => services.hearthStop(c.id)); }}>{act.label}</Button>}
+          </div>
+          {hint && <p className="hearth-hint">{hint}</p>}
         </div>
-        {hint && <p className="hearth-hint">{hint}</p>}
         {shownError && <p className="hearth-err" role="alert">{shownError}</p>}
       </header>
 

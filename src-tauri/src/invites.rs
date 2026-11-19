@@ -11,8 +11,10 @@
 //! `friend://join_request` (JoinRequest) puis `friend://join_requests` (Vec<JoinRequest>, à chaque changement) ;
 //! décision par `friend_join_request_answer`. Demande envoyée (invité) : `friend_join_request` attend la décision.
 //!
-//! Point d'accroche pour une notification système : l'événement `friend://invite` (payload `Invite`), émis
-//! une fois par invitation reçue ; la file complète est dans `friend_invites` / `friend://invites`.
+//! Notification système : `hotkey.rs` écoute `friend://invite` (payload `Invite`, émis une fois par invitation reçue) et
+//! `friend://join_request` (payload `JoinRequest`, une fois par demande reçue) ; les files complètes sont dans
+//! `friend_invites` / `friend://invites` et `friend_join_requests` / `friend://join_requests`. À l'écran, les demandes
+//! sont affichées par le bandeau de la coque et par le panneau « en jeu ».
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;

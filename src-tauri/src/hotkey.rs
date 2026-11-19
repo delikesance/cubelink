@@ -63,6 +63,16 @@ pub fn invite_notification(payload: &Value, hotkey: Option<&str>) -> Option<(Str
     Some((format!("{name} t'invite à rejoindre son monde"), body))
 }
 
+/// Pur : titre et corps de la notification d'une demande à rejoindre reçue (`None` si la charge utile est inutilisable).
+/// Le texte renvoie vers Cubelink : la réponse se donne dans le bandeau du launcher ou dans le panneau « en jeu ».
+pub fn join_request_notification(payload: &Value) -> Option<(String, String)> {
+    let name: String = payload.get("name")?.as_str()?.chars().filter(|c| !c.is_control()).take(48).collect();
+    if name.trim().is_empty() {
+        return None;
+    }
+    Some(("Demande à rejoindre".into(), format!("{name} veut rejoindre ta partie. Ouvre Cubelink pour répondre.")))
+}
+
 fn settings_of(app: &AppHandle) -> (bool, String) {
     match app.try_state::<Arc<AppState>>() {
         Some(st) => {
@@ -151,6 +161,19 @@ pub fn setup(app: &AppHandle, test_mode: bool) {
             }
         }
     });
+    // Demande à rejoindre reçue (hôte) : sans cela, un hôte dont la fenêtre n'est pas à l'écran ne la voit jamais.
+    let h = app.clone();
+    app.listen("friend://join_request", move |ev| {
+        if test_mode {
+            return;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(ev.payload()) else { return };
+        if let Some((title, body)) = join_request_notification(&v) {
+            if let Err(e) = h.notification().builder().title(title).body(body).show() {
+                eprintln!("[Cubelink] notification de demande à rejoindre : {e}");
+            }
+        }
+    });
 }
 
 #[cfg(test)]
@@ -174,6 +197,18 @@ mod tests {
             let e = validate_hotkey(bad).unwrap_err();
             assert!(e.contains("raccourci"), "{bad}: {e}");
         }
+    }
+
+    #[test]
+    fn notification_de_demande_a_rejoindre() {
+        let v = serde_json::json!({"public_key": "ab", "name": "Alex", "received_at": 1, "expires_at": 121});
+        let (t, b) = join_request_notification(&v).unwrap();
+        assert_eq!(t, "Demande à rejoindre");
+        assert_eq!(b, "Alex veut rejoindre ta partie. Ouvre Cubelink pour répondre.");
+        assert!(join_request_notification(&serde_json::json!({"public_key": "ab"})).is_none());
+        assert!(join_request_notification(&serde_json::json!({"name": " \n "})).is_none());
+        let long = serde_json::json!({"name": "a".repeat(500)});
+        assert!(join_request_notification(&long).unwrap().1.len() < 160);
     }
 
     #[test]

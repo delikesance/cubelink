@@ -133,8 +133,8 @@ Les types nommés (`Profile`, `TransferProgress`, `HostState`, `StageState`…) 
 | `tunnel://state` | `{ state: "ok" \| "reconnecting" \| "lost" }` : liaison du tunnel invité. `reconnecting` : connexion à l'hôte coupée, reconnexion automatique en cours (10 s max, le port local `127.0.0.1:<port>` reste le même : Minecraft peut se reconnecter sans relancer le jeu) ; `lost` : hôte parti ou refus, le tunnel est inutilisable. Émis seulement pendant un tunnel ouvert (`join_open_tunnel` / `join_play`). |
 | `friend://request` | `FriendRequest` |
 | `friend://invite` / `friend://invites` | `Invite` (une invitation reçue) / `Invite[]` (file complète à chaque changement) |
-| `friend://join_request` | `JoinRequest` `{ public_key, name, received_at, expires_at }` : un ami demande à rejoindre ma partie (hôte) |
-| `friend://join_requests` | `JoinRequest[]` : demandes en attente, à chaque changement (décidée, expirée, retirée, partage arrêté) |
+| `friend://join_request` | `JoinRequest` `{ public_key, name, received_at, expires_at }` : un ami demande à rejoindre ma partie (hôte). Rust en fait une notification système (« Demande à rejoindre », hors mode test) |
+| `friend://join_requests` | `JoinRequest[]` : demandes en attente, à chaque changement (décidée, expirée, retirée, partage arrêté). Affichées par le bandeau de la coque (masqué tant que le panneau « en jeu » est ouvert) et par le panneau « en jeu » |
 | `launch://log` | lignes de log du jeu en cours |
 | `browse://progress` | progression d'une installation depuis le catalogue (`done`, `total`, libellé) |
 | `import://warning` | avertissement pendant l'import d'un modpack |

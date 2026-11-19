@@ -37,7 +37,7 @@ use p2p_lib::hearth::outbox::{MemberReplica, Outbox, Replica};
 use p2p_lib::hearth::proto::{HearthConn, HearthDelegate, NetError};
 use p2p_lib::hearth::store::{Group, GroupKey, GroupStore};
 use p2p_lib::hearth::sync::{human_size, FetchOptions, GroupMembers, PublishedWorld, SyncError, WorldStore};
-use p2p_lib::hearth::version::{SignedVersion, VersionHeader, VersionId, VersionKind, VersionPoint};
+use p2p_lib::hearth::version::{SignedVersion, VersionGraph, VersionHeader, VersionId, VersionKind, VersionPoint};
 use p2p_lib::identity::Identity;
 use p2p_lib::presence::PeerKey;
 use serde::{Deserialize, Serialize};
@@ -47,6 +47,12 @@ use crate::state::{lock, now_secs, EventSink};
 
 /// Erreur renvoyée par `hearth_play` quand l'EULA de Minecraft n'a pas encore été acceptée (l'écran la propose).
 pub const EULA_REQUIRED: &str = "eula_required";
+/// Préfixe de l'erreur de `hearth_play` quand la dernière version est connue (en-tête) mais que personne de joignable n'en
+/// a le contenu. Format : `head_unavailable|<n° de la tête>|<n° de la dernière version complète, ou vide>|<nom de l'auteur>`.
+/// L'écran propose « Attendre » et, s'il y a une version complète, « Jouer depuis la n° N ».
+pub const HEAD_UNAVAILABLE: &str = "head_unavailable";
+/// Message de `fetch_version` quand aucun membre n'est en ligne pour fournir le monde.
+const NO_MEMBER_ONLINE: &str = "aucun membre du groupe n'est joignable pour récupérer le monde";
 /// Délai entre deux sondes des membres.
 pub const PROBE_INTERVAL: Duration = Duration::from_secs(60);
 /// Délai d'une sonde d'un membre.
@@ -319,6 +325,8 @@ pub struct MemberStatus {
     pub op_seq: u64,
     /// Version la plus avancée qu'il dit avoir (parmi celles qu'on connaît).
     pub latest: Option<VersionPoint>,
+    /// Les versions qu'il dit pouvoir servir en entier (ses têtes complètes).
+    pub announced: Vec<VersionId>,
 }
 
 /// Invitation de groupe reçue, en attente de la réponse de l'utilisateur.
@@ -1087,10 +1095,11 @@ impl HearthRuntime {
             }
         }
         let (seq, heads) = self.with_group(&gid, |g| (g.state().op_seq, g.heads()))?;
+        let complete = self.complete_heads_of(&gid);
         // Connexion et `Hello` : 4 s au plus (le rattrapage qui suit a son propre délai).
         let (conn, st) = tokio::time::timeout(ROUND_HELLO_TIMEOUT, async {
             let conn = self.connect(&key).await?;
-            let st = conn.hello(&gid, seq, &heads).await.map_err(|e| e.to_string())?;
+            let st = conn.hello_with(&gid, seq, &heads, Some(&complete)).await.map_err(|e| e.to_string())?;
             Ok::<_, String>((conn, st))
         })
         .await
@@ -1105,8 +1114,9 @@ impl HearthRuntime {
             let vs = conn.fetch_versions(&gid, after.saturating_sub(1)).await.map_err(|e| e.to_string())?;
             self.with_group(&gid, |g| g.add_versions(vs).map(|_| ()).map_err(|e| e.to_string()))??;
         }
-        let latest = self.with_group(&gid, |g| st.heads.iter().filter_map(|h| g.graph().get(h)).map(|v| v.header.point()).max())?;
-        lock(&self.status).insert((gid, key), MemberStatus { online: true, op_seq: st.op_seq, latest });
+        // Sa version = ce qu'il peut servir en entier : un en-tête sans contenu ne dit pas qu'il est « à jour ».
+        let latest = self.with_group(&gid, |g| st.announced().iter().filter_map(|h| g.graph().get(h)).map(|v| v.header.point()).max())?;
+        lock(&self.status).insert((gid, key), MemberStatus { online: true, op_seq: st.op_seq, latest, announced: st.announced().to_vec() });
         self.mark_seen(&gid, &key);
         match st.lease {
             Some(l) if l.holder == key => {
@@ -1123,6 +1133,11 @@ impl HearthRuntime {
             Some(_) => {}
         }
         Ok(())
+    }
+
+    /// Les versions que `key` a dit pouvoir servir en entier à sa dernière réponse.
+    pub fn announced_by(&self, gid: &GroupId, key: &PeerKey) -> Vec<VersionId> {
+        lock(&self.status).get(&(*gid, *key)).map(|s| s.announced.clone()).unwrap_or_default()
     }
 
     /// Reprend auprès de `key` les opérations et les versions qui nous manquent.
@@ -1225,7 +1240,7 @@ impl HearthRuntime {
         }
         let addrs = self.online_addrs(&gid, prefer);
         if addrs.is_empty() {
-            return Err("aucun membre du groupe n'est joignable pour récupérer le monde".into());
+            return Err(NO_MEMBER_ONLINE.into());
         }
         {
             let mut f = lock(&self.fetching);
@@ -1356,17 +1371,50 @@ impl HearthRuntime {
     pub fn complete_head(&self, gid: &GroupId) -> Option<SignedVersion> {
         let head = self.head(gid)?;
         let epoch = self.state(gid)?.epoch;
+        self.with_group(gid, |g| self.nearest_complete(g.graph(), &head.id(), epoch).cloned()).ok().flatten()
+    }
+
+    /// `id` si son monde est en entier sur ce PC, sinon son plus proche ancêtre qui l'est, sans quitter l'époque `epoch`.
+    fn nearest_complete<'g>(&self, graph: &'g VersionGraph, id: &VersionId, epoch: u64) -> Option<&'g SignedVersion> {
+        graph
+            .ancestry(id)
+            .iter()
+            .filter_map(|a| graph.get(a))
+            .take_while(|v| v.header.epoch == epoch)
+            .find(|v| self.world_complete(v))
+    }
+
+    /// Ce que ce PC annonce comme « ma version » : pour chaque tête du graphe, elle-même si son monde est en entier ici,
+    /// sinon son plus proche ancêtre complet. Une tête dont on n'a que l'en-tête n'est jamais annoncée (personne ne
+    /// pourrait y jouer en s'y fiant) ; les en-têtes, eux, continuent de circuler par `heads`.
+    pub fn complete_heads_of(&self, gid: &GroupId) -> Vec<VersionId> {
+        let Some(epoch) = self.state(gid).map(|s| s.epoch) else { return Vec::new() };
         self.with_group(gid, |g| {
-            g.graph()
-                .ancestry(&head.id())
-                .iter()
-                .filter_map(|id| g.graph().get(id))
-                .take_while(|v| v.header.epoch == epoch)
-                .find(|v| self.world_complete(v))
-                .cloned()
+            let mut out: Vec<VersionId> = Vec::new();
+            for h in g.graph().heads(g.state()) {
+                if let Some(v) = self.nearest_complete(g.graph(), &h.id(), epoch) {
+                    if !out.contains(&v.id()) {
+                        out.push(v.id());
+                    }
+                }
+            }
+            out
         })
-        .ok()
-        .flatten()
+        .unwrap_or_default()
+    }
+
+    /// L'erreur « personne n'a le contenu de la tête » (voir [`HEAD_UNAVAILABLE`]), avec le repli possible : la dernière
+    /// version complète ici. Le nom de l'auteur ne contient jamais le séparateur.
+    pub fn head_unavailable_error(&self, gid: &GroupId, head: &SignedVersion) -> String {
+        let prev = self.complete_head(gid).map(|v| v.header.number.to_string()).unwrap_or_default();
+        let name = self.name_of(&head.header.author).replace('|', " ");
+        format!("{HEAD_UNAVAILABLE}|{}|{prev}|{name}", head.header.number)
+    }
+
+    /// Une erreur de `fetch_version` qui veut dire « personne ne peut fournir ce monde » (et non : disque plein, version
+    /// trop grosse à confirmer, mise à jour déjà en cours).
+    fn is_unserved(e: &str) -> bool {
+        e == NO_MEMBER_ONLINE || e.starts_with("aucun membre joignable") || e.starts_with("transfert impossible")
     }
 
     pub fn is_fork(&self, gid: &GroupId) -> bool {
@@ -1522,6 +1570,10 @@ impl HearthDelegate for HearthRuntime {
         self.with_group(group, |g| g.heads()).unwrap_or_default()
     }
 
+    fn complete_heads(&self, group: &GroupId) -> Vec<VersionId> {
+        self.complete_heads_of(group)
+    }
+
     fn lease(&self, group: &GroupId) -> Option<Lease> {
         // Un serveur prêt, sinon un serveur en préparation : un membre qui nous sonde sait qu'il y a une partie.
         self.active(group)
@@ -1534,12 +1586,14 @@ impl HearthDelegate for HearthRuntime {
         coll.is_some_and(|c| lock(&self.complete).contains(&c))
     }
 
-    fn on_status(&self, from: PeerKey, group: &GroupId, op_seq: u64, heads: &[VersionId]) {
+    fn on_status(&self, from: PeerKey, group: &GroupId, op_seq: u64, heads: &[VersionId], complete_heads: Option<&[VersionId]>) {
+        // Sa version : ce qu'il peut servir en entier (un nœud ancien qui ne le dit pas : ses têtes).
+        let announced = complete_heads.unwrap_or(heads);
         let latest = self
-            .with_group(group, |g| heads.iter().filter_map(|h| g.graph().get(h)).map(|v| v.header.point()).max())
+            .with_group(group, |g| announced.iter().filter_map(|h| g.graph().get(h)).map(|v| v.header.point()).max())
             .ok()
             .flatten();
-        lock(&self.status).insert((*group, from), MemberStatus { online: true, op_seq, latest });
+        lock(&self.status).insert((*group, from), MemberStatus { online: true, op_seq, latest, announced: announced.to_vec() });
         self.mark_seen(group, &from);
         let (mine, known) = self
             .with_group(group, |g| (g.state().op_seq, heads.iter().all(|h| g.graph().contains(h))))
@@ -2183,7 +2237,11 @@ impl HearthRuntime {
         if self.materialized(&gid) == Some(h.id()) && dest.join("level.dat").is_file() {
             return Ok(());
         }
-        self.fetch_version_user(gid, h, None).await?;
+        if let Err(e) = self.fetch_version_user(gid, h, None).await {
+            // Le contenu de la tête n'est chez personne de joignable (par exemple son auteur s'est éteint avant l'envoi) :
+            // l'écran propose d'attendre ou de repartir de la dernière version complète.
+            return Err(if Self::is_unserved(&e) { self.head_unavailable_error(&gid, h) } else { e });
+        }
         let world = self.world()?;
         world.materialize(&h.header.collection, &dest).await.map_err(|e| e.to_string())?;
         self.set_materialized(&gid, Some(h.id()));
@@ -2813,7 +2871,15 @@ impl HearthRuntime {
         let (graph, proposals) = self.with_group(gid, |g| (g.graph().clone(), g.proposals().cloned().collect::<Vec<_>>()))?;
         let heads = effective_heads(&graph, &st);
         let head = (heads.len() == 1).then(|| heads[0].clone());
-        let my_latest = graph.latest_by_number(&st).map(|v| v.header.point());
+        // La version la plus avancée qui existe (en-tête connu) et celle dont j'ai le monde en entier : un en-tête sans
+        // contenu ne me met pas « à jour ».
+        let newest = graph.latest_by_number(&st).map(|v| v.header.point());
+        let my_latest = self
+            .complete_heads_of(gid)
+            .iter()
+            .filter_map(|id| graph.get(id))
+            .map(|v| v.header.point())
+            .max();
         let now = now_secs();
         let meta = self.meta_of(gid);
         let unseen = |k: &PeerKey| -> Option<u32> {
@@ -2828,9 +2894,10 @@ impl HearthRuntime {
             .map(|k| {
                 let s = lock(&self.status).get(&(*gid, *k)).cloned().unwrap_or_default();
                 let latest = if *k == self.me { my_latest } else { s.latest };
-                let sync = match (latest, my_latest) {
+                let sync = match (latest, newest) {
                     (Some(l), Some(m)) if l >= m => "ok",
                     (Some(_), Some(_)) => "behind",
+                    (None, Some(_)) if *k == self.me => "behind",
                     (None, None) if *k == self.me || s.online => "ok",
                     (Some(_), None) => "ok",
                     _ => "unknown",
@@ -2931,7 +2998,7 @@ impl HearthRuntime {
     }
 
     /// Un membre en ligne dit-il avoir le monde de `v` en entier (sonde `Have`) ?
-    async fn online_member_has_world(self: &Arc<Self>, gid: &GroupId, v: &SignedVersion) -> bool {
+    pub async fn online_member_has_world(self: &Arc<Self>, gid: &GroupId, v: &SignedVersion) -> bool {
         let (found, id) = (Arc::new(AtomicBool::new(false)), v.id());
         let visit: Visit = Arc::new({
             let (found, gid) = (found.clone(), *gid);

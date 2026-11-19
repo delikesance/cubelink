@@ -1,9 +1,29 @@
-import { HEARTH_EULA_REQUIRED, type HearthCard } from "../../services/types";
+import { HEARTH_EULA_REQUIRED, HEARTH_HEAD_UNAVAILABLE, type HearthCard } from "../../services/types";
 
 export const errText = (e: unknown): string => (e instanceof Error ? e.message : typeof e === "string" ? e : "Une erreur est survenue.");
 
 /** Vrai quand l'erreur de `hearthPlay` demande d'accepter le contrat d'utilisation de Minecraft. */
 export const isEulaRequired = (e: unknown): boolean => errText(e).includes(HEARTH_EULA_REQUIRED);
+
+/** La dernière version du monde est connue mais personne de joignable n'en a le contenu. */
+export interface HeadUnavailable {
+  author: string;
+  head: number;
+  /** Numéro de la dernière version dont le monde est complet ici ; `null` : aucune. */
+  previous: number | null;
+}
+
+/** Lit l'erreur `head_unavailable|<n° tête>|<n° précédent ou vide>|<auteur>` de `hearthPlay` ; `null` pour toute autre erreur. */
+export function parseHeadUnavailable(e: unknown): HeadUnavailable | null {
+  const text = errText(e);
+  const at = text.indexOf(`${HEARTH_HEAD_UNAVAILABLE}|`);
+  if (at < 0) return null;
+  const [head, previous, ...name] = text.slice(at + HEARTH_HEAD_UNAVAILABLE.length + 1).split("|");
+  const h = Number(head);
+  if (!Number.isInteger(h)) return null;
+  const p = previous ? Number(previous) : null;
+  return { author: name.join("|").trim() || "un ami", head: h, previous: p !== null && Number.isInteger(p) ? p : null };
+}
 
 export function fmtSize(bytes: number): string {
   if (bytes >= 1_000_000_000) return `${(bytes / 1_000_000_000).toLocaleString("fr-FR", { maximumFractionDigits: 1 })} Go`;

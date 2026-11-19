@@ -6,6 +6,7 @@ import { HearthLeaveError } from "../../services/types";
 import { HearthSection } from "./HearthSection";
 import { HearthMoments } from "./Moments";
 import Hearth from "./index";
+import { parseHeadUnavailable } from "./format";
 
 afterEach(cleanup);
 
@@ -107,6 +108,39 @@ describe("Accueil : serveurs de groupe", () => {
   it("sans point de reprise : reprise à la dernière version", async () => {
     home({ id: "g1", name: "Les copains", state: "unclean", unclean: { holder: { public_key: "k", name: "Alex", online: false }, checkpoint_at: null } });
     await screen.findByRole("button", { name: /Jouer depuis la dernière version/ });
+  });
+
+  it("dernière version sans contenu : Attendre ferme la boîte, Jouer depuis la n° précédente repart de celle-ci", async () => {
+    const { services } = home({ id: "g1", name: "Les copains" });
+    services.setHearthEula(true);
+    services.setHearthHeadUnavailable({ author: "Alice", head: 12, previous: 11 });
+    fireEvent.click(await screen.findByRole("button", { name: "Jouer sur Les copains" }));
+    const dlg = await screen.findByRole("dialog", { name: "La partie de Alice n'a pas fini d'être envoyée" });
+    expect(within(dlg).getByText(/Personne de connecté n'a encore le monde de la n° 12/)).toBeTruthy();
+    fireEvent.click(within(dlg).getByRole("button", { name: "Attendre Alice" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(services.hearthCalls.map((c) => c.kind)).toEqual(["Play"]);
+    fireEvent.click(screen.getByRole("button", { name: "Jouer sur Les copains" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Jouer depuis la n° 11" }));
+    await screen.findByText("Tu héberges · 1 joueur");
+    expect(services.hearthCalls.map((c) => c.kind)).toEqual(["Play", "Play", "PlayFromPrevious"]);
+  });
+
+  it("dernière version sans contenu et aucune version complète : seulement Attendre", async () => {
+    const { services } = home({ id: "g1", name: "Les copains" });
+    services.setHearthEula(true);
+    services.setHearthHeadUnavailable({ author: "Alice", head: 2, previous: null });
+    fireEvent.click(await screen.findByRole("button", { name: "Jouer sur Les copains" }));
+    const dlg = await screen.findByRole("dialog");
+    expect(within(dlg).getByRole("button", { name: "Attendre Alice" })).toBeTruthy();
+    expect(within(dlg).queryByRole("button", { name: /Jouer depuis/ })).toBeNull();
+  });
+
+  it("parseHeadUnavailable : lit le format stable, ignore les autres erreurs", () => {
+    expect(parseHeadUnavailable("head_unavailable|12|11|Alice")).toEqual({ author: "Alice", head: 12, previous: 11 });
+    expect(parseHeadUnavailable(new Error("head_unavailable|3||Alice B"))).toEqual({ author: "Alice B", head: 3, previous: null });
+    expect(parseHeadUnavailable("aucun membre du groupe n'est joignable")).toBeNull();
+    expect(parseHeadUnavailable("head_unavailable|x|1|A")).toBeNull();
   });
 
   it("premier hébergement : la boîte du contrat Minecraft s'ouvre, J'accepte relance Jouer", async () => {

@@ -162,6 +162,8 @@ export const commands = {
 	hearthStop: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_stop", { id }, options),
 	/**  Choix du groupe après une partie mal terminée. */
 	hearthUncleanChoice: (id: string, choice: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_unclean_choice", { id, choice }, options),
+	/**  Jouer depuis la dernière version complète quand le contenu de la dernière version n'est chez personne de joignable. */
+	hearthPlayFromPrevious: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_play_from_previous", { id }, options),
 	/**  Associe l'instance locale du modpack au groupe. */
 	hearthSetInstance: (id: string, instanceId: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_set_instance", { id, instance_id: instanceId }, options),
 	/**  Propose d'ajouter un ami au groupe. */

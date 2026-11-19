@@ -141,6 +141,7 @@ export function createTauriServices(): Services {
     hearthInviteDismiss: (id) => done(commands.hearthInviteDismiss(id)),
     hearthPlay: (id) => done(commands.hearthPlay(id)),
     hearthStop: (id) => done(commands.hearthStop(id)),
+    hearthPlayFromPrevious: (id) => done(commands.hearthPlayFromPrevious(id)),
     hearthUncleanChoice: (id, choice) => done(commands.hearthUncleanChoice(id, choice)),
     hearthSetInstance: (id, instanceId) => done(commands.hearthSetInstance(id, instanceId)),
     hearthAddMember: (id, publicKey) => done(commands.hearthAddMember(id, publicKey)),

@@ -345,6 +345,40 @@ impl AppState {
         r
     }
 
+    /// « Jouer depuis la version précédente » : la dernière version est connue mais personne de joignable n'en a le
+    /// contenu (`head_unavailable`). Le serveur démarre depuis la dernière version complète ici ; quand l'auteur revient avec
+    /// la sienne, les deux branches forment une fourche que le groupe résout depuis la page du serveur (docs/hearth-et-si.md).
+    pub async fn hearth_play_from_previous(self: &Arc<Self>, id: &str) -> Result<(), String> {
+        self.hearth.require_enabled()?;
+        let g = gid(id)?;
+        let rt = self.hearth.clone();
+        rt.require_state(&g)?;
+        if self.auth_status_refresh().await.is_none() {
+            return Err("connectez-vous avant de lancer le jeu".into());
+        }
+        let instance = rt.instance_of(&g).ok_or("Installe d'abord le modpack de ce groupe : rejoins la partie d'un ami du groupe pour le récupérer.")?;
+        if rt.active(&g).is_some() {
+            return Err("le serveur de ce groupe tourne déjà".into());
+        }
+        if rt.is_fork(&g) {
+            return Err("Deux versions du monde existent : choisis laquelle garder depuis la page du serveur.".into());
+        }
+        let head = rt.head(&g).ok_or("aucune version connue pour repartir")?;
+        // Le contenu de la tête est revenu entre-temps (l'auteur, ou un membre qui l'a reçu) : un simple « Jouer » suffit.
+        if rt.world_complete(&head) || rt.online_member_has_world(&g, &head).await {
+            return Err("Le monde de la dernière version est de nouveau disponible : clique sur Jouer.".into());
+        }
+        let prev = rt.complete_head(&g).ok_or("aucune version complète sur ce PC pour repartir : il faut attendre l'auteur")?;
+        if !rt.try_begin_play(&g, HOST_STEPS) {
+            return Err("un lancement de ce serveur est déjà en cours".into());
+        }
+        let r = self.hearth_host(g, &instance, Some(prev.id())).await;
+        if r.is_err() {
+            rt.set_play(&g, None);
+        }
+        r
+    }
+
     /// Ferme le jeu en cours s'il s'agit de la même instance (par exemple après une passation, le client est resté au menu).
     async fn close_same_instance_game(self: &Arc<Self>, instance: &str) -> Result<(), String> {
         match self.game_current() {
@@ -383,8 +417,12 @@ impl AppState {
                 }
                 Decision::Sync(peer) => {
                     rt.pull_from(g, peer).await?;
-                    for h in rt.heads_of(&g).unwrap_or_default() {
-                        rt.fetch_version_user(g, &h, Some(peer)).await?;
+                    // On récupère ce que ce membre annonce en entier : sa dernière tête n'a pas forcément son contenu
+                    // (un en-tête circule avant son monde), et la demander lui échouerait.
+                    let versions: Vec<_> = rt.announced_by(&g, &peer).iter().filter_map(|id| rt.version(&g, id)).collect();
+                    let versions = if versions.is_empty() { rt.heads_of(&g).unwrap_or_default() } else { versions };
+                    for v in versions {
+                        rt.fetch_version_user(g, &v, Some(peer)).await?;
                     }
                 }
                 Decision::Join(holder) => return self.hearth_join(g, instance, holder).await,
@@ -438,6 +476,16 @@ impl AppState {
             Some(id) => Some(rt.version(&g, &id).ok_or("la version de départ est introuvable")?),
             None => rt.head(&g),
         };
+        // La tête est connue (en-tête) mais personne de joignable n'en a le contenu : on le dit avant de prendre le bail, au
+        // lieu d'annoncer « le serveur démarre » puis d'échouer. L'écran propose d'attendre l'auteur ou de repartir de la
+        // dernière version complète (`hearth_play_from_previous`).
+        if base.is_none() {
+            if let Some(h) = head.as_ref().filter(|h| !rt.world_complete(h)) {
+                if !rt.online_member_has_world(&g, h).await {
+                    return Err(rt.head_unavailable_error(&g, h));
+                }
+            }
+        }
         let tip = head.as_ref().map(|h| (h.id(), h.header.number));
         // Premier temps du bail : les autres membres voient « le serveur démarre » dès maintenant, et non seulement à la
         // fin de l'installation (de 2 à 6 minutes pour un gros pack). Un membre déjà en train de démarrer, ou dont le
@@ -729,6 +777,13 @@ pub async fn hearth_play(state: S<'_>, id: String) -> Result<(), String> {
 #[specta::specta(rename_all = "snake_case")]
 pub async fn hearth_stop(state: S<'_>, id: String) -> Result<(), String> {
     state.inner().hearth_stop(&id).await
+}
+
+/// Jouer depuis la dernière version complète quand le contenu de la dernière version n'est chez personne de joignable.
+#[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
+pub async fn hearth_play_from_previous(state: S<'_>, id: String) -> Result<(), String> {
+    state.inner().hearth_play_from_previous(&id).await
 }
 
 /// Choix du groupe après une partie mal terminée.

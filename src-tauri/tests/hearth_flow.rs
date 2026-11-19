@@ -857,3 +857,61 @@ async fn pas_de_banniere_quand_le_monde_de_l_absent_est_deja_complet() {
         p.stop().await;
     }
 }
+
+/// Alice publie une n° 2 dont personne n'a le contenu (son PC s'éteint avant l'envoi) : l'en-tête arrive chez Bob et Carol.
+/// Ils n'annoncent que la n° 1 (la seule complète), Jouer dit « head_unavailable » avec le repli sur la n° 1 au lieu d'échouer
+/// sur « aucun membre joignable », et « Jouer depuis la n° 1 » démarre le serveur sur le monde de la n° 1 (fourche à la
+/// publication, visible dans la page du serveur).
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn en_tete_sans_contenu_jouer_propose_la_version_precedente() {
+    let (peers, g, id) = group_of(&["Alice", "Bob", "Carol"]).await;
+    let (a, b, c) = (&peers[0], &peers[1], &peers[2]);
+    let d1 = a.dir.path().join("monde-1");
+    small_world(&d1, "monde n° 1");
+    let v1 = a.rt().publish_version(g, &d1, VersionKind::Session, None, 60).await.unwrap();
+    wait_for("n° 1 complète chez Bob et Carol", 40, || {
+        [b, c].iter().all(|p| p.rt().head(&g).is_some_and(|h| h.id() == v1.id() && p.rt().world_complete(&h)))
+    })
+    .await;
+    // n° 2 d'Alice : l'en-tête part chez les autres, le contenu n'existe nulle part ailleurs ; Alice s'éteint.
+    let v2 = a.rt().record_version(g, VersionKind::Session, Some((v1.id(), 1)), 90, [9; 32], 4096).unwrap();
+    wait_for("en-tête n° 2 chez Bob et Carol", 40, || [b, c].iter().all(|p| p.rt().head(&g).is_some_and(|h| h.id() == v2.id()))).await;
+    a.stop().await;
+    for p in [b, c] {
+        assert!(!p.rt().world_complete(&v2), "personne n'a le monde de la n° 2");
+        assert_eq!(p.rt().complete_heads_of(&g), vec![v1.id()], "seule la n° 1 est annoncée");
+    }
+    // Chacun voit l'autre à la n° 1, pas à la n° 2 dont il n'a que l'en-tête.
+    for (me, other) in [(b, c), (c, b)] {
+        me.rt().probe_all().await;
+        let d = me.node.st.hearth.detail(&g).unwrap();
+        let m = d.members.iter().find(|m| m.public_key == other.node.key()).unwrap();
+        assert_eq!(m.version, Some(1), "{} annonce la n° 1 (complète), pas la n° 2", other.name);
+        let moi = d.members.iter().find(|m| m.is_me).unwrap();
+        assert_eq!((moi.version, moi.sync.as_str()), (Some(1), "behind"), "mon monde le plus avancé est la n° 1");
+    }
+
+    // Jouer : erreur typée avec le repli, jamais « aucun membre joignable ».
+    b.node.st.hearth_eula_accept();
+    let refus = b.node.st.hearth_play(&id).await.unwrap_err();
+    assert_eq!(refus, "head_unavailable|2|1|Alice", "{refus}");
+    assert_ne!(b.state_of(&g), HearthStateKind::Hosting);
+    assert!(b.runner.calls.lock().unwrap().is_empty(), "aucun serveur démarré, aucun bail annoncé pour rien");
+
+    // Jouer depuis la n° 1 : Bob héberge le monde de la n° 1.
+    b.node.st.hearth_play_from_previous(&id).await.unwrap();
+    assert_eq!(b.state_of(&g), HearthStateKind::Hosting);
+    assert!(read_tree(&b.rt().server_dir(&g).join("world")).iter().any(|(n, c)| n == "level.dat" && c == b"monde n\xc2\xb0 1"));
+    let lease = lock(&b.rt().active(&g).expect("serveur de Bob").lease).clone();
+    assert_eq!(lease.base_version, Some(v1.id()), "le bail part de la n° 1");
+
+    // Fin de partie : la session de Bob est une nouvelle version fille de la n° 1, face à la n° 2 d'Alice : fourche visible.
+    b.close_game();
+    wait_for("serveur de Bob arrêté", 30, || b.state_of(&g) != HearthStateKind::Hosting).await;
+    assert!(b.rt().is_fork(&g), "deux versions du monde : la n° 2 d'Alice et la reprise de Bob");
+    let d = b.node.st.hearth.detail(&g).unwrap();
+    assert_eq!(d.fork.len(), 2, "la page du serveur propose de choisir entre les deux branches");
+    for p in &peers {
+        p.stop().await;
+    }
+}

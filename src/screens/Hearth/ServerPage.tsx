@@ -313,7 +313,7 @@ export default function ServerPage({ id }: { id: string }) {
             <StatusDot tone={c.state === "hosting" ? "ok" : c.state === "idle" ? "neutral" : c.state === "hosted" ? "accent" : "warn"} label={stateText(c)} />
           </div>
           <div className="hearth-hero-cta">
-            {act.kind === "play" && <Button size="lg" loading={busy} icon={<Icon d={ICONS.play} fill />} onClick={() => { void run(() => services.hearthPlay(c.id)); }}>{act.label}</Button>}
+            {act.kind === "play" && <Button size="lg" loading={busy} icon={<Icon d={ICONS.play} fill />} onClick={() => { void run(() => services.hearthPlay(c.id), c.id); }}>{act.label}</Button>}
             {act.kind === "stop" && <Button variant="secondary" loading={busy} onClick={() => { void run(() => services.hearthStop(c.id)); }}>{act.label}</Button>}
           </div>
           {hint && <p className="hearth-hint">{hint}</p>}
@@ -328,7 +328,7 @@ export default function ServerPage({ id }: { id: string }) {
             <strong>La partie de {c.unclean.holder.name} s'est mal terminée.</strong>
             <span className="hearth-meta">{c.unclean.checkpoint_at != null ? `Dernier point de reprise : ${fmtDate(c.unclean.checkpoint_at)}.` : "Aucun point de reprise connu."}</span>
           </span>
-          <Button loading={busy} onClick={() => { const r = resumeLabel(c); void run(() => services.hearthUncleanChoice(c.id, r.choice)); }}>{resumeLabel(c).label}</Button>
+          <Button loading={busy} onClick={() => { const r = resumeLabel(c); void run(() => services.hearthUncleanChoice(c.id, r.choice), c.id); }}>{resumeLabel(c).label}</Button>
           <Button variant="secondary" onClick={() => { void run(() => services.hearthUncleanChoice(c.id, "wait")); }}>Attendre</Button>
         </div>
       )}

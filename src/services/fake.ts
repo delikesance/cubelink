@@ -1,5 +1,5 @@
 import { validateOfflineName } from "./accounts";
-import { HEARTH_EULA_REQUIRED, HearthLeaveError } from "./types";
+import { HEARTH_EULA_REQUIRED, HEARTH_HEAD_UNAVAILABLE, HearthLeaveError } from "./types";
 import type {
   AccountInfo, AccountsState, BrowseHit, BrowseInstallResult, BrowseKind, BrowseProgressEvent, BrowseSource, BrowseVersion, FixPlan, FixProgressEvent, FixResult, ModCheck, ModEntry, ModIssue,
   CreateInstanceInput, DeviceCode, HostState, Invite, JoinAnswer, JoinRequest, ImportWarningEvent, LaunchLogEvent, FriendRequest, FriendWithPresence, Instance, InstanceArt,
@@ -60,6 +60,8 @@ export interface FakeControls {
   emitHearthHostPrompt(e: HearthHostPrompt): void;
   /** Test : le contrat d'utilisation de Minecraft est déjà accepté (ou non). Défaut : non. */
   setHearthEula(accepted: boolean): void;
+  /** Test : la dernière version n'a de contenu chez personne : `hearthPlay` rejette avec `head_unavailable` jusqu'à `hearthPlayFromPrevious`. `previous: null` : aucune version complète. */
+  setHearthHeadUnavailable(info: { author: string; head: number; previous: number | null } | null): void;
   /** Test : commandes Hearth reçues, dans l'ordre (nom sans préfixe `hearth`, arguments). */
   readonly hearthCalls: Array<{ kind: string; args: unknown[] }>;
   /** Test : fusionne `patch` dans l'état de la zone de jeu et émet stage://state. */
@@ -308,6 +310,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
   const hearthGroups = new Map<string, HearthDetail>();
   let hearthInvs: HearthInvite[] = [];
   let hearthEula = false;
+  let hearthHeadMissing: { author: string; head: number; previous: number | null } | null = null;
   /** Le faux service part avec Hearth activé (le vrai réglage est coupé par défaut) ; `hearthSetEnabled` le change. */
   let hearthOn = true;
   let hearthN = 0;
@@ -663,12 +666,24 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
       const st = g.card.state;
       if (st === "idle" || st === "unclean" || st === "blocked") {
         if (!hearthEula) throw new Error(HEARTH_EULA_REQUIRED);
+        if (hearthHeadMissing) {
+          const m = hearthHeadMissing;
+          throw new Error(`${HEARTH_HEAD_UNAVAILABLE}|${m.head}|${m.previous ?? ""}|${m.author}`);
+        }
         hearthLaunch(id, ["Mise à jour du monde", "Démarrage du serveur", "Ouverture de Minecraft"], { state: "hosting", host: { ...ME }, players: 1, unclean: null });
       } else if (st === "hosted") {
         hearthLaunch(id, ["Connexion à l'hôte", "Ouverture de Minecraft"], { state: "hosted", players: g.card.players + 1 });
       } else {
         throw new Error("Ce serveur ne peut pas être lancé pour l'instant.");
       }
+    },
+    hearthPlayFromPrevious: async (id) => {
+      hearthCalls.push({ kind: "PlayFromPrevious", args: [id] });
+      hearthCard(id);
+      if (!hearthHeadMissing || hearthHeadMissing.previous === null) throw new Error("aucune version complète sur ce PC pour repartir : il faut attendre l'auteur");
+      if (!hearthEula) throw new Error(HEARTH_EULA_REQUIRED);
+      hearthHeadMissing = null;
+      hearthLaunch(id, ["Mise à jour du monde", "Démarrage du serveur", "Ouverture de Minecraft"], { state: "hosting", host: { ...ME }, players: 1, unclean: null });
     },
     hearthStop: async (id) => {
       hearthCalls.push({ kind: "Stop", args: [id] });
@@ -799,6 +814,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     emitHearthHandover: (e) => emit(listeners.hearthHandover, e),
     emitHearthHostPrompt: (e) => emit(listeners.hearthHostPrompt, e),
     setHearthEula: (a) => { hearthEula = a; },
+    setHearthHeadUnavailable: (i) => { hearthHeadMissing = i; },
     hearthCalls,
     friendInvites: async () => invites.map((i) => ({ ...i })),
     friendInviteDismiss: async (id) => {

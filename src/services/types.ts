@@ -163,6 +163,12 @@ export type HearthUncleanChoice = "wait" | "checkpoint" | "last";
 /** Erreur renvoyée par `hearthPlay` tant que le contrat d'utilisation de Minecraft n'est pas accepté. */
 export const HEARTH_EULA_REQUIRED = "eula_required";
 
+/**
+ * Préfixe de l'erreur de `hearthPlay` quand la dernière version est connue mais que personne de joignable n'en a le contenu.
+ * Format : `head_unavailable|<n° de la tête>|<n° de la dernière version complète, ou vide>|<nom de l'auteur>`.
+ */
+export const HEARTH_HEAD_UNAVAILABLE = "head_unavailable";
+
 export interface Services {
   authStatus(): Promise<Profile | null>;
   authBeginLogin(): Promise<DeviceCode>;
@@ -299,6 +305,8 @@ export interface Services {
   hearthInviteDismiss(groupId: string): Promise<void>;
   /** Le bouton unique de la carte : jouer ou rejoindre selon l'état. Rejette avec `eula_required` au premier hébergement. */
   hearthPlay(id: string): Promise<void>;
+  /** Repart de la dernière version complète quand `hearthPlay` a rejeté avec `head_unavailable` : crée une fourche quand l'auteur revient. */
+  hearthPlayFromPrevious(id: string): Promise<void>;
   hearthStop(id: string): Promise<void>;
   hearthUncleanChoice(id: string, choice: HearthUncleanChoice): Promise<void>;
   /** Associe le modpack du groupe à une instance locale. */

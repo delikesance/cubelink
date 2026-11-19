@@ -1350,6 +1350,25 @@ impl HearthRuntime {
         (h.len() == 1).then(|| h.remove(0))
     }
 
+    /// La version la plus avancée dont le monde est en entier sur ce PC : la tête unique si son contenu est là, sinon
+    /// son plus proche ancêtre (même période) qui l'est. C'est d'elle que repart un `ContinueWithout` : repartir d'une
+    /// tête dont personne n'a le contenu ne débloquerait rien. `None` : fourche, aucune version, ou aucun contenu.
+    pub fn complete_head(&self, gid: &GroupId) -> Option<SignedVersion> {
+        let head = self.head(gid)?;
+        let epoch = self.state(gid)?.epoch;
+        self.with_group(gid, |g| {
+            g.graph()
+                .ancestry(&head.id())
+                .iter()
+                .filter_map(|id| g.graph().get(id))
+                .take_while(|v| v.header.epoch == epoch)
+                .find(|v| self.world_complete(v))
+                .cloned()
+        })
+        .ok()
+        .flatten()
+    }
+
     pub fn is_fork(&self, gid: &GroupId) -> bool {
         self.heads_of(gid).is_some_and(|h| h.len() > 1)
     }
@@ -1918,7 +1937,7 @@ impl HearthRuntime {
         let leaving = matches!(op, GroupOp::Leave);
         self.check_continue_vote(&gid, &op)?;
         let (p, status) = self.with_group(&gid, |g| {
-            g.check_continue_base(&op, true).map_err(|e| e.to_string())?;
+            g.check_continue_base(&op, true, Some(&|v| self.world_complete(v))).map_err(|e| e.to_string())?;
             let mut p = Proposal::new(g.state(), op).map_err(|e| e.to_string())?;
             p.vote(g.state(), &*self.identity).map_err(|e| e.to_string())?;
             let status = g.put_proposal(p.clone(), &self.me).map_err(|e| e.to_string())?;
@@ -1995,7 +2014,7 @@ impl HearthRuntime {
         let (sig, status) = self.with_group(&gid, |g| {
             let p = g.proposal(&id).ok_or("cette proposition n'existe plus")?.clone();
             self.check_continue_vote(&gid, &p.op)?;
-            g.check_continue_base(&p.op, true).map_err(|e| e.to_string())?;
+            g.check_continue_base(&p.op, true, Some(&|v| self.world_complete(v))).map_err(|e| e.to_string())?;
             let sig = p.sign(&*self.identity);
             let status = g.add_vote(&id, self.me, sig).map_err(|e| e.to_string())?;
             Ok::<_, String>((sig, status))
@@ -2879,7 +2898,7 @@ impl HearthRuntime {
             .collect();
         let blocker = head.as_ref().and_then(|h| {
             let a = h.header.author;
-            let days = blocking_days(a == self.me, st.is_member(&a), unseen(&a))?;
+            let days = blocking_days(a == self.me, st.is_member(&a), unseen(&a), self.world_complete(h))?;
             Some(HearthBlocker { member: self.lite(&st, &a), days })
         });
         let fork: Vec<HearthBranch> = if heads.len() > 1 {
@@ -2911,7 +2930,28 @@ impl HearthRuntime {
         self.detail(gid).ok()?.blocker.and_then(|b| parse_key(&b.member.public_key))
     }
 
-    /// Propose de continuer sans `absent` : repart de la version la plus récente que nous avons.
+    /// Un membre en ligne dit-il avoir le monde de `v` en entier (sonde `Have`) ?
+    async fn online_member_has_world(self: &Arc<Self>, gid: &GroupId, v: &SignedVersion) -> bool {
+        let (found, id) = (Arc::new(AtomicBool::new(false)), v.id());
+        let visit: Visit = Arc::new({
+            let (found, gid) = (found.clone(), *gid);
+            move |c| {
+                let found = found.clone();
+                Box::pin(async move {
+                    if c.have_version(&gid, &id).await? {
+                        found.store(true, Ordering::SeqCst);
+                    }
+                    Ok(())
+                })
+            }
+        });
+        self.broadcast(*gid, true, visit).await;
+        found.load(Ordering::SeqCst)
+    }
+
+    /// Propose de continuer sans `absent` : repart de la version la plus récente dont nous avons le monde en entier
+    /// (celle de l'absent n'a en général pas de contenu chez nous). Refuse si un membre en ligne a déjà le monde de la
+    /// dernière version : rien n'est bloqué, il suffit de le récupérer.
     pub async fn propose_continue(self: &Arc<Self>, gid: GroupId, absent: PeerKey) -> Result<(), String> {
         let st = self.require_state(&gid)?;
         if !st.is_member(&absent) || absent == self.me {
@@ -2928,7 +2968,17 @@ impl HearthRuntime {
         if let Some(id) = existing {
             return self.vote(gid, id).await;
         }
-        let base = self.head(&gid).ok_or("aucune version connue pour repartir")?.id();
+        let head = self.head(&gid).ok_or("aucune version connue pour repartir")?;
+        // Un membre joignable a déjà le monde de la tête : on le récupère, rien n'est bloqué.
+        if self.online_member_has_world(&gid, &head).await {
+            let rt = self.clone();
+            spawn(async move { rt.sync_heads(gid, None).await });
+            return Err("un membre en ligne a déjà le monde de la dernière version : il se synchronise, réessaie dans un instant si besoin.".into());
+        }
+        let base = self
+            .complete_head(&gid)
+            .ok_or("aucune version complète sur ce PC pour repartir : le monde n'a pas encore été récupéré ici")?
+            .id();
         // Dernier signe de vie de l'absent tel que nous le connaissons ; sans cela, rien n'atteste son absence.
         let seen = self.meta_of(&gid).seen.get(&key_hex(&absent)).copied().ok_or("on ne sait pas depuis quand ce membre est absent")?;
         let (absent_since, at) = (u64::try_from(seen).unwrap_or(0), u64::try_from(now_secs()).unwrap_or(0));
@@ -2937,10 +2987,11 @@ impl HearthRuntime {
 }
 
 /// Nombre de jours d'absence de l'auteur de la version la plus récente, s'il bloque le groupe : un autre membre,
-/// actuellement dans le groupe, pas revenu depuis `CONTINUE_AFTER_DAYS` jours au moins.
-fn blocking_days(author_is_me: bool, is_member: bool, unseen_days: Option<u32>) -> Option<u32> {
+/// actuellement dans le groupe, pas revenu depuis `CONTINUE_AFTER_DAYS` jours au moins, et dont la version n'est pas
+/// déjà complète sur ce PC (sinon son absence ne bloque rien : on a le monde, on peut y jouer).
+fn blocking_days(author_is_me: bool, is_member: bool, unseen_days: Option<u32>, head_complete: bool) -> Option<u32> {
     let days = unseen_days?;
-    (!author_is_me && is_member && days >= CONTINUE_AFTER_DAYS).then_some(days)
+    (!author_is_me && is_member && !head_complete && days >= CONTINUE_AFTER_DAYS).then_some(days)
 }
 
 /// Espace libre (octets) sur le disque qui porte `path`, s'il se mesure ; `None` sinon (la vérification est alors
@@ -3013,14 +3064,16 @@ mod tests {
     #[test]
     fn bannière_seulement_apres_sept_jours_pour_un_autre_membre() {
         // Moins de sept jours, ou jamais vu : pas de bannière.
-        assert_eq!(blocking_days(false, true, Some(CONTINUE_AFTER_DAYS - 1)), None);
-        assert_eq!(blocking_days(false, true, None), None);
+        assert_eq!(blocking_days(false, true, Some(CONTINUE_AFTER_DAYS - 1), false), None);
+        assert_eq!(blocking_days(false, true, None, false), None);
         // Sept jours et plus : « X n'est pas revenu depuis N jours ».
-        assert_eq!(blocking_days(false, true, Some(CONTINUE_AFTER_DAYS)), Some(CONTINUE_AFTER_DAYS));
-        assert_eq!(blocking_days(false, true, Some(30)), Some(30));
+        assert_eq!(blocking_days(false, true, Some(CONTINUE_AFTER_DAYS), false), Some(CONTINUE_AFTER_DAYS));
+        assert_eq!(blocking_days(false, true, Some(30), false), Some(30));
         // Jamais pour moi, ni pour quelqu'un qui n'est plus dans le groupe.
-        assert_eq!(blocking_days(true, true, Some(30)), None);
-        assert_eq!(blocking_days(false, false, Some(30)), None);
+        assert_eq!(blocking_days(true, true, Some(30), false), None);
+        assert_eq!(blocking_days(false, false, Some(30), false), None);
+        // Le monde de sa version est déjà complet ici : son absence ne bloque rien, pas de bannière.
+        assert_eq!(blocking_days(false, true, Some(30), true), None);
     }
 
     #[test]

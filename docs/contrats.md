@@ -225,7 +225,7 @@ Erreur spéciale : `eula_required` (chaîne exacte, `HEARTH_EULA_REQUIRED` côt�
   - `HearthMember` : `{ public_key, name, online, is_me, is_creator, sync: "ok" | "behind" | "unknown", version, unseen_days }`.
   - `HearthVersion` : `{ id, number, kind: "session" | "checkpoint" | "restore", author, author_name, created_at, played_secs, total_size, is_head, side_branch }`.
   - `HearthProposal` : `{ id, kind: "continue_without" | "set_governance" | "add_member" | "remove_member" | "pack_update" | "leave", subject, approvals, needed, i_voted, can_vote }`.
-  - `HearthBlocker` : `{ member, days }` : le membre qui avait la version la plus récente n'est pas revenu depuis `days` jours (7 au moins) ; la bannière propose `hearth_continue_without`.
+  - `HearthBlocker` : `{ member, days }` : le membre qui avait la version la plus récente n'est pas revenu depuis `days` jours (7 au moins) et le monde de cette version n'est pas complet sur ce PC (sinon il ne bloque rien, pas de bannière) ; la bannière propose `hearth_continue_without`, qui repart de la dernière version dont le monde est complet ici.
   - `HearthBranch` : `{ version_id, number, author_name, created_at, played_secs, total_size }`. `HearthSettings` : `{ keep_background, disk_bytes, outbox_pending, instance_name }`.
 
 ### Écarts avec docs/hearth.md et réseau

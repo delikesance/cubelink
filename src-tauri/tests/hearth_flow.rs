@@ -771,3 +771,89 @@ async fn invitations_de_groupe_limitees_et_emetteur_membre_exige() {
         p.stop().await;
     }
 }
+
+/// Écrit un petit monde dans `dir` (chaque `txt` donne un monde distinct).
+fn small_world(dir: &Path, txt: &str) {
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(dir.join("level.dat"), txt).unwrap();
+}
+
+/// Eve publie une version dont personne d'autre n'a le contenu, puis disparaît : « Continuer sans Eve » repart de la
+/// dernière version dont le monde est complet (la n° 1), pas de la tête d'Eve. Après le vote, « Jouer » fonctionne.
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn continuer_sans_repart_de_la_derniere_version_complete() {
+    let (peers, g, id) = group_of(&["Alice", "Bob", "Eve"]).await;
+    let (a, b, e) = (&peers[0], &peers[1], &peers[2]);
+    // n° 1 d'Alice, complète chez tout le monde.
+    let d1 = a.dir.path().join("monde-1");
+    small_world(&d1, "monde n° 1");
+    let v1 = a.rt().publish_version(g, &d1, VersionKind::Session, None, 60).await.unwrap();
+    wait_for("n° 1 complète chez Bob et Eve", 40, || {
+        [b, e].iter().all(|p| p.rt().head(&g).is_some_and(|h| h.id() == v1.id() && p.rt().world_complete(&h)))
+    })
+    .await;
+    // n° 2 d'Eve : l'en-tête part chez les autres, mais son contenu n'existe nulle part ailleurs (Eve est ensuite éteinte).
+    let v2 = e.rt().record_version(g, VersionKind::Session, Some((v1.id(), 1)), 90, [7; 32], 4096).unwrap();
+    wait_for("en-tête n° 2 chez Alice et Bob", 40, || [a, b].iter().all(|p| p.rt().head(&g).is_some_and(|h| h.id() == v2.id()))).await;
+    e.stop().await;
+    for p in [a, b] {
+        p.rt().probe_all().await;
+        p.rt().test_set_last_seen_days_ago(&g, &e.key(), 8);
+    }
+    for p in [a, b] {
+        assert!(!p.rt().world_complete(&v2), "personne n'a le monde de la n° 2");
+        let blocker = p.node.st.hearth.detail(&g).unwrap().blocker.expect("Eve bloque : sa version n'a pas de contenu");
+        assert_eq!(blocker.member.public_key, e.node.key());
+        assert_eq!(p.rt().complete_head(&g).unwrap().id(), v1.id(), "la tête complète est la n° 1");
+    }
+
+    // Bob propose, Alice vote : époque 1, repartie de la n° 1.
+    b.node.st.hearth_continue_without(&id, &e.node.key()).await.unwrap();
+    wait_for("proposition chez Alice", 20, || !a.node.st.hearth.detail(&g).unwrap().proposals.is_empty()).await;
+    let prop = a.node.st.hearth.detail(&g).unwrap().proposals.remove(0);
+    assert!(prop.can_vote && prop.kind == "continue_without");
+    a.node.st.hearth_vote(&id, &prop.id).await.unwrap();
+    wait_for("époque 1 chez Bob", 20, || b.rt().state(&g).is_some_and(|s| s.epoch == 1)).await;
+    for p in [a, b] {
+        assert_eq!(p.rt().state(&g).unwrap().epoch, 1);
+        let head = p.rt().head(&g).unwrap();
+        assert_eq!(head.id(), v1.id(), "la nouvelle époque repart de la n° 1, pas de la n° 2 sans contenu");
+        assert!(p.rt().world_complete(&head));
+        let d = p.node.st.hearth.detail(&g).unwrap();
+        assert!(d.blocker.is_none(), "plus personne ne bloque");
+        assert!(d.versions.iter().any(|v| v.id == v2.id().to_hex() && v.side_branch), "la n° 2 reste restaurable, en branche");
+    }
+
+    // « Jouer » fonctionne : Bob héberge à partir du monde de la n° 1.
+    b.node.st.hearth_play(&id).await.unwrap();
+    assert_eq!(b.state_of(&g), HearthStateKind::Hosting);
+    assert!(read_tree(&b.rt().server_dir(&g).join("world")).iter().any(|(n, c)| n == "level.dat" && c == b"monde n\xc2\xb0 1"));
+    b.close_game();
+    wait_for("serveur de Bob arrêté", 30, || b.state_of(&g) != HearthStateKind::Hosting).await;
+    for p in &peers {
+        p.stop().await;
+    }
+}
+
+/// Eve a publié la dernière version et son monde est déjà complet chez Alice : son absence ne bloque rien, pas de
+/// bannière « Continuer sans Eve », et la commande est refusée.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pas_de_banniere_quand_le_monde_de_l_absent_est_deja_complet() {
+    let (peers, g, id) = group_of(&["Alice", "Eve"]).await;
+    let (a, e) = (&peers[0], &peers[1]);
+    let d1 = e.dir.path().join("monde-eve");
+    small_world(&d1, "monde d'Eve");
+    let v1 = e.rt().publish_version(g, &d1, VersionKind::Session, None, 60).await.unwrap();
+    wait_for("monde d'Eve complet chez Alice", 40, || a.rt().head(&g).is_some_and(|h| h.id() == v1.id() && a.rt().world_complete(&h))).await;
+    e.stop().await;
+    a.rt().probe_all().await;
+    a.rt().test_set_last_seen_days_ago(&g, &e.key(), 8);
+    let d = a.node.st.hearth.detail(&g).unwrap();
+    assert!(d.blocker.is_none(), "Alice a le monde : Eve ne bloque rien");
+    assert_eq!(d.members.iter().find(|m| m.public_key == e.node.key()).unwrap().unseen_days, Some(8));
+    let err = a.node.st.hearth_continue_without(&id, &e.node.key()).await.unwrap_err();
+    assert!(err.contains("personne ne bloque"), "{err}");
+    for p in &peers {
+        p.stop().await;
+    }
+}

@@ -200,7 +200,7 @@ pub fn decrypt_backup(bytes: &[u8], passphrase: &str) -> Result<BackupPayload, B
         return Err(BackupError::UnsupportedVersion(bytes[4]));
     }
     if bytes[5] != KDF_ARGON2ID {
-        return Err(BackupError::UnsupportedVersion(bytes[4]));
+        return Err(BackupError::UnsupportedVersion(bytes[5]));
     }
     let params = KdfParams { m_cost_kib: u32_at(bytes, 6), t_cost: u32_at(bytes, 10), parallelism: u32_at(bytes, 14) };
     if !params.within_bounds() {
@@ -376,26 +376,64 @@ fn copy_replace(from: &Path, to: &Path) -> Result<(), BackupError> {
     write_replace(to, &data)
 }
 
+/// Nombre de démarrages après lesquels une restauration qui échoue toujours sur une erreur d'E/S est abandonnée.
+const MAX_APPLY_LAUNCHES: u32 = 3;
+/// Fichier compteur déposé dans `import-pending/` après un échec d'E/S.
+const ATTEMPTS_FILE: &str = "attempts";
+/// Réessais au sein d'un même démarrage (Windows : l'ancien processus peut encore tenir `friends.db` ouverte
+/// pendant quelques instants après `app.restart()`), et pause entre deux.
+const APPLY_RETRIES: u32 = 20;
+const APPLY_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// Applique une restauration déposée par [`stage_import`]. À appeler au tout début du démarrage, avant l'ouverture
 /// de l'identité et de la base. Sans restauration en attente : ne fait rien (`Ok(false)`).
+/// `hearth_dir` : dossier des groupes Hearth, lié à l'identité ; quand la clé change, il est mis de côté en
+/// `hearth.bak-<horodatage>` (sinon des groupes de l'ancienne clé resteraient chargés sous la nouvelle).
 ///
 /// Reprenable : le dossier en attente n'est supprimé qu'à la fin ; rejouée après un arrêt brutal, l'application
 /// saute ce qui est déjà en place. L'ancienne identité n'est jamais absente du disque (copie `.bak`, puis
-/// remplacement atomique). En cas d'échec, les anciens fichiers sont remis et la restauration est abandonnée.
-pub fn apply_pending_import(p2p_dir: &Path) -> Result<bool, BackupError> {
+/// remplacement atomique). En cas d'échec, les anciens fichiers sont remis. Une erreur d'E/S (fichier verrouillé)
+/// est réessayée quelques secondes, puis la restauration reste en attente pour le démarrage suivant (trois au
+/// plus) ; une restauration invalide est abandonnée tout de suite.
+pub fn apply_pending_import(p2p_dir: &Path, hearth_dir: Option<&Path>) -> Result<bool, BackupError> {
+    apply_pending_import_with(p2p_dir, hearth_dir, APPLY_RETRIES, APPLY_RETRY_DELAY)
+}
+
+fn apply_pending_import_with(
+    p2p_dir: &Path,
+    hearth_dir: Option<&Path>,
+    retries: u32,
+    delay: std::time::Duration,
+) -> Result<bool, BackupError> {
     let pending = p2p_dir.join(PENDING_DIR);
     // Un dépôt interrompu avant son renommage final n'est jamais appliqué.
     let _ = std::fs::remove_dir_all(p2p_dir.join(format!("{PENDING_DIR}.tmp")));
     if !pending.exists() {
         return Ok(false);
     }
-    let res = apply_inner(p2p_dir, &pending);
-    // Réussite ou échec, la restauration est terminée : on ne la rejoue pas à chaque démarrage.
-    let _ = std::fs::remove_dir_all(&pending);
+    let launches: u32 = std::fs::read_to_string(pending.join(ATTEMPTS_FILE)).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
+    let mut res = apply_inner(p2p_dir, hearth_dir, &pending);
+    for _ in 0..retries {
+        if !matches!(res, Err(BackupError::Io(_))) {
+            break;
+        }
+        std::thread::sleep(delay);
+        res = apply_inner(p2p_dir, hearth_dir, &pending);
+    }
+    match &res {
+        // Fichier encore verrouillé : la restauration reste en attente, rejouée au prochain démarrage.
+        Err(BackupError::Io(_)) if launches + 1 < MAX_APPLY_LAUNCHES => {
+            let _ = std::fs::write(pending.join(ATTEMPTS_FILE), (launches + 1).to_string());
+        }
+        // Réussie, invalide ou trop de démarrages ratés : terminée, on ne la rejoue pas.
+        _ => {
+            let _ = std::fs::remove_dir_all(&pending);
+        }
+    }
     res.map(|()| true)
 }
 
-fn apply_inner(p2p_dir: &Path, pending: &Path) -> Result<(), BackupError> {
+fn apply_inner(p2p_dir: &Path, hearth_dir: Option<&Path>, pending: &Path) -> Result<(), BackupError> {
     let new_key = pending.join(KEY_FILE);
     let new_db = pending.join(DB_FILE);
     let key_ok = std::fs::metadata(&new_key).map(|m| m.len() == 32).unwrap_or(false);
@@ -427,6 +465,12 @@ fn apply_inner(p2p_dir: &Path, pending: &Path) -> Result<(), BackupError> {
         }
         // 2. Identité, en dernier : c'est le point de validation. La clé actuelle est copiée en .bak d'abord.
         if !(cur_key.is_file() && same_content(&new_key, &cur_key)) {
+            // Les groupes Hearth sont liés à l'ancienne clé : mis de côté avant qu'elle change (reprenable : absent = fait).
+            if let Some(h) = hearth_dir.filter(|h| h.exists()) {
+                let bak = bak_name(h, &stamp);
+                std::fs::rename(h, &bak).map_err(|e| io("mise de côté des groupes Hearth", e))?;
+                moved.push((bak, h.to_path_buf()));
+            }
             if cur_key.exists() {
                 copy_replace(&cur_key, &bak_name(&cur_key, &stamp))?;
             }
@@ -483,7 +527,7 @@ mod tests {
         let pk = stage_import(dst.path(), &file, PASS).unwrap();
         assert_eq!(pk, id.public_key_hex());
         assert!(has_pending_import(dst.path()));
-        assert!(apply_pending_import(dst.path()).unwrap());
+        assert!(apply_pending_import(dst.path(), None).unwrap());
         assert!(!dst.path().join(PENDING_DIR).exists());
 
         let id2 = Identity::load_or_create(dst.path()).unwrap();
@@ -673,7 +717,7 @@ mod tests {
     #[test]
     fn apply_without_pending_is_a_noop() {
         let d = tempfile::tempdir().unwrap();
-        assert!(!apply_pending_import(d.path()).unwrap());
+        assert!(!apply_pending_import(d.path(), None).unwrap());
         assert_eq!(std::fs::read_dir(d.path()).unwrap().count(), 0);
     }
 
@@ -691,7 +735,7 @@ mod tests {
         std::mem::forget(old_db);
 
         stage_import(dst.path(), &file, PASS).unwrap();
-        assert!(apply_pending_import(dst.path()).unwrap());
+        assert!(apply_pending_import(dst.path(), None).unwrap());
 
         let names: Vec<String> = std::fs::read_dir(dst.path()).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
         assert!(names.iter().any(|n| n.starts_with("identity.key.bak-")), "{names:?}");
@@ -725,15 +769,15 @@ mod tests {
         let pending = dst.path().join(PENDING_DIR);
         // Arrêt brutal juste après l'étape « amis » : la base est en place, l'identité pas encore.
         std::fs::copy(pending.join(DB_FILE), dst.path().join(DB_FILE)).unwrap();
-        assert!(apply_pending_import(dst.path()).unwrap());
+        assert!(apply_pending_import(dst.path(), None).unwrap());
         assert_eq!(Identity::load_or_create(dst.path()).unwrap().public_key_hex(), id.public_key_hex());
         assert_eq!(FriendsDb::open(dst.path().join(DB_FILE)).unwrap().list_friends().unwrap().len(), 2);
         // Rejouée en entier : sans rien de nouveau à faire (pas de pending), toujours sans effet.
-        assert!(!apply_pending_import(dst.path()).unwrap());
+        assert!(!apply_pending_import(dst.path(), None).unwrap());
     }
 
     #[test]
-    fn apply_failure_rolls_back_to_the_old_state() {
+    fn apply_failure_rolls_back_and_keeps_the_restore_for_the_next_launch() {
         let src = tempfile::tempdir().unwrap();
         let (id, db) = setup(src.path());
         let file = export(src.path(), &id, &db, PASS);
@@ -742,14 +786,73 @@ mod tests {
         old_db.add_friend(&Friend { public_key: key('d'), name: "Dora".into(), trust: TrustLevel::Ask, added_at: 1 }).unwrap();
         drop(old_db);
         stage_import(dst.path(), &file, PASS).unwrap();
-        // Panne à l'étape « identité » : un dossier occupe le nom du fichier .bak voulu.
+        // Panne à l'étape « identité » : un dossier occupe le nom du fichier .bak voulu (équivalent d'un fichier verrouillé).
         let pending_stamp = std::fs::read_to_string(dst.path().join(PENDING_DIR).join(STAMP_FILE)).unwrap();
-        std::fs::create_dir_all(dst.path().join(format!("identity.key.bak-{}", pending_stamp.trim()))).unwrap();
-        assert!(apply_pending_import(dst.path()).is_err());
-        assert!(!dst.path().join(PENDING_DIR).exists());
+        let obstacle = dst.path().join(format!("identity.key.bak-{}", pending_stamp.trim()));
+        std::fs::create_dir_all(&obstacle).unwrap();
+        let none = std::time::Duration::ZERO;
+        assert!(apply_pending_import_with(dst.path(), None, 2, none).is_err());
+        // Erreur d'E/S : la restauration n'est pas perdue, elle est rejouée au démarrage suivant.
+        assert!(has_pending_import(dst.path()));
         assert_eq!(Identity::load_or_create(dst.path()).unwrap().public_key_hex(), old_id.public_key_hex());
         let friends = FriendsDb::open(dst.path().join(DB_FILE)).unwrap().list_friends().unwrap();
         assert!(friends.iter().any(|f| f.name == "Dora"), "{friends:?}");
+        // Le verrou disparaît : le démarrage suivant applique la restauration.
+        std::fs::remove_dir_all(&obstacle).unwrap();
+        assert!(apply_pending_import_with(dst.path(), None, 0, none).unwrap());
+        assert!(!dst.path().join(PENDING_DIR).exists());
+        assert_eq!(Identity::load_or_create(dst.path()).unwrap().public_key_hex(), id.public_key_hex());
+    }
+
+    #[test]
+    fn apply_gives_up_after_too_many_failed_launches() {
+        let src = tempfile::tempdir().unwrap();
+        let (id, db) = setup(src.path());
+        let file = export(src.path(), &id, &db, PASS);
+        let dst = tempfile::tempdir().unwrap();
+        let (old_id, _old_db) = setup(dst.path());
+        stage_import(dst.path(), &file, PASS).unwrap();
+        let stamp = std::fs::read_to_string(dst.path().join(PENDING_DIR).join(STAMP_FILE)).unwrap();
+        std::fs::create_dir_all(dst.path().join(format!("identity.key.bak-{}", stamp.trim()))).unwrap();
+        let none = std::time::Duration::ZERO;
+        for _ in 0..MAX_APPLY_LAUNCHES - 1 {
+            assert!(apply_pending_import_with(dst.path(), None, 0, none).is_err());
+            assert!(has_pending_import(dst.path()));
+        }
+        assert!(apply_pending_import_with(dst.path(), None, 0, none).is_err());
+        assert!(!dst.path().join(PENDING_DIR).exists());
+        assert_eq!(Identity::load_or_create(dst.path()).unwrap().public_key_hex(), old_id.public_key_hex());
+    }
+
+    #[test]
+    fn hearth_groups_are_set_aside_when_the_key_changes() {
+        let src = tempfile::tempdir().unwrap();
+        let (id, db) = setup(src.path());
+        let file = export(src.path(), &id, &db, PASS);
+        let dst = tempfile::tempdir().unwrap();
+        let _old = Identity::load_or_create(dst.path()).unwrap();
+        let hearth = dst.path().join("hearth-test");
+        std::fs::create_dir_all(&hearth).unwrap();
+        std::fs::write(hearth.join("meta.json"), b"{}").unwrap();
+        stage_import(dst.path(), &file, PASS).unwrap();
+        assert!(apply_pending_import(dst.path(), Some(&hearth)).unwrap());
+        assert!(!hearth.exists());
+        let stamp_bak = std::fs::read_dir(dst.path()).unwrap().filter_map(|e| e.ok()).any(|e| {
+            e.file_name().to_string_lossy().starts_with("hearth-test.bak-") && e.path().join("meta.json").is_file()
+        });
+        assert!(stamp_bak);
+    }
+
+    #[test]
+    fn hearth_groups_are_kept_when_the_key_is_unchanged() {
+        let src = tempfile::tempdir().unwrap();
+        let (id, db) = setup(src.path());
+        let file = export(src.path(), &id, &db, PASS);
+        let hearth = src.path().join("hearth-test");
+        std::fs::create_dir_all(&hearth).unwrap();
+        stage_import(src.path(), &file, PASS).unwrap();
+        assert!(apply_pending_import(src.path(), Some(&hearth)).unwrap());
+        assert!(hearth.exists());
     }
 
     #[test]
@@ -759,7 +862,7 @@ mod tests {
         let tmp = d.path().join(format!("{PENDING_DIR}.tmp"));
         std::fs::create_dir_all(&tmp).unwrap();
         std::fs::write(tmp.join(KEY_FILE), [1u8; 32]).unwrap();
-        assert!(!apply_pending_import(d.path()).unwrap());
+        assert!(!apply_pending_import(d.path(), None).unwrap());
         assert!(!tmp.exists());
     }
 
@@ -770,7 +873,7 @@ mod tests {
         let p = d.path().join(PENDING_DIR);
         std::fs::create_dir_all(&p).unwrap();
         std::fs::write(p.join(KEY_FILE), b"trop court").unwrap();
-        assert!(apply_pending_import(d.path()).is_err());
+        assert!(apply_pending_import(d.path(), None).is_err());
         assert!(!p.exists());
         assert_eq!(Identity::load_or_create(d.path()).unwrap().public_key_hex(), id.public_key_hex());
     }

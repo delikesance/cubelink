@@ -383,7 +383,7 @@ impl AppState {
         paths.create_all().map_err(|_| "impossible de créer le dossier de données".to_string())?;
         let store = StoreIndex::open(paths.store.join("index.sqlite")).map_err(|e| crate::error::user_msg(&e))?;
         // Restauration d'identité déposée avant le redémarrage : avant toute ouverture de l'identité et de la base.
-        match p2p_lib::identity_backup::apply_pending_import(&paths.p2p) {
+        match p2p_lib::identity_backup::apply_pending_import(&paths.p2p, Some(&paths.root.join("hearth"))) {
             Ok(true) => eprintln!("[Cubelink] identité restaurée depuis une sauvegarde"),
             Ok(false) => {}
             Err(e) => eprintln!("[Cubelink] restauration d'identité abandonnée, ancienne identité gardée : {e}"),

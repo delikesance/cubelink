@@ -247,6 +247,16 @@ impl FriendsDb {
         rand::Rng::fill_bytes(&mut rand::rand_core::UnwrapErr(rand::rngs::SysRng), &mut nonce);
         let tmp = scratch.join(format!("snapshot-{}.tmp", hex::encode(nonce)));
         let res = (|| -> Result<Vec<u8>> {
+            // Fichier vide créé d'abord, en 0600 sous unix (VACUUM INTO accepte un fichier vide) : la copie contient
+            // les clés et adresses des amis, elle ne doit pas être lisible par les autres comptes.
+            let mut opts = std::fs::OpenOptions::new();
+            opts.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                opts.mode(0o600);
+            }
+            opts.open(&tmp).map_err(|e| Error::Other(format!("fichier temporaire : {e}")))?;
             self.lock().execute("VACUUM INTO ?1", params![tmp.to_string_lossy()]).map_err(db)?;
             std::fs::read(&tmp).map_err(|e| Error::Other(format!("lecture de la copie des amis : {e}")))
         })();

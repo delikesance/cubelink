@@ -81,8 +81,9 @@ export default function Login() {
   // Au premier affichage et au retour à l'accueil (Annuler), le titre reprend le focus.
   useEffect(() => { if (!onCode) h1.current?.focus(); }, [onCode]);
 
-  // Échap sur l'écran du code = Annuler (pas pendant « Connecté » : l'écran part tout seul vers l'accueil).
-  const cancellable = state.step === "code" || state.step === "expired" || state.step === "error";
+  // Échap = Annuler : sur l'écran du code, et aussi pendant la demande du code (réseau coupé : sans cela, rien ne la quitte).
+  // Pas pendant « Connecté » : l'écran part tout seul vers l'accueil.
+  const cancellable = state.step === "starting" || state.step === "code" || state.step === "expired" || state.step === "error";
   useEffect(() => {
     if (!cancellable) return;
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape" && !e.defaultPrevented) { e.preventDefault(); cancel(); } };

@@ -29,6 +29,7 @@ export function createTauriServices(): Services {
     authStatus: () => commands.authStatus(),
     authBeginLogin: () => commands.authBeginLogin(),
     authPollLogin: () => commands.authPollLogin(),
+    authCancelLogin: () => commands.authCancelLogin(),
     authLogout: () => done(commands.authLogout()),
     authOfflineLogin: (name) => commands.authOfflineLogin(name),
     offlineAvailable: async () => true,

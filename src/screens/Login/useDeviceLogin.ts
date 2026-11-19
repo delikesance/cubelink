@@ -25,6 +25,8 @@ export function useDeviceLogin(services: Services, onFailure?: (message: string)
   const [left, setLeft] = useState(0);
   const [copied, setCopied] = useState(false);
   const run = useRef(0);
+  /** Numéro de l'appel `authBeginLogin` en vol (0 = aucun) : un second clic pendant l'attente ne demande pas un second code. */
+  const beginning = useRef(0);
   const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const failure = useRef(onFailure);
   failure.current = onFailure;
@@ -35,10 +37,13 @@ export function useDeviceLogin(services: Services, onFailure?: (message: string)
   }, []);
 
   const start = useCallback(async () => {
+    if (beginning.current) return;
     const id = ++run.current;
+    beginning.current = id;
     setState({ step: "starting" });
     try {
       const code = await services.authBeginLogin();
+      if (beginning.current === id) beginning.current = 0;
       if (id !== run.current) return;
       setLeft(code.expires_in);
       setCopied(false);
@@ -47,6 +52,7 @@ export function useDeviceLogin(services: Services, onFailure?: (message: string)
       if (id !== run.current) return;
       setState({ step: "connected", profile });
     } catch (e) {
+      if (beginning.current === id) beginning.current = 0;
       if (id !== run.current) return;
       const message = messageOf(e);
       if (failure.current?.(message)) return;
@@ -54,11 +60,13 @@ export function useDeviceLogin(services: Services, onFailure?: (message: string)
     }
   }, [services]);
 
-  /** Abandonne le flux en cours (la réponse tardive est ignorée). */
+  /** Abandonne le flux en cours : la réponse tardive est ignorée ici, et Rust cesse d'attendre le code (aucun compte ajouté). */
   const cancel = useCallback(() => {
     run.current += 1;
+    beginning.current = 0;
     setState({ step: "idle" });
-  }, []);
+    services.authCancelLogin().catch(() => { /* rien à annuler côté Rust */ });
+  }, [services]);
 
   const waiting = state.step === "code";
   useEffect(() => {

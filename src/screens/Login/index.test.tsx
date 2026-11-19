@@ -98,6 +98,34 @@ describe("écran Connexion", () => {
     await expectBackAtWelcome(finish);
   });
 
+  it("Annuler prévient Rust (authCancelLogin), pour qu'une validation tardive n'ajoute aucun compte", async () => {
+    const { svc } = lateServices();
+    const cancelLogin = vi.fn(async () => {});
+    render(<Shell services={{ ...svc, authCancelLogin: cancelLogin }} />);
+    fireEvent.click(btn());
+    expect(await screen.findByLabelText(/^Code :/)).toBeTruthy();
+    expect(cancelLogin).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Annuler" }));
+    expect(cancelLogin).toHaveBeenCalledTimes(1);
+  });
+
+  it("Échap pendant la demande du code (réseau lent) quitte l'attente ; un second clic ne redemande pas de code", async () => {
+    const base = createFakeServices({ tickMs: 0 });
+    let release: (c: { user_code: string; verification_uri: string; expires_in: number }) => void = () => {};
+    const begin = vi.fn(() => new Promise<{ user_code: string; verification_uri: string; expires_in: number }>((r) => { release = r; }));
+    const cancelLogin = vi.fn(async () => {});
+    render(<Shell services={{ ...base, authBeginLogin: begin, authCancelLogin: cancelLogin }} />);
+    fireEvent.click(btn());
+    fireEvent.click(btn());
+    expect(begin).toHaveBeenCalledTimes(1);
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(cancelLogin).toHaveBeenCalledTimes(1);
+    // La réponse tardive de la demande de code ne rouvre pas l'écran du code.
+    await act(async () => { release({ user_code: "ZZZZ-0000", verification_uri: "https://x.test", expires_in: 900 }); await Promise.resolve(); });
+    expect(screen.queryByLabelText(/^Code :/)).toBeNull();
+    expect(screen.getByRole("button", { name: "Jouer hors ligne" })).toBeTruthy();
+  });
+
   it("Échap déjà pris en charge par un autre composant (defaultPrevented) n'annule pas", async () => {
     const { svc } = lateServices();
     render(<Shell services={svc} />);

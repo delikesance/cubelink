@@ -45,6 +45,7 @@ macro_rules! commands {
             commands_auth::auth_remove,
             commands_auth::auth_begin_login,
             commands_auth::auth_poll_login,
+            commands_auth::auth_cancel_login,
             commands_auth::auth_logout,
             commands_auth::auth_offline_login,
             commands_instances::instances_list,

@@ -489,6 +489,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
       };
       if (loginDelayMs <= 0) done(); else setTimeout(done, loginDelayMs);
     }),
+    authCancelLogin: async () => {},
     authLogout: async () => {
       accounts = accounts.filter((a) => a.id !== active);
       active = accounts[0]?.id ?? null;

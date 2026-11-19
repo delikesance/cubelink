@@ -17,6 +17,7 @@ Arguments : clés JSON envoyées à Tauri (snake_case) et leur type TypeScript. 
 | `auth_remove` | `id: string` | — | Retire un compte enregistré. |
 | `auth_begin_login` | — | `DeviceCodeInfo` | Démarre la connexion Microsoft (code d'appareil à saisir sur la page de vérification). |
 | `auth_poll_login` | — | `Profile` | Attend la validation du code d'appareil et renvoie le profil connecté. |
+| `auth_cancel_login` | — | — | Abandonne la connexion Microsoft en cours (le code n'est plus attendu ; une validation tardive n'ajoute aucun compte). |
 | `auth_logout` | — | — | Déconnecte le compte actif. |
 | `auth_offline_login` | `name: string` | `Profile` | Crée ou reprend un compte hors ligne au pseudo donné. |
 | `instances_list` | — | `Instance_Serialize[]` | Instances installées. |

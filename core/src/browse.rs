@@ -653,7 +653,8 @@ pub async fn install_content(
             let mut same = mod_fix::same_mod_in_instance(game_dir, inst.loader.loader, &new_jar, &[pl.name.as_str(), disabled.as_str()])?;
             // Même projet (même provenance) : déjà géré, sans sauvegarde, par `remove_old_versions`.
             same.retain(|f| !prov.get(f.strip_suffix(".disabled").unwrap_or(f)).is_some_and(|p| p.source == pl.source.as_str() && p.id == pl.project_id));
-            if *is_dep && !same.is_empty() {
+            // Une dépendance désactivée (`.jar.disabled`) ne la fournit pas : on ne saute que si un jar activé la porte.
+            if *is_dep && same.iter().any(|f| !f.ends_with(".disabled")) {
                 continue; // dépendance déjà fournie sous un autre nom : pas de doublon
             }
             backup = mod_fix::backup_replaced(game_dir, &same)?;
@@ -673,13 +674,17 @@ pub async fn install_content(
             return Err(e);
         }
         index.add_ref(&obj.sha256)?;
-        if input.kind == BrowseKind::Mod {
-            mods::record_provenance(game_dir, &[(pl.name.clone(), Provenance { source: pl.source.as_str().into(), id: pl.project_id.clone() })])?;
-        }
+        let recorded = if input.kind == BrowseKind::Mod {
+            mods::record_provenance(game_dir, &[(pl.name.clone(), Provenance { source: pl.source.as_str().into(), id: pl.project_id.clone() })])
+        } else {
+            Ok(())
+        };
+        // Le jar est posé : on consigne la sauvegarde même si la provenance n'a pas pu être écrite (`undo` retire le jar posé).
         if let Some(b) = backup {
             report.replaced.extend(b.files());
             b.commit(game_dir, &pl.name, &obj.sha256);
         }
+        recorded?;
         report.installed.push(pl.name.clone());
     }
     Ok(report)

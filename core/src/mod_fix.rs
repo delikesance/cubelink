@@ -2254,6 +2254,22 @@ mod tests {
         assert_eq!(std::fs::read(e.game.join("mods/fabric-api-pack.jar")).unwrap(), api);
     }
 
+    /// Une dépendance seulement présente sous un autre nom *désactivé* n'est pas fournie : elle est installée.
+    #[tokio::test]
+    async fn install_adds_dependency_when_other_name_is_disabled() {
+        let (mr, cf) = (MockServer::start().await, MockServer::start().await);
+        let deps = json!([{"project_id": "API", "version_id": null, "dependency_type": "required"}]);
+        mount_project(&mr, "IRIS", "1.7", "iris-1.7.jar", &fabjar("iris", "1.7", ""), deps).await;
+        mount_project(&mr, "API", "0.100", "fabric-api-0.100.jar", &fabjar("fabric-api", "0.100", ""), json!([])).await;
+        let e = env();
+        put(&e, "fabric-api-old.jar.disabled", &fabjar("fabric-api", "0.99", ""));
+        let r = install(&mr, &cf, &e, "IRIS").await.unwrap();
+        assert!(r.installed.contains(&"fabric-api-0.100.jar".to_string()), "{r:?}");
+        // L'ancien jar désactivé est mis de côté (réversible), pas laissé à côté du nouveau.
+        assert_eq!(r.replaced, vec!["fabric-api-old.jar.disabled".to_string()]);
+        assert_eq!(backups(&e).len(), 1);
+    }
+
     /// Si la pose du nouveau jar échoue, l'ancien revient à sa place avec sa provenance et aucune sauvegarde ne reste.
     #[tokio::test]
     async fn install_failure_restores_replaced_jars() {

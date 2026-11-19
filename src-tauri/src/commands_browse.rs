@@ -322,7 +322,7 @@ pub async fn browse_versions(
     state.browse_versions(&source, &id, &kind, minecraft.as_deref(), loader.as_deref()).await
 }
 
-/// Installe un projet du catalogue (nouvelle instance pour un modpack). Progression par `browse://progress`.
+/// Installe un projet du catalogue (nouvelle instance pour un modpack). Un mod remplace les jars du même mod déjà présents sous un autre nom (modpack, ajout manuel) : ils vont dans `mods/.cubelink-backup/<id>/` (restaurables avec `mods_fix_undo` sur cet id ; le résultat de `browse_install` ne le renvoie pas encore, donc l'interface n'offre pas d'annulation). Une dépendance déjà fournie par un jar activé sous un autre nom est ignorée. Progression par `browse://progress`.
 #[tauri::command(rename_all = "snake_case")]
 #[specta::specta(rename_all = "snake_case")]
 pub async fn browse_install(state: State<'_, Arc<AppState>>, input: BrowseInstallInput) -> Result<BrowseInstallResult, String> {

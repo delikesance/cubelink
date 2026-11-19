@@ -106,6 +106,12 @@ impl AppState {
                 if !flag.swap(true, std::sync::atomic::Ordering::SeqCst) {
                     self.emit_state(id, LaunchPhase::Preparing, Some("Annulation en cours…".into()));
                 }
+                // Le jeu a pu être posé entre la lecture de `game_handle` et la levée du drapeau : la boucle de lancement a alors
+                // lu le drapeau avant nous. On relit le handle et on arrête le jeu nous-mêmes (un second arrêt est sans effet).
+                let started = lock(&self.game_handle).as_ref().filter(|(gid, _)| gid == id).map(|(_, g)| g.clone());
+                if let Some(g) = started {
+                    let _ = g.kill().await;
+                }
                 Ok(())
             }
         }

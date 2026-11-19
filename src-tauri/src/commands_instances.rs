@@ -501,8 +501,13 @@ impl AppState {
                 cancelled
             };
             // Annulé pendant la préparation : `exited` part une fois `game` libéré, pour qu'un nouveau clic sur « Jouer » passe.
+            // Le verrou `game` reste tenu pendant l'émission : un lancement concurrent de la même instance (ami, lien profond)
+            // ne peut pas poser son `preparing` avant, donc cet `exited` ne périme jamais le suivant.
             if cancelled {
-                me.emit_state(&id, LaunchPhase::Exited, None);
+                let game = lock(&me.game);
+                if game.is_none() {
+                    me.emit_state(&id, LaunchPhase::Exited, None);
+                }
             }
         });
         Ok(())

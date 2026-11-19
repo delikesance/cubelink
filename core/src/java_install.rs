@@ -268,6 +268,18 @@ where
     Ok(InstalledJava { home: final_dir, java_exe: final_exe, major })
 }
 
+/// Attend `fut`, mais rend `Error::Cancelled` dès que `cancel` est levé (le futur est abandonné : la connexion se ferme).
+async fn abortable<T>(cancel: &AtomicBool, fut: impl std::future::Future<Output = T>) -> Result<T> {
+    check(cancel)?;
+    tokio::pin!(fut);
+    loop {
+        tokio::select! {
+            r = &mut fut => return Ok(r),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => check(cancel)?,
+        }
+    }
+}
+
 async fn download<F>(client: &reqwest::Client, package: &JrePackage, part: &Path, progress: &F, cancel: &AtomicBool) -> Result<()>
 where
     F: Fn(u64, u64) + Send + Sync,
@@ -275,7 +287,7 @@ where
     if package.size > MAX_DOWNLOAD_BYTES {
         return Err(Error::Invalid(format!("taille annoncée excessive : {}", package.size)));
     }
-    let resp = client.get(&package.url).send().await.map_err(net)?;
+    let resp = abortable(cancel, client.get(&package.url).send()).await?.map_err(net)?;
     let status = resp.status();
     if status == reqwest::StatusCode::NOT_FOUND {
         return Err(Error::NotFound(package.url.clone()));
@@ -287,7 +299,8 @@ where
     let mut hasher = Sha256::new();
     let mut done: u64 = 0;
     let mut stream = resp.bytes_stream();
-    while let Some(chunk) = stream.next().await {
+    // Un corps qui ne vient plus ne retient pas l'annulation : on la surveille aussi pendant l'attente du morceau.
+    while let Some(chunk) = abortable(cancel, stream.next()).await? {
         check(cancel)?;
         let chunk = chunk.map_err(net)?;
         done += chunk.len() as u64;
@@ -604,6 +617,32 @@ mod tests {
         let c = cancel.clone();
         let r = install_with(&p, root.path(), move |_, _| c.store(true, Ordering::SeqCst), cancel, Arc::new(FakeProbe(Some(21)))).await;
         assert!(matches!(r, Err(Error::Cancelled)));
+        assert!(leftovers(root.path()).is_empty());
+    }
+
+    /// Un CDN qui accepte la connexion puis ne répond plus : l'annulation ne doit pas attendre les délais réseau.
+    #[tokio::test]
+    async fn annulation_pendant_reponse_muette() {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        let _mute = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((s, _)) = l.accept().await {
+                held.push(s);
+            }
+        });
+        let root = tempfile::tempdir().unwrap();
+        let p = JrePackage { url: format!("http://{addr}/dl/jre.zip"), size: 10, sha256: "0".repeat(64), filename: "jre.zip".into(), major: 21 };
+        let cancel = Arc::new(AtomicBool::new(false));
+        let c = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            c.store(true, Ordering::SeqCst);
+        });
+        let t = std::time::Instant::now();
+        let r = install_with(&p, root.path(), |_, _| {}, cancel, Arc::new(FakeProbe(Some(21)))).await;
+        assert!(matches!(r, Err(Error::Cancelled)), "{r:?}");
+        assert!(t.elapsed() < std::time::Duration::from_secs(3), "annulation trop lente : {:?}", t.elapsed());
         assert!(leftovers(root.path()).is_empty());
     }
 

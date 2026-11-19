@@ -96,7 +96,7 @@ describe("Parcourir : recherche", () => {
     fireEvent.click(screen.getByRole("button", { name: /^CurseForge/ }));
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toContain("CurseForge n'est pas configuré dans cette version de Cubelink. Utilise Modrinth.");
-    expect(screen.getByRole("button", { name: /CurseForge · indisponible/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /CurseForge\s*· indisponible/ })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Utiliser Modrinth" }));
     expect(await screen.findByText("Super Pack")).toBeTruthy();
   });

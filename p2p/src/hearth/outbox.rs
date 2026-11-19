@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use futures_util::future::{join_all, BoxFuture};
 use iroh::{Endpoint, EndpointAddr};
-use rand::RngCore;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::{watch, Notify};
@@ -149,7 +149,7 @@ impl std::fmt::Debug for Outbox {
 
 fn write_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("entree");
-    let tmp = path.with_file_name(format!(".{name}.tmp-{:016x}", rand::rngs::OsRng.next_u64()));
+    let tmp = path.with_file_name(format!(".{name}.tmp-{:016x}", rand::rand_core::UnwrapErr(rand::rngs::SysRng).next_u64()));
     let run = || -> std::io::Result<()> {
         let mut f = fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
         f.write_all(data)?;

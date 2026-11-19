@@ -115,8 +115,11 @@ test.describe('T7 relais : reglages (sans Internet)', () => {
       event: 'transfer://progress',
       payload: { phase: 'receiving', files_done: 1, files_total: 4, bytes_done: 1_000_000, bytes_total: 8_000_000, speed_bps, via_relay },
     });
-    await emit(false, 8_000_000);
-    await expect(page.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '12'); // l'evenement est bien recu
+    // L'abonnement de l'ecran (listen) est asynchrone : on reemet jusqu'a ce que l'ecran l'ait recu.
+    await expect(async () => {
+      await emit(false, 8_000_000);
+      await expect(page.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '12', { timeout: 1_000 }); // l'evenement est bien recu
+    }).toPass({ timeout: 15_000 });
     await expect(note).toHaveCount(0);
     await emit(true, 900_000);
     await expect(note).toBeVisible();

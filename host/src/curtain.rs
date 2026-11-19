@@ -392,6 +392,7 @@ impl Curtain {
             let c = Point::from_xy(w as f32 / 2.0, h as f32 * 0.40);
             if let Some(sh) = RadialGradient::new(
                 c,
+                0.0,
                 c,
                 (w.max(h) as f32) * 0.55,
                 vec![GradientStop::new(0.0, col(ACCENT, 0.10)), GradientStop::new(1.0, col(ACCENT, 0.0))],

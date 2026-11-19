@@ -44,7 +44,9 @@ impl Identity {
         }
         std::fs::create_dir_all(dir)
             .with_context(|| format!("création du dossier {}", dir.display()))?;
-        let signing = SigningKey::generate(&mut rand::rngs::OsRng);
+        let mut seed = [0u8; 32];
+        rand::Rng::fill_bytes(&mut rand::rand_core::UnwrapErr(rand::rngs::SysRng), &mut seed);
+        let signing = SigningKey::from_bytes(&seed);
         write_atomic(&path, &signing.to_bytes())?;
         Ok(Self { signing })
     }

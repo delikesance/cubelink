@@ -83,9 +83,9 @@ pub type LeaseId = [u8; 16];
 
 /// Nouvel identifiant de bail.
 pub fn new_lease_id() -> LeaseId {
-    use rand::RngCore;
+    use rand::Rng;
     let mut b = [0u8; 16];
-    rand::rngs::OsRng.fill_bytes(&mut b);
+    rand::rand_core::UnwrapErr(rand::rngs::SysRng).fill_bytes(&mut b);
     b
 }
 

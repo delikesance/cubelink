@@ -103,6 +103,17 @@ describe("Demandes", () => {
     expect(screen.getByRole("button", { name: "Voir la demande de Nouveau" })).toBeTruthy();
   });
 
+  it("une demande expirée disparaît de la liste avec une annonce, sans clic", async () => {
+    const svc = fake(3);
+    mount(svc);
+    await screen.findByRole("heading", { level: 3, name: "Demande de Alex0" });
+    const key = (await svc.friendRequests({ offset: 0, limit: 1 })).items[0].public_key;
+    act(() => svc.expireRequest(key));
+    expect(await screen.findByText("La demande de Alex0 a expiré.")).toBeTruthy();
+    expect(screen.queryByRole("heading", { level: 3, name: "Demande de Alex0" })).toBeNull();
+    expect(screen.getByRole("heading", { level: 3, name: "Demande de Steve1" })).toBeTruthy();
+  });
+
   it("reste fluide avec 1 000 demandes : seules les lignes chargées sont rendues", async () => {
     mount(fake(1000));
     await screen.findByText("Demande de Alex0");

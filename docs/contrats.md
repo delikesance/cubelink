@@ -39,8 +39,8 @@ Arguments : clés JSON envoyées à Tauri (snake_case) et leur type TypeScript. 
 | `friend_list` | — | `FriendWithPresence_Serialize[]` | Amis, avec leur présence, `in_game` (un jeu tourne chez l'ami : seul cas où « Demander à rejoindre » est proposé ; faux hors ligne et pour un ami d'une ancienne version) et la dernière fois vus en ligne. |
 | `friend_send_request` | `code: string` | `VerifyCode` | Envoie une demande d'ami à partir de son code ; renvoie le code de vérification à comparer. |
 | `friend_requests` | `offset: number`, `limit: number`, `query: string \| null` | `RequestsPage` | Demandes d'amis reçues, par page, filtrées par nom. |
-| `friend_accept` | `public_key: string` | — | Accepte une demande d'ami. |
-| `friend_refuse` | `public_key: string` | — | Refuse une demande d'ami. |
+| `friend_accept` | `public_key: string` | — | Accepte une demande d'ami. Si la demande n'est plus décidable (expirée, redémarrage), la ligne est retirée et l'erreur est « Cette demande a expiré : demande à ton ami de la renvoyer. » |
+| `friend_refuse` | `public_key: string` | — | Refuse une demande d'ami. Réussit aussi si la demande a expiré (la ligne est simplement retirée). |
 | `friend_refuse_all` | — | `number` | Refuse toutes les demandes ; renvoie leur nombre. |
 | `join_plan` | `friend_public_key: string` | `JoinPlan_Serialize` | Plan du « Rejoindre » d'un ami : manifeste, fichiers à recevoir, fichiers à accepter et hash du manifeste montré. |
 | `join_start` | `friend_public_key: string`, `ram_mb: number \| null`, `manifest_hash: string`, `accept_unknown: boolean \| null` | — | Démarre le transfert du plan montré (`manifest_hash`) ; `accept_unknown` exigé s'il y a des fichiers à accepter. Progression par `transfer://progress`. |
@@ -132,6 +132,7 @@ Les types nommés (`Profile`, `TransferProgress`, `HostState`, `StageState`…) 
 | `friend://presence` | `{ public_key, presence, in_game }` : émis quand la présence OU `in_game` change (au plus une sonde, ~30 s, après le changement) |
 | `tunnel://state` | `{ state: "ok" \| "reconnecting" \| "lost" }` : liaison du tunnel invité. `reconnecting` : connexion à l'hôte coupée, reconnexion automatique en cours (10 s max, le port local `127.0.0.1:<port>` reste le même : Minecraft peut se reconnecter sans relancer le jeu) ; `lost` : hôte parti ou refus, le tunnel est inutilisable. Émis seulement pendant un tunnel ouvert (`join_open_tunnel` / `join_play`). |
 | `friend://request` | `FriendRequest` |
+| `friend://request_removed` | `{ public_key }` : une demande reçue est retirée sans décision (l'ami a fermé sa demande, ou 10 min écoulées) ; l'interface retire la carte. Les demandes reçues ne survivent pas à un redémarrage : elles sont purgées au démarrage (sans événement). |
 | `friend://invite` / `friend://invites` | `Invite` (une invitation reçue) / `Invite[]` (file complète à chaque changement) |
 | `friend://join_request` | `JoinRequest` `{ public_key, name, received_at, expires_at }` : un ami demande à rejoindre ma partie (hôte) |
 | `friend://join_requests` | `JoinRequest[]` : demandes en attente, à chaque changement (décidée, expirée, retirée, partage arrêté) |

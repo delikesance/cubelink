@@ -96,6 +96,10 @@ export default function Main() {
     return () => { alive = false; off(); };
   }, [services]);
   useEffect(() => services.onFriendRequest(() => setRequests((n) => (n ?? 0) + 1)), [services]);
+  // Demande expirée ou annulée : on relit le total plutôt que de décrémenter à l'aveugle.
+  useEffect(() => services.onFriendRequestRemoved(() => {
+    services.friendRequests({ offset: 0, limit: 1 }).then((p) => setRequests(p.total), () => {});
+  }), [services]);
 
   const homeRef = useRef<HTMLDivElement>(null);
   // Focus cohérent au retour sur l'accueil : première tuile une fois chargé, sauf si le focus est déjà ailleurs.

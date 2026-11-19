@@ -51,6 +51,8 @@ export default function Requests() {
   const queryRef = useRef("");
   const cancelRef = useRef<HTMLButtonElement>(null);
   queryRef.current = query;
+  const itemsRef = useRef<FriendRequest[]>([]);
+  itemsRef.current = items;
 
   useEffect(() => {
     const t = setTimeout(() => setQuery(input.trim()), DEBOUNCE_MS);
@@ -86,6 +88,27 @@ export default function Requests() {
       setOpenKey((k) => k ?? r.public_key);
     }
     setNotice(`Nouvelle demande de ${r.name}.`);
+  }), [services]);
+
+  useEffect(() => services.onFriendRequestRemoved(({ public_key }) => {
+    const gone = itemsRef.current.find((x) => x.public_key === public_key);
+    if (!gone) {
+      // Hors de la page chargée (ou filtrée) : on resynchronise les totaux au lieu de les deviner.
+      const q = queryRef.current;
+      void services.friendRequests({ offset: 0, limit: 1, query: q || undefined }).then((p) => setTotal(p.total), () => {});
+      void services.friendRequests({ offset: 0, limit: 1 }).then((p) => setGrand(p.total), () => {});
+      return;
+    }
+    setGrand((g) => Math.max(0, g - 1));
+    setTotal((t) => Math.max(0, t - 1));
+    setItems((list) => list.filter((x) => x.public_key !== public_key));
+    setOpenKey((k) => {
+      if (k !== public_key) return k;
+      const list = itemsRef.current;
+      const idx = list.findIndex((x) => x.public_key === public_key);
+      return (list[idx + 1] ?? list[idx - 1] ?? null)?.public_key ?? null;
+    });
+    setNotice(`La demande de ${gone.name} a expiré.`);
   }), [services]);
 
   useEffect(() => { if (confirming) cancelRef.current?.focus(); }, [confirming]);

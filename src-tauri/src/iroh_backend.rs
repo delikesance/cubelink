@@ -508,6 +508,7 @@ impl IrohBackend {
                     let _ = acc_tx.send(k);
                 }
             }
+            FriendEvent::RequestRemoved(k) => emit("friend://request_removed", serde_json::json!({ "public_key": k })),
             FriendEvent::Refused(_) => {}
         });
         let friends_svc = FriendService::attach(endpoint.clone(), st.identity.clone(), st.friends.clone(), sink, opts.friend.clone())

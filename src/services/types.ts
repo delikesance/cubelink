@@ -267,6 +267,8 @@ export interface Services {
   onTransferProgress(cb: (p: TransferProgress) => void): Unsubscribe;
   onFriendPresence(cb: (e: PresenceEvent) => void): Unsubscribe;
   onFriendRequest(cb: (r: FriendRequest) => void): Unsubscribe;
+  /** Une demande reçue a été retirée sans décision (l'ami a annulé ou le délai est écoulé) : clé publique. */
+  onFriendRequestRemoved(cb: (e: { public_key: string }) => void): Unsubscribe;
   onFriendInvite(cb: (i: Invite) => void): Unsubscribe;
   /** Liste complète des invitations à chaque changement. */
   onFriendInvites(cb: (l: Invite[]) => void): Unsubscribe;

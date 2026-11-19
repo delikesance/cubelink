@@ -117,6 +117,7 @@ export function createTauriServices(): Services {
     onTransferProgress: (cb) => on("transfer://progress", cb),
     onFriendPresence: (cb) => on("friend://presence", cb),
     onFriendRequest: (cb) => on("friend://request", cb),
+    onFriendRequestRemoved: (cb) => on("friend://request_removed", cb),
     onFriendInvite: (cb) => on("friend://invite", cb),
     onFriendInvites: (cb) => on("friend://invites", cb),
     onFriendJoinRequest: (cb) => on("friend://join_request", cb),

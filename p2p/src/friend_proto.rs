@@ -64,6 +64,9 @@ pub enum FriendEvent {
     Accepted(Friend),
     /// Notre demande a été refusée (clé publique hex du pair).
     Refused(String),
+    /// Une demande reçue a été retirée sans décision de l'utilisateur (l'ami a fermé son flux ou le délai
+    /// de décision est écoulé) : clé publique hex du demandeur. L'interface retire la carte.
+    RequestRemoved(String),
 }
 
 pub type EventSink = Arc<dyn Fn(FriendEvent) + Send + Sync>;
@@ -443,7 +446,7 @@ impl Shared {
             () = tokio::time::sleep(self.cfg.decision_ttl) => None,
         };
         let Some(d) = outcome else {
-            let _ = self.db.remove_request(&peer);
+            self.drop_undecided(&peer);
             drop(adm);
             return Ok(());
         };
@@ -460,11 +463,20 @@ impl Shared {
             // Attend que A ait lu et fermé la connexion avant de libérer la connexion.
             let _ = tokio::time::timeout(Duration::from_secs(5), conn.closed()).await;
         } else {
-            let _ = self.db.remove_request(&peer);
+            self.drop_undecided(&peer);
         }
         let _ = d.reply.send(written.map_err(|e| Error::Network(e.to_string())));
         conn.close(0u32.into(), b"done");
         Ok(())
+    }
+
+    /// Retire une demande qui ne peut plus être décidée (flux fermé, délai écoulé, écriture échouée) et
+    /// prévient l'interface si la ligne existait encore.
+    fn drop_undecided(&self, peer: &str) {
+        lock(&self.state).pending.remove(peer);
+        if self.db.remove_request(peer).unwrap_or(false) {
+            (self.sink)(FriendEvent::RequestRemoved(peer.to_string()));
+        }
     }
 
     async fn decide(&self, public_key: &str, accept: bool) -> Result<()> {
@@ -553,6 +565,13 @@ impl FriendService {
         event_sink: EventSink,
         cfg: FriendConfig,
     ) -> Result<Self> {
+        // L'attente d'une décision est un état de session (flux de l'ami). Après un arrêt, les demandes
+        // reçues en base ne sont plus décidables : on les retire plutôt que d'afficher des cartes mortes.
+        match db.remove_incoming_requests() {
+            Ok(n) if n > 0 => tracing::debug!("{n} demande(s) d'ami orpheline(s) retirée(s) au démarrage"),
+            Ok(_) => {}
+            Err(e) => tracing::warn!("purge des demandes d'ami orphelines impossible : {e}"),
+        }
         let me = identity.public_key().to_bytes();
         let name = format!("Joueur-{}", &hex::encode(me)[..8]);
         let shared = Arc::new(Shared {
@@ -695,14 +714,27 @@ impl FriendService {
     }
 
     /// Accepte une demande reçue : envoie l'acceptation signée puis crée l'ami.
+    /// Si la demande n'est plus décidable (flux fermé, délai écoulé, redémarrage), la ligne est retirée
+    /// et l'erreur demande de la renvoyer.
     pub async fn accept(&self, public_key: &str) -> Result<Friend> {
-        self.shared.decide(public_key, true).await?;
+        match self.shared.decide(public_key, true).await {
+            Ok(()) => {}
+            Err(Error::NotFound(_)) => {
+                self.shared.db.remove_request(public_key)?;
+                return Err(Error::Other("Cette demande a expiré : demande à ton ami de la renvoyer.".into()));
+            }
+            Err(e) => return Err(e),
+        }
         self.shared.db.accept_request(public_key)
     }
 
-    /// Refuse une demande reçue : envoie le refus signé puis retire la demande.
+    /// Refuse une demande reçue : envoie le refus signé puis retire la demande. Une demande qui n'est
+    /// plus décidable (expirée, orpheline) est simplement retirée : le refus réussit.
     pub async fn refuse(&self, public_key: &str) -> Result<()> {
-        self.shared.decide(public_key, false).await?;
+        match self.shared.decide(public_key, false).await {
+            Ok(()) | Err(Error::NotFound(_)) => {}
+            Err(e) => return Err(e),
+        }
         self.shared.db.remove_request(public_key)?;
         Ok(())
     }
@@ -866,7 +898,97 @@ mod tests {
         assert!(a.db.list_friends().unwrap().is_empty());
         assert!(b.db.list_friends().unwrap().is_empty());
         assert_eq!(b.db.request_count().unwrap(), 0);
-        assert!(matches!(b.svc.accept(&a.hex()).await, Err(Error::NotFound(_))));
+        let err = b.svc.accept(&a.hex()).await.unwrap_err();
+        assert!(err.to_string().contains("a expiré"), "{err}");
+        assert!(b.db.list_friends().unwrap().is_empty());
+    }
+
+    fn orphan_request(pk: &str) -> FriendRequest {
+        FriendRequest { public_key: pk.into(), name: "Alice".into(), verify_code: VerifyCode("AAAA · BBBB · CCCC · DDDD".into()), received_at: 1 }
+    }
+
+    /// Redémarre le service d'un nœud sur la même base (comme un relancement de l'application).
+    async fn restart(n: &Node) -> (FriendService, Events) {
+        n.svc.shutdown().await;
+        let events: Events = Arc::default();
+        let ev = events.clone();
+        let sink: EventSink = Arc::new(move |e| lock(&ev).push(e));
+        let svc = FriendService::start_with_config(
+            n.ep.clone(),
+            n.ident.clone(),
+            n.db.clone(),
+            sink,
+            FriendConfig { io_timeout: Duration::from_secs(5), ..FriendConfig::default() },
+        )
+        .unwrap();
+        (svc, events)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn request_orphaned_by_restart_is_purged() {
+        let a = Node::new("Alice").await;
+        let b = Node::new("Bob").await;
+        a.svc.send_request(&b.code).await.unwrap();
+        b.wait_event(|e| matches!(e, FriendEvent::IncomingRequest(_))).await;
+        assert_eq!(b.db.request_count().unwrap(), 1);
+        // B quitte sans décider puis relance : la demande ne peut plus être décidée, elle disparaît.
+        let (svc2, _) = restart(&b).await;
+        assert_eq!(b.db.request_count().unwrap(), 0);
+        // Un refus tardif (carte déjà affichée) réussit quand même.
+        svc2.refuse(&a.hex()).await.unwrap();
+        svc2.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn refuse_and_accept_tolerate_orphan_row() {
+        let b = Node::new("Bob").await;
+        let pk = "a".repeat(64);
+        b.db.upsert_request(&orphan_request(&pk), Direction::In).unwrap();
+        b.svc.refuse(&pk).await.unwrap();
+        assert_eq!(b.db.request_count().unwrap(), 0);
+
+        b.db.upsert_request(&orphan_request(&pk), Direction::In).unwrap();
+        let err = b.svc.accept(&pk).await.unwrap_err();
+        assert!(err.to_string().contains("a expiré"), "{err}");
+        assert!(!err.to_string().contains(&pk));
+        assert_eq!(b.db.request_count().unwrap(), 0);
+        assert!(b.db.list_friends().unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn decision_ttl_removes_request_and_emits_event() {
+        let a = Node::new("Alice").await;
+        let b = Node::with_config(
+            "Bob",
+            FriendConfig { io_timeout: Duration::from_secs(5), decision_ttl: Duration::from_millis(400), ..FriendConfig::default() },
+        )
+        .await;
+        a.svc.send_request(&b.code).await.unwrap();
+        b.wait_event(|e| matches!(e, FriendEvent::IncomingRequest(_))).await;
+        b.wait_event(|e| matches!(e, FriendEvent::RequestRemoved(k) if *k == a.hex())).await;
+        assert_eq!(b.db.request_count().unwrap(), 0);
+        b.svc.refuse(&a.hex()).await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn closed_stream_removes_request_and_emits_event() {
+        let b = Node::new("Bob").await;
+        let x = Node::new("Eve").await;
+        let (c, mut s, mut r) = x.raw(&b).await;
+        let nonce = random32();
+        send_raw(&mut s, &x.msg(&b.pk(), now_secs(), Body::Request { name: "Eve".into(), commit: commitment(&x.pk(), &nonce) })).await;
+        let m = decode(&try_read(&mut r).await.unwrap()).unwrap();
+        let Body::Commit { commit_b, commit_a } = m.body else { panic!("COMMIT attendu") };
+        let session = session_id(&commit_a, &commit_b);
+        send_raw(&mut s, &x.msg(&b.pk(), now_secs(), Body::Reveal { session, nonce })).await;
+        try_read(&mut r).await.unwrap();
+        b.wait_event(|e| matches!(e, FriendEvent::IncomingRequest(_))).await;
+        // Eve ferme son flux avant toute décision.
+        drop((s, r));
+        c.close(0u32.into(), b"bye");
+        b.wait_event(|e| matches!(e, FriendEvent::RequestRemoved(k) if *k == x.hex())).await;
+        assert_eq!(b.db.request_count().unwrap(), 0);
+        assert!(matches!(b.svc.accept(&x.hex()).await, Err(Error::Other(_))));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

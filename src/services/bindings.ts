@@ -98,6 +98,12 @@ export const commands = {
 	settingsGet: (options?: InvokeOptions) => __TAURI_INVOKE<Settings_Serialize>("settings_get", undefined, options),
 	/**  Le front envoie les réglages dans `{ settings }`. */
 	settingsSet: (settings: SettingsInput_Deserialize, options?: InvokeOptions) => __TAURI_INVOKE<Settings_Serialize>("settings_set", { settings }, options),
+	/**  Sauvegarde l'identité et la liste d'amis dans un fichier `.cubelink-id` chiffré. Renvoie la clé publique. */
+	identityExport: (path: string, passphrase: string, options?: InvokeOptions) => __TAURI_INVOKE<string>("identity_export", { path, passphrase }, options),
+	/**  Valide une sauvegarde et la prépare ; elle s'applique au redémarrage (`identity_restart`). Renvoie la clé publique. */
+	identityImport: (path: string, passphrase: string, options?: InvokeOptions) => __TAURI_INVOKE<string>("identity_import", { path, passphrase }, options),
+	/**  Redémarre Cubelink pour appliquer la restauration préparée par `identity_import`. */
+	identityRestart: (options?: InvokeOptions) => __TAURI_INVOKE<null>("identity_restart", undefined, options),
 	/**  Recherche dans le catalogue (Modrinth ou CurseForge). */
 	browseSearch: (query: BrowseQuery_Deserialize, options?: InvokeOptions) => __TAURI_INVOKE<BrowsePage_Serialize>("browse_search", { query }, options),
 	/**  Versions d'un projet du catalogue, filtrées par version de Minecraft et loader. */

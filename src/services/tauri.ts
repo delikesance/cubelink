@@ -82,6 +82,9 @@ export function createTauriServices(): Services {
     joinResume: () => done(commands.joinResume()),
     joinCancel: () => done(commands.joinCancel()),
 
+    identityExport: (path, passphrase) => commands.identityExport(path, passphrase),
+    identityImport: (path, passphrase) => commands.identityImport(path, passphrase),
+    identityRestart: () => done(commands.identityRestart()),
     settingsGet: () => commands.settingsGet(),
     settingsSet: (settings) => commands.settingsSet(settings),
 
@@ -105,6 +108,11 @@ export function createTauriServices(): Services {
       const { open } = await import("@tauri-apps/plugin-dialog");
       const r = await open({ multiple: !!multiple, directory: false, filters: [{ name: "Fichiers", extensions }] });
       return r == null ? [] : Array.isArray(r) ? r : [r];
+    },
+
+    pickSavePath: async ({ defaultName, extension }) => {
+      const { save } = await import("@tauri-apps/plugin-dialog");
+      return save({ defaultPath: defaultName, filters: [{ name: "Sauvegarde d'identité", extensions: [extension] }] });
     },
 
     onAuthState: (cb) => on("auth://state", cb),

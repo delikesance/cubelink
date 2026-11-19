@@ -236,6 +236,24 @@ impl FriendsDb {
         self.lock().query_row("PRAGMA user_version", [], |r| r.get(0)).map_err(db)
     }
 
+    /// Copie cohérente de la base (amis, demandes, adresses) pour la sauvegarde d'identité.
+    ///
+    /// `VACUUM INTO` : jamais de copie brute du fichier, la base tourne en WAL et une partie des données peut ne pas
+    /// être encore dans le fichier principal. `scratch` est un dossier privé où le fichier temporaire vit le temps
+    /// de la lecture (il est supprimé dans tous les cas).
+    pub fn snapshot_bytes(&self, scratch: &Path) -> Result<Vec<u8>> {
+        std::fs::create_dir_all(scratch).map_err(|e| Error::Other(format!("dossier temporaire : {e}")))?;
+        let mut nonce = [0u8; 8];
+        rand::Rng::fill_bytes(&mut rand::rand_core::UnwrapErr(rand::rngs::SysRng), &mut nonce);
+        let tmp = scratch.join(format!("snapshot-{}.tmp", hex::encode(nonce)));
+        let res = (|| -> Result<Vec<u8>> {
+            self.lock().execute("VACUUM INTO ?1", params![tmp.to_string_lossy()]).map_err(db)?;
+            std::fs::read(&tmp).map_err(|e| Error::Other(format!("lecture de la copie des amis : {e}")))
+        })();
+        let _ = std::fs::remove_file(&tmp);
+        res
+    }
+
     // ----- amis -----
 
     /// Ajoute un ami. `Error::Invalid` si la clé est déjà présente ou si une entrée est invalide.

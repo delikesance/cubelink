@@ -99,6 +99,7 @@ export interface StageFallback {
 export interface StageLayout { x: number; y: number; w: number; h: number; panel_w: number }
 
 export interface PickFilesOptions { extensions: string[]; multiple?: boolean }
+export interface PickSavePathOptions { defaultName: string; extension: string }
 
 export type Unsubscribe = () => void;
 
@@ -233,6 +234,13 @@ export interface Services {
   settingsGet(): Promise<Settings>;
   settingsSet(settings: Settings): Promise<Settings>;
 
+  /** Sauvegarde l'identité et la liste d'amis dans un fichier `.cubelink-id` chiffré par la phrase de passe (8 caractères minimum). Renvoie la clé publique. */
+  identityExport(path: string, passphrase: string): Promise<string>;
+  /** Vérifie une sauvegarde et la prépare ; elle remplace l'identité au redémarrage. Renvoie la clé publique à restaurer. */
+  identityImport(path: string, passphrase: string): Promise<string>;
+  /** Redémarre Cubelink pour appliquer la restauration préparée par `identityImport`. */
+  identityRestart(): Promise<void>;
+
   browseSearch(q: BrowseQuery): Promise<BrowsePage>;
   browseVersions(source: BrowseSource, id: string, kind: BrowseKind, minecraft?: string, loader?: string): Promise<BrowseVersion[]>;
   browseInstall(input: BrowseInstallInput): Promise<BrowseInstallResult>;
@@ -253,6 +261,8 @@ export interface Services {
   modsAdd(instanceId: string, path: string): Promise<ModEntry>;
   /** Sélecteur de fichiers natif ; renvoie les chemins choisis ([] si annulé). */
   pickFiles(opts: PickFilesOptions): Promise<string[]>;
+  /** Sélecteur « Enregistrer sous » natif ; renvoie le chemin choisi (null si annulé). */
+  pickSavePath(opts: PickSavePathOptions): Promise<string | null>;
 
   onAuthState(cb: (p: Profile | null) => void): Unsubscribe;
   /** Changements de la liste des comptes ou du compte actif. */

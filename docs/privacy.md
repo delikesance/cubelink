@@ -34,7 +34,7 @@ Cubelink lets you share a modpack and a Minecraft world with friends, directly b
 - you exchange a short verification code and the device keys needed to recognise each other;
 - your friend can see whether you are online and whether a game is running on your device (the "in game" status), and, when you share, your instance name, mod list and the files needed to join;
 - Cubelink can start with your computer session (option in Settings) so that your friends can reach you; while it runs, it answers your friends' presence checks;
-- connections are made directly between devices when possible, or through a relay server when a direct connection is not possible. A relay only forwards encrypted traffic; it cannot read its content. The relay operator (n0 by default) sees technical metadata such as IP addresses;
+- connections are made directly between devices when possible, or through a relay server when a direct connection is not possible. A relay forwards encrypted traffic, and what it can read of that content is not yet formally established (the in-app Legal page says so): assume it only sees technical metadata, and do not rely on more. The relay operator (n0 by default) sees technical metadata such as IP addresses;
 - your friend code contains your public key and the address of your relay. If you turn the relay off in Settings, it also contains your IP addresses (up to 8): share it only with people you trust. Your friends' devices remember your last known addresses to find you again; nothing is published for this;
 - with Hearth group worlds, copies of the world are kept on the devices of the other group members.
 

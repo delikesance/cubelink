@@ -251,22 +251,23 @@ describe("Page du serveur", () => {
     return { services, pk: noor };
   }
 
-  it("Réglages : « Supprimer de ce PC » efface le serveur sans prévenir le groupe, et ramène à l'accueil", async () => {
+  it("Quitter (ma ligne de Membres) : départ annoncé au groupe, retour à l'accueil", async () => {
     const services = createFakeServices({ tickMs: 0 });
     services.seedHearth({ id: "g3", name: "Les copains" }, {
       members: [{ public_key: "me", name: "Toi", online: true, is_me: true, is_creator: true, sync: "ok", version: 1, unseen_days: null }],
     });
     const s = shell(services, { id: "g3" });
     render(<ShellContext.Provider value={s.value}><Hearth /></ShellContext.Provider>);
-    // bouton de l'en-tête : visible sans changer d'onglet
-    fireEvent.click(await screen.findByRole("button", { name: "Supprimer ce serveur" }));
+    // sur ma ligne de l'onglet Membres, sans changer d'onglet
+    fireEvent.click(await screen.findByRole("button", { name: "Quitter" }));
     const dlg = await screen.findByRole("alertdialog");
-    fireEvent.click(within(dlg).getByRole("button", { name: "Supprimer" }));
-    await waitFor(() => expect(services.hearthCalls).toEqual([{ kind: "Forget", args: ["g3"] }]));
+    expect(within(dlg).getByText(/même si c'est toi qui l'as créé/)).toBeTruthy();
+    fireEvent.click(within(dlg).getByRole("button", { name: "Quitter" }));
+    await waitFor(() => expect(services.hearthCalls).toEqual([{ kind: "Leave", args: ["g3"] }]));
     await waitFor(() => expect(s.navigate).toHaveBeenCalledWith("main"));
   });
 
-  it("Quitter refusé (aucun membre joignable) : le message renvoie vers « Supprimer de ce PC »", async () => {
+  it("Quitter quand personne n'est joignable : le monde local est quand même supprimé", async () => {
     const services = createFakeServices({ tickMs: 0 });
     services.seedHearth({ id: "g4", name: "Les copains" }, {
       members: [{ public_key: "me", name: "Toi", online: true, is_me: true, is_creator: true, sync: "ok", version: 1, unseen_days: null }],
@@ -274,12 +275,11 @@ describe("Page du serveur", () => {
     services.hearthLeave = async () => { throw new Error("Personne du groupe n'a pu être joint."); };
     const s = shell(services, { id: "g4" });
     render(<ShellContext.Provider value={s.value}><Hearth /></ShellContext.Provider>);
-    fireEvent.click(await screen.findByRole("tab", { name: "Réglages" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Quitter le groupe" }));
-    const dlg = await screen.findByRole("alertdialog");
-    fireEvent.click(within(dlg).getByRole("button", { name: "Quitter" }));
-    expect((await within(dlg).findByRole("alert")).textContent).toContain("Supprimer de ce PC");
-    expect(s.navigate).not.toHaveBeenCalledWith("main");
+    // sur ma ligne de l'onglet Membres, sans changer d'onglet
+    fireEvent.click(await screen.findByRole("button", { name: "Quitter" }));
+    fireEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Quitter" }));
+    await waitFor(() => expect(services.hearthCalls).toEqual([{ kind: "Forget", args: ["g4"] }]));
+    await waitFor(() => expect(s.navigate).toHaveBeenCalledWith("main"));
   });
 
   it("Membres : ma tête vient de mon compte actif, jamais du libellé « Toi » (un autre joueur porte ce pseudo)", async () => {
@@ -347,7 +347,7 @@ describe("Page du serveur", () => {
     await screen.findByText(/Version 4 · Restauration · actuelle/);
   });
 
-  it("Réglages : garder le serveur, proposer la mise à jour du modpack, quitter le groupe", async () => {
+  it("Réglages : garder le serveur, proposer la mise à jour du modpack (pas de bouton Quitter ici)", async () => {
     const { services, navigate } = page({ id: "g1" }, { id: "g1", name: "Les copains" });
     fireEvent.click(await screen.findByRole("tab", { name: "Réglages" }));
     fireEvent.click(await screen.findByRole("checkbox", { name: /Garder le serveur ouvert/ }));
@@ -356,10 +356,9 @@ describe("Page du serveur", () => {
     fireEvent.click(screen.getByRole("button", { name: "Proposer la mise à jour au groupe" }));
     fireEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Proposer au groupe" }));
     await waitFor(() => expect(services.hearthCalls[1]).toEqual({ kind: "PackUpdate", args: ["g1", "inst-aeronautics"] }));
-    fireEvent.click(screen.getByRole("button", { name: "Quitter le groupe" }));
-    fireEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Quitter" }));
-    await waitFor(() => expect(navigate).toHaveBeenCalledWith("main"));
-    expect(services.hearthCalls[2]).toEqual({ kind: "Leave", args: ["g1"] });
+    // un seul « Quitter » sur la page : celui de ma ligne dans Membres, pas de doublon dans Réglages
+    expect(screen.queryByRole("button", { name: /^Quitter/ })).toBeNull();
+    expect(navigate).not.toHaveBeenCalled();
   });
 
   it("deux versions : choisir celle à garder résout la fourche", async () => {

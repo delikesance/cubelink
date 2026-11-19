@@ -4,7 +4,7 @@ import { useShell } from "../../app/context";
 import { useHearthDetail } from "../../app/useHearth";
 import { useAccounts } from "../../app/useAccounts";
 import type { FriendWithPresence, HearthDetail, HearthProposal, Instance, Services } from "../../services/types";
-import { Badge, Button, Card, Icon, ICONS } from "../../ui";
+import { Select, BackButton, Badge, Button, Card, Icon, ICONS, StatusDot } from "../../ui";
 import { Avatar } from "../Friends/Avatar";
 import { Modal } from "../Main/Modal";
 import { errText, fmtDate, fmtPlayed, fmtSize, mainAction, plural, resumeLabel, stateHint, stateText } from "./format";
@@ -69,7 +69,7 @@ function Proposals({ d, services, onError }: { d: HearthDetail; services: Servic
   );
 }
 
-function Members({ d, services, friends, ask, onError }: { d: HearthDetail; services: Services; friends: FriendWithPresence[]; ask: (c: Confirm) => void; onError: (m: string) => void }) {
+function Members({ d, services, friends, ask, onError, leave }: { d: HearthDetail; services: Services; friends: FriendWithPresence[]; ask: (c: Confirm) => void; onError: (m: string) => void; leave: () => void }) {
   const id = d.card.id;
   // Ma tête : le skin de MON compte actif (le libellé « Toi » n'est pas mon pseudo). Compte hors ligne : tête générée.
   const { state: accounts } = useAccounts(services);
@@ -102,7 +102,7 @@ function Members({ d, services, friends, ask, onError }: { d: HearthDetail; serv
       )}
       <Proposals d={d} services={services} onError={onError} />
       <section aria-label="Membres" className="hearth-block">
-        <h2>{plural(d.members.length, "membre", "membres")}</h2>
+        <h2 className="hearth-sr">{plural(d.members.length, "membre", "membres")}</h2>
         <ul className="hearth-rows">
           {d.members.map((m) => (
             <li key={m.public_key} className="hearth-row">
@@ -116,7 +116,7 @@ function Members({ d, services, friends, ask, onError }: { d: HearthDetail; serv
               </span>
               {!m.is_me && (
                 <Button
-                  variant="secondary" aria-label={`Retirer ${m.name}`}
+                  variant="danger-quiet" aria-label={`Retirer ${m.name}`}
                   onClick={() => ask({
                     title: `Retirer ${m.name} ?`, action: "Retirer", danger: true,
                     text: `${m.name} ne pourra plus rejoindre ce serveur. Selon les règles du groupe, le retrait peut demander l'accord de la majorité.`,
@@ -124,17 +124,16 @@ function Members({ d, services, friends, ask, onError }: { d: HearthDetail; serv
                   })}
                 >Retirer</Button>
               )}
+              {m.is_me && <Button variant="danger-quiet" onClick={leave}>Quitter</Button>}
             </li>
           ))}
         </ul>
         {addable.length > 0 && (
           <div className="hearth-add">
-            <label className="cl-field">
-              <span className="hearth-sr">Ami à ajouter</span>
-              <select className="cl-input" value={toAdd || addable[0]!.friend.public_key} onChange={(e) => setToAdd(e.target.value)}>
-                {addable.map((f) => <option key={f.friend.public_key} value={f.friend.public_key}>{f.friend.name}</option>)}
-              </select>
-            </label>
+            <div className="cl-field">
+              <Select aria-label="Ami à ajouter" value={toAdd || addable[0]!.friend.public_key} onChange={setToAdd}
+                options={addable.map((f) => ({ value: f.friend.public_key, label: f.friend.name }))} />
+            </div>
             <Button variant="secondary" loading={adding} icon={<Icon d={ICONS.userPlus} />} onClick={() => { void add(); }}>Ajouter au groupe</Button>
           </div>
         )}
@@ -173,23 +172,22 @@ function History({ d, services, ask }: { d: HearthDetail; services: Services; as
   );
 }
 
-function Settings({ d, services, instances, ask, onError, leave, forget }: { d: HearthDetail; services: Services; instances: Instance[]; ask: (c: Confirm) => void; onError: (m: string) => void; leave: () => void; forget: () => void }) {
+function Settings({ d, services, instances, ask, onError }: { d: HearthDetail; services: Services; instances: Instance[]; ask: (c: Confirm) => void; onError: (m: string) => void }) {
   const id = d.card.id;
   const [inst, setInst] = useState("");
   const pick = inst || d.card.instance_id || instances[0]?.id || "";
   return (
     <div className="hearth-settings">
       <section className="hearth-block" aria-label="Modpack">
-        <h2>Modpack</h2>
-        <p className="hearth-meta">Instance utilisée sur ce PC : {d.settings.instance_name ?? "aucune"}. Les mods sont figés : une mise à jour doit être acceptée par le groupe.</p>
+        <div className="hearth-block-head">
+          <h2>Modpack</h2>
+          <p className="hearth-meta">Instance utilisée sur ce PC : {d.settings.instance_name ?? "aucune"}. Les mods sont figés : une mise à jour doit être acceptée par le groupe.</p>
+        </div>
         {instances.length > 0 && (
           <div className="hearth-add">
-            <label className="cl-field">
-              <span className="hearth-sr">Instance à proposer</span>
-              <select className="cl-input" value={pick} onChange={(e) => setInst(e.target.value)}>
-                {instances.map((i) => <option key={i.id} value={i.id}>{i.name}</option>)}
-              </select>
-            </label>
+            <div className="cl-field">
+              <Select aria-label="Instance à proposer" value={pick} onChange={setInst} options={instances.map((i) => ({ value: i.id, label: i.name }))} />
+            </div>
             <Button
               variant="secondary"
               onClick={() => ask({
@@ -202,21 +200,17 @@ function Settings({ d, services, instances, ask, onError, leave, forget }: { d: 
         )}
       </section>
       <section className="hearth-block" aria-label="Serveur">
-        <h2>Serveur</h2>
+        <div className="hearth-block-head">
+          <h2>Serveur</h2>
+          <p className="hearth-meta">
+            Place prise sur ce disque : {fmtSize(d.settings.disk_bytes)}.
+            {d.settings.outbox_pending > 0 && ` ${plural(d.settings.outbox_pending, "version attend", "versions attendent")} d'être envoyée aux autres membres.`}
+          </p>
+        </div>
         <label className="hearth-check">
           <input type="checkbox" checked={d.settings.keep_background} onChange={(e) => { services.hearthSetBackground(id, e.target.checked).catch((x: unknown) => onError(errText(x))); }} />
           <span>Garder le serveur ouvert quand mon jeu se ferme</span>
         </label>
-        <p className="hearth-meta">Place prise sur ce disque : {fmtSize(d.settings.disk_bytes)}.</p>
-        {d.settings.outbox_pending > 0 && <p className="hearth-meta">{plural(d.settings.outbox_pending, "version attend", "versions attendent")} d'être envoyée aux autres membres.</p>}
-      </section>
-      <section className="hearth-block" aria-label="Quitter">
-        <h2>Quitter le groupe</h2>
-        <p className="hearth-meta">Le monde copié sur ce PC est supprimé. Les autres membres gardent le leur.</p>
-        <Button variant="danger" onClick={leave}>Quitter le groupe</Button>
-        <h2>Supprimer de ce PC</h2>
-        <p className="hearth-meta">Efface ce serveur de ce PC sans prévenir le groupe : à utiliser quand quitter est impossible (aucun ami joignable). Les autres membres te comptent toujours dans le groupe, tu peux être réinvité.</p>
-        <Button variant="danger" onClick={forget}>Supprimer ce serveur de ce PC</Button>
       </section>
     </div>
   );
@@ -259,34 +253,34 @@ export default function ServerPage({ id }: { id: string }) {
   const ask = (x: Confirm) => setConfirm({ ...x, run: async () => { await x.run(); reload(); } });
   const leave = () => ask({
     title: `Quitter « ${c.name} » ?`, action: "Quitter", danger: true,
-    text: "Le monde copié sur ce PC est supprimé. Tu pourras être réinvité plus tard.",
+    text: "Le monde copié sur ce PC est supprimé. Le serveur continue pour les autres membres, même si c'est toi qui l'as créé. Tu pourras être réinvité plus tard.",
     run: async () => {
-      try { await services.hearthLeave(c.id); } catch (e) {
-        throw new Error(`${errText(e)} Tu peux aussi supprimer ce serveur de ce PC (Réglages, « Supprimer de ce PC »).`);
+      try { await services.hearthLeave(c.id); } catch {
+        // Aucun autre membre joignable : le départ ne peut pas leur être annoncé. On supprime quand même ce PC ; ils te
+        // compteront dans le groupe jusqu'à ce que ton départ leur parvienne (ou que tu sois réinvité).
+        await services.hearthForget(c.id);
       }
       navigate("main");
     },
-  });
-  const forget = () => ask({
-    title: `Supprimer « ${c.name} » de ce PC ?`, action: "Supprimer", danger: true,
-    text: "Le serveur et le monde copié sur ce PC sont supprimés, sans prévenir le groupe. Les autres membres te comptent toujours dans le groupe.",
-    run: async () => { await services.hearthForget(c.id); navigate("main"); },
   });
   const shownError = error ?? runError;
 
   return (
     <div className="hearth-page">
       <header className="hearth-page-head">
-        <button type="button" className="hearth-link" onClick={() => navigate("main")}>← Accueil</button>
-        <h1 ref={title} tabIndex={-1}>{c.name}</h1>
-        <p className="hearth-meta">{c.minecraft} · {c.loader} · {plural(c.members_total, "membre", "membres")}</p>
-        <div className="hearth-state-row">
-          <Badge tone={c.state === "hosting" ? "ok" : c.state === "idle" ? "neutral" : c.state === "hosted" ? "accent" : "warn"}>{stateText(c)}</Badge>
-          {act.kind === "play" && <Button size="lg" loading={busy} icon={<Icon d={ICONS.play} fill />} onClick={() => { void run(() => services.hearthPlay(c.id)); }}>{act.label}</Button>}
-          {act.kind === "stop" && <Button variant="secondary" loading={busy} onClick={() => { void run(() => services.hearthStop(c.id)); }}>{act.label}</Button>}
-          <Button variant="danger" onClick={forget}>Supprimer ce serveur</Button>
+        <BackButton label="Accueil" onClick={() => navigate("main")} />
+        <div className="hearth-hero">
+          <div className="hearth-hero-id">
+            <h1 ref={title} tabIndex={-1}>{c.name}</h1>
+            <p className="hearth-meta">{c.minecraft} · {c.loader}</p>
+            <StatusDot tone={c.state === "hosting" ? "ok" : c.state === "idle" ? "neutral" : c.state === "hosted" ? "accent" : "warn"} label={stateText(c)} />
+          </div>
+          <div className="hearth-hero-cta">
+            {act.kind === "play" && <Button size="lg" loading={busy} icon={<Icon d={ICONS.play} fill />} onClick={() => { void run(() => services.hearthPlay(c.id)); }}>{act.label}</Button>}
+            {act.kind === "stop" && <Button variant="secondary" loading={busy} onClick={() => { void run(() => services.hearthStop(c.id)); }}>{act.label}</Button>}
+          </div>
+          {hint && <p className="hearth-hint">{hint}</p>}
         </div>
-        {hint && <p className="hearth-hint">{hint}</p>}
         {shownError && <p className="hearth-err" role="alert">{shownError}</p>}
       </header>
 
@@ -340,9 +334,9 @@ export default function ServerPage({ id }: { id: string }) {
           ))}
         </div>
         <div id="hearth-panel" role="tabpanel" aria-labelledby={`hearth-tab-${tab}`} className="hearth-panel">
-          {tab === "membres" && <Members d={detail} services={services} friends={friends} ask={ask} onError={setError} />}
+          {tab === "membres" && <Members d={detail} services={services} friends={friends} ask={ask} onError={setError} leave={leave} />}
           {tab === "historique" && <History d={detail} services={services} ask={ask} />}
-          {tab === "reglages" && <Settings d={detail} services={services} instances={instances} ask={ask} onError={setError} leave={leave} forget={forget} />}
+          {tab === "reglages" && <Settings d={detail} services={services} instances={instances} ask={ask} onError={setError} />}
         </div>
       </Card>
       {confirm && <ConfirmDialog c={confirm} onClose={() => setConfirm(null)} />}

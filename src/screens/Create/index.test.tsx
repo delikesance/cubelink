@@ -20,7 +20,7 @@ async function chooser(svc: Services) {
 async function form(svc: Services) {
   await chooser(svc);
   fireEvent.click(screen.getByRole("button", { name: /Créer une instance vide/ }));
-  await screen.findByRole("option", { name: "1.21.1 (recommandée)" });
+  await waitFor(() => expect(screen.getByLabelText("Version de Minecraft").textContent).toBe("1.21.1 (recommandée)"));
 }
 
 describe("validateName", () => {
@@ -82,7 +82,7 @@ describe("écran Créer : choix (B3)", () => {
 describe("écran Créer : formulaire (B4)", () => {
   it("1.21.1 sélectionnée, NeoForge par défaut, Nom focalisé", async () => {
     await form(createFakeServices({ tickMs: 0 }));
-    expect((screen.getByLabelText("Version de Minecraft") as HTMLSelectElement).value).toBe("1.21.1");
+    expect(screen.getByLabelText("Version de Minecraft").textContent).toContain("1.21.1");
     expect((screen.getByRole("radio", { name: "NeoForge" }) as HTMLInputElement).checked).toBe(true);
     expect(document.activeElement).toBe(nameInput());
   });

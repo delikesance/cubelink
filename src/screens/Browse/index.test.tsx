@@ -135,7 +135,7 @@ describe("Parcourir : onglets et source", () => {
   it("instance de la route : préremplit minecraft et loader", async () => {
     const svc = setup({}, { kind: "mod", instance: "i1" });
     await waitFor(() => expect(svc.browseSearch).toHaveBeenLastCalledWith(expect.objectContaining({ minecraft: "1.21.1", loader: "fabric" })));
-    expect((screen.getByLabelText("Instance") as HTMLSelectElement).value).toBe("i1");
+    expect(screen.getByLabelText("Instance").textContent).toBe("Mon monde");
   });
 });
 
@@ -155,7 +155,7 @@ describe("Parcourir : fiche et installation", () => {
     expect(link.getAttribute("href")).toBe("https://modrinth.com/modpack/p1");
     expect(link.getAttribute("rel")).toContain("noopener");
     expect(link.getAttribute("target")).toBe("_blank");
-    await screen.findByRole("option", { name: /1\.0\.0/ });
+    await waitFor(() => expect(screen.getByLabelText("Version").textContent).toMatch(/1\.0\.0/));
     fireEvent.click(screen.getByRole("button", { name: "Installer le modpack" }));
     fireEvent.click(await screen.findByRole("button", { name: "Ouvrir le modpack" }));
     expect(window.location.hash).toBe("#/instance?id=i1");
@@ -213,7 +213,7 @@ describe("Parcourir : fiche et installation", () => {
   it("mod sans instance : message, aucun appel", async () => {
     const svc = setup({ browseSearch: vi.fn(async () => ({ hits: [hit({ kind: "mod", name: "Sodium" })], total: 1 })) }, { kind: "mod" });
     fireEvent.click(await screen.findByRole("button", { name: /Sodium/ }));
-    await screen.findByRole("option", { name: /1\.0\.0/ });
+    await waitFor(() => expect(screen.getByLabelText("Version").textContent).toMatch(/1\.0\.0/));
     fireEvent.click(screen.getByRole("button", { name: "Installer" }));
     expect((await screen.findByRole("alert")).textContent).toMatch(/instance cible/);
     expect(svc.browseInstall).not.toHaveBeenCalled();
@@ -228,9 +228,9 @@ describe("Parcourir : fiche et installation", () => {
       browseInstall: vi.fn(() => new Promise((r) => { resolve = r; })),
     }, { kind: "mod", instance: "i1" });
     // Attend que les filtres de l'instance soient appliqués (la grille est rechargée).
-    await waitFor(() => expect(screen.getByLabelText("Loader")).toHaveProperty("value", "fabric"));
+    await waitFor(() => expect(screen.getByLabelText("Loader").textContent).toBe("Fabric"));
     fireEvent.click(await screen.findByRole("button", { name: /Sodium/ }));
-    await screen.findByRole("option", { name: /1\.0\.0/ });
+    await waitFor(() => expect(screen.getByLabelText("Version").textContent).toMatch(/1\.0\.0/));
     await waitFor(() => expect((screen.getByRole("button", { name: "Installer" }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByRole("button", { name: "Installer" }));
     await act(async () => { emit({ done: 1, total: 4, label: "Téléchargement de sodium.jar" }); });
@@ -253,13 +253,14 @@ describe("Parcourir : fiche et installation", () => {
       browseCheck: vi.fn(async () => ({ installed: [], recommended: "v1", blockers: [],
         verdicts: [{ version_id: "v2", ok: false, problems: ["Iris : Requiert Sodium 0.9.x"] }, { version_id: "v1", ok: true, problems: [] }] })),
     });
-    await waitFor(() => expect(screen.getByLabelText("Loader")).toHaveProperty("value", "fabric"));
+    await waitFor(() => expect(screen.getByLabelText("Loader").textContent).toBe("Fabric"));
     fireEvent.click(await screen.findByRole("button", { name: /Iris/ }));
-    await waitFor(() => expect((screen.getByLabelText("Version") as HTMLSelectElement).value).toBe("v1"));
+    await waitFor(() => expect(screen.getByLabelText("Version").textContent).toMatch(/1\.10\.9.*\(recommandée\)/));
+    fireEvent.click(screen.getByLabelText("Version"));
     expect(screen.getByRole("option", { name: /1\.10\.9.*\(recommandée\)/ })).toBeTruthy();
     expect(screen.getByRole("option", { name: /1\.11\.4.*\(incompatible\)/ })).toBeTruthy();
     // Version incompatible choisie à la main : installation impossible, raison affichée.
-    fireEvent.change(screen.getByLabelText("Version"), { target: { value: "v2" } });
+    fireEvent.click(screen.getByRole("option", { name: /1\.11\.4.*\(incompatible\)/ }));
     expect(await screen.findByText("Iris : Requiert Sodium 0.9.x")).toBeTruthy();
     expect((screen.getByRole("button", { name: "Installer" }) as HTMLButtonElement).disabled).toBe(true);
     expect(svc.browseCheck).toHaveBeenCalledWith("modrinth", "p1", "mod", "i1");
@@ -269,7 +270,7 @@ describe("Parcourir : fiche et installation", () => {
     const svc = modSetup({
       browseCheck: vi.fn(async () => ({ installed: [], recommended: null, verdicts: [], blockers: ["Iris : Incompatible avec Embeddium."] })),
     });
-    await waitFor(() => expect(screen.getByLabelText("Loader")).toHaveProperty("value", "fabric"));
+    await waitFor(() => expect(screen.getByLabelText("Loader").textContent).toBe("Fabric"));
     fireEvent.click(await screen.findByRole("button", { name: /Iris/ }));
     expect(await screen.findByText(/Aucune version n'est compatible avec les mods déjà présents/)).toBeTruthy();
     expect(screen.getByText("Iris : Incompatible avec Embeddium.")).toBeTruthy();
@@ -283,7 +284,7 @@ describe("Parcourir : fiche et installation", () => {
       browseCheck: vi.fn(async () => ({ installed, recommended: "v1", verdicts: [{ version_id: "v1", ok: true, problems: [] }], blockers: [] })),
       modsRemove: vi.fn(async () => { installed = []; }),
     });
-    await waitFor(() => expect(screen.getByLabelText("Loader")).toHaveProperty("value", "fabric"));
+    await waitFor(() => expect(screen.getByLabelText("Loader").textContent).toBe("Fabric"));
     fireEvent.click(await screen.findByRole("button", { name: /Iris/ }));
     fireEvent.click(await screen.findByRole("button", { name: "Désinstaller" }));
     expect(screen.queryByRole("button", { name: "Installer" })).toBeNull();

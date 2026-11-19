@@ -1,4 +1,5 @@
 export { Button, type ButtonProps } from "./Button";
+export { BackButton, type BackButtonProps } from "./BackButton";
 export { IconButton, type IconButtonProps } from "./IconButton";
 export { Field, Input, type FieldProps, type InputProps, type FieldControlProps } from "./Field";
 export { Card, type CardProps } from "./Card";
@@ -7,6 +8,7 @@ export { ProgressBar, type ProgressBarProps } from "./ProgressBar";
 export { Tooltip, type TooltipProps } from "./Tooltip";
 export { StatusDot, Badge, type Tone } from "./Status";
 export { RamPicker, RAM_DEFAULT, ramLabel, useDefaultRam, type RamPickerProps } from "./RamPicker";
+export { Select, type SelectProps, type SelectOption } from "./Select";
 export { Icon, ICONS } from "./Icon";
 export { PixelHead, WorldIcon } from "./Pixel";
 export { DefaultArt } from "./DefaultArt";

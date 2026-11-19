@@ -1,3 +1,4 @@
+import { BackButton } from "../../ui";
 import { useEffect, useRef } from "react";
 import "./legal.css";
 import { useBack } from "../../app/context";
@@ -21,10 +22,7 @@ export default function Legal() {
   return (
     <div className="legal screen">
       <div className="legal-top enter">
-        <button type="button" className="cl-btn cl-btn-secondary legal-back" onClick={() => back()}>
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6" /></svg>
-          Retour
-        </button>
+        <BackButton onClick={() => back()} />
       </div>
       <article className="legal-article enter" style={{ "--i": 1 } as React.CSSProperties} aria-labelledby="leg-title">
         <h1 id="leg-title" ref={title} tabIndex={-1}>Mentions légales et confidentialité</h1>

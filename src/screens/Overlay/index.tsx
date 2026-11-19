@@ -253,7 +253,7 @@ export default function InGamePanel({ open = true }: { open?: boolean }) {
                   </div>
                   <div className="ov-actions">
                     {inst.id === current ? (
-                      <Button variant="danger" aria-label={`Fermer ${inst.name}`} loading={busy === `close-${inst.id}`} onClick={() => setConfirm({ kind: "close", instance: inst })}>Fermer</Button>
+                      <Button variant="danger-quiet" aria-label={`Fermer ${inst.name}`} loading={busy === `close-${inst.id}`} onClick={() => setConfirm({ kind: "close", instance: inst })}>Fermer</Button>
                     ) : (
                       <Button variant="secondary" aria-label={`Lancer ${inst.name}`} loading={busy === `switch-${inst.id}`} onClick={() => launch(inst)}>Lancer</Button>
                     )}

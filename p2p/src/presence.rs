@@ -24,7 +24,6 @@ use futures_util::stream::{self, StreamExt};
 use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
 use iroh::{Endpoint, EndpointAddr, EndpointId, TransportAddr};
-use rand::Rng;
 use tokio::sync::{watch, Semaphore};
 use tokio::task::JoinHandle;
 
@@ -287,7 +286,7 @@ impl PresenceService {
                     _ = stop_rx.wait_for(|s| *s) => break,
                     _ = task_inner.round() => {}
                 }
-                let jitter = rand::thread_rng().gen_range(0.8..1.2);
+                let jitter = rand::random_range(0.8..1.2);
                 let wait = task_inner.cfg.interval.mul_f64(jitter);
                 tokio::select! {
                     _ = stop_rx.wait_for(|s| *s) => break,

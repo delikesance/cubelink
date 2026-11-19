@@ -45,7 +45,7 @@ use iroh_blobs::store::fs::options::Options as FsOptions;
 use iroh_blobs::store::fs::FsStore;
 use iroh_blobs::store::GcConfig;
 use iroh_blobs::{BlobFormat, BlobsProtocol, Hash, HashAndFormat};
-use rand::RngCore;
+use rand::Rng;
 use thiserror::Error;
 use tokio::task::JoinHandle;
 
@@ -796,7 +796,7 @@ impl WorldStore {
         std::fs::create_dir_all(parent).map_err(io_err(format!("création de {}", parent.display())))?;
         let base = dest.file_name().and_then(|n| n.to_str()).ok_or_else(|| SyncError::Invalid("nom de destination invalide".into()))?.to_string();
         cleanup_stale(parent, &base);
-        let nonce = format!("{:016x}", rand::rngs::OsRng.next_u64());
+        let nonce = format!("{:016x}", rand::rand_core::UnwrapErr(rand::rngs::SysRng).next_u64());
         let tmp = parent.join(format!("{base}.hearth-tmp-{nonce}"));
         let old = parent.join(format!("{base}.hearth-old-{nonce}"));
         std::fs::create_dir_all(&tmp).map_err(io_err(format!("création de {}", tmp.display())))?;

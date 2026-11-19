@@ -34,7 +34,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use rand::RngCore;
+use rand::Rng;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
@@ -105,7 +105,7 @@ impl GroupKey {
     /// Nouvelle clé aléatoire (système).
     pub fn random() -> Self {
         let mut b = [0u8; 32];
-        rand::rngs::OsRng.fill_bytes(&mut b);
+        rand::rand_core::UnwrapErr(rand::rngs::SysRng).fill_bytes(&mut b);
         Self(b)
     }
 
@@ -156,7 +156,7 @@ fn sync_parent(path: &Path) -> io::Result<()> {
 /// Écrit `data` dans `path` de façon atomique (fichier temporaire voisin, `fsync`, `rename`).
 fn write_atomic(path: &Path, data: &[u8], private: bool) -> io::Result<()> {
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("fichier");
-    let tmp = path.with_file_name(format!(".{name}.tmp-{:016x}", rand::rngs::OsRng.next_u64()));
+    let tmp = path.with_file_name(format!(".{name}.tmp-{:016x}", rand::rand_core::UnwrapErr(rand::rngs::SysRng).next_u64()));
     let write = || -> io::Result<()> {
         let mut opts = fs::OpenOptions::new();
         opts.write(true).create_new(true);
@@ -790,7 +790,7 @@ impl GroupStore {
         if dest.exists() {
             return Err(StoreError::AlreadyExists);
         }
-        let tmp = self.root.join(format!(".creating-{:016x}", rand::rngs::OsRng.next_u64()));
+        let tmp = self.root.join(format!(".creating-{:016x}", rand::rand_core::UnwrapErr(rand::rngs::SysRng).next_u64()));
         let build = || -> Result<(), StoreError> {
             fs::create_dir_all(tmp.join("versions")).map_err(io_err("création du groupe"))?;
             fs::create_dir_all(tmp.join("proposals")).map_err(io_err("création du groupe"))?;

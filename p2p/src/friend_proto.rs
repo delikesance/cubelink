@@ -25,7 +25,7 @@ use ed25519_dalek::Signature;
 use iroh::endpoint::{Connection, RecvStream, SendStream};
 use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayUrl};
-use rand::RngCore;
+use rand::Rng;
 use sha2::{Digest, Sha256};
 use tokio::sync::{oneshot, OwnedSemaphorePermit, Semaphore};
 
@@ -254,7 +254,7 @@ fn session_id(commit_a: &[u8; 32], commit_b: &[u8; 32]) -> [u8; 32] {
 
 fn random32() -> [u8; 32] {
     let mut n = [0u8; 32];
-    rand::rngs::OsRng.fill_bytes(&mut n);
+    rand::rand_core::UnwrapErr(rand::rngs::SysRng).fill_bytes(&mut n);
     n
 }
 

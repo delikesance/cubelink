@@ -9,8 +9,9 @@ use std::path::{Path, PathBuf};
 
 use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
-use rand::rngs::OsRng;
-use rand::RngCore;
+use rand::rand_core::UnwrapErr;
+use rand::rngs::SysRng;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 use crate::types::{Error, Profile, Result};
@@ -72,7 +73,7 @@ impl KeyProvider for FileKeyProvider {
             }
         }
         let mut key = [0u8; KEY_LEN];
-        OsRng.fill_bytes(&mut key);
+        UnwrapErr(SysRng).fill_bytes(&mut key);
         let mut opts = fs::OpenOptions::new();
         opts.write(true).create_new(true);
         #[cfg(unix)]
@@ -180,7 +181,7 @@ pub(crate) fn encrypt_blob<K: KeyProvider>(keys: &K, plain: &[u8]) -> Result<Vec
     let key = keys.key()?;
     let cipher = Aes256Gcm::new(&Key::<Aes256Gcm>::from(key));
     let mut nonce = [0u8; NONCE_LEN];
-    OsRng.fill_bytes(&mut nonce);
+    UnwrapErr(SysRng).fill_bytes(&mut nonce);
     let ct = cipher
         .encrypt(&Nonce::from(nonce), Payload { msg: plain, aad: MAGIC })
         .map_err(|_| Error::Auth("chiffrement des jetons impossible".into()))?;

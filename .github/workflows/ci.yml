@@ -190,8 +190,10 @@ jobs:
           command: check advisories
 
   # Pré-version canary : seulement après un push sur `canary` et si les vérifications ont réussi.
-  # `e2e-windows` n'en fait pas (encore) partie, par décision du mainteneur (2026-11-14) : 19 scénarios ne suivent plus
-  # l'interface actuelle. Le job tourne toujours ; le remettre dans `needs` dès que la suite repasse au vert (ici et dans `release`, qui a la même liste).
+  # `e2e-windows` n'en fait pas (encore) partie, par décision du mainteneur (2026-11-14) : des scénarios ne suivaient plus
+  # l'interface actuelle (ticket #66, specs remises à jour ; pas de nombre en dur, `playwright test --list` donne le compte).
+  # Le job tourne toujours ; le remettre dans `needs` dès qu'un run Windows complet est vert (ici et dans `release`, qui a la
+  # même liste), sur confirmation du mainteneur.
   canary:
     needs: [front, agent-lan-java8, clippy-windows, tests-windows, clippy-linux, tests-linux, deny]
     if: github.event_name == 'push' && github.ref == 'refs/heads/canary'

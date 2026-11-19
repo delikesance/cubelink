@@ -94,7 +94,7 @@ export async function setupHostAndGuest(world: Pick<World, 'appA' | 'appB' | 'se
   return { host, keyA };
 }
 
-/** Parcours UI de B : Ecran Amis -> Rejoindre l'ami -> Rejoindre (coche la confiance si demandee) -> Installation. */
+/** Parcours UI de B : Accueil -> « Rejoindre <ami> » (partie en cours) -> Rejoindre (coche la confiance si demandee) -> transfert sur place. */
 export async function waitOnline(page: Page, timeout = 60_000) {
   const end = Date.now() + timeout;
   while (Date.now() < end) {
@@ -107,10 +107,12 @@ export async function waitOnline(page: Page, timeout = 60_000) {
 
 export async function startJoinViaUi(page: Page) {
   await waitOnline(page);
-  await page.evaluate(() => { window.location.hash = '#/main'; });
+  // L'accueil lit les invitations au montage : on le remonte. Le bouton « Rejoindre <ami> » est dans les parties en
+  // cours (la colonne d'amis en a un du meme nom : on cible la liste pour eviter l'ambiguite), plus sur l'ancien ecran Amis.
+  await page.evaluate(() => { window.location.hash = '#/settings?tab=amis'; });
   await sleep(300);
-  await page.evaluate(() => { window.location.hash = '#/friends'; });
-  const joinBtn = page.getByRole('button', { name: /^Rejoindre / });
+  await page.evaluate(() => { window.location.hash = '#/main'; });
+  const joinBtn = page.getByRole('list', { name: 'Parties en cours' }).getByRole('button', { name: /^Rejoindre / });
   await expect(joinBtn).toBeVisible({ timeout: 30_000 });
   await joinBtn.click();
   const go = page.getByRole('button', { name: 'Rejoindre et jouer' });
@@ -118,7 +120,8 @@ export async function startJoinViaUi(page: Page) {
   const trust = page.getByRole('checkbox');
   if (await trust.count()) await trust.check();
   await go.click();
-  await expect(page.locator('#inst-title')).toBeVisible({ timeout: 15_000 });
+  // Le transfert se deroule sur l'ecran Rejoindre (plus d'ecran Installation separe).
+  await expect(page.getByRole('region', { name: 'Rejoindre un ami' }).getByRole('progressbar')).toBeVisible({ timeout: 15_000 });
 }
 
 export interface Progress { phase: string; files_done: number; files_total: number; bytes_done: number; bytes_total: number }

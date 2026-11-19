@@ -39,7 +39,7 @@ test('T6 hote hors ligne pendant le join : message francais, Reessayer, Annuler'
   await retry.click(); // hote toujours absent : l'erreur revient
   await expect(title).toBeVisible({ timeout: 60_000 });
   await page.getByRole('button', { name: 'Annuler' }).click();
-  await page.waitForSelector('main[data-route="main"]');
+  await page.waitForSelector('main[data-route="main"]', { timeout: 15_000 });
 });
 
 test('T6 hote injoignable puis de retour : Reessayer recharge le plan', async ({ appA, appB, servers, binary }) => {
@@ -116,7 +116,7 @@ test('T6 coupure prolongee : ecran friend-left, Annuler ramene a l accueil', asy
   const failed = ((await events(appB, 'transfer://progress')) as any[]).filter((p) => p.phase === 'failed');
   expect(failed.at(-1).error).toBe("l'ami s'est déconnecté : réessayez quand il est en ligne");
   await page.getByRole('button', { name: 'Annuler' }).click();
-  await page.waitForSelector('main[data-route="main"]');
+  await page.waitForSelector('main[data-route="main"]', { timeout: 15_000 });
 });
 
 // ---------------------------------------------------------------- fichiers de l'hote modifies apres le manifeste
@@ -248,7 +248,7 @@ test('T6 ecrans Erreur : textes francais et actions de chaque etat', async ({ ap
       await expect(page.getByRole('alert'), e.state).toBeVisible();
       if ('link' in e) await expect(page.getByRole('link', { name: e.link })).toHaveAttribute('href', 'https://www.minecraft.net/');
       await page.getByRole('button', { name: label, exact: true }).click();
-      await page.waitForSelector(`main[data-route="${route}"]`);
+      await page.waitForSelector(`main[data-route="${route}"]`, { timeout: 15_000 });
     }
   }
   // Etat « waiting » : Annuler -> connexion ; Rouvrir la fenetre relance auth_begin_login.

@@ -72,6 +72,9 @@ const INVITE_TTL_SECS: i64 = 7 * 24 * 3600;
 /// Message des commandes refusées quand l'interrupteur est coupé.
 pub const HEARTH_DISABLED: &str = "Les serveurs de groupe sont désactivés : active « Serveurs de groupe (expérimental) » dans les Réglages.";
 /// Délai laissé au serveur d'un groupe oublié pour s'arrêter avant d'être tué.
+/// Attente maximale, avant de quitter un groupe, que ma dernière partie soit remise à un membre (une remise prend des minutes).
+pub const LEAVE_FLUSH_WAIT: Duration = Duration::from_secs(5 * 60);
+const LEAVE_FLUSH_POLL: Duration = Duration::from_millis(250);
 const FORGET_STOP_GRACE: Duration = Duration::from_secs(20);
 /// Délai laissé au serveur pour s'arrêter proprement (sauvegarde du monde).
 const SERVER_STOP_GRACE: Duration = Duration::from_secs(90);
@@ -458,7 +461,8 @@ impl std::fmt::Display for ProposeErr {
 }
 
 /// Échec de `hearth_leave`, avec un code stable pour que l'écran choisisse quoi proposer. Seul `Unreachable` autorise le
-/// repli « supprimer quand même ce PC » (après une seconde confirmation) ; jamais une autre erreur.
+/// repli « supprimer quand même ce PC » (après une seconde confirmation), et seul `OutboxPending` autorise de rejouer avec
+/// `force` (« Quitter quand même », la dernière partie sera perdue pour le groupe) ; jamais une autre erreur.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, specta::Type)]
 #[serde(tag = "code", content = "message", rename_all = "snake_case")]
 pub enum LeaveError {
@@ -466,6 +470,9 @@ pub enum LeaveError {
     LastMember,
     /// Aucun autre membre n'a reçu mon départ. Rien n'a été supprimé.
     Unreachable,
+    /// Ma dernière partie n'a été remise à aucun membre (file d'envoi non vidée) : la quitter maintenant la perdrait pour le
+    /// groupe. Rien n'a été supprimé ; mon serveur est arrêté et la version reste en file. Rejouable, ou avec `force`.
+    OutboxPending,
     /// Toute autre erreur (quota, disque, jeu en cours…) : message affichable, rien n'est supprimé par le front.
     Other(String),
 }
@@ -481,6 +488,7 @@ impl std::fmt::Display for LeaveError {
         match self {
             LeaveError::LastMember => f.write_str("Tu es le dernier membre de ce groupe : le quitter effacerait la seule copie du monde."),
             LeaveError::Unreachable => f.write_str(&ProposeErr::Unreachable.to_string()),
+            LeaveError::OutboxPending => f.write_str("Ta dernière partie n'a pas encore été envoyée aux autres membres."),
             LeaveError::Other(m) => f.write_str(m),
         }
     }
@@ -1770,6 +1778,47 @@ impl HearthRuntime {
         let (ops, gk) = self.with_group(&gid, |g| (g.ops().to_vec(), g.key().clone()))?;
         let conn = self.connect(&key).await?;
         conn.send_invite(&ops, &gk).await.map_err(|e| e.to_string())
+    }
+
+    /// Versions de ce groupe encore en file d'envoi (une remise réussie à un membre retire l'entrée).
+    fn group_pending(&self, gid: &GroupId) -> Vec<(VersionId, u32)> {
+        self.outbox.pending().iter().filter(|e| e.group_id() == *gid).map(|e| (e.id(), e.attempts)).collect()
+    }
+
+    /// Attend que la file d'envoi du groupe soit vidée, donc que chaque version ait été remise à au moins un membre
+    /// (#56 : `forget_now` jette ce qui reste en file). Rend `true` quand elle est vide. Rend `false` tout de suite si aucun
+    /// membre ne répond, ou si une remise vient d'échouer ; sinon au bout de `timeout`. Ne supprime rien : la boucle
+    /// d'envoi continue en fond tant que le groupe existe.
+    pub async fn flush_group_outbox(self: &Arc<Self>, gid: &GroupId, timeout: Duration) -> bool {
+        let mut base = self.group_pending(gid);
+        if base.is_empty() {
+            return true;
+        }
+        // Présence fraîche : le cache peut dater de la dernière ronde (une minute) et garder en ligne un ami parti.
+        if self.probe_round(*gid).await.answers.is_empty() {
+            return false;
+        }
+        let deadline = Instant::now() + timeout;
+        let mut last = usize::MAX;
+        loop {
+            let now = self.group_pending(gid);
+            if now.is_empty() {
+                self.emit_state();
+                return true;
+            }
+            if now.len() != last {
+                last = now.len();
+                self.emit_state();
+            }
+            // Une tentative de plus sur une version encore en file : le dernier passage a échoué chez tous les membres.
+            base.retain(|(id, _)| now.iter().any(|(n, _)| n == id));
+            let failed = now.iter().any(|(id, a)| base.iter().find(|(b, _)| b == id).is_some_and(|(_, a0)| a > a0));
+            if failed || Instant::now() >= deadline {
+                return false;
+            }
+            self.outbox.wake();
+            tokio::time::sleep(LEAVE_FLUSH_POLL).await;
+        }
     }
 
     /// Oublie le groupe sur ce PC (départ, retrait). L'état en mémoire disparaît tout de suite ; puis, dans l'ordre : le

@@ -578,7 +578,7 @@ async fn interrupteur_coupe_refuse_les_commandes_et_les_pairs() {
     let e = a.node.st.hearth_play(&id).await.unwrap_err();
     assert!(e.contains("désactivés"), "{e}");
     assert!(a.node.st.hearth_create("X", &a.instance, None, vec![]).await.unwrap_err().contains("désactivés"));
-    assert!(a.node.st.hearth_leave(&id).await.unwrap_err().to_string().contains("désactivés"));
+    assert!(a.node.st.hearth_leave(&id, false).await.unwrap_err().to_string().contains("désactivés"));
     assert_eq!(a.node.st.hearth_list().len(), 1, "la lecture d'état reste possible");
     assert!(!a.rt().is_friend(&b.key()), "le protocole refuse les pairs");
     assert!(a.rt().group_state(&g).is_none());
@@ -616,13 +616,13 @@ async fn quitter_en_dernier_membre_refuse_et_garde_le_monde() {
     let (peers, g, id) = group_of(&["Alice", "Bob"]).await;
     let (a, b) = (&peers[0], &peers[1]);
     // Bob part : Alice devient la seule membre.
-    b.node.st.hearth_leave(&id).await.unwrap();
+    b.node.st.hearth_leave(&id, false).await.unwrap();
     wait_for("Alice est seule", 30, || a.rt().state(&g).is_some_and(|s| s.members.len() == 1)).await;
     a.node.st.hearth_play(&id).await.unwrap();
     assert_eq!(a.state_of(&g), HearthStateKind::Hosting);
     let dir = a.rt().server_dir(&g);
     assert!(dir.is_dir());
-    assert_eq!(a.node.st.hearth_leave(&id).await.unwrap_err(), LeaveError::LastMember);
+    assert_eq!(a.node.st.hearth_leave(&id, false).await.unwrap_err(), LeaveError::LastMember);
     assert!(a.rt().state(&g).is_some(), "le groupe existe toujours");
     assert!(dir.is_dir(), "le dossier du monde existe toujours");
     assert!(a.rt().active(&g).is_some(), "mon serveur n'a pas été arrêté");
@@ -630,25 +630,86 @@ async fn quitter_en_dernier_membre_refuse_et_garde_le_monde() {
     a.stop().await;
 }
 
-/// Personne n'est joignable : « Quitter » rejette `Unreachable` (et non un message libre), sans rien supprimer, et reste
-/// rejouable ; seul `hearth_forget` (choix explicite de l'utilisateur) efface ensuite le monde de ce PC.
+/// Personne n'est joignable et rien n'attend dans la file : « Quitter » rejette `Unreachable` (et non un message libre),
+/// sans rien supprimer, et reste rejouable ; seul `hearth_forget` (choix explicite de l'utilisateur) efface ensuite le
+/// monde de ce PC.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn quitter_sans_personne_de_joignable_ne_supprime_rien() {
     let (peers, g, id) = group_of(&["Alice", "Bob"]).await;
     let (a, b) = (&peers[0], &peers[1]);
-    a.node.st.hearth_play(&id).await.unwrap();
     let dir = a.rt().server_dir(&g);
-    assert!(dir.is_dir());
-    a.close_game();
+    std::fs::create_dir_all(&dir).unwrap();
     b.stop().await;
-    assert_eq!(a.node.st.hearth_leave(&id).await.unwrap_err(), LeaveError::Unreachable);
+    assert_eq!(a.node.st.hearth_leave(&id, false).await.unwrap_err(), LeaveError::Unreachable);
     assert!(a.rt().state(&g).is_some() && dir.is_dir(), "rien n'est supprimé");
-    assert_eq!(a.node.st.hearth_leave(&id).await.unwrap_err(), LeaveError::Unreachable, "rejouable");
+    assert_eq!(a.node.st.hearth_leave(&id, false).await.unwrap_err(), LeaveError::Unreachable, "rejouable");
     assert!(a.rt().state(&g).is_some() && dir.is_dir());
     a.node.st.hearth_forget(&id).await.unwrap();
     assert!(a.rt().state(&g).is_none());
     assert!(!dir.exists(), "forget supprime le monde local");
     a.stop().await;
+}
+
+/// #56 : Alice joue puis quitte tout de suite. Sa `Session` est en file au moment de signer `Leave` : elle doit être remise à
+/// Bob AVANT que le groupe soit oublié (avant le correctif, `forget_now` la jetait de la file). En loopback la remise est vite faite : ce scénario garde le chemin
+/// nominal ; le refus quand la remise est impossible est couvert par le test suivant, qui échouait avant le correctif.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn quitter_juste_apres_une_partie_la_session_arrive_chez_bob() {
+    let (peers, g, id) = group_of(&["Alice", "Bob"]).await;
+    let (a, b) = (&peers[0], &peers[1]);
+    a.node.st.hearth_play(&id).await.unwrap();
+    let dir = a.rt().server_dir(&g);
+    a.close_game();
+    a.node.st.hearth_leave(&id, false).await.unwrap();
+    assert!(a.rt().state(&g).is_none(), "Alice a quitté");
+    wait_for("son monde local est supprimé", 30, || !dir.exists()).await;
+    wait_for("la Session d'Alice est chez Bob", 30, || {
+        b.rt().head(&g).is_some_and(|h| h.header.author == a.key() && h.header.kind == VersionKind::Session && b.rt().world_complete(&h))
+    })
+    .await;
+    for p in &peers {
+        p.stop().await;
+    }
+}
+
+/// #56 : la dernière partie n'a pu être remise à personne (Bob est hors ligne) : « Quitter » rejette `OutboxPending` sans rien
+/// supprimer (la version reste en file, le serveur est arrêté), vite et en restant rejouable. `force` saute l'attente et
+/// retombe sur `Unreachable` (#57), puis seul `hearth_forget` efface le monde.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn quitter_avec_une_partie_non_envoyee_refuse_puis_force() {
+    let (peers, g, id) = group_of(&["Alice", "Bob"]).await;
+    let (a, b) = (&peers[0], &peers[1]);
+    a.node.st.hearth_play(&id).await.unwrap();
+    let dir = a.rt().server_dir(&g);
+    a.close_game();
+    b.stop().await;
+    let t = std::time::Instant::now();
+    assert_eq!(a.node.st.hearth_leave(&id, false).await.unwrap_err(), LeaveError::OutboxPending);
+    assert!(t.elapsed() < std::time::Duration::from_secs(30), "personne de joignable : pas d'attente de 5 minutes ({:?})", t.elapsed());
+    assert!(a.rt().state(&g).is_some() && dir.is_dir(), "rien n'est supprimé");
+    assert!(a.rt().pending_outbox() > 0, "la Session reste en file");
+    assert!(a.rt().active(&g).is_none(), "le serveur est arrêté");
+    assert_eq!(a.node.st.hearth_leave(&id, false).await.unwrap_err(), LeaveError::OutboxPending, "rejouable");
+    assert_eq!(a.node.st.hearth_leave(&id, true).await.unwrap_err(), LeaveError::Unreachable, "force : personne n'a reçu le départ");
+    assert!(a.rt().state(&g).is_some() && dir.is_dir(), "toujours rien de supprimé");
+    a.node.st.hearth_forget(&id).await.unwrap();
+    assert!(a.rt().state(&g).is_none());
+    assert!(!dir.exists());
+    a.stop().await;
+}
+
+/// `force` : Bob est en ligne mais on choisit de ne pas attendre la file d'envoi : le départ aboutit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn quitter_force_ne_attend_pas_la_file() {
+    let (peers, g, id) = group_of(&["Alice", "Bob"]).await;
+    let (a, _b) = (&peers[0], &peers[1]);
+    a.node.st.hearth_play(&id).await.unwrap();
+    a.close_game();
+    a.node.st.hearth_leave(&id, true).await.unwrap();
+    assert!(a.rt().state(&g).is_none());
+    for p in &peers {
+        p.stop().await;
+    }
 }
 
 /// Invitations de groupe reçues (`on_invite`) : un ami qui n'est pas membre d'un groupe connu ne change pas sa clé ; au

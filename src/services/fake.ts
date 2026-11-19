@@ -705,11 +705,13 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
       hearthSync(g);
       hearthEmit();
     },
-    hearthLeave: async (id) => {
-      hearthCalls.push({ kind: "Leave", args: [id] });
+    hearthLeave: async (id, force) => {
+      hearthCalls.push({ kind: "Leave", args: force ? [id, true] : [id] });
       const g = hearthCard(id);
       // Comme Rust : le dernier membre ne peut pas quitter, rien n'est supprimé.
       if (g.members.length <= 1) throw new HearthLeaveError("last_member");
+      // Comme Rust : une partie encore en file n'est pas jetée sans `force`.
+      if (!force && g.settings.outbox_pending > 0) throw new HearthLeaveError("outbox_pending");
       hearthGroups.delete(id);
       hearthEmit();
     },

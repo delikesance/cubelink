@@ -168,8 +168,8 @@ export const commands = {
 	hearthAddMember: (id: string, publicKey: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_add_member", { id, public_key: publicKey }, options),
 	/**  Propose de retirer un membre du groupe. */
 	hearthRemoveMember: (id: string, publicKey: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_remove_member", { id, public_key: publicKey }, options),
-	/**  Quitte le groupe. Rejette `{ code: "last_member" | "unreachable" | "other", message? }` : rien n'est supprimé dans ces cas. */
-	hearthLeave: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_leave", { id }, options),
+	/**  Quitte le groupe, après avoir attendu (jusqu'à 5 min) que ma dernière partie soit remise à un membre. Rejette `{ code: "last_member" | "unreachable" | "outbox_pending" | "other", message? }` : rien n'est supprimé dans ces cas. `force: true` saute l'attente de la file d'envoi (la dernière partie est perdue pour le groupe). */
+	hearthLeave: (id: string, force: boolean | null, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_leave", { id, force }, options),
 	/**  Supprime le serveur de ce PC seulement, sans prévenir le groupe : arrête mon serveur, libère les blobs et efface le dossier (choix explicite de l'utilisateur quand personne n'est joignable, jamais un repli automatique). */
 	hearthForget: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_forget", { id }, options),
 	/**  Approuve une décision du groupe en attente. */
@@ -1001,13 +1001,19 @@ export type LaunchStateEvent_Serialize = {
 
 /**
  *  Échec de `hearth_leave`, avec un code stable pour que l'écran choisisse quoi proposer. Seul `Unreachable` autorise le
- *  repli « supprimer quand même ce PC » (après une seconde confirmation) ; jamais une autre erreur.
+ *  repli « supprimer quand même ce PC » (après une seconde confirmation), et seul `OutboxPending` autorise de rejouer avec
+ *  `force` (« Quitter quand même », la dernière partie sera perdue pour le groupe) ; jamais une autre erreur.
  */
 export type LeaveError = 
 /**  Je suis le dernier membre : quitter effacerait la seule copie du monde. Rien n'a été touché. */
 { code: "last_member" } | 
 /**  Aucun autre membre n'a reçu mon départ. Rien n'a été supprimé. */
 { code: "unreachable" } | 
+/**
+ *  Ma dernière partie n'a été remise à aucun membre (file d'envoi non vidée) : la quitter maintenant la perdrait pour le
+ *  groupe. Rien n'a été supprimé ; mon serveur est arrêté et la version reste en file. Rejouable, ou avec `force`.
+ */
+{ code: "outbox_pending" } | 
 /**  Toute autre erreur (quota, disque, jeu en cours…) : message affichable, rien n'est supprimé par le front. */
 { code: "other"; message: string };
 

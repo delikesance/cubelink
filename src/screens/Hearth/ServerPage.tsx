@@ -29,7 +29,7 @@ const PROPOSAL_LABEL = (p: HearthProposal): string => {
 const SYNC_LABEL = { ok: "À jour", behind: "En retard", unknown: "Pas encore vérifié" } as const;
 
 /** `run` peut rendre une seconde confirmation à enchaîner (elle remplace celle-ci au lieu de la fermer). */
-interface Confirm { title: string; text: string; action: string; danger?: boolean; run: () => Promise<void | Confirm> }
+interface Confirm { title: string; text: string; action: string; danger?: boolean; busyText?: string; run: () => Promise<void | Confirm> }
 
 /** Boîte de confirmation d'une action qu'on ne peut pas défaire d'un clic. */
 function ConfirmDialog({ c, onClose }: { c: Confirm; onClose: (next?: Confirm) => void }) {
@@ -42,7 +42,7 @@ function ConfirmDialog({ c, onClose }: { c: Confirm; onClose: (next?: Confirm) =
   };
   return (
     <Modal title={c.title} role="alertdialog" onClose={() => onClose()}>
-      <p className="home-modal-text">{c.text}</p>
+      <p className="home-modal-text" role={busy && c.busyText ? "status" : undefined}>{busy && c.busyText ? c.busyText : c.text}</p>
       {error && <p className="hearth-err" role="alert">{error}</p>}
       <div className="home-modal-foot">
         <Button variant="secondary" data-autofocus onClick={() => onClose()}>Annuler</Button>
@@ -266,25 +266,38 @@ export default function ServerPage({ id }: { id: string }) {
   );
   const unreachable = () => deleteWorld(
     "Personne n'est joignable",
-    "Aucun ami du groupe n'est connecté : ton départ ne leur sera pas annoncé, et ils te compteront encore dans le groupe. Supprimer quand même le monde de ce PC ? Tu pourras être réinvité plus tard.",
+    "Aucun ami du groupe n'est connecté : ton départ ne leur sera pas annoncé, et ils te compteront encore dans le groupe. "
+      + (detail.settings.outbox_pending > 0 ? `${plural(detail.settings.outbox_pending, "partie n'a pas été envoyée et sera perdue", "parties n'ont pas été envoyées et seront perdues")}. ` : "")
+      + "Supprimer quand même le monde de ce PC ? Tu pourras être réinvité plus tard.",
     "Supprimer quand même",
   );
+  // Ma dernière partie n'a été remise à personne : quitter maintenant la perd pour le groupe (#56). Le serveur est déjà arrêté.
+  const notSent = (): Confirm => wrap({
+    title: "Ta dernière partie n'est pas encore partie",
+    text: "Aucun ami ne l'a reçue : si tu quittes maintenant, elle sera perdue pour le groupe. Tu peux attendre qu'un ami soit connecté et réessayer.",
+    action: "Quitter quand même", danger: true,
+    busyText: "Quitter le groupe…",
+    run: () => leaveNow(true),
+  });
+  const leaveNow = async (force: boolean): Promise<void | Confirm> => {
+    try { await services.hearthLeave(c.id, force); } catch (e) {
+      // Seuls ces codes mènent à autre chose qu'une erreur affichée, et la suppression n'arrive qu'après une nouvelle
+      // confirmation. Toute autre erreur est relancée : la boîte l'affiche et le monde reste en place.
+      if (e instanceof HearthLeaveError && e.code === "last_member") return lastMember();
+      if (e instanceof HearthLeaveError && e.code === "unreachable") return unreachable();
+      if (e instanceof HearthLeaveError && e.code === "outbox_pending" && !force) return notSent();
+      throw e;
+    }
+    navigate("main");
+  };
   const leave = () => {
     // Seul dans le groupe : le texte « le serveur continue pour les autres » serait faux, et Quitter serait refusé.
     if (detail.members.length <= 1) { setConfirm(lastMember()); return; }
     ask({
       title: `Quitter « ${c.name} » ?`, action: "Quitter", danger: true,
       text: "Le monde copié sur ce PC est supprimé. Le serveur continue pour les autres membres, même si c'est toi qui l'as créé. Tu pourras être réinvité plus tard.",
-      run: async () => {
-        try { await services.hearthLeave(c.id); } catch (e) {
-          // Seuls ces deux codes mènent à une suppression, et seulement après une nouvelle confirmation. Toute autre erreur
-          // est relancée : la boîte l'affiche et le monde reste en place.
-          if (e instanceof HearthLeaveError && e.code === "last_member") return lastMember();
-          if (e instanceof HearthLeaveError && e.code === "unreachable") return unreachable();
-          throw e;
-        }
-        navigate("main");
-      },
+      busyText: "Envoi de ta dernière partie aux autres membres avant de quitter… Ça peut prendre quelques minutes.",
+      run: () => leaveNow(false),
     });
   };
   const shownError = error ?? runError;

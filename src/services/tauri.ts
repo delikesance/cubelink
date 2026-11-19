@@ -15,7 +15,7 @@ async function done(p: Promise<unknown>): Promise<void> {
 export function toLeaveError(e: unknown): Error {
   if (e && typeof e === "object" && "code" in e) {
     const { code, message } = e as { code: unknown; message?: unknown };
-    if (code === "last_member" || code === "unreachable") return new HearthLeaveError(code);
+    if (code === "last_member" || code === "unreachable" || code === "outbox_pending") return new HearthLeaveError(code);
     if (code === "other") return new HearthLeaveError("other", typeof message === "string" ? message : undefined);
   }
   return new HearthLeaveError("other", typeof e === "string" ? e : e instanceof Error ? e.message : undefined);
@@ -145,7 +145,7 @@ export function createTauriServices(): Services {
     hearthSetInstance: (id, instanceId) => done(commands.hearthSetInstance(id, instanceId)),
     hearthAddMember: (id, publicKey) => done(commands.hearthAddMember(id, publicKey)),
     hearthRemoveMember: (id, publicKey) => done(commands.hearthRemoveMember(id, publicKey)),
-    hearthLeave: (id) => done(commands.hearthLeave(id)).catch((e: unknown) => { throw toLeaveError(e); }),
+    hearthLeave: (id, force) => done(commands.hearthLeave(id, force ?? false)).catch((e: unknown) => { throw toLeaveError(e); }),
     hearthForget: (id) => done(commands.hearthForget(id)),
     hearthVote: (id, proposalId) => done(commands.hearthVote(id, proposalId)),
     hearthContinueWithout: (id, publicKey) => done(commands.hearthContinueWithout(id, publicKey)),

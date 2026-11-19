@@ -3,14 +3,17 @@ import { toLeaveError } from "./tauri";
 import { HearthLeaveError } from "./types";
 
 describe("toLeaveError", () => {
-  it("reconnaît les trois codes de hearth_leave", () => {
+  it("reconnaît les quatre codes de hearth_leave", () => {
     const a = toLeaveError({ code: "last_member" });
     const b = toLeaveError({ code: "unreachable" });
     const c = toLeaveError({ code: "other", message: "Quota atteint." });
+    const d = toLeaveError({ code: "outbox_pending" });
     expect(a).toBeInstanceOf(HearthLeaveError);
     expect((a as HearthLeaveError).code).toBe("last_member");
     expect((b as HearthLeaveError).code).toBe("unreachable");
     expect((c as HearthLeaveError).code).toBe("other");
+    expect(d).toBeInstanceOf(HearthLeaveError);
+    expect((d as HearthLeaveError).code).toBe("outbox_pending");
     expect(c.message).toBe("Quota atteint.");
   });
 

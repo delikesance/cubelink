@@ -329,6 +329,48 @@ describe("Page du serveur", () => {
     await waitFor(() => expect(s.navigate).toHaveBeenCalledWith("main"));
   });
 
+  it("Quitter alors que ma dernière partie n'est pas partie (#56) : boîte « Quitter quand même », hearthLeave rappelé avec force, rien n'est jeté avant", async () => {
+    const services = createFakeServices({ tickMs: 0 });
+    services.seedHearth({ id: "g10", name: "Les copains" }, { members: [{ ...me }, { ...noor }], settings: { keep_background: false, disk_bytes: 1, outbox_pending: 1, instance_name: "x" } });
+    const s = shell(services, { id: "g10" });
+    render(<ShellContext.Provider value={s.value}><Hearth /></ShellContext.Provider>);
+    fireEvent.click(within(await clickQuitter()).getByRole("button", { name: "Quitter" }));
+    const dlg = await screen.findByText(/elle sera perdue pour le groupe/).then(() => screen.getByRole("alertdialog"));
+    expect(within(dlg).getByText("Ta dernière partie n'est pas encore partie")).toBeTruthy();
+    expect(services.hearthCalls).toEqual([{ kind: "Leave", args: ["g10"] }]);
+    expect(s.navigate).not.toHaveBeenCalled();
+    fireEvent.click(within(dlg).getByRole("button", { name: "Quitter quand même" }));
+    await waitFor(() => expect(services.hearthCalls).toEqual([{ kind: "Leave", args: ["g10"] }, { kind: "Leave", args: ["g10", true] }]));
+    await waitFor(() => expect(s.navigate).toHaveBeenCalledWith("main"));
+  });
+
+  it("Quitter alors que ma dernière partie n'est pas partie, puis Annuler : le monde reste", async () => {
+    const { services, s } = twoMembers("g11", async () => { throw new HearthLeaveError("outbox_pending"); });
+    fireEvent.click(within(await clickQuitter()).getByRole("button", { name: "Quitter" }));
+    const dlg = await screen.findByText(/elle sera perdue pour le groupe/).then(() => screen.getByRole("alertdialog"));
+    fireEvent.click(within(dlg).getByRole("button", { name: "Annuler" }));
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+    expect(services.hearthCalls).toEqual([{ kind: "Leave", args: ["g11"] }]);
+    expect(s.navigate).not.toHaveBeenCalled();
+  });
+
+  it("Quitter quand même, puis personne n'est joignable : on retombe sur la confirmation de suppression avec la partie perdue", async () => {
+    const services = createFakeServices({ tickMs: 0 });
+    services.seedHearth({ id: "g12", name: "Les copains" }, { members: [{ ...me }, { ...noor }], settings: { keep_background: false, disk_bytes: 1, outbox_pending: 2, instance_name: "x" } });
+    services.hearthLeave = async (gid, force) => {
+      services.hearthCalls.push({ kind: "Leave", args: force ? [gid, true] : [gid] });
+      throw new HearthLeaveError(force ? "unreachable" : "outbox_pending");
+    };
+    const s = shell(services, { id: "g12" });
+    render(<ShellContext.Provider value={s.value}><Hearth /></ShellContext.Provider>);
+    fireEvent.click(within(await clickQuitter()).getByRole("button", { name: "Quitter" }));
+    fireEvent.click(within(await screen.findByText(/elle sera perdue pour le groupe/).then(() => screen.getByRole("alertdialog"))).getByRole("button", { name: "Quitter quand même" }));
+    const dlg = await screen.findByText(/ne leur sera pas annoncé/).then(() => screen.getByRole("alertdialog"));
+    expect(within(dlg).getByText(/2 parties n'ont pas été envoyées et seront perdues/)).toBeTruthy();
+    expect(services.hearthCalls).toEqual([{ kind: "Leave", args: ["g12"] }, { kind: "Leave", args: ["g12", true] }]);
+    expect(s.navigate).not.toHaveBeenCalled();
+  });
+
   it("Quitter quand personne n'est joignable, puis Annuler : le monde reste", async () => {
     const { services, s } = twoMembers("g8", async () => { throw new HearthLeaveError("unreachable"); });
     fireEvent.click(within(await clickQuitter()).getByRole("button", { name: "Quitter" }));

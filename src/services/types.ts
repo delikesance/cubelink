@@ -12,7 +12,9 @@ export class HearthLeaveError extends Error {
       ? "Tu es le dernier membre de ce groupe : le quitter effacerait la seule copie du monde."
       : code === "unreachable"
         ? "Personne du groupe n'a pu être joint : ton départ n'a pas pu leur être annoncé."
-        : "Une erreur est survenue."));
+        : code === "outbox_pending"
+          ? "Ta dernière partie n'a pas encore été envoyée aux autres membres."
+          : "Une erreur est survenue."));
     this.name = "HearthLeaveError";
   }
 }
@@ -304,7 +306,8 @@ export interface Services {
   hearthAddMember(id: string, publicKey: string): Promise<void>;
   hearthRemoveMember(id: string, publicKey: string): Promise<void>;
   /** Rejette avec une `HearthLeaveError` (`last_member`, `unreachable`, `other`) : rien n'est supprimé, c'est à l'écran de proposer la suite. */
-  hearthLeave(id: string): Promise<void>;
+  /** `force` : ne pas attendre l'envoi de ma dernière partie (elle est perdue pour le groupe si elle n'est pas partie). */
+  hearthLeave(id: string, force?: boolean): Promise<void>;
   /** Supprime le serveur de CE PC seulement, sans prévenir le groupe (choix explicite après « personne n'est joignable » ou « dernier membre », jamais un repli automatique). */
   hearthForget(id: string): Promise<void>;
   hearthVote(id: string, proposalId: string): Promise<void>;

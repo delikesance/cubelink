@@ -21,7 +21,7 @@ use serde::Serialize;
 use tauri::State;
 
 use crate::error::{sanitize, user_msg};
-use crate::hearth::{key_hex, parse_key, Begin, HearthRuntime, HostParams, LeaveError, Play, EULA_REQUIRED, HOST_STEPS, JOIN_STEPS};
+use crate::hearth::{key_hex, parse_key, Begin, HearthRuntime, HostParams, LeaveError, Play, EULA_REQUIRED, HOST_STEPS, JOIN_STEPS, LEAVE_FLUSH_WAIT};
 use crate::state::AppState;
 
 /// Longueur maximale du nom d'un groupe (caractères).
@@ -230,7 +230,8 @@ impl AppState {
         self.hearth.propose(g, GroupOp::RemoveMember { key: k }).await
     }
 
-    pub async fn hearth_leave(self: &Arc<Self>, id: &str) -> Result<(), LeaveError> {
+    /// `force` saute l'attente de la file d'envoi : ma dernière partie, si elle n'est pas encore partie, est perdue pour le groupe.
+    pub async fn hearth_leave(self: &Arc<Self>, id: &str, force: bool) -> Result<(), LeaveError> {
         self.hearth.require_enabled()?;
         let g = gid(id)?;
         // Dernier membre : refus AVANT d'arrêter mon serveur, il ne doit rien arriver au monde.
@@ -239,6 +240,11 @@ impl AppState {
         }
         if self.hearth.active(&g).is_some() {
             self.hearth_stop(id).await?;
+        }
+        // #56 : `forget_group` jette la file d'envoi du groupe. Ma dernière partie (publiée par l'arrêt ci-dessus) doit
+        // d'abord être remise à un membre ; sinon rien n'est supprimé et l'écran propose « Quitter quand même ».
+        if !force && !self.hearth.flush_group_outbox(&g, LEAVE_FLUSH_WAIT).await {
+            return Err(LeaveError::OutboxPending);
         }
         self.hearth.propose_leave(g).await?;
         // Le groupe a été quitté si la chaîne l'a appliqué ; `forget_group` est aussi appelé par le runtime.
@@ -753,11 +759,11 @@ pub async fn hearth_remove_member(state: S<'_>, id: String, public_key: String) 
     state.hearth_remove_member(&id, &public_key).await
 }
 
-/// Quitte le groupe. Rejette `{ code: "last_member" | "unreachable" | "other", message? }` : rien n'est supprimé dans ces cas.
+/// Quitte le groupe, après avoir attendu (jusqu'à 5 min) que ma dernière partie soit remise à un membre. Rejette `{ code: "last_member" | "unreachable" | "outbox_pending" | "other", message? }` : rien n'est supprimé dans ces cas. `force: true` saute l'attente de la file d'envoi (la dernière partie est perdue pour le groupe).
 #[tauri::command(rename_all = "snake_case")]
 #[specta::specta(rename_all = "snake_case")]
-pub async fn hearth_leave(state: S<'_>, id: String) -> Result<(), LeaveError> {
-    state.inner().hearth_leave(&id).await
+pub async fn hearth_leave(state: S<'_>, id: String, force: Option<bool>) -> Result<(), LeaveError> {
+    state.inner().hearth_leave(&id, force.unwrap_or(false)).await
 }
 
 /// Supprime le serveur de ce PC seulement, sans prévenir le groupe : arrête mon serveur, libère les blobs et efface le dossier (choix explicite de l'utilisateur quand personne n'est joignable, jamais un repli automatique).

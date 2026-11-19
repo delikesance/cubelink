@@ -57,6 +57,18 @@ fn client() -> &'static reqwest::Client {
     })
 }
 
+/// Réponse HTTP d'un service Mojang : `Ok` si 2xx ; « n'existe pas » (`NotFound`, définitif, mis en cache par l'appelant) pour 204,
+/// 400, 404 ; tout le reste (429, 5xx, redirection...) est TEMPORAIRE (`Network` : l'appelant ne le retient pas et réessaie).
+fn check_status(status: reqwest::StatusCode, what: &str) -> Result<()> {
+    if status.is_success() && status != reqwest::StatusCode::NO_CONTENT {
+        return Ok(());
+    }
+    match status.as_u16() {
+        204 | 400 | 404 => Err(Error::NotFound(what.into())),
+        c => Err(Error::Network(format!("{what} : réponse HTTP {c}"))),
+    }
+}
+
 /// UUID sans tirets, 32 caractères hexadécimaux.
 pub fn normalize_uuid(uuid: &str) -> Option<String> {
     let s: String = uuid.chars().filter(|c| *c != '-').collect::<String>().to_ascii_lowercase();
@@ -110,9 +122,7 @@ pub async fn head_png_by_name(name: &str) -> Result<Vec<u8>> {
     }
     let net = |e: reqwest::Error| Error::Network(e.to_string());
     let resp = client().get(format!("{PROFILE_URL}{name}")).send().await.map_err(net)?;
-    if !resp.status().is_success() {
-        return Err(Error::NotFound("profil Minecraft".into()));
-    }
+    check_status(resp.status(), "profil Minecraft")?;
     #[derive(Deserialize)]
     struct Id {
         id: String,
@@ -126,9 +136,7 @@ pub async fn head_png(uuid: &str) -> Result<Vec<u8>> {
     let id = normalize_uuid(uuid).ok_or_else(|| Error::Invalid("identifiant de compte invalide".into()))?;
     let net = |e: reqwest::Error| Error::Network(e.to_string());
     let resp = client().get(format!("{SESSION_URL}{id}")).send().await.map_err(net)?;
-    if !resp.status().is_success() {
-        return Err(Error::NotFound("profil Minecraft".into()));
-    }
+    check_status(resp.status(), "profil Minecraft")?;
     let profile: Profile = resp.json().await.map_err(net)?;
     let url = profile
         .properties
@@ -137,9 +145,7 @@ pub async fn head_png(uuid: &str) -> Result<Vec<u8>> {
         .and_then(|p| skin_url(&p.value))
         .ok_or_else(|| Error::NotFound("skin".into()))?;
     let resp = client().get(url).send().await.map_err(net)?;
-    if !resp.status().is_success() {
-        return Err(Error::NotFound("skin".into()));
-    }
+    check_status(resp.status(), "skin")?;
     let bytes = resp.bytes().await.map_err(net)?;
     if bytes.len() > MAX_SKIN_BYTES {
         return Err(Error::Invalid("skin trop gros".into()));
@@ -150,6 +156,20 @@ pub async fn head_png(uuid: &str) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn statut_http_definitif_ou_temporaire() {
+        use reqwest::StatusCode as S;
+        assert!(check_status(S::OK, "x").is_ok());
+        // Inconnu de Mojang : définitif (l'appelant le retient)
+        for c in [S::NO_CONTENT, S::BAD_REQUEST, S::NOT_FOUND] {
+            assert!(matches!(check_status(c, "x"), Err(Error::NotFound(_))), "{c}");
+        }
+        // Limite de débit, panne, redirection : temporaire, jamais retenu comme « pas de skin »
+        for c in [S::TOO_MANY_REQUESTS, S::INTERNAL_SERVER_ERROR, S::BAD_GATEWAY, S::SERVICE_UNAVAILABLE, S::FOUND] {
+            assert!(matches!(check_status(c, "x"), Err(Error::Network(_))), "{c}");
+        }
+    }
 
     #[test]
     fn uuid_is_normalized() {

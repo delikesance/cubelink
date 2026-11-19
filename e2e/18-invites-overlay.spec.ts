@@ -104,11 +104,12 @@ test('regle de jonction : un ami non invite est refuse ; sa demande refusee est 
   await record(appA.page, 'friend://join_requests');
   await openWorld(appA, host.id);
 
-  // Ami non invite : ni plan, ni (donc) tunnel ; l'UI de B propose « Demander » et non « Rejoindre ».
+  // Ami non invite : ni plan, ni (donc) tunnel ; l'UI de B propose « Demander » et non « Rejoindre ». « Demander » n'apparaît que
+  // quand A annonce « en jeu » (partage en cours) : B le sait à sa sonde de présence suivante (~30 s).
   expect(await invokeErr(appB.page, 'join_plan', { friend_public_key: keyA }), 'plan refuse sans invitation').not.toBeNull();
   await appB.page.evaluate(() => { window.location.hash = '#/friends'; });
   await appB.page.waitForSelector('main[data-route="main"]');
-  await expect(appB.page.getByRole('button', { name: /^Demander à rejoindre / })).toBeVisible({ timeout: 15_000 });
+  await expect(appB.page.getByRole('button', { name: /^Demander à rejoindre / })).toBeVisible({ timeout: 45_000 });
   await expect(appB.page.getByRole('button', { name: /^Rejoindre / })).toHaveCount(0);
 
   // Demande refusee : A la voit (evenement + liste), la refuse ; B recoit « refused ».

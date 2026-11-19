@@ -67,7 +67,7 @@ describe("Accueil : serveurs de groupe", () => {
     await waitFor(() => expect(services.hearthCalls.map((c) => c.kind)).toEqual(["Play"]));
   });
 
-  it("états sans bouton de jeu : mise à jour, connexion requise, deux versions", async () => {
+  it("états : mise à jour sans bouton, personne en ligne (on peut lancer), deux versions", async () => {
     const services = createFakeServices({ tickMs: 0 });
     services.seedHearth({ id: "a", name: "Sync", state: "syncing", progress: 42 });
     services.seedHearth({ id: "b", name: "Hors ligne", state: "blocked" });
@@ -76,8 +76,9 @@ describe("Accueil : serveurs de groupe", () => {
     await screen.findByText("Mise à jour du monde 42 %");
     expect(screen.getByRole("progressbar", { name: /Sync/ }).getAttribute("aria-valuenow")).toBe("42");
     const blocked = screen.getByRole("listitem", { name: "Serveur Hors ligne" });
-    expect(within(blocked).getByText("Connexion requise")).toBeTruthy();
-    expect(within(blocked).queryByRole("button", { name: /^Jouer/ })).toBeNull();
+    expect(within(blocked).getByText("Aucun membre en ligne")).toBeTruthy();
+    expect(within(blocked).getByText(/Tu peux lancer le serveur : ils le rejoindront à leur arrivée/)).toBeTruthy();
+    expect(within(blocked).getByRole("button", { name: "Jouer sur Hors ligne" })).toBeTruthy();
     const fork = screen.getByRole("listitem", { name: "Serveur Fourche" });
     expect(within(fork).getByText("Deux versions existent")).toBeTruthy();
     expect(within(fork).getByRole("button", { name: "Choisir une version" })).toBeTruthy();
@@ -250,6 +251,56 @@ describe("Page du serveur", () => {
     return { services, pk: noor };
   }
 
+  it("Quitter (ma ligne de Membres) : départ annoncé au groupe, retour à l'accueil", async () => {
+    const services = createFakeServices({ tickMs: 0 });
+    services.seedHearth({ id: "g3", name: "Les copains" }, {
+      members: [{ public_key: "me", name: "Toi", online: true, is_me: true, is_creator: true, sync: "ok", version: 1, unseen_days: null }],
+    });
+    const s = shell(services, { id: "g3" });
+    render(<ShellContext.Provider value={s.value}><Hearth /></ShellContext.Provider>);
+    // sur ma ligne de l'onglet Membres, sans changer d'onglet
+    fireEvent.click(await screen.findByRole("button", { name: "Quitter" }));
+    const dlg = await screen.findByRole("alertdialog");
+    expect(within(dlg).getByText(/même si c'est toi qui l'as créé/)).toBeTruthy();
+    fireEvent.click(within(dlg).getByRole("button", { name: "Quitter" }));
+    await waitFor(() => expect(services.hearthCalls).toEqual([{ kind: "Leave", args: ["g3"] }]));
+    await waitFor(() => expect(s.navigate).toHaveBeenCalledWith("main"));
+  });
+
+  it("Quitter quand personne n'est joignable : le monde local est quand même supprimé", async () => {
+    const services = createFakeServices({ tickMs: 0 });
+    services.seedHearth({ id: "g4", name: "Les copains" }, {
+      members: [{ public_key: "me", name: "Toi", online: true, is_me: true, is_creator: true, sync: "ok", version: 1, unseen_days: null }],
+    });
+    services.hearthLeave = async () => { throw new Error("Personne du groupe n'a pu être joint."); };
+    const s = shell(services, { id: "g4" });
+    render(<ShellContext.Provider value={s.value}><Hearth /></ShellContext.Provider>);
+    // sur ma ligne de l'onglet Membres, sans changer d'onglet
+    fireEvent.click(await screen.findByRole("button", { name: "Quitter" }));
+    fireEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Quitter" }));
+    await waitFor(() => expect(services.hearthCalls).toEqual([{ kind: "Forget", args: ["g4"] }]));
+    await waitFor(() => expect(s.navigate).toHaveBeenCalledWith("main"));
+  });
+
+  it("Membres : ma tête vient de mon compte actif, jamais du libellé « Toi » (un autre joueur porte ce pseudo)", async () => {
+    const services = createFakeServices({ tickMs: 0 });
+    const byName = vi.fn(async () => null);
+    const byUuid = vi.fn(async () => null);
+    services.skinHeadByName = byName;
+    services.authSkinHead = byUuid;
+    const acc = await services.authAccounts();
+    const active = acc.accounts.find((a) => a.id === acc.active);
+    services.seedHearth({ id: "g2", name: "Les copains" }, {
+      members: [{ public_key: "me", name: "Toi", online: true, is_me: true, is_creator: true, sync: "ok", version: 1, unseen_days: null }],
+    });
+    const s = shell(services, { id: "g2" });
+    render(<ShellContext.Provider value={s.value}><Hearth /></ShellContext.Provider>);
+    await screen.findByText(/Toi \(toi\)/);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(byName).not.toHaveBeenCalledWith("Toi");
+    if (active?.kind === "online") expect(byUuid).toHaveBeenCalledWith(active.uuid);
+  });
+
   it("Membres : bannière « n'est pas revenu depuis N jours » et vote par majorité", async () => {
     const { services, pk } = await withBlocker();
     await screen.findByText("Noor avait la version la plus récente et n'est pas revenu depuis 9 jours.");
@@ -296,7 +347,7 @@ describe("Page du serveur", () => {
     await screen.findByText(/Version 4 · Restauration · actuelle/);
   });
 
-  it("Réglages : garder le serveur, proposer la mise à jour du modpack, quitter le groupe", async () => {
+  it("Réglages : garder le serveur, proposer la mise à jour du modpack (pas de bouton Quitter ici)", async () => {
     const { services, navigate } = page({ id: "g1" }, { id: "g1", name: "Les copains" });
     fireEvent.click(await screen.findByRole("tab", { name: "Réglages" }));
     fireEvent.click(await screen.findByRole("checkbox", { name: /Garder le serveur ouvert/ }));
@@ -305,10 +356,9 @@ describe("Page du serveur", () => {
     fireEvent.click(screen.getByRole("button", { name: "Proposer la mise à jour au groupe" }));
     fireEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Proposer au groupe" }));
     await waitFor(() => expect(services.hearthCalls[1]).toEqual({ kind: "PackUpdate", args: ["g1", "inst-aeronautics"] }));
-    fireEvent.click(screen.getByRole("button", { name: "Quitter le groupe" }));
-    fireEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Quitter" }));
-    await waitFor(() => expect(navigate).toHaveBeenCalledWith("main"));
-    expect(services.hearthCalls[2]).toEqual({ kind: "Leave", args: ["g1"] });
+    // un seul « Quitter » sur la page : celui de ma ligne dans Membres, pas de doublon dans Réglages
+    expect(screen.queryByRole("button", { name: /^Quitter/ })).toBeNull();
+    expect(navigate).not.toHaveBeenCalled();
   });
 
   it("deux versions : choisir celle à garder résout la fourche", async () => {

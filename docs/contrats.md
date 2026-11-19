@@ -36,7 +36,7 @@ Arguments : clés JSON envoyées à Tauri (snake_case) et leur type TypeScript. 
 | `net_test` | — | `NetTest_Serialize` | Test de connexion réseau (Paramètres → « Tester ma connexion »). |
 | `friend_my_code` | — | `FriendCode` | Mon code ami (`mcl1-…`). |
 | `friend_regenerate_code` | — | `FriendCode` | Génère un nouveau code ami (l'ancien ne marche plus). |
-| `friend_list` | — | `FriendWithPresence_Serialize[]` | Amis, avec leur présence et la dernière fois vus en ligne. |
+| `friend_list` | — | `FriendWithPresence_Serialize[]` | Amis, avec leur présence, `in_game` (un jeu tourne chez l'ami : seul cas où « Demander à rejoindre » est proposé ; faux hors ligne et pour un ami d'une ancienne version) et la dernière fois vus en ligne. |
 | `friend_send_request` | `code: string` | `VerifyCode` | Envoie une demande d'ami à partir de son code ; renvoie le code de vérification à comparer. |
 | `friend_requests` | `offset: number`, `limit: number`, `query: string \| null` | `RequestsPage` | Demandes d'amis reçues, par page, filtrées par nom. |
 | `friend_accept` | `public_key: string` | — | Accepte une demande d'ami. |
@@ -88,6 +88,7 @@ Arguments : clés JSON envoyées à Tauri (snake_case) et leur type TypeScript. 
 | `hearth_add_member` | `id: string`, `public_key: string` | — | Propose d'ajouter un ami au groupe. |
 | `hearth_remove_member` | `id: string`, `public_key: string` | — | Propose de retirer un membre du groupe. |
 | `hearth_leave` | `id: string` | — | Quitte le groupe. |
+| `hearth_forget` | `id: string` | — | Supprime le serveur de ce PC seulement, sans prévenir le groupe : arrête mon serveur, libère les blobs et efface le dossier (repli quand quitter est impossible). |
 | `hearth_vote` | `id: string`, `proposal_id: string` | — | Approuve une décision du groupe en attente. |
 | `hearth_continue_without` | `id: string`, `public_key: string` | — | Propose de continuer sans la version d'un membre absent. |
 | `hearth_pack_update` | `id: string`, `instance_id: string` | — | Propose de passer le groupe à une nouvelle version du modpack. |
@@ -128,7 +129,7 @@ Les types nommés (`Profile`, `TransferProgress`, `HostState`, `StageState`…) 
 | `auth://state` | `Profile \| null` |
 | `launch://state` | `{ id, state: "preparing" \| "running" \| "exited" \| "failed", message? }` |
 | `transfer://progress` | `TransferProgress` (champ optionnel `error` en phase `failed`) |
-| `friend://presence` | `{ public_key, presence }` |
+| `friend://presence` | `{ public_key, presence, in_game }` : émis quand la présence OU `in_game` change (au plus une sonde, ~30 s, après le changement) |
 | `tunnel://state` | `{ state: "ok" \| "reconnecting" \| "lost" }` : liaison du tunnel invité. `reconnecting` : connexion à l'hôte coupée, reconnexion automatique en cours (10 s max, le port local `127.0.0.1:<port>` reste le même : Minecraft peut se reconnecter sans relancer le jeu) ; `lost` : hôte parti ou refus, le tunnel est inutilisable. Émis seulement pendant un tunnel ouvert (`join_open_tunnel` / `join_play`). |
 | `friend://request` | `FriendRequest` |
 | `friend://invite` / `friend://invites` | `Invite` (une invitation reçue) / `Invite[]` (file complète à chaque changement) |

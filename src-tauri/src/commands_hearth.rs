@@ -244,6 +244,19 @@ impl AppState {
         Ok(())
     }
 
+    /// Supprime le serveur de CE PC seulement : arrête mon serveur s'il tourne, ferme l'accès, libère les blobs et efface le
+    /// dossier, sans rien annoncer au groupe. Sert quand « Quitter » ne peut pas aboutir (aucun membre joignable) ou que je veux
+    /// seulement faire le ménage ici. Les autres membres me comptent encore dans le groupe : je peux être réinvité.
+    pub async fn hearth_forget(self: &Arc<Self>, id: &str) -> Result<(), String> {
+        self.hearth.require_enabled()?;
+        let g = gid(id)?;
+        self.hearth.require_state(&g)?;
+        if self.hearth.active(&g).is_some() {
+            self.hearth_stop(id).await?;
+        }
+        self.hearth.forget_group_wait(&g).await
+    }
+
     pub async fn hearth_vote(&self, id: &str, proposal_id: &str) -> Result<(), String> {
         self.hearth.require_enabled()?;
         let g = gid(id)?;
@@ -344,8 +357,15 @@ impl AppState {
                 return Err("Deux versions du monde existent : choisis laquelle garder depuis la page du serveur.".into());
             }
             match rt.decision_for(&g, &round).ok_or("ce groupe n'existe plus")? {
+                // Personne d'autre n'est joignable : on héberge quand même (docs/hearth.md § 1). Les amis rejoignent mon nœud à leur
+                // arrivée ; le monde leur parvient par la file d'envoi. Le bail « au mieux » demande une seconde confirmation
+                // (`best_effort_pending`) : le clic sur Jouer vaut pour les deux, on ne fait pas cliquer deux fois.
                 Decision::Blocked => {
-                    return Err("Connexion requise : aucun membre du groupe n'est joignable. Le jeu hors ligne n'est pas possible sur un serveur de groupe.".into())
+                    let r = self.hearth_host(g, instance, None).await;
+                    if r.is_err() && rt.best_effort_pending(&g) {
+                        return self.hearth_host(g, instance, None).await;
+                    }
+                    return r;
                 }
                 Decision::Unclean { holder, .. } => {
                     let name = rt.name_of(&holder);
@@ -734,6 +754,13 @@ pub async fn hearth_remove_member(state: S<'_>, id: String, public_key: String) 
 #[specta::specta(rename_all = "snake_case")]
 pub async fn hearth_leave(state: S<'_>, id: String) -> Result<(), String> {
     state.inner().hearth_leave(&id).await
+}
+
+/// Supprime le serveur de ce PC seulement, sans prévenir le groupe : arrête mon serveur, libère les blobs et efface le dossier (repli quand quitter est impossible).
+#[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
+pub async fn hearth_forget(state: S<'_>, id: String) -> Result<(), String> {
+    state.inner().hearth_forget(&id).await
 }
 
 /// Approuve une décision du groupe en attente.

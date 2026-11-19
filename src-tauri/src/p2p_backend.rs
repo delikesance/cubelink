@@ -111,6 +111,10 @@ pub trait P2pBackend: Send + Sync {
     }
     /// Présence d'un ami.
     fn presence(&self, public_key: &str) -> Presence;
+    /// Un jeu tourne-t-il chez cet ami (d'après sa dernière réponse de présence) ? Faux pour une ancienne version.
+    fn in_game(&self, _public_key: &str) -> bool {
+        false
+    }
     /// Pseudo déclaré aux amis (demandes et acceptations).
     fn set_display_name(&self, _name: &str) {}
     /// Indices à mettre dans notre code ami : (relais, adresses directes).

@@ -30,7 +30,7 @@ export function stateText(c: HearthCard): string {
     case "idle": return "Personne ne joue";
     case "hosted": return `${c.host?.name ?? "Un ami"} héberge · ${plural(c.players, "joueur", "joueurs")}`;
     case "syncing": return `Mise à jour du monde ${c.progress ?? 0} %`;
-    case "blocked": return "Connexion requise";
+    case "blocked": return "Aucun membre en ligne";
     case "unclean": return "Partie mal terminée";
     case "fork": return "Deux versions existent";
     case "launching": return c.step ?? "Lancement";
@@ -40,9 +40,12 @@ export function stateText(c: HearthCard): string {
 }
 
 /** Détail sous l'état : la raison, en une phrase. */
-export function stateHint(c: HearthCard): string | null {
+export function stateHint(c: HearthCard, offline: string[] = []): string | null {
   switch (c.state) {
-    case "blocked": return "Personne du groupe n'est joignable : le jeu hors ligne est interdit sur un serveur de groupe.";
+    case "blocked": {
+      const who = offline.length > 0 ? ` (${offline.join(", ")} ${offline.length > 1 ? "sont hors ligne" : "est hors ligne"})` : "";
+      return `Aucun autre membre n'est en ligne${who}. Tu peux lancer le serveur : ils le rejoindront à leur arrivée. Si l'un d'eux joue seul de son côté en même temps, le groupe choisira la version du monde à garder.`;
+    }
     case "unclean": return c.unclean ? `La partie de ${c.unclean.holder.name} ne s'est pas terminée proprement.` : null;
     case "fork": return "Deux membres ont joué en même temps : le groupe choisit la version à garder.";
     case "pack_missing": return "Installe le modpack du groupe pour pouvoir jouer.";
@@ -61,6 +64,8 @@ export function mainAction(c: HearthCard): MainAction {
     case "idle": return { kind: "play", label: "Jouer" };
     case "hosted": return { kind: "play", label: "Rejoindre" };
     case "hosting": return { kind: "stop", label: "Arrêter le serveur" };
+    // Personne d'autre en ligne : on peut quand même lancer le serveur, les amis le rejoindront à leur arrivée.
+    case "blocked": return { kind: "play", label: "Jouer" };
     default: return { kind: "none" };
   }
 }

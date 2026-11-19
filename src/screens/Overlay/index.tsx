@@ -67,7 +67,7 @@ export default function InGamePanel({ open = true }: { open?: boolean }) {
   useEffect(() => {
     setRunning(true); // le panneau n'existe que pendant une partie
     const offs = [
-      services.onFriendPresence((e) => setFriends((l) => l.map((f) => (f.friend.public_key === e.public_key ? { ...f, presence: e.presence } : f)))),
+      services.onFriendPresence((e) => setFriends((l) => l.map((f) => (f.friend.public_key === e.public_key ? { ...f, presence: e.presence, in_game: e.in_game } : f)))),
       services.onLaunchState((s) => {
         if (s.state === "running" || s.state === "preparing") {
           if (s.state === "running") setRunning(true);
@@ -225,7 +225,7 @@ export default function InGamePanel({ open = true }: { open?: boolean }) {
                       {canJoin && (
                         <Button aria-label={`Rejoindre ${f.friend.name}`} loading={busy === `join-${pk}`} onClick={() => join(pk, f.friend.name)}>Rejoindre</Button>
                       )}
-                      {on && !canJoin && (
+                      {on && f.in_game && !canJoin && (
                         <Button variant="secondary" aria-label={`Demander à rejoindre ${f.friend.name}`} loading={asked === "pending"} onClick={() => { void ask(f); }}>
                           {asked === "pending" ? ASK_LABEL.pending : "Demander"}
                         </Button>
@@ -253,7 +253,7 @@ export default function InGamePanel({ open = true }: { open?: boolean }) {
                   </div>
                   <div className="ov-actions">
                     {inst.id === current ? (
-                      <Button variant="danger" aria-label={`Fermer ${inst.name}`} loading={busy === `close-${inst.id}`} onClick={() => setConfirm({ kind: "close", instance: inst })}>Fermer</Button>
+                      <Button variant="danger-quiet" aria-label={`Fermer ${inst.name}`} loading={busy === `close-${inst.id}`} onClick={() => setConfirm({ kind: "close", instance: inst })}>Fermer</Button>
                     ) : (
                       <Button variant="secondary" aria-label={`Lancer ${inst.name}`} loading={busy === `switch-${inst.id}`} onClick={() => launch(inst)}>Lancer</Button>
                     )}

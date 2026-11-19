@@ -25,7 +25,7 @@
 .create-error{margin:0;color:var(--danger);line-height:1.5;font-weight:600}
 
 .create-form{box-sizing:border-box;width:100%;max-width:640px;margin:auto;display:flex;flex-direction:column;gap:var(--sp-5);padding:var(--sp-6);border-radius:var(--r-lg);background:var(--surface);border:1px solid var(--line);box-shadow:var(--shadow-soft)}
-.create-select{width:100%;color-scheme:dark}
+
 .create-fieldset{margin:0;padding:0;border:0;min-width:0;display:flex;flex-direction:column;gap:var(--sp-2)}
 .create-fieldset legend{padding:0;margin-bottom:var(--sp-2)}
 

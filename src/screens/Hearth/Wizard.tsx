@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import "./hearth.css";
 import { useShell } from "../../app/context";
 import type { FriendWithPresence, HearthWorld, Instance } from "../../services/types";
-import { Button, Card, Field, Input } from "../../ui";
+import { Button, Card, Field, Input, Select } from "../../ui";
 import { Avatar } from "../Friends/Avatar";
 import { errText, fmtSize, plural } from "./format";
 
@@ -87,9 +87,8 @@ export default function Wizard() {
               <>
                 <Field label="Modpack du groupe" hint="Tout le monde jouera avec ce modpack, mods compris.">
                   {({ id, "aria-describedby": described }) => (
-                    <select id={id} aria-describedby={described} className="cl-input" value={instanceId} onChange={(e) => setInstanceId(e.target.value)}>
-                      {instances.map((i) => <option key={i.id} value={i.id}>{i.name} ({i.minecraft})</option>)}
-                    </select>
+                    <Select id={id} aria-describedby={described} value={instanceId} onChange={setInstanceId}
+                      options={instances.map((i) => ({ value: i.id, label: `${i.name} (${i.minecraft})` }))} />
                   )}
                 </Field>
                 <Field label="Nom du serveur">
@@ -136,7 +135,7 @@ export default function Wizard() {
               <strong>Une copie du monde chez chacun.</strong>{" "}
               {chosen ? `${fmtSize(chosen.size_bytes)} à télécharger chez ${plural(picked.length, "membre", "membres")} (${picked.map((f) => f.friend.name).join(", ")}).` : `Le nouveau monde sera copié chez ${plural(picked.length, "membre", "membres")} (${picked.map((f) => f.friend.name).join(", ")}) après le premier lancement.`}
             </li>
-            <li><strong>Connexion requise.</strong> Jouer hors ligne est interdit sur un serveur de groupe : sinon deux versions du monde pourraient apparaître.</li>
+            <li><strong>Connexion requise.</strong> Il faut Internet pour lancer le serveur. Les amis le rejoignent quand ils sont en ligne, même si tu l'as lancé avant eux.</li>
             <li><strong>Mods figés.</strong> Le modpack « {inst?.name} » ne change que si le groupe vote la mise à jour.</li>
             <li><strong>Un seul bouton Jouer.</strong> Le serveur démarre chez le premier qui joue, les autres le rejoignent.</li>
           </ul>

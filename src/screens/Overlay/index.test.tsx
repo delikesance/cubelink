@@ -48,6 +48,18 @@ describe("Panneau en jeu : modpack en cours", () => {
     expect(screen.queryByRole("button", { name: `Demander à rejoindre ${alex.name}` })).toBeNull();
   });
 
+  it("ami en ligne mais pas en jeu : ni Demander ni Rejoindre", async () => {
+    const svc = createFakeServices({ tickMs: 0 });
+    const alex = (await svc.friendList())[0].friend;
+    const base = svc.friendList;
+    svc.friendList = async () => (await base()).map((f) => ({ ...f, in_game: false }));
+    mount(svc);
+    const friends = await screen.findByRole("list", { name: "Amis" });
+    await within(friends).findByText(alex.name);
+    expect(within(friends).queryByRole("button", { name: `Demander à rejoindre ${alex.name}` })).toBeNull();
+    expect(within(friends).queryByRole("button", { name: `Rejoindre ${alex.name}` })).toBeNull();
+  });
+
   it("ami qui héberge (invitation reçue) : Rejoindre directement, sans Demander", async () => {
     const svc = createFakeServices({ tickMs: 0 });
     const alex = (await svc.friendList())[0].friend;

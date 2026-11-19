@@ -87,8 +87,8 @@ Arguments : clés JSON envoyées à Tauri (snake_case) et leur type TypeScript. 
 | `hearth_set_instance` | `id: string`, `instance_id: string` | — | Associe l'instance locale du modpack au groupe. |
 | `hearth_add_member` | `id: string`, `public_key: string` | — | Propose d'ajouter un ami au groupe. |
 | `hearth_remove_member` | `id: string`, `public_key: string` | — | Propose de retirer un membre du groupe. |
-| `hearth_leave` | `id: string` | — | Quitte le groupe. |
-| `hearth_forget` | `id: string` | — | Supprime le serveur de ce PC seulement, sans prévenir le groupe : arrête mon serveur, libère les blobs et efface le dossier (repli quand quitter est impossible). |
+| `hearth_leave` | `id: string` | — | Quitte le groupe. Rejette `{ code: "last_member" \| "unreachable" \| "other", message? }` : rien n'est supprimé dans ces cas. |
+| `hearth_forget` | `id: string` | — | Supprime le serveur de ce PC seulement, sans prévenir le groupe : arrête mon serveur, libère les blobs et efface le dossier (choix explicite de l'utilisateur quand personne n'est joignable, jamais un repli automatique). |
 | `hearth_vote` | `id: string`, `proposal_id: string` | — | Approuve une décision du groupe en attente. |
 | `hearth_continue_without` | `id: string`, `public_key: string` | — | Propose de continuer sans la version d'un membre absent. |
 | `hearth_pack_update` | `id: string`, `instance_id: string` | — | Propose de passer le groupe à une nouvelle version du modpack. |
@@ -196,7 +196,7 @@ Voir `docs/hearth.md`. Implémentation : `src-tauri/src/hearth.rs` (runtime : so
 | `hearth_set_instance` | `id`, `instance_id` | | Relie le groupe à une instance locale dont le modpack est celui du groupe (carte `pack_missing`). |
 | `hearth_add_member` | `id`, `public_key` | | Propose d'ajouter un ami ; devient une décision du groupe (majorité). |
 | `hearth_remove_member` | `id`, `public_key` | | Propose de retirer un membre. |
-| `hearth_leave` | `id` | | Quitte le groupe : arrête mon serveur s'il tourne, ferme l'accès, libère les collections du groupe dans le magasin de blobs puis supprime le monde local (même chose quand je suis retiré du groupe). |
+| `hearth_leave` | `id` | | Quitte le groupe : arrête mon serveur s'il tourne, ferme l'accès, libère les collections du groupe dans le magasin de blobs puis supprime le monde local (même chose quand je suis retiré du groupe). Refuse sans rien toucher (ni arrêter mon serveur, ni supprimer) et rejette `{ code, message? }` : `last_member` (je suis le dernier membre), `unreachable` (aucun autre membre n'a reçu mon départ ; la proposition reste rejouable), `other` (message affichable). Le front ne propose `hearth_forget` qu'après une confirmation explicite sur `last_member` ou `unreachable`, jamais sur `other`. |
 | `hearth_vote` | `id`, `proposal_id` | | Approuve une décision en attente. |
 | `hearth_continue_without` | `id`, `public_key` | | Propose de continuer sans un membre absent (bannière de la page Membres). |
 | `hearth_pack_update` | `id`, `instance_id` | | Propose au groupe le modpack de cette instance (les mods sont figés : sans vote, le modpack ne change pas). L'instance liée au groupe ne change qu'une fois `PackUpdate` appliqué à la chaîne (tout de suite si ma voix suffit, sinon au vote qui atteint le quota). |

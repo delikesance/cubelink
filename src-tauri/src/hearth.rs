@@ -435,6 +435,57 @@ pub struct HearthRuntime {
     me_weak: Weak<HearthRuntime>,
 }
 
+/// Pourquoi `propose_inner` échoue : « personne joignable » (cas du départ) ou un message affichable.
+#[derive(Debug)]
+enum ProposeErr {
+    Unreachable,
+    Msg(String),
+}
+
+impl From<String> for ProposeErr {
+    fn from(m: String) -> Self {
+        ProposeErr::Msg(m)
+    }
+}
+
+impl std::fmt::Display for ProposeErr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProposeErr::Unreachable => f.write_str("Personne du groupe n'a pu être joint : ton départ n'a pas pu leur être annoncé. Réessaie quand un ami est connecté."),
+            ProposeErr::Msg(m) => f.write_str(m),
+        }
+    }
+}
+
+/// Échec de `hearth_leave`, avec un code stable pour que l'écran choisisse quoi proposer. Seul `Unreachable` autorise le
+/// repli « supprimer quand même ce PC » (après une seconde confirmation) ; jamais une autre erreur.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, specta::Type)]
+#[serde(tag = "code", content = "message", rename_all = "snake_case")]
+pub enum LeaveError {
+    /// Je suis le dernier membre : quitter effacerait la seule copie du monde. Rien n'a été touché.
+    LastMember,
+    /// Aucun autre membre n'a reçu mon départ. Rien n'a été supprimé.
+    Unreachable,
+    /// Toute autre erreur (quota, disque, jeu en cours…) : message affichable, rien n'est supprimé par le front.
+    Other(String),
+}
+
+impl From<String> for LeaveError {
+    fn from(m: String) -> Self {
+        LeaveError::Other(m)
+    }
+}
+
+impl std::fmt::Display for LeaveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LeaveError::LastMember => f.write_str("Tu es le dernier membre de ce groupe : le quitter effacerait la seule copie du monde."),
+            LeaveError::Unreachable => f.write_str(&ProposeErr::Unreachable.to_string()),
+            LeaveError::Other(m) => f.write_str(m),
+        }
+    }
+}
+
 /// Issue de la première phase de la prise du bail ([`HearthRuntime::begin_starting`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Begin {
@@ -1799,6 +1850,22 @@ impl HearthRuntime {
 
     /// Propose une opération (ou l'applique tout de suite si ma voix suffit).
     pub async fn propose(self: &Arc<Self>, gid: GroupId, op: GroupOp) -> Result<(), String> {
+        self.propose_inner(gid, op).await.map_err(|e| e.to_string())
+    }
+
+    /// Quitte le groupe : refuse si je suis le dernier membre, sinon propose `Leave` en distinguant l'échec « personne
+    /// joignable » (le départ n'est pas annoncé, mais rien n'est perdu) des autres erreurs.
+    pub async fn propose_leave(self: &Arc<Self>, gid: GroupId) -> Result<(), LeaveError> {
+        if self.state(&gid).is_some_and(|s| s.members.len() <= 1) {
+            return Err(LeaveError::LastMember);
+        }
+        self.propose_inner(gid, GroupOp::Leave).await.map_err(|e| match e {
+            ProposeErr::Unreachable => LeaveError::Unreachable,
+            ProposeErr::Msg(m) => LeaveError::Other(m),
+        })
+    }
+
+    async fn propose_inner(self: &Arc<Self>, gid: GroupId, op: GroupOp) -> Result<(), ProposeErr> {
         let leaving = matches!(op, GroupOp::Leave);
         self.check_continue_vote(&gid, &op)?;
         let (p, status) = self.with_group(&gid, |g| {
@@ -1821,10 +1888,10 @@ impl HearthRuntime {
                 // peux plus servir la chaîne, et les autres me compteraient pour toujours dans leurs quorums.
                 let others = self.state(&gid).map_or(0, |s| self.others(&s).len());
                 if others > 0 && self.broadcast(gid, false, visit).await == 0 {
-                    return Err("Personne du groupe n'a pu être joint : ton départ n'a pas pu leur être annoncé. Réessaie quand un ami est connecté.".into());
+                    return Err(ProposeErr::Unreachable);
                 }
             }
-            return self.finalize(gid, status.id).await;
+            return self.finalize(gid, status.id).await.map_err(ProposeErr::Msg);
         }
         self.broadcast(gid, true, visit).await;
         self.emit_state();

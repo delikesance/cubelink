@@ -1,5 +1,5 @@
 import { validateOfflineName } from "./accounts";
-import { HEARTH_EULA_REQUIRED } from "./types";
+import { HEARTH_EULA_REQUIRED, HearthLeaveError } from "./types";
 import type {
   AccountInfo, AccountsState, BrowseHit, BrowseInstallResult, BrowseKind, BrowseProgressEvent, BrowseSource, BrowseVersion, FixPlan, FixProgressEvent, FixResult, ModCheck, ModEntry, ModIssue,
   CreateInstanceInput, DeviceCode, HostState, Invite, JoinAnswer, JoinRequest, ImportWarningEvent, LaunchLogEvent, FriendRequest, FriendWithPresence, Instance, InstanceArt,
@@ -707,7 +707,9 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     },
     hearthLeave: async (id) => {
       hearthCalls.push({ kind: "Leave", args: [id] });
-      hearthCard(id);
+      const g = hearthCard(id);
+      // Comme Rust : le dernier membre ne peut pas quitter, rien n'est supprimé.
+      if (g.members.length <= 1) throw new HearthLeaveError("last_member");
       hearthGroups.delete(id);
       hearthEmit();
     },

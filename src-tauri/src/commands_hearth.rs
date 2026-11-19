@@ -21,7 +21,7 @@ use serde::Serialize;
 use tauri::State;
 
 use crate::error::{sanitize, user_msg};
-use crate::hearth::{key_hex, parse_key, Begin, HearthRuntime, HostParams, Play, EULA_REQUIRED, HOST_STEPS, JOIN_STEPS};
+use crate::hearth::{key_hex, parse_key, Begin, HearthRuntime, HostParams, LeaveError, Play, EULA_REQUIRED, HOST_STEPS, JOIN_STEPS};
 use crate::state::AppState;
 
 /// Longueur maximale du nom d'un groupe (caractères).
@@ -230,13 +230,17 @@ impl AppState {
         self.hearth.propose(g, GroupOp::RemoveMember { key: k }).await
     }
 
-    pub async fn hearth_leave(self: &Arc<Self>, id: &str) -> Result<(), String> {
+    pub async fn hearth_leave(self: &Arc<Self>, id: &str) -> Result<(), LeaveError> {
         self.hearth.require_enabled()?;
         let g = gid(id)?;
+        // Dernier membre : refus AVANT d'arrêter mon serveur, il ne doit rien arriver au monde.
+        if self.hearth.state(&g).is_some_and(|s| s.members.len() <= 1) {
+            return Err(LeaveError::LastMember);
+        }
         if self.hearth.active(&g).is_some() {
             self.hearth_stop(id).await?;
         }
-        self.hearth.propose(g, GroupOp::Leave).await?;
+        self.hearth.propose_leave(g).await?;
         // Le groupe a été quitté si la chaîne l'a appliqué ; `forget_group` est aussi appelé par le runtime.
         if self.hearth.state(&g).is_some() {
             self.hearth.forget_group_wait(&g).await?;
@@ -749,14 +753,14 @@ pub async fn hearth_remove_member(state: S<'_>, id: String, public_key: String) 
     state.hearth_remove_member(&id, &public_key).await
 }
 
-/// Quitte le groupe.
+/// Quitte le groupe. Rejette `{ code: "last_member" | "unreachable" | "other", message? }` : rien n'est supprimé dans ces cas.
 #[tauri::command(rename_all = "snake_case")]
 #[specta::specta(rename_all = "snake_case")]
-pub async fn hearth_leave(state: S<'_>, id: String) -> Result<(), String> {
+pub async fn hearth_leave(state: S<'_>, id: String) -> Result<(), LeaveError> {
     state.inner().hearth_leave(&id).await
 }
 
-/// Supprime le serveur de ce PC seulement, sans prévenir le groupe : arrête mon serveur, libère les blobs et efface le dossier (repli quand quitter est impossible).
+/// Supprime le serveur de ce PC seulement, sans prévenir le groupe : arrête mon serveur, libère les blobs et efface le dossier (choix explicite de l'utilisateur quand personne n'est joignable, jamais un repli automatique).
 #[tauri::command(rename_all = "snake_case")]
 #[specta::specta(rename_all = "snake_case")]
 pub async fn hearth_forget(state: S<'_>, id: String) -> Result<(), String> {

@@ -5,6 +5,18 @@
 
 import type * as B from "./bindings";
 
+/** Échec de `hearthLeave` : `code` dit quoi proposer (voir `LeaveError` côté Rust). Rien n'est supprimé dans aucun de ces cas. */
+export class HearthLeaveError extends Error {
+  constructor(readonly code: B.LeaveError["code"], message?: string) {
+    super(message ?? (code === "last_member"
+      ? "Tu es le dernier membre de ce groupe : le quitter effacerait la seule copie du monde."
+      : code === "unreachable"
+        ? "Personne du groupe n'a pu être joint : ton départ n'a pas pu leur être annoncé."
+        : "Une erreur est survenue."));
+    this.name = "HearthLeaveError";
+  }
+}
+
 // Les structures que serde lit et écrit différemment (champ `serde(default)`, `Option`) existent en deux variantes
 // générées : `_Serialize` (ce que Rust renvoie, tous les champs présents) et `_Deserialize` (ce que Rust accepte).
 // Le front reçoit la première et envoie la seconde.
@@ -291,8 +303,9 @@ export interface Services {
   hearthSetInstance(id: string, instanceId: string): Promise<void>;
   hearthAddMember(id: string, publicKey: string): Promise<void>;
   hearthRemoveMember(id: string, publicKey: string): Promise<void>;
+  /** Rejette avec une `HearthLeaveError` (`last_member`, `unreachable`, `other`) : rien n'est supprimé, c'est à l'écran de proposer la suite. */
   hearthLeave(id: string): Promise<void>;
-  /** Supprime le serveur de CE PC seulement, sans prévenir le groupe (repli quand quitter est impossible : aucun membre joignable). */
+  /** Supprime le serveur de CE PC seulement, sans prévenir le groupe (choix explicite après « personne n'est joignable » ou « dernier membre », jamais un repli automatique). */
   hearthForget(id: string): Promise<void>;
   hearthVote(id: string, proposalId: string): Promise<void>;
   hearthContinueWithout(id: string, publicKey: string): Promise<void>;

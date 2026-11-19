@@ -3,6 +3,7 @@ import "./hearth.css";
 import { useShell } from "../../app/context";
 import { useHearthDetail } from "../../app/useHearth";
 import { useAccounts } from "../../app/useAccounts";
+import { HearthLeaveError } from "../../services/types";
 import type { FriendWithPresence, HearthDetail, HearthProposal, Instance, Services } from "../../services/types";
 import { Select, BackButton, Badge, Button, Card, Icon, ICONS, StatusDot } from "../../ui";
 import { Avatar } from "../Friends/Avatar";
@@ -27,23 +28,24 @@ const PROPOSAL_LABEL = (p: HearthProposal): string => {
 
 const SYNC_LABEL = { ok: "À jour", behind: "En retard", unknown: "Pas encore vérifié" } as const;
 
-interface Confirm { title: string; text: string; action: string; danger?: boolean; run: () => Promise<void> }
+/** `run` peut rendre une seconde confirmation à enchaîner (elle remplace celle-ci au lieu de la fermer). */
+interface Confirm { title: string; text: string; action: string; danger?: boolean; run: () => Promise<void | Confirm> }
 
 /** Boîte de confirmation d'une action qu'on ne peut pas défaire d'un clic. */
-function ConfirmDialog({ c, onClose }: { c: Confirm; onClose: () => void }) {
+function ConfirmDialog({ c, onClose }: { c: Confirm; onClose: (next?: Confirm) => void }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const go = async () => {
     setBusy(true);
-    try { await c.run(); onClose(); }
+    try { const next = await c.run(); setBusy(false); setError(null); onClose(next ?? undefined); }
     catch (e) { setError(errText(e)); setBusy(false); }
   };
   return (
-    <Modal title={c.title} role="alertdialog" onClose={onClose}>
+    <Modal title={c.title} role="alertdialog" onClose={() => onClose()}>
       <p className="home-modal-text">{c.text}</p>
       {error && <p className="hearth-err" role="alert">{error}</p>}
       <div className="home-modal-foot">
-        <Button variant="secondary" data-autofocus onClick={onClose}>Annuler</Button>
+        <Button variant="secondary" data-autofocus onClick={() => onClose()}>Annuler</Button>
         <Button variant={c.danger ? "danger" : "primary"} loading={busy} onClick={() => { void go(); }}>{c.action}</Button>
       </div>
     </Modal>
@@ -250,19 +252,41 @@ export default function ServerPage({ id }: { id: string }) {
   const c = detail.card;
   const act = mainAction(c);
   const hint = stateHint(c, detail.members.filter((m) => !m.is_me && !m.online).map((m) => m.name));
-  const ask = (x: Confirm) => setConfirm({ ...x, run: async () => { await x.run(); reload(); } });
-  const leave = () => ask({
-    title: `Quitter « ${c.name} » ?`, action: "Quitter", danger: true,
-    text: "Le monde copié sur ce PC est supprimé. Le serveur continue pour les autres membres, même si c'est toi qui l'as créé. Tu pourras être réinvité plus tard.",
-    run: async () => {
-      try { await services.hearthLeave(c.id); } catch {
-        // Aucun autre membre joignable : le départ ne peut pas leur être annoncé. On supprime quand même ce PC ; ils te
-        // compteront dans le groupe jusqu'à ce que ton départ leur parvienne (ou que tu sois réinvité).
-        await services.hearthForget(c.id);
-      }
-      navigate("main");
-    },
+  const wrap = (x: Confirm): Confirm => ({ ...x, run: async () => { const next = await x.run(); if (!next) reload(); return next; } });
+  const ask = (x: Confirm) => setConfirm(wrap(x));
+  // Suppression locale : seul choix explicite de l'utilisateur, jamais un repli automatique (#57). Rien n'est annoncé au groupe.
+  const deleteWorld = (title: string, text: string, action: string): Confirm => wrap({
+    title, text, action, danger: true,
+    run: async () => { await services.hearthForget(c.id); navigate("main"); },
   });
+  const lastMember = () => deleteWorld(
+    `Tu es le dernier membre de « ${c.name} »`,
+    "Personne d'autre n'a une copie du monde : quitter est impossible, et le supprimer efface la seule copie, sans retour possible.",
+    "Supprimer le monde",
+  );
+  const unreachable = () => deleteWorld(
+    "Personne n'est joignable",
+    "Aucun ami du groupe n'est connecté : ton départ ne leur sera pas annoncé, et ils te compteront encore dans le groupe. Supprimer quand même le monde de ce PC ? Tu pourras être réinvité plus tard.",
+    "Supprimer quand même",
+  );
+  const leave = () => {
+    // Seul dans le groupe : le texte « le serveur continue pour les autres » serait faux, et Quitter serait refusé.
+    if (detail.members.length <= 1) { setConfirm(lastMember()); return; }
+    ask({
+      title: `Quitter « ${c.name} » ?`, action: "Quitter", danger: true,
+      text: "Le monde copié sur ce PC est supprimé. Le serveur continue pour les autres membres, même si c'est toi qui l'as créé. Tu pourras être réinvité plus tard.",
+      run: async () => {
+        try { await services.hearthLeave(c.id); } catch (e) {
+          // Seuls ces deux codes mènent à une suppression, et seulement après une nouvelle confirmation. Toute autre erreur
+          // est relancée : la boîte l'affiche et le monde reste en place.
+          if (e instanceof HearthLeaveError && e.code === "last_member") return lastMember();
+          if (e instanceof HearthLeaveError && e.code === "unreachable") return unreachable();
+          throw e;
+        }
+        navigate("main");
+      },
+    });
+  };
   const shownError = error ?? runError;
 
   return (
@@ -339,7 +363,7 @@ export default function ServerPage({ id }: { id: string }) {
           {tab === "reglages" && <Settings d={detail} services={services} instances={instances} ask={ask} onError={setError} />}
         </div>
       </Card>
-      {confirm && <ConfirmDialog c={confirm} onClose={() => setConfirm(null)} />}
+      {confirm && <ConfirmDialog c={confirm} onClose={(next) => setConfirm(next ?? null)} />}
       {eula}
     </div>
   );

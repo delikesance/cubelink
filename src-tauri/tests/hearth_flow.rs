@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use common::{befriend, wait_for, world, Node};
 use core_lib::types::HearthStateKind;
-use cubelink_app::hearth::{BoxFut, ClientLauncher, RenewTick, RunningServer, ServerRunner, ServerSpec, EULA_REQUIRED};
+use cubelink_app::hearth::{BoxFut, ClientLauncher, LeaveError, RenewTick, RunningServer, ServerRunner, ServerSpec, EULA_REQUIRED};
 use cubelink_app::state::{lock, AppState};
 use p2p_lib::hearth::lease::{Lease, ManualClock};
 use p2p_lib::hearth::model::{GroupId, GroupOp};
@@ -578,7 +578,7 @@ async fn interrupteur_coupe_refuse_les_commandes_et_les_pairs() {
     let e = a.node.st.hearth_play(&id).await.unwrap_err();
     assert!(e.contains("désactivés"), "{e}");
     assert!(a.node.st.hearth_create("X", &a.instance, None, vec![]).await.unwrap_err().contains("désactivés"));
-    assert!(a.node.st.hearth_leave(&id).await.unwrap_err().contains("désactivés"));
+    assert!(a.node.st.hearth_leave(&id).await.unwrap_err().to_string().contains("désactivés"));
     assert_eq!(a.node.st.hearth_list().len(), 1, "la lecture d'état reste possible");
     assert!(!a.rt().is_friend(&b.key()), "le protocole refuse les pairs");
     assert!(a.rt().group_state(&g).is_none());
@@ -607,6 +607,48 @@ async fn oublier_un_groupe_arrete_l_hote_et_supprime_les_donnees() {
     for p in &peers {
         p.stop().await;
     }
+}
+
+/// Dernier membre : « Quitter » est refusé avec le code `LastMember`, AVANT d'arrêter mon serveur, et le monde reste sur le
+/// disque (#57 : l'écran ne doit plus pouvoir effacer la seule copie sur une erreur).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn quitter_en_dernier_membre_refuse_et_garde_le_monde() {
+    let (peers, g, id) = group_of(&["Alice", "Bob"]).await;
+    let (a, b) = (&peers[0], &peers[1]);
+    // Bob part : Alice devient la seule membre.
+    b.node.st.hearth_leave(&id).await.unwrap();
+    wait_for("Alice est seule", 30, || a.rt().state(&g).is_some_and(|s| s.members.len() == 1)).await;
+    a.node.st.hearth_play(&id).await.unwrap();
+    assert_eq!(a.state_of(&g), HearthStateKind::Hosting);
+    let dir = a.rt().server_dir(&g);
+    assert!(dir.is_dir());
+    assert_eq!(a.node.st.hearth_leave(&id).await.unwrap_err(), LeaveError::LastMember);
+    assert!(a.rt().state(&g).is_some(), "le groupe existe toujours");
+    assert!(dir.is_dir(), "le dossier du monde existe toujours");
+    assert!(a.rt().active(&g).is_some(), "mon serveur n'a pas été arrêté");
+    assert!(!a.runner.calls.lock().unwrap().contains(&"stop"));
+    a.stop().await;
+}
+
+/// Personne n'est joignable : « Quitter » rejette `Unreachable` (et non un message libre), sans rien supprimer, et reste
+/// rejouable ; seul `hearth_forget` (choix explicite de l'utilisateur) efface ensuite le monde de ce PC.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn quitter_sans_personne_de_joignable_ne_supprime_rien() {
+    let (peers, g, id) = group_of(&["Alice", "Bob"]).await;
+    let (a, b) = (&peers[0], &peers[1]);
+    a.node.st.hearth_play(&id).await.unwrap();
+    let dir = a.rt().server_dir(&g);
+    assert!(dir.is_dir());
+    a.close_game();
+    b.stop().await;
+    assert_eq!(a.node.st.hearth_leave(&id).await.unwrap_err(), LeaveError::Unreachable);
+    assert!(a.rt().state(&g).is_some() && dir.is_dir(), "rien n'est supprimé");
+    assert_eq!(a.node.st.hearth_leave(&id).await.unwrap_err(), LeaveError::Unreachable, "rejouable");
+    assert!(a.rt().state(&g).is_some() && dir.is_dir());
+    a.node.st.hearth_forget(&id).await.unwrap();
+    assert!(a.rt().state(&g).is_none());
+    assert!(!dir.exists(), "forget supprime le monde local");
+    a.stop().await;
 }
 
 /// Invitations de groupe reçues (`on_invite`) : un ami qui n'est pas membre d'un groupe connu ne change pas sa clé ; au

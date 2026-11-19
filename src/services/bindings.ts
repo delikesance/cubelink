@@ -168,9 +168,9 @@ export const commands = {
 	hearthAddMember: (id: string, publicKey: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_add_member", { id, public_key: publicKey }, options),
 	/**  Propose de retirer un membre du groupe. */
 	hearthRemoveMember: (id: string, publicKey: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_remove_member", { id, public_key: publicKey }, options),
-	/**  Quitte le groupe. */
+	/**  Quitte le groupe. Rejette `{ code: "last_member" | "unreachable" | "other", message? }` : rien n'est supprimé dans ces cas. */
 	hearthLeave: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_leave", { id }, options),
-	/**  Supprime le serveur de ce PC seulement, sans prévenir le groupe : arrête mon serveur, libère les blobs et efface le dossier (repli quand quitter est impossible). */
+	/**  Supprime le serveur de ce PC seulement, sans prévenir le groupe : arrête mon serveur, libère les blobs et efface le dossier (choix explicite de l'utilisateur quand personne n'est joignable, jamais un repli automatique). */
 	hearthForget: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_forget", { id }, options),
 	/**  Approuve une décision du groupe en attente. */
 	hearthVote: (id: string, proposalId: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_vote", { id, proposal_id: proposalId }, options),
@@ -998,6 +998,18 @@ export type LaunchStateEvent_Serialize = {
 	state: LaunchPhase,
 	message?: string,
 };
+
+/**
+ *  Échec de `hearth_leave`, avec un code stable pour que l'écran choisisse quoi proposer. Seul `Unreachable` autorise le
+ *  repli « supprimer quand même ce PC » (après une seconde confirmation) ; jamais une autre erreur.
+ */
+export type LeaveError = 
+/**  Je suis le dernier membre : quitter effacerait la seule copie du monde. Rien n'a été touché. */
+{ code: "last_member" } | 
+/**  Aucun autre membre n'a reçu mon départ. Rien n'a été supprimé. */
+{ code: "unreachable" } | 
+/**  Toute autre erreur (quota, disque, jeu en cours…) : message affichable, rien n'est supprimé par le front. */
+{ code: "other"; message: string };
 
 export type Loader = "vanilla" | "neoforge" | "fabric" | "quilt" | "forge";
 

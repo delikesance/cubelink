@@ -181,8 +181,10 @@ function Settings({ d, services, instances, ask, onError }: { d: HearthDetail; s
   return (
     <div className="hearth-settings">
       <section className="hearth-block" aria-label="Modpack">
-        <h2>Modpack</h2>
-        <p className="hearth-meta">Instance utilisée sur ce PC : {d.settings.instance_name ?? "aucune"}. Les mods sont figés : une mise à jour doit être acceptée par le groupe.</p>
+        <div className="hearth-block-head">
+          <h2>Modpack</h2>
+          <p className="hearth-meta">Instance utilisée sur ce PC : {d.settings.instance_name ?? "aucune"}. Les mods sont figés : une mise à jour doit être acceptée par le groupe.</p>
+        </div>
         {instances.length > 0 && (
           <div className="hearth-add">
             <label className="cl-field">
@@ -203,13 +205,17 @@ function Settings({ d, services, instances, ask, onError }: { d: HearthDetail; s
         )}
       </section>
       <section className="hearth-block" aria-label="Serveur">
-        <h2>Serveur</h2>
+        <div className="hearth-block-head">
+          <h2>Serveur</h2>
+          <p className="hearth-meta">
+            Place prise sur ce disque : {fmtSize(d.settings.disk_bytes)}.
+            {d.settings.outbox_pending > 0 && ` ${plural(d.settings.outbox_pending, "version attend", "versions attendent")} d'être envoyée aux autres membres.`}
+          </p>
+        </div>
         <label className="hearth-check">
           <input type="checkbox" checked={d.settings.keep_background} onChange={(e) => { services.hearthSetBackground(id, e.target.checked).catch((x: unknown) => onError(errText(x))); }} />
           <span>Garder le serveur ouvert quand mon jeu se ferme</span>
         </label>
-        <p className="hearth-meta">Place prise sur ce disque : {fmtSize(d.settings.disk_bytes)}.</p>
-        {d.settings.outbox_pending > 0 && <p className="hearth-meta">{plural(d.settings.outbox_pending, "version attend", "versions attendent")} d'être envoyée aux autres membres.</p>}
       </section>
     </div>
   );

@@ -54,7 +54,7 @@ Arguments : clés JSON envoyées à Tauri (snake_case) et leur type TypeScript. 
 | `settings_set` | `settings: SettingsInput_Deserialize` | `Settings_Serialize` | Le front envoie les réglages dans `{ settings }`. |
 | `browse_search` | `query: BrowseQuery_Deserialize` | `BrowsePage_Serialize` | Recherche dans le catalogue (Modrinth ou CurseForge). |
 | `browse_versions` | `source: string`, `id: string`, `kind: string`, `minecraft: string \| null`, `loader: string \| null` | `BrowseVersion[]` | Versions d'un projet du catalogue, filtrées par version de Minecraft et loader. |
-| `browse_install` | `input: BrowseInstallInput_Deserialize` | `BrowseInstallResult_Serialize` | Installe un projet du catalogue (nouvelle instance pour un modpack). Progression par `browse://progress`. |
+| `browse_install` | `input: BrowseInstallInput_Deserialize` | `BrowseInstallResult_Serialize` | Installe un projet du catalogue (nouvelle instance pour un modpack). Un mod remplace les jars du même mod déjà présents sous un autre nom (modpack, ajout manuel) : ils vont dans `mods/.cubelink-backup/<id>/`, annulables comme une correction. Progression par `browse://progress`. |
 | `mods_list` | `instance_id: string` | `ModEntry[]` | Mods d'une instance (activés ou non). |
 | `mods_icon` | `instance_id: string`, `file: string` | `string \| null` | Icône d'un mod lue dans son jar (data URL 64 px), `None` s'il n'en a pas. |
 | `mods_check` | `instance_id: string` | `ModCheck_Serialize` | Vérifie la compatibilité des mods installés (dépendances, incompatibilités, version, loader, doublons). |

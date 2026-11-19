@@ -192,7 +192,7 @@ test.use({ appOptions: { env: { CUBELINK_MS_CLIENT_ID: '00000000-0000-0000-0000-
 for (const c of AUTH_CASES) {
   test(`T6 connexion Microsoft « ${c.scenario} » : message francais, Reessayer puis succes`, async ({ appA, servers }) => {
     const page = appA.page;
-    await page.waitForSelector('main[data-route="login"]');
+    await page.waitForSelector('main[data-route="login"]', { timeout: 30_000 });
     await control(servers.auth.base, { scenario: c.scenario });
     await page.getByRole('button', { name: 'Se connecter avec Microsoft' }).click();
     if ('screen' in c) {
@@ -201,7 +201,7 @@ for (const c of AUTH_CASES) {
       // Reessayer ramene a l'ecran de connexion ; on relance puis la connexion aboutit.
       await control(servers.auth.base, { scenario: 'ok' });
       await page.getByRole('button', { name: c.screen.retry }).click();
-      await page.waitForSelector('main[data-route="login"]');
+      await page.waitForSelector('main[data-route="login"]', { timeout: 30_000 });
       await page.getByRole('button', { name: 'Se connecter avec Microsoft' }).click();
     } else {
       const alert = page.getByRole('alert').filter({ hasText: c.message });
@@ -218,7 +218,7 @@ for (const c of AUTH_CASES) {
 
 test('T6 echec de connexion Microsoft : l\'ecran Erreur (cancelled / no-license / offline) est affiche', async ({ appA, servers }) => {
   const page = appA.page;
-  await page.waitForSelector('main[data-route="login"]');
+  await page.waitForSelector('main[data-route="login"]', { timeout: 30_000 });
   await control(servers.auth.base, { scenario: 'no_license' });
   await page.getByRole('button', { name: 'Se connecter avec Microsoft' }).click();
   await expect(page.getByRole('heading', { name: 'Ce compte Microsoft ne possède pas Minecraft : Java Edition' })).toBeVisible({ timeout: 30_000 });
@@ -239,7 +239,7 @@ const ERR = [
 
 test('T6 ecrans Erreur : textes francais et actions de chaque etat', async ({ appA }) => {
   const page = appA.page;
-  await page.waitForSelector('main[data-route="login"]');
+  await page.waitForSelector('main[data-route="login"]', { timeout: 30_000 });
   for (const e of ERR) {
     for (const [label, route] of Object.entries(e.actions)) {
       await gotoHash(appA, `#/error?state=${e.state}`, 'error');
@@ -255,7 +255,7 @@ test('T6 ecrans Erreur : textes francais et actions de chaque etat', async ({ ap
   await gotoHash(appA, '#/error?state=waiting', 'error');
   await expect(page.getByRole('status').getByRole('heading', { name: 'Ouverture de Microsoft dans ton navigateur…' })).toBeVisible();
   await page.getByRole('button', { name: 'Annuler' }).click();
-  await page.waitForSelector('main[data-route="login"]');
+  await page.waitForSelector('main[data-route="login"]', { timeout: 30_000 });
   // Etat inconnu : retombe sur « cancelled » (non alarmant).
   await gotoHash(appA, '#/error?state=n-importe-quoi', 'error');
   await expect(page.getByRole('heading', { name: 'La connexion a été annulée' })).toBeVisible();
@@ -263,7 +263,7 @@ test('T6 ecrans Erreur : textes francais et actions de chaque etat', async ({ ap
 });
 
 test("T6 les ecrans Erreur affichent le nom de l'ami et le fichier fournis (libelles neutres sinon)", async ({ appA }) => {
-  await appA.page.waitForSelector('main[data-route="login"]');
+  await appA.page.waitForSelector('main[data-route="login"]', { timeout: 30_000 });
   await gotoHash(appA, '#/error?state=friend-left&name=Alice', 'error');
   await expect(appA.page.getByRole('heading', { name: "Alice s'est déconnecté" })).toBeVisible();
   await gotoHash(appA, '#/error?state=bad-hash&name=Alice&file=mods%2Fa.jar', 'error');

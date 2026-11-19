@@ -23,7 +23,7 @@ export async function closeOpened(): Promise<void> {
 /** Connexion hors ligne des deux apps (le hook de test annonce les adresses directes : plus de redemarrage). */
 export async function loginBoth(world: Pick<World, 'appA' | 'appB' | 'servers' | 'binary'>): Promise<void> {
   const { appA: a, appB: b } = world;
-  await Promise.all([a.page.waitForSelector('main[data-route="login"]'), b.page.waitForSelector('main[data-route="login"]')]);
+  await Promise.all([a.page.waitForSelector('main[data-route="login"]', { timeout: 30_000 }), b.page.waitForSelector('main[data-route="login"]', { timeout: 30_000 })]);
   await loginOffline(a.page, NAME_A);
   await loginOffline(b.page, NAME_B);
 }

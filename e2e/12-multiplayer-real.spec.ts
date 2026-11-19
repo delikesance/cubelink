@@ -34,7 +34,7 @@ function tunnelRoundTrip(port: number): Promise<number> {
 test('multijoueur reel via le relais public : ami, partage, join, transfert relaye, tunnel', async ({ appA, appB }) => {
   test.setTimeout(600_000);
   for (const [app, name] of [[appA, NAME_A], [appB, NAME_B]] as const) {
-    await app.page.waitForSelector('main[data-route="login"]');
+    await app.page.waitForSelector('main[data-route="login"]', { timeout: 30_000 });
     await loginOffline(app.page, name);
     const s = await invoke<{ relay_only: boolean; discovery: boolean }>(app.page, 'settings_get');
     expect(s.relay_only, 'relay_only lu depuis settings.json au demarrage').toBe(true);

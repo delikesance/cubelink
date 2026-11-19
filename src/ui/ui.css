@@ -78,3 +78,16 @@
 .cl-ram-range{width:100%;accent-color:var(--accent);height:24px}
 .cl-ram-scale{display:flex;justify-content:space-between;color:var(--muted);font-size:12px}
 .cl-ram-hint{margin:0;color:var(--muted);font-size:13px}
+
+/* Select maison */
+.cl-select{position:relative;min-width:0}
+.cl-select-btn{display:flex;align-items:center;justify-content:space-between;gap:var(--sp-3);text-align:left;cursor:pointer;box-sizing:border-box}
+.cl-select-val{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cl-select-ph{color:var(--muted)}
+.cl-select-chev{flex:none;color:var(--muted);transition:transform var(--dur-feedback) var(--ease)}
+.cl-select-btn[aria-expanded="true"]{border-color:var(--focus)}
+.cl-select-btn[aria-expanded="true"] .cl-select-chev{transform:rotate(180deg)}
+.cl-select-list{position:absolute;z-index:30;top:calc(100% + var(--sp-1));left:0;min-width:100%;width:max-content;max-width:min(520px,90vw);max-height:280px;overflow:auto;margin:0;padding:var(--sp-1);list-style:none;border-radius:var(--r-md);border:1px solid var(--line);background:var(--surface-2);box-shadow:0 12px 32px rgba(0,0,0,.45)}
+.cl-select-opt{display:flex;align-items:center;min-height:40px;padding:0 var(--sp-3);border-radius:var(--r-sm,8px);color:var(--text);cursor:pointer}
+.cl-select-opt.is-active{background:color-mix(in srgb,var(--accent) 16%,transparent)}
+.cl-select-opt.is-selected{color:var(--accent);font-weight:700}

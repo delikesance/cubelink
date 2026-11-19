@@ -4,7 +4,7 @@ import { useShell } from "../../app/context";
 import { useHearthDetail } from "../../app/useHearth";
 import { useAccounts } from "../../app/useAccounts";
 import type { FriendWithPresence, HearthDetail, HearthProposal, Instance, Services } from "../../services/types";
-import { BackButton, Badge, Button, Card, Icon, ICONS, StatusDot } from "../../ui";
+import { Select, BackButton, Badge, Button, Card, Icon, ICONS, StatusDot } from "../../ui";
 import { Avatar } from "../Friends/Avatar";
 import { Modal } from "../Main/Modal";
 import { errText, fmtDate, fmtPlayed, fmtSize, mainAction, plural, resumeLabel, stateHint, stateText } from "./format";
@@ -130,12 +130,10 @@ function Members({ d, services, friends, ask, onError, leave }: { d: HearthDetai
         </ul>
         {addable.length > 0 && (
           <div className="hearth-add">
-            <label className="cl-field">
-              <span className="hearth-sr">Ami à ajouter</span>
-              <select className="cl-input" value={toAdd || addable[0]!.friend.public_key} onChange={(e) => setToAdd(e.target.value)}>
-                {addable.map((f) => <option key={f.friend.public_key} value={f.friend.public_key}>{f.friend.name}</option>)}
-              </select>
-            </label>
+            <div className="cl-field">
+              <Select aria-label="Ami à ajouter" value={toAdd || addable[0]!.friend.public_key} onChange={setToAdd}
+                options={addable.map((f) => ({ value: f.friend.public_key, label: f.friend.name }))} />
+            </div>
             <Button variant="secondary" loading={adding} icon={<Icon d={ICONS.userPlus} />} onClick={() => { void add(); }}>Ajouter au groupe</Button>
           </div>
         )}
@@ -187,12 +185,9 @@ function Settings({ d, services, instances, ask, onError }: { d: HearthDetail; s
         </div>
         {instances.length > 0 && (
           <div className="hearth-add">
-            <label className="cl-field">
-              <span className="hearth-sr">Instance à proposer</span>
-              <select className="cl-input" value={pick} onChange={(e) => setInst(e.target.value)}>
-                {instances.map((i) => <option key={i.id} value={i.id}>{i.name}</option>)}
-              </select>
-            </label>
+            <div className="cl-field">
+              <Select aria-label="Instance à proposer" value={pick} onChange={setInst} options={instances.map((i) => ({ value: i.id, label: i.name }))} />
+            </div>
             <Button
               variant="secondary"
               onClick={() => ask({

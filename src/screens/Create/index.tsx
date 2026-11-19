@@ -4,7 +4,7 @@ import { useBack, useScreenTitle, useServices } from "../../app/context";
 import { navigate } from "../../app/router";
 import { setImportWarning } from "../../app/importWarning";
 import type { Loader } from "../../services/types";
-import { Button, Field, Input, RAM_DEFAULT, RamPicker, useDefaultRam } from "../../ui";
+import { Button, Field, Input, RAM_DEFAULT, Select, RamPicker, useDefaultRam } from "../../ui";
 import { ICONS, Icon } from "../../ui";
 
 export const RECOMMENDED_VERSION = "1.21.1";
@@ -244,11 +244,9 @@ export default function Create({ pickMrpack }: CreateProps = {}) {
 
           <div className="cl-field">
             <label htmlFor={mcId} className="cl-label">Version de Minecraft</label>
-            <select id={mcId} className="cl-input create-select" value={minecraft}
-              disabled={versions === null || versions.length === 0} onChange={(e) => setMinecraft(e.target.value)}>
-              {versions === null && <option value="">Chargement des versions…</option>}
-              {versions?.map((v) => <option key={v} value={v}>{v === RECOMMENDED_VERSION ? `${v} (recommandée)` : v}</option>)}
-            </select>
+            <Select id={mcId} className="create-select" value={minecraft} placeholder={versions === null ? "Chargement des versions…" : undefined}
+              disabled={versions === null || versions.length === 0} onChange={setMinecraft}
+              options={(versions ?? []).map((v) => ({ value: v, label: v === RECOMMENDED_VERSION ? `${v} (recommandée)` : v }))} />
           </div>
 
           <fieldset className="create-fieldset">

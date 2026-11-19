@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { navigate } from "../../app/router";
 import type { BrowseHit, BrowseInstallResult, BrowseVersion, ContentCheck, Instance, Services } from "../../services/types";
-import { BackButton, RAM_DEFAULT, RamPicker, useDefaultRam } from "../../ui";
+import { BackButton, Select, RAM_DEFAULT, RamPicker, useDefaultRam } from "../../ui";
 
 export const SOURCE_LABEL = { curseforge: "CurseForge", modrinth: "Modrinth" } as const;
 
@@ -216,14 +216,11 @@ export function Detail({ hit, services, minecraft, loader, instance, installed, 
             <p className="br-muted">Aucune version compatible{minecraft && !modpack ? ` avec Minecraft ${minecraft}` : ""}{loader && !modpack ? ` (${loader})` : ""}.</p>
           )}
           {versions && versions.length > 0 && (
-            <select id={`${uid}-ver`} className="br-input" value={versionId} onChange={(e) => setVersionId(e.target.value)}>
-              {versions.map((v) => (
-                <option key={v.id} value={v.id}>
-                  {v.name} — MC {v.minecraft.join(", ") || "?"}{v.loaders.length ? ` · ${v.loaders.join(", ")}` : ""}{v.downloadable ? "" : " (non téléchargeable)"}
-                  {check?.recommended === v.id ? " (recommandée)" : isBad(v.id) ? " (incompatible)" : ""}
-                </option>
-              ))}
-            </select>
+            <Select id={`${uid}-ver`} value={versionId} onChange={setVersionId}
+              options={versions.map((v) => ({
+                value: v.id,
+                label: `${v.name} — MC ${v.minecraft.join(", ") || "?"}${v.loaders.length ? ` · ${v.loaders.join(", ")}` : ""}${v.downloadable ? "" : " (non téléchargeable)"}${check?.recommended === v.id ? " (recommandée)" : isBad(v.id) ? " (incompatible)" : ""}`,
+              }))} />
           )}
         </div>
 

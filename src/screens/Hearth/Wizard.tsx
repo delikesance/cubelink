@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import "./hearth.css";
 import { useShell } from "../../app/context";
 import type { FriendWithPresence, HearthWorld, Instance } from "../../services/types";
-import { Button, Card, Field, Input } from "../../ui";
+import { Button, Card, Field, Input, Select } from "../../ui";
 import { Avatar } from "../Friends/Avatar";
 import { errText, fmtSize, plural } from "./format";
 
@@ -87,9 +87,8 @@ export default function Wizard() {
               <>
                 <Field label="Modpack du groupe" hint="Tout le monde jouera avec ce modpack, mods compris.">
                   {({ id, "aria-describedby": described }) => (
-                    <select id={id} aria-describedby={described} className="cl-input" value={instanceId} onChange={(e) => setInstanceId(e.target.value)}>
-                      {instances.map((i) => <option key={i.id} value={i.id}>{i.name} ({i.minecraft})</option>)}
-                    </select>
+                    <Select id={id} aria-describedby={described} value={instanceId} onChange={setInstanceId}
+                      options={instances.map((i) => ({ value: i.id, label: `${i.name} (${i.minecraft})` }))} />
                   )}
                 </Field>
                 <Field label="Nom du serveur">

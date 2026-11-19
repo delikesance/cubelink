@@ -3,7 +3,7 @@ import "./browse.css";
 import { useBack, useScreenTitle, useShell } from "../../app/context";
 import type { BrowseHit, BrowseKind, BrowseQuery, BrowseSource, Instance } from "../../services/types";
 import { Detail, SOURCE_LABEL, CF_UNAVAILABLE, isCurseForgeDown, messageOf } from "./Detail";
-import { BackButton, Button } from "../../ui";
+import { BackButton, Button, Select } from "../../ui";
 import { useContextMenu, type MenuItem } from "../../app/useContextMenu";
 import { openExternal } from "../../app/externalLinks";
 import { ICONS, Icon } from "../../ui";
@@ -290,33 +290,24 @@ export default function Browse() {
           </div>
           <div className="br-field">
             <label htmlFor={`${uid}-mc`}>Version de Minecraft</label>
-            <select id={`${uid}-mc`} className="br-input" value={minecraft} onChange={(e) => setMinecraft(e.target.value)}>
-              <option value="">Toutes</option>
-              {minecraft && !mcVersions.includes(minecraft) && <option value={minecraft}>{minecraft}</option>}
-              {mcVersions.map((v) => <option key={v} value={v}>{v}</option>)}
-            </select>
+            <Select id={`${uid}-mc`} value={minecraft} onChange={setMinecraft}
+              options={[{ value: "", label: "Toutes" }, ...(minecraft && !mcVersions.includes(minecraft) ? [{ value: minecraft, label: minecraft }] : []), ...mcVersions.map((v) => ({ value: v, label: v }))]} />
           </div>
           {(kind === "mod" || kind === "modpack") && (
             <div className="br-field">
               <label htmlFor={`${uid}-ld`}>Loader</label>
-              <select id={`${uid}-ld`} className="br-input" value={loader} onChange={(e) => setLoader(e.target.value)}>
-                {LOADERS.map((l) => <option key={l.value} value={l.value}>{l.label}</option>)}
-              </select>
+              <Select id={`${uid}-ld`} value={loader} onChange={setLoader} options={LOADERS.map((l) => ({ value: l.value, label: l.label }))} />
             </div>
           )}
           <div className="br-field">
             <label htmlFor={`${uid}-sort`}>Tri</label>
-            <select id={`${uid}-sort`} className="br-input" value={sort} onChange={(e) => setSort(e.target.value as Sort)}>
-              {SORTS.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
-            </select>
+            <Select id={`${uid}-sort`} value={sort} onChange={(v) => setSort(v as Sort)} options={SORTS.map((s) => ({ value: s.value, label: s.label }))} />
           </div>
           {needsInstance && (
             <div className="br-field">
               <label htmlFor={`${uid}-inst`}>Instance</label>
-              <select id={`${uid}-inst`} className="br-input" value={instanceId} onChange={(e) => onInstance(e.target.value)}>
-                <option value="">Aucune</option>
-                {instances.map((i) => <option key={i.id} value={i.id}>{i.name}</option>)}
-              </select>
+              <Select id={`${uid}-inst`} value={instanceId} onChange={onInstance}
+                options={[{ value: "", label: "Aucune" }, ...instances.map((i) => ({ value: i.id, label: i.name }))]} />
             </div>
           )}
         </form>

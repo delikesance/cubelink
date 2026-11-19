@@ -115,6 +115,7 @@ Constats : navigation Général (Comptes, Jeux, Réseau P2P) / Aide (Diagnostic,
 | Secondaire | `secondary` (44 px) | actions neutres, retour, annuler | Accueil / Retour (`BackButton`), Annuler, Retirer |
 | Destructif, point d'entrée | `danger-quiet` (contour rouge, sans aplat) | ouvre une action qu'on ne défait pas | Retirer et Quitter (lignes de Membres), Fermer le jeu (overlay) |
 | Destructif, confirmation | `danger` (aplat rouge) | le bouton qui CONFIRME, dans sa boîte de confirmation ; ou un arrêt immédiat qui remplace Jouer | Supprimer, Vider le cache, Arrêter |
+| Liste déroulante | `Select` (src/ui/Select.tsx) | toujours à la place de `<select>` : le popup natif n'est pas stylable | Instance, version, tri |
 | Compact | `secondary`/`primary` réduits par le CSS de la zone | listes denses (amis 32 px, overlay et comptes 36 px) | Rejoindre dans la colonne d'amis |
 
 Règles : une action destructive n'est jamais dans l'en-tête ni en haut à droite (zone de navigation) : elle vit sur la ligne de l'élément concerné (ex. « Quitter » sur ma ligne de la liste des membres), jamais loin de lui ; le rouge plein n'apparaît jamais à côté de Jouer en dehors d'une confirmation ; le retour est toujours `BackButton` en haut à gauche ; un lien souligné n'est jamais un bouton.

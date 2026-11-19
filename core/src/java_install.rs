@@ -115,8 +115,20 @@ pub async fn resolve_package(major: u32, os: &str, arch: &str) -> Result<JrePack
     resolve_package_from(DEFAULT_ADOPTIUM_URL, major, os, arch).await
 }
 
-/// Variante à URL de base injectable (tests).
+/// Version majeure réellement installable pour une exigence donnée. Mojang demande Java 16
+/// pour Minecraft 1.17.x, mais Adoptium ne publie pas de JRE 16 : le JRE 17 lance 1.17 sans souci.
+pub fn installable_major(required: u32) -> u32 {
+    if required == 16 {
+        17
+    } else {
+        required
+    }
+}
+
+/// Variante à URL de base injectable (tests). Une exigence de Java 16 est servie par le JRE 17
+/// (voir `installable_major`) : le `JrePackage` rendu porte alors `major == 17`.
 pub async fn resolve_package_from(base_url: &str, major: u32, os: &str, arch: &str) -> Result<JrePackage> {
+    let major = installable_major(major);
     if !SUPPORTED_MAJORS.contains(&major) {
         return Err(Error::Invalid(format!("version Java {major} non supportée (8, 17, 21, 25)")));
     }
@@ -464,6 +476,47 @@ mod tests {
         // 17 non mocké : 404 de wiremock.
         assert!(matches!(resolve_package_from(&server.uri(), 17, "windows", "x64").await, Err(Error::NotFound(_))));
         assert!(matches!(resolve_package_from(&server.uri(), 11, "windows", "x64").await, Err(Error::Invalid(_))));
+    }
+
+    #[test]
+    fn java_16_se_installe_en_17() {
+        assert_eq!(installable_major(16), 17);
+        for m in [8, 11, 17, 21, 25] {
+            assert_eq!(installable_major(m), m);
+        }
+    }
+
+    /// Non-régression #47 : Minecraft 1.17.x exige Java 16, absent d'Adoptium. Sur une machine
+    /// sans Java 17, on demande le JRE 17 (jamais /latest/16/), on l'installe dans `jre-17`,
+    /// et `select_for(16, ..)` le retrouve ensuite.
+    #[tokio::test]
+    async fn java_16_requis_installe_le_jre_17() {
+        let server = MockServer::start().await;
+        let exe = format!("jdk-17.0.13+11-jre/{}", java_exe_rel());
+        let data = fake_zip(&[(&exe, b"fake java"), ("jdk-17.0.13+11-jre/release", b"JAVA_VERSION=\"17.0.13\"")]);
+        let body = serde_json::json!([{ "binary": { "package": {
+            "link": format!("{}/dl/jre.zip", server.uri()), "size": data.len(),
+            "checksum": hex::encode(Sha256::digest(&data)), "name": "jre.zip" } } }]);
+        Mock::given(method("GET"))
+            .and(path("/v3/assets/latest/17/hotspot"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET")).and(path("/v3/assets/latest/16/hotspot")).respond_with(ResponseTemplate::new(200)).expect(0).mount(&server).await;
+        serve(&server, data).await;
+
+        let p = resolve_package_from(&server.uri(), 16, "linux", "x64").await.unwrap();
+        assert_eq!(p.major, 17);
+        let root = tempfile::tempdir().unwrap();
+        let inst = install_with(&p, root.path(), |_, _| {}, Arc::new(AtomicBool::new(false)), Arc::new(FakeProbe(Some(17)))).await.unwrap();
+        assert_eq!(inst.major, 17);
+        assert_eq!(inst.home, root.path().join("jre-17"));
+        assert!(inst.java_exe.is_file());
+
+        let found = crate::java::find_installed(&[root.path().to_path_buf()]);
+        let sel = crate::java::select_for(16, &found).expect("le JRE 17 installé doit servir pour 16");
+        assert_eq!(sel.major, 17);
     }
 
     #[tokio::test]

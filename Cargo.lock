@@ -1092,7 +1092,7 @@ name = "cubelink"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "base64 0.22.1",
+ "base64 0.23.1",
  "cubelink-core",
  "cubelink-host",
  "cubelink-p2p",
@@ -1128,7 +1128,7 @@ dependencies = [
  "aes-gcm",
  "ammonia",
  "anyhow",
- "base64 0.22.1",
+ "base64 0.23.1",
  "flate2",
  "futures-util",
  "hex",

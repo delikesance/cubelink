@@ -309,7 +309,7 @@ pub fn run() {
             }
             commands_update::setup(app, test_mode);
             hotkey::setup(app.handle(), test_mode);
-            // Zone de jeu integree (Windows) : la fenetre du jeu est adoptee dans celle du launcher. Le joueur la coupe par le reglage
+            // Zone de jeu integree (Windows, Linux X11) : la fenetre du jeu est adoptee dans celle du launcher. Le joueur la coupe par le reglage
             // « Jeu integre » ; CUBELINK_NO_STAGE=1 est un coupe-circuit de developpement (la zone n'est meme pas creee).
             let stage_allowed = !test_mode || std::env::var_os("CUBELINK_STAGE_TEST").is_some();
             if cfg!(any(windows, target_os = "linux")) && stage_allowed {

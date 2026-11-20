@@ -438,7 +438,7 @@ pub struct Settings {
     /// Raccourci global du panneau (format du plugin global-shortcut, p. ex. `Ctrl+Shift+C`).
     #[serde(default = "default_overlay_hotkey")]
     pub overlay_hotkey: String,
-    /// Jeu intégré (Windows) : le jeu s'affiche dans la fenêtre du launcher. Lu au lancement du jeu : un jeu déjà
+    /// Jeu intégré (Windows, Linux X11) : le jeu s'affiche dans la fenêtre du launcher. Lu au lancement du jeu : un jeu déjà
     /// ouvert n'est pas touché. `true` par défaut (fichiers de réglages anciens : `true`).
     #[serde(default = "default_embedded_game")]
     pub embedded_game: bool,

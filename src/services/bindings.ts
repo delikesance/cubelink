@@ -208,7 +208,7 @@ export const commands = {
 	stagePanel: (open: boolean, options?: InvokeOptions) => __TAURI_INVOKE<void>("stage_panel", { open }, options),
 	/**  Zone de jeu mesuree par l'interface (element reserve du DOM), en pixels physiques dans la zone cliente de la fenetre. */
 	stageLayout: (x: number, y: number, w: number, h: number, panelW: number, options?: InvokeOptions) => __TAURI_INVOKE<void>("stage_layout", { x, y, w, h, panel_w: panelW }, options),
-	/**  La zone de jeu integree existe sur cette plateforme (l'interface n'affiche le reglage « Jeu integre » que dans ce cas). */
+	/**  La zone de jeu integree existe sur cette plateforme (Windows, ou Linux avec un serveur X11 joignable, XWayland compris ; l'interface n'affiche le reglage « Jeu integre » que dans ce cas). */
 	stageSupported: (options?: InvokeOptions) => __TAURI_INVOKE<boolean>("stage_supported", undefined, options),
 	/**
 	 *  Le joueur redonne sa chance a la Scene apres une coupure de session (replis de suite) : le prochain lancement y retourne.
@@ -1241,7 +1241,7 @@ export type Settings_Deserialize = {
 	/**  Raccourci global du panneau (format du plugin global-shortcut, p. ex. `Ctrl+Shift+C`). */
 	overlay_hotkey?: string,
 	/**
-	 *  Jeu intégré (Windows) : le jeu s'affiche dans la fenêtre du launcher. Lu au lancement du jeu : un jeu déjà
+	 *  Jeu intégré (Windows, Linux X11) : le jeu s'affiche dans la fenêtre du launcher. Lu au lancement du jeu : un jeu déjà
 	 *  ouvert n'est pas touché. `true` par défaut (fichiers de réglages anciens : `true`).
 	 */
 	embedded_game?: boolean,
@@ -1285,7 +1285,7 @@ export type Settings_Serialize = {
 	/**  Raccourci global du panneau (format du plugin global-shortcut, p. ex. `Ctrl+Shift+C`). */
 	overlay_hotkey: string,
 	/**
-	 *  Jeu intégré (Windows) : le jeu s'affiche dans la fenêtre du launcher. Lu au lancement du jeu : un jeu déjà
+	 *  Jeu intégré (Windows, Linux X11) : le jeu s'affiche dans la fenêtre du launcher. Lu au lancement du jeu : un jeu déjà
 	 *  ouvert n'est pas touché. `true` par défaut (fichiers de réglages anciens : `true`).
 	 */
 	embedded_game: boolean,

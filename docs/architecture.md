@@ -125,7 +125,7 @@ Points tranchés depuis le cadrage : format du code ami (`mcl1-`, voir `p2p/src/
 
 ## 8. État d'implémentation (2026-11-10)
 
-Workspace Rust `core` (logique), `p2p` (réseau), `src-tauri` (commandes et intégration) ; front React/TypeScript dans `src/`. `spike/p2p-tunnel` est exclu du workspace (prototype jetable).
+Workspace Rust `core` (logique), `p2p` (réseau), `host` (la Scène, voir § 9), `src-tauri` (commandes et intégration) ; front React/TypeScript dans `src/`. `spike/p2p-tunnel` est exclu du workspace (prototype jetable).
 
 | Domaine | État | Où |
 |---|---|---|
@@ -149,3 +149,31 @@ Tests : `npm test` (clippy `-D warnings`, `cargo test --workspace`, `tsc`, vites
 Refonte d'interface « clay doux » (fond `#131116`, accent cyan unique `#4FC3E8`) : tokens dans `src/styles/tokens.css`, composants dans `src/ui/`, écrans refaits dans `src/screens/`. Corrigés dans le même lot : fenêtres de terminal (`CREATE_NO_WINDOW`), démarrage non bloquant du backend P2P, miniatures d'instance au lieu du base64.
 
 Limites connues : polices Inter et Space Grotesk non embarquées (repli système) ; pas de progression chiffrée pendant la préparation du jeu ; « amis ayant joué au modpack » non implémenté ; « Vider le cache » sans effet réel ; Échap depuis Mentions légales revient à l'accueil.
+
+## 9. La Scène (jeu intégré à la fenêtre du launcher)
+
+Le jeu garde son processus (une JVM par modpack : Java, loader et natives diffèrent) ; sa fenêtre native est adoptée dans celle du launcher dès sa création, avant d'être affichée. Changer de modpack remplace le processus : un rideau (deux panneaux aux couleurs du launcher, barre de chargement) couvre l'intervalle. Le joueur la coupe par le réglage « Jeu intégré » (lu au lancement : un jeu déjà ouvert n'est jamais arraché à sa fenêtre).
+
+### Découpe du code
+
+- Crate `host` (`cubelink-host`) :
+  - modules purs, testables sans fenêtre : `flow` (machine à états launcher / rideau / jeu), `guard` (quand renoncer), `health` (contrat avec le launcher : `HostEvent`, `FallbackReason`), `progress` (étapes du démarrage lues dans la sortie du jeu), `curtain`, `foreground`, `system` ;
+  - `scene.rs` : `GameHost` et l'état du lancement, communs aux deux systèmes ; `win/` et `x11/` fournissent chacun un `Backend`.
+- App : `src-tauri/src/stage/` (`mod.rs` : réglage, `staged`, replis ; `platform.rs` : ce qui dépend du système ; `commands.rs` : commandes `stage_*`, voir `docs/contrats.md`) et `src-tauri/src/stage_log.rs` (journal `logs/stage.log`).
+
+### Par système
+
+- **Windows** : la fenêtre du jeu reste une fenêtre de premier niveau (le jeu n'accepte clavier et souris que s'il est au premier plan, ce qu'une fenêtre fille n'obtient jamais), mais sans cadre, possédée par le launcher et calée sur la zone de jeu.
+- **Linux, X11 ou XWayland** : deux modes d'adoption.
+  - Reparentage dans une sous-fenêtre X11 du launcher (le focus clavier est possible) ; le rideau est une fenêtre ARGB `override-redirect`, traversée par la souris.
+  - Mode transitoire (`WM_TRANSIENT_FOR`, sans décoration, `SKIP_TASKBAR`, calage en coordonnées écran, garage hors écran, panneau découpé par XShape). C'est le chemin par défaut dès qu'un gestionnaire de fenêtres tourne, ou si le reparentage est refusé. Il est vérifié sous Xvfb avec un gestionnaire simulé et avec `openbox` (`host/tests/x11_transient_*.rs`), pas sous Mutter, KWin ni XWayland : ne pas le tenir pour acquis ailleurs.
+- **Wayland ou XWayland** : Wayland natif ne permet pas d'adopter la fenêtre d'un autre processus. Au démarrage, avant la création de la fenêtre, `lib.rs` pose `GDK_BACKEND=x11` (le launcher tourne donc sous XWayland quand la session est Wayland), seulement si un serveur X11 est joignable (`DISPLAY`), si `CUBELINK_NO_STAGE` est absent, si la Scène est permise (hors mode test) et si « Jeu intégré » est actif (réglage lu sur le disque). Sinon GTK garde le Wayland natif et le jeu garde sa fenêtre ; le réglage ne s'applique donc qu'au prochain démarrage de Cubelink. Un jeu de la Scène est lancé en XWayland (`RunOptions::force_x11`).
+- **Wayland pur (sans `DISPLAY`) et macOS** : la Scène est inerte, le jeu garde sa fenêtre.
+
+### Filets de sécurité
+
+- Quand l'hôte ne peut pas tenir le jeu (surveillance ou rattachement refusé, aucune fenêtre dans le délai de garde), il renonce pour ce lancement : `HostEvent::Fallback`, la fenêtre est rendue au jeu, le lancement n'est plus `staged` et l'événement `stage://fallback` est émis.
+- `MAX_FALLBACK_STREAK` (2) replis de suite coupent la Scène pour la session (le réglage enregistré ne bouge pas) jusqu'à `Stage::retry` (commande `stage_retry`) ou au redémarrage du processus.
+- Un rideau fermé a toujours une suite : `abort_switch` (lancement qui n'a pas lieu après un changement de modpack) et `run_finished` (tâche de jeu arrêtée) le rouvrent sur le launcher.
+- Coupe-circuit de développement : `CUBELINK_NO_STAGE=1` (la zone n'est même pas créée) ; `CUBELINK_STAGE_TEST` permet la Scène en mode test.
+- Journal `logs/stage.log` (ouvert sous Windows et Linux, jamais en mode test), tournant en `stage.log.1` (environ 2 Mo au plus sur le disque).

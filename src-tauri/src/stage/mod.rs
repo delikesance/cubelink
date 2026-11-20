@@ -1,6 +1,6 @@
-//! Zone de jeu integree au launcher (Windows) : la fenetre native du jeu est adoptee DANS la fenetre du launcher, sous la barre
+//! Zone de jeu integree au launcher (Windows et Linux X11) : la fenetre native du jeu est adoptee DANS la fenetre du launcher, sous la barre
 //! de titre, et un rideau (deux panneaux, barre de chargement) masque les lancements et les changements de modpack. Voir le crate
-//! `cubelink-host`. Hors Windows (ou en mode test) tout est inerte : le jeu garde sa propre fenetre.
+//! `cubelink-host`. Sous Wayland natif (sans XWayland), sous macOS ou en mode test tout est inerte : le jeu garde sa propre fenetre.
 //!
 //! Filets de securite, tous ici :
 //! - reglage « Jeu integre » (`set_wanted`) : lu au lancement, un jeu deja ouvert n'est jamais arrache a la fenetre ;
@@ -169,7 +169,7 @@ struct Core {
     wanted: AtomicBool,
     /// Mouvement reduit transmis a l'hote (pour ne journaliser que les changements).
     calm: AtomicBool,
-    /// Journal et envois differes ; absent en test et hors Windows (tout se fait alors sur place, sans journal).
+    /// Journal et envois differes ; absent en test (`open_log` n'est pas appele : tout se fait alors sur place, sans journal).
     outbox: OnceLock<Outbox>,
 }
 
@@ -422,7 +422,7 @@ impl Stage {
         *lock(&self.core.last)
     }
 
-    /// Ouvre le journal permanent (`<dir>/stage.log`). Sans cet appel (tests, hors Windows) rien n'est ecrit.
+    /// Ouvre le journal permanent (`<dir>/stage.log`). Sans cet appel (tests) rien n'est ecrit.
     pub fn open_log(&self, dir: &Path) {
         match Outbox::start(dir.join(crate::stage_log::FILE_NAME)) {
             Ok(o) => {
@@ -547,7 +547,7 @@ impl Stage {
         }
     }
 
-    /// Hors Windows la fenetre d'un autre processus ne s'adopte pas : le jeu garde la sienne.
+    /// Ni Windows ni Linux (macOS) : la fenetre d'un autre processus ne s'adopte pas, le jeu garde la sienne.
     #[cfg(not(any(windows, target_os = "linux")))]
     pub fn attach(&self, _window: &tauri::WebviewWindow, _sink: EventSink) {}
 

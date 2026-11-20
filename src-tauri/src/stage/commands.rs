@@ -29,7 +29,7 @@ pub fn stage_layout(state: State<'_, Arc<AppState>>, window: tauri::WebviewWindo
     state.stage.set_layout(&window, x, y, w, h, panel_w);
 }
 
-/// La zone de jeu integree existe sur cette plateforme (l'interface n'affiche le reglage « Jeu integre » que dans ce cas).
+/// La zone de jeu integree existe sur cette plateforme (Windows, ou Linux avec un serveur X11 joignable, XWayland compris ; l'interface n'affiche le reglage « Jeu integre » que dans ce cas).
 #[tauri::command(rename_all = "snake_case")]
 #[specta::specta(rename_all = "snake_case")]
 pub fn stage_supported() -> bool {

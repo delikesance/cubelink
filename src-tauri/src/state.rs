@@ -113,7 +113,7 @@ pub struct AppState {
     pub game: Mutex<Option<String>>,
     /// Processus de jeu en cours (id de l'instance + poignée d'arrêt) ; vide pendant la préparation.
     pub game_handle: Mutex<Option<(String, Arc<RunningGame>)>>,
-    /// Zone de jeu integree a la fenetre du launcher (Windows) : rideau et adoption de la fenetre du jeu.
+    /// Zone de jeu integree a la fenetre du launcher (Windows, Linux X11) : rideau et adoption de la fenetre du jeu.
     pub stage: crate::stage::Stage,
     pub join: Mutex<Option<JoinSession>>,
     /// Chemin du jar de l'agent LAN (ressource Tauri), s'il est présent.

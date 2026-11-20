@@ -107,7 +107,7 @@ Arguments : clés JSON envoyées à Tauri (snake_case) et leur type TypeScript. 
 | `stage_state` | — | `StageState` | État de la zone de jeu intégrée (rattachée, jeu visible, panneau ouvert). |
 | `stage_panel` | `open: boolean` | — | Ouvre (`true`) ou ferme (`false`) le panneau « en jeu » (Echap, bouton Fermer). |
 | `stage_layout` | `x: number`, `y: number`, `w: number`, `h: number`, `panel_w: number` | — | Zone de jeu mesuree par l'interface (element reserve du DOM), en pixels physiques dans la zone cliente de la fenetre. |
-| `stage_supported` | — | `boolean` | La zone de jeu integree existe sur cette plateforme (l'interface n'affiche le reglage « Jeu integre » que dans ce cas). |
+| `stage_supported` | — | `boolean` | La zone de jeu integree existe sur cette plateforme (Windows, ou Linux avec un serveur X11 joignable, XWayland compris ; l'interface n'affiche le reglage « Jeu integre » que dans ce cas). |
 | `stage_retry` | — | `boolean` | Le joueur redonne sa chance a la Scene apres une coupure de session (replis de suite) : le prochain lancement y retourne. Rend vrai si ce prochain lancement ira dans la Scene (hote present, reglage « Jeu integre » actif). |
 | `update_state` | — | `UpdateState_Serialize` | État de la mise à jour automatique du launcher. |
 | `update_check` | — | `UpdateState_Serialize` | Vérifie s'il existe une mise à jour ; si oui, le téléchargement démarre en arrière-plan. |

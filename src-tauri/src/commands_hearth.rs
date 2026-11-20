@@ -497,8 +497,9 @@ impl AppState {
         // lieu d'annoncer « le serveur démarre » puis d'échouer. L'écran propose d'attendre l'auteur ou de repartir de la
         // dernière version complète (`hearth_play_from_previous`).
         if base.is_none() {
+            // `world_complete` est l'ensemble en mémoire, rempli en tâche de fond au démarrage : on regarde aussi le disque.
             if let Some(h) = head.as_ref().filter(|h| !rt.world_complete(h)) {
-                if !rt.online_member_has_world(&g, h).await {
+                if !rt.world_on_disk_complete(h).await && !rt.online_member_has_world(&g, h).await {
                     return Err(rt.head_unavailable_error(&g, h));
                 }
             }

@@ -416,6 +416,8 @@ pub struct ActiveHost {
     /// Exclu après une veille : la partie finit comme branche sans bail (`LeaseRelease { Suspend }`).
     fenced: AtomicBool,
     players: Arc<Mutex<BTreeSet<String>>>,
+    /// Quelqu'un est déjà entré sur ce serveur : le monde peut contenir du jeu non publié, même si tout le monde est parti.
+    ever_joined: Arc<AtomicBool>,
     tasks: Mutex<Vec<JoinHandle<()>>>,
     stopping: AtomicBool,
 }
@@ -1509,7 +1511,10 @@ impl HearthRuntime {
             .ancestry(id)
             .iter()
             .filter_map(|a| graph.get(a))
-            .take_while(|v| v.header.epoch == epoch)
+            // La tête elle-même passe toujours : après un `ContinueWithout` elle est la base, d'une époque précédente.
+            .enumerate()
+            .take_while(|(i, v)| *i == 0 || v.header.epoch == epoch)
+            .map(|(_, v)| v)
             .find(|v| self.world_complete(v))
     }
 
@@ -1541,9 +1546,16 @@ impl HearthRuntime {
     }
 
     /// Une erreur de `fetch_version` qui veut dire « personne ne peut fournir ce monde » (et non : disque plein, version
-    /// trop grosse à confirmer, mise à jour déjà en cours).
+    /// trop grosse à confirmer, mise à jour déjà en cours). Une erreur de transfert (`transfert impossible`) n'en fait pas
+    /// partie : une coupure réseau se réessaie, voir [`Self::is_unserved_after_probe`].
     fn is_unserved(e: &str) -> bool {
-        e == NO_MEMBER_ONLINE || e.starts_with("aucun membre joignable") || e.starts_with("transfert impossible")
+        e == NO_MEMBER_ONLINE || e.starts_with("aucun membre joignable")
+    }
+
+    /// Une erreur de transfert est aussi « personne ne peut fournir ce monde » quand une sonde `Have` ne trouve plus aucun
+    /// membre qui l'ait (le pair contacté n'a que l'en-tête). Si l'un l'a, c'est un accroc réseau : l'erreur reste affichée.
+    async fn is_unserved_after_probe(self: &Arc<Self>, gid: &GroupId, v: &SignedVersion, e: &str) -> bool {
+        Self::is_unserved(e) || (e.starts_with("transfert impossible") && !self.online_member_has_world(gid, v).await)
     }
 
     pub fn is_fork(&self, gid: &GroupId) -> bool {
@@ -2530,7 +2542,7 @@ impl HearthRuntime {
         if let Err(e) = self.fetch_version_user(gid, h, None).await {
             // Le contenu de la tête n'est chez personne de joignable (par exemple son auteur s'est éteint avant l'envoi) :
             // l'écran propose d'attendre ou de repartir de la dernière version complète.
-            return Err(if Self::is_unserved(&e) { self.head_unavailable_error(&gid, h) } else { e });
+            return Err(if self.is_unserved_after_probe(&gid, h, &e).await { self.head_unavailable_error(&gid, h) } else { e });
         }
         let world = self.world()?;
         world.materialize(&h.header.collection, &dest).await.map_err(|e| e.to_string())?;
@@ -2549,12 +2561,14 @@ impl HearthRuntime {
             return Err(if a.group == gid { "le serveur de ce groupe tourne déjà".into() } else { "un autre serveur de groupe tourne déjà sur ce PC".to_string() });
         }
         let players: Arc<Mutex<BTreeSet<String>>> = Arc::default();
-        let (pl, rt) = (players.clone(), self.clone());
+        let ever_joined = Arc::new(AtomicBool::new(false));
+        let (pl, ej, rt) = (players.clone(), ever_joined.clone(), self.clone());
         let on_line: LineSink = Arc::new(move |line| {
             if let Some((joined, name)) = parse_player_event(line) {
                 {
                     let mut set = lock(&pl);
                     if joined {
+                        ej.store(true, Ordering::SeqCst);
                         set.insert(name);
                     } else {
                         set.remove(&name);
@@ -2612,6 +2626,7 @@ impl HearthRuntime {
             fence: Mutex::new(HostFence::new(&*self.clock())),
             fenced: AtomicBool::new(false),
             players,
+            ever_joined,
             tasks: Mutex::new(Vec::new()),
             stopping: AtomicBool::new(false),
         });
@@ -3017,8 +3032,11 @@ impl HearthRuntime {
             t.abort();
         }
         host.server.stop(Duration::from_secs(20)).await;
-        // Un autre membre a gardé la main avant que quiconque ne joue ici : il n'y a rien à publier.
-        self.clear_session_marker(&gid);
+        // Si personne n'est jamais entré, il n'y a rien à publier : le marqueur tombe. Sinon (tout le monde est parti après
+        // une vraie partie) il reste, et le prochain « Jouer » met ce monde de côté au lieu de l'écraser (§ 7.5).
+        if !host.ever_joined.load(Ordering::SeqCst) {
+            self.clear_session_marker(&gid);
+        }
         let l = lock(&host.lease).clone();
         let visit: Visit =
             Arc::new(move |c| Box::pin(async move { c.release_lease(&gid, l.lease_id, l.seq, ReleaseReason::Handover, None).await }));
@@ -3305,6 +3323,21 @@ impl HearthRuntime {
     /// Le membre qui bloque le groupe (bannière « Continuer sans X »), s'il y en a un.
     pub fn blocker(&self, gid: &GroupId) -> Option<PeerKey> {
         self.detail(gid).ok()?.blocker.and_then(|b| parse_key(&b.member.public_key))
+    }
+
+    /// Le monde de `v` est-il en entier dans le magasin de ce PC, même si l'ensemble en mémoire (`complete`, rempli en
+    /// tâche de fond au démarrage) ne le sait pas encore ? Le note alors.
+    pub async fn world_on_disk_complete(&self, v: &SignedVersion) -> bool {
+        if self.world_complete(v) {
+            return true;
+        }
+        let Ok(world) = self.world() else { return false };
+        let coll = v.header.collection;
+        let done = world.is_complete(&coll).await;
+        if done {
+            lock(&self.complete).insert(coll);
+        }
+        done
     }
 
     /// Un membre en ligne dit-il avoir le monde de `v` en entier (sonde `Have`) ?

@@ -819,6 +819,9 @@ async fn continuer_sans_repart_de_la_derniere_version_complete() {
         let head = p.rt().head(&g).unwrap();
         assert_eq!(head.id(), v1.id(), "la nouvelle époque repart de la n° 1, pas de la n° 2 sans contenu");
         assert!(p.rt().world_complete(&head));
+        // La base est d'une époque précédente : elle reste annoncée comme version complète (et non « aucune »).
+        assert_eq!(p.rt().complete_heads_of(&g), vec![v1.id()], "la base de la nouvelle époque est annoncée");
+        assert_eq!(p.rt().complete_head(&g).map(|v| v.id()), Some(v1.id()));
         let d = p.node.st.hearth.detail(&g).unwrap();
         assert!(d.blocker.is_none(), "plus personne ne bloque");
         assert!(d.versions.iter().any(|v| v.id == v2.id().to_hex() && v.side_branch), "la n° 2 reste restaurable, en branche");

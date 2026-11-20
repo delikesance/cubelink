@@ -68,14 +68,23 @@ impl AppState {
         token
     }
 
-    fn encode_code(&self, token: friend_code::Token) -> FriendCode {
+    fn code_payload(&self, token: friend_code::Token) -> FriendCodePayload {
         let (relay, addrs) = self.backend().code_hints();
-        FriendCode(friend_code::encode(&FriendCodePayload {
-            public_key: self.identity.public_key().to_bytes(),
-            token,
-            relay,
-            addrs,
-        }))
+        FriendCodePayload { public_key: self.identity.public_key().to_bytes(), token, relay, addrs }
+    }
+
+    fn encode_code(&self, token: friend_code::Token) -> FriendCode {
+        FriendCode(friend_code::encode(&self.code_payload(token)))
+    }
+
+    /// Mon lien ami `cubelink://add/<code>` : même charge utile et même jeton que `friend_my_code`.
+    pub fn friend_my_link(&self) -> String {
+        friend_code::encode_link(&self.code_payload(self.code_token()))
+    }
+
+    /// Reprend (une seule fois) le lien ami reçu du système et pas encore lu par l'interface.
+    pub fn friend_take_pending_link(&self) -> Option<String> {
+        lock(&self.pending_link).take()
     }
 
     pub fn profile_name(&self) -> Option<String> {
@@ -170,6 +179,16 @@ impl AppState {
         Ok(())
     }
 
+    /// Annule la demande d'ami envoyée avec ce code : le pair est libéré tout de suite et la demande disparaît chez
+    /// lui. Idempotent (rien en cours, ou déjà décidée : `Ok`). Pas de vérification « déjà ami » ici : on peut annuler
+    /// juste après une acceptation.
+    pub fn friend_cancel_request(&self, code: &str) -> Result<(), String> {
+        let payload = friend_code::parse(code).map_err(|_| "code ami invalide : vérifiez qu'il commence par mcl1-".to_string())?;
+        let key = hex::encode(payload.public_key);
+        self.backend().cancel_request(&key);
+        Ok(())
+    }
+
     pub async fn friend_refuse(&self, public_key: &str) -> Result<(), String> {
         valid_key(public_key)?;
         if self.backend().refuse_request(public_key.to_string()).await.map_err(|e| crate::error::sanitize(&e))? {
@@ -227,6 +246,20 @@ pub fn friend_my_code(state: State<'_, Arc<AppState>>) -> Result<FriendCode, Str
     Ok(state.friend_my_code())
 }
 
+/// Mon lien ami `cubelink://add/<code>` (bouton « Copier mon lien »). Même charge utile que `friend_my_code`, donc même jeton : « Générer un nouveau code » invalide aussi les anciens liens. Un clic sur ce lien ne fait que préremplir « Ajouter un ami » chez celui qui le reçoit.
+#[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
+pub fn friend_my_link(state: State<'_, Arc<AppState>>) -> Result<String, String> {
+    Ok(state.friend_my_link())
+}
+
+/// Lien ami `cubelink://add/…` ouvert depuis le système (clic, `xdg-open`, argument de lancement) et pas encore repris : le rend puis l'oublie (`null` si rien n'attend). Appelé au démarrage de l'interface et à chaque événement `friend://link`. Le lien n'est jamais validé ni envoyé ici : l'interface le met dans « Ajouter un ami », l'envoi reste un geste de l'utilisateur.
+#[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
+pub fn friend_take_pending_link(state: State<'_, Arc<AppState>>) -> Result<Option<String>, String> {
+    Ok(state.friend_take_pending_link())
+}
+
 /// Génère un nouveau jeton (écrit sur disque avant tout changement, puis pris en compte tout de suite par le réseau) et renvoie le nouveau code. L'ancien code est refusé pour les **nouvelles** demandes d'ami ; les amis déjà acceptés et les demandes déjà reçues ne sont pas touchés. La clé publique ne change pas : l'appareil reste joignable par la connexion de base (présence). L'ancien fichier `friend_code_epoch` est ignoré et supprimé : les codes `mcl1-` d'avant le jeton (version 1) sont périmés.
 #[tauri::command(rename_all = "snake_case")]
 #[specta::specta(rename_all = "snake_case")]
@@ -246,6 +279,13 @@ pub fn friend_list(state: State<'_, Arc<AppState>>) -> Result<Vec<FriendWithPres
 #[specta::specta(rename_all = "snake_case")]
 pub async fn friend_send_request(state: State<'_, Arc<AppState>>, code: String) -> Result<VerifyCode, String> {
     state.friend_send_request(&code).await
+}
+
+/// Annule la demande d'ami envoyée avec ce code (celui passé à `friend_send_request`) : le pair est libéré tout de suite (une nouvelle demande est possible) et la demande disparaît chez lui. Idempotent : rien en cours n'est pas une erreur. Aucun événement `friend://accepted` / `friend://refused` n'est émis pour une demande annulée.
+#[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
+pub fn friend_cancel_request(state: State<'_, Arc<AppState>>, code: String) -> Result<(), String> {
+    state.friend_cancel_request(&code)
 }
 
 /// Demandes d'amis reçues, par page, filtrées par nom.
@@ -318,6 +358,47 @@ mod tests {
         let (other, _) = test_state(other_dir.path());
         let e = st.friend_send_request(&other.friend_my_code().0).await.unwrap_err();
         assert!(e.contains("pas encore disponible"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn mon_lien_porte_le_meme_code_et_le_meme_jeton() {
+        let dir = tempfile::tempdir().unwrap();
+        let (st, _) = test_state(dir.path());
+        st.auth_offline_login("Alice").unwrap();
+        let (code, link) = (st.friend_my_code().0, st.friend_my_link());
+        assert_eq!(link, format!("cubelink://add/{code}"));
+        assert_eq!(friend_code::parse(&link).unwrap(), friend_code::parse(&code).unwrap());
+        // Le lien est accepté partout où le code l'est (ici : reconnu comme le propre code de l'utilisateur).
+        assert!(st.friend_send_request(&link).await.unwrap_err().contains("propre code"));
+        // « Générer un nouveau code » change aussi le lien.
+        st.friend_regenerate_code().unwrap();
+        assert_ne!(st.friend_my_link(), link);
+        assert_ne!(friend_code::parse(&st.friend_my_link()).unwrap().token, friend_code::parse(&link).unwrap().token);
+    }
+
+    #[test]
+    fn lien_en_attente_repris_une_seule_fois() {
+        let dir = tempfile::tempdir().unwrap();
+        let (st, _) = test_state(dir.path());
+        assert_eq!(st.friend_take_pending_link(), None);
+        *lock(&st.pending_link) = Some("cubelink://add/mcl1-abcd".into());
+        assert_eq!(st.friend_take_pending_link().as_deref(), Some("cubelink://add/mcl1-abcd"));
+        assert_eq!(st.friend_take_pending_link(), None);
+    }
+
+    #[test]
+    fn annuler_une_demande_est_idempotent_et_rejette_un_code_invalide() {
+        let dir = tempfile::tempdir().unwrap();
+        let (st, _) = test_state(dir.path());
+        let other_dir = tempfile::tempdir().unwrap();
+        let (other, _) = test_state(other_dir.path());
+        let code = other.friend_my_code().0;
+        // Rien en cours : pas une erreur, et aussi quand on recommence.
+        st.friend_cancel_request(&code).unwrap();
+        st.friend_cancel_request(&code).unwrap();
+        for bad in ["", "abc", "mcl1-zzzz"] {
+            assert!(st.friend_cancel_request(bad).unwrap_err().contains("code ami invalide"), "{bad}");
+        }
     }
 
     #[test]

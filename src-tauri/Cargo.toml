@@ -41,7 +41,8 @@ specta.workspace = true
 tauri-specta = { version = "=2.0.0-rc.29", features = ["derive", "typescript"] }
 specta-typescript = "=0.0.15"
 tauri-plugin-autostart = "2"
-tauri-plugin-single-instance = "2"
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
+tauri-plugin-deep-link = "2"
 
 [target.'cfg(any(windows, target_os = "linux"))'.dependencies]
 cubelink-host = { path = "../host" }

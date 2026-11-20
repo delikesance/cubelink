@@ -233,9 +233,15 @@ export interface Services {
   /** Vide le cache de mods ; renvoie les octets libérés. Refusé pendant une installation, un transfert ou une partie. */
   cacheClear(): Promise<number>;
   friendMyCode(): Promise<FriendCode>;
+  /** Mon lien ami `cubelink://add/<code>` (même jeton que le code : un nouveau code invalide aussi les anciens liens). */
+  friendMyLink(): Promise<string>;
+  /** Lien ami reçu du système (clic sur `cubelink://add/…`) pas encore repris : le rend puis l'oublie, `null` sinon. */
+  friendTakePendingLink(): Promise<string | null>;
   friendRegenerateCode(): Promise<FriendCode>;
   friendList(): Promise<FriendWithPresence[]>;
   friendSendRequest(code: string): Promise<VerifyCode>;
+  /** Annule la demande envoyée avec ce code : le pair est libéré tout de suite, la demande disparaît chez lui. Idempotent. */
+  friendCancelRequest(code: string): Promise<void>;
   friendRequests(q: FriendRequestsQuery): Promise<FriendRequestsPage>;
   friendAccept(publicKey: string): Promise<void>;
   friendRefuse(publicKey: string): Promise<void>;
@@ -323,9 +329,17 @@ export interface Services {
   onHostState(cb: (e: HostState) => void): Unsubscribe;
   onTransferProgress(cb: (p: TransferProgress) => void): Unsubscribe;
   onFriendPresence(cb: (e: PresenceEvent) => void): Unsubscribe;
+  /** Un lien ami vient d'être ouvert (Cubelink déjà lancé) : à reprendre avec `friendTakePendingLink`. */
+  onFriendLink(cb: () => void): Unsubscribe;
   onFriendRequest(cb: (r: FriendRequest) => void): Unsubscribe;
   /** Une demande reçue a été retirée sans décision (l'ami a annulé ou le délai est écoulé) : clé publique. */
   onFriendRequestRemoved(cb: (e: { public_key: string }) => void): Unsubscribe;
+  /** Ma demande d'ami envoyée a été acceptée : l'ami est créé. */
+  onFriendAccepted(cb: (e: { public_key: string; name: string }) => void): Unsubscribe;
+  /** Ma demande d'ami envoyée a été refusée. */
+  onFriendRefused(cb: (e: { public_key: string }) => void): Unsubscribe;
+  /** Ma demande d'ami envoyée est restée sans réponse (délai écoulé ou ami injoignable). Jamais émis après une annulation. */
+  onFriendRequestExpired(cb: (e: { public_key: string }) => void): Unsubscribe;
   onFriendInvite(cb: (i: Invite) => void): Unsubscribe;
   /** Liste complète des invitations à chaque changement. */
   onFriendInvites(cb: (l: Invite[]) => void): Unsubscribe;

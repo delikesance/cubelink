@@ -10,6 +10,10 @@ docker run --rm -v "$dir":/rpm:ro "$image" bash -euo pipefail -c '
   rpm -q cubelink
   if ldd /usr/bin/cubelink | grep "not found"; then echo "bibliothèque manquante" >&2; exit 1; fi
   test -f /usr/lib/Cubelink/cubelink-lan-agent.jar
+  # Lien ami cubelink://add/<code> : le .desktop installé déclare le gestionnaire de schéma, avec le lien en argument (%u/%U).
+  desktop=$(grep -l "x-scheme-handler/cubelink" /usr/share/applications/*.desktop | head -n1)
+  if [ -z "$desktop" ]; then echo "pas de x-scheme-handler/cubelink dans les .desktop installés" >&2; exit 1; fi
+  grep -Eq "^Exec=.*%[uU]" "$desktop" || { echo "Exec sans %u/%U dans $desktop : le lien ne serait pas transmis" >&2; exit 1; }
   Xvfb :99 >/dev/null 2>&1 &
   sleep 2
   set +e

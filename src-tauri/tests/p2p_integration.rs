@@ -264,3 +264,49 @@ async fn join_handlers_partages_instance_dynamique() {
     a.be.shutdown().await;
     b.be.shutdown().await;
 }
+
+/// Le demandeur apprend la réponse (refus, puis acceptation) et peut annuler : vrai réseau QUIC en loopback,
+/// vrai disque SQLite, commandes de l'app (`friend_send_request`, `friend_cancel_request`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn demande_ami_refusee_annulee_puis_acceptee() {
+    let a = Node::new("Alice").await;
+    let b = Node::new("Bob").await;
+    let code_b = b.st.friend_my_code().0;
+
+    // 1. B refuse : A reçoit friend://refused (clé de B), aucun ami.
+    a.st.friend_send_request(&code_b).await.unwrap();
+    wait_for("demande chez B", || b.events("friend://request").len() == 1).await;
+    b.st.friend_refuse(&a.key()).await.unwrap();
+    wait_for("friend://refused chez A", || a.events("friend://refused").iter().any(|e| e["public_key"] == b.key())).await;
+    assert!(!a.st.friends.is_friend(&b.key()).unwrap());
+
+    // 2. A redemande, puis annule : la carte disparaît chez B, A n'a reçu aucune réponse.
+    //    Le pair est libre tout de suite (pas de « déjà en cours »).
+    // La tâche de fond relâche le pair juste après l'événement : `false` = plus rien en cours.
+    wait_for("pair libéré après le refus", || !a.be.cancel_request(&b.key())).await;
+    a.st.friend_send_request(&code_b).await.unwrap();
+    wait_for("2e demande chez B", || b.events("friend://request").len() == 2).await;
+    let e = a.st.friend_send_request(&code_b).await.unwrap_err();
+    assert!(e.contains("déjà en cours"), "{e}");
+    a.st.friend_cancel_request(&code_b).unwrap();
+    wait_for("friend://request_removed chez B", || b.events("friend://request_removed").iter().any(|e| e["public_key"] == a.key())).await;
+    assert_eq!(b.st.friend_requests(0, 10, None).unwrap().total, 0);
+    assert_eq!(a.events("friend://refused").len(), 1, "l'annulation n'émet ni refus ni acceptation");
+    assert!(a.events("friend://accepted").is_empty());
+    assert!(a.events("friend://request_expired").is_empty());
+    // Annuler deux fois n'est pas une erreur.
+    a.st.friend_cancel_request(&code_b).unwrap();
+
+    // 3. Nouvelle demande, acceptée : A reçoit friend://accepted (clé + nom) et voit B dans sa liste.
+    a.st.friend_send_request(&code_b).await.unwrap();
+    wait_for("3e demande chez B", || b.events("friend://request").len() == 3).await;
+    b.st.friend_accept(&a.key()).await.unwrap();
+    wait_for("friend://accepted chez A", || !a.events("friend://accepted").is_empty()).await;
+    let acc = &a.events("friend://accepted")[0];
+    assert_eq!(acc["public_key"], b.key());
+    assert_eq!(acc["name"], "Bob");
+    assert!(a.st.friend_list().unwrap().iter().any(|f| f.friend.public_key == b.key()));
+    assert!(a.events("friend://request_expired").is_empty());
+    a.be.shutdown().await;
+    b.be.shutdown().await;
+}

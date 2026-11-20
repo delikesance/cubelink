@@ -478,12 +478,14 @@ impl IrohBackend {
                 }
             }
             FriendEvent::Accepted(f) => {
+                emit("friend://accepted", serde_json::json!({ "public_key": f.public_key, "name": f.name }));
                 if let Some(k) = hex::decode(&f.public_key).ok().and_then(|b| <[u8; 32]>::try_from(b).ok()) {
                     let _ = acc_tx.send(k);
                 }
             }
             FriendEvent::RequestRemoved(k) => emit("friend://request_removed", serde_json::json!({ "public_key": k })),
-            FriendEvent::Refused(_) => {}
+            FriendEvent::Refused(k) => emit("friend://refused", serde_json::json!({ "public_key": k })),
+            FriendEvent::Expired(k) => emit("friend://request_expired", serde_json::json!({ "public_key": k })),
         });
         let friends_svc = FriendService::attach(endpoint.clone(), st.identity.clone(), st.friends.clone(), sink, opts.friend.clone())
             .map_err(|e| user_msg(&e))?;
@@ -974,6 +976,10 @@ impl P2pBackend for IrohBackend {
             }
             Ok(Some(f))
         })
+    }
+
+    fn cancel_request(&self, public_key: &str) -> bool {
+        self.friends_svc.cancel_request(public_key)
     }
 
     fn refuse_request(&self, public_key: String) -> BoxFuture<'_, std::result::Result<bool, String>> {

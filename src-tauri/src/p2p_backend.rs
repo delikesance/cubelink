@@ -119,6 +119,11 @@ pub trait P2pBackend: Send + Sync {
     fn set_code_token(&self, _token: p2p_lib::friend_code::Token) {}
     /// Envoie une demande d'ami ; renvoie le code de vérification à comparer.
     fn send_request(&self, target: FriendCodePayload, my_name: String) -> BoxFuture<'_, Result<VerifyCode, String>>;
+    /// Annule la demande d'ami envoyée à ce pair (clé publique hex) : le pair est libéré tout de suite.
+    /// `false` : rien en cours.
+    fn cancel_request(&self, _public_key: &str) -> bool {
+        false
+    }
     /// Accepte une demande reçue (décision signée + ami créé). `None` : non géré, l'appelant le fait en local.
     fn accept_request(&self, _public_key: String) -> BoxFuture<'_, Result<Option<Friend>, String>> {
         Box::pin(async { Ok(None) })

@@ -107,6 +107,8 @@ pub struct AppState {
     pub last_seen: Arc<crate::last_seen::LastSeen>,
     /// Jeton courant du code ami (source de vérité en mémoire ; le fichier le conserve d'un lancement à l'autre).
     pub code_token: Mutex<Option<p2p_lib::friend_code::Token>>,
+    /// Lien ami `cubelink://add/…` reçu du système et pas encore repris par l'interface (voir `deeplink`).
+    pub pending_link: Mutex<Option<String>>,
     /// Mods inconnus déjà acceptés (par sha256) : la case de confiance ne les redemande pas.
     pub trusted_mods: Arc<crate::trusted_mods::TrustedMods>,
     /// Par ami : le dernier `join_plan` montré (hash du manifeste, sha256 des fichiers qui demandent l'accord), vérifié
@@ -430,6 +432,7 @@ impl AppState {
         Ok(Self {
             last_seen,
             code_token: Mutex::new(None),
+            pending_link: Mutex::new(None),
             trusted_mods,
             pending_trust: Mutex::new(std::collections::HashMap::new()),
             instances,

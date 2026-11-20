@@ -9,12 +9,19 @@
 //! La version 1 (sans jeton, `epoch u32` à la place) n'est plus acceptée : un code v1 valide reçoit un
 //! message dédié. Le CRC couvre tout ce qui précède. Encodage : base32 minuscule sans padding,
 //! groupes de 4 caractères séparés par `-`, préfixe `mcl1-`.
+//!
+//! Lien : `cubelink://add/<code>` (voir `encode_link`). `parse` lit aussi l'ancien `launcher://add/<code>`.
 
 use core_lib::types::{Error, Result};
 use data_encoding::BASE32_NOPAD;
 
 const PREFIX: &str = "mcl1-";
-const LINK_PREFIX: &str = "launcher://add/";
+/// Schéma propre de Cubelink, enregistré auprès du système (« Copier mon lien », clic sur un lien reçu).
+pub const LINK_SCHEME: &str = "cubelink";
+/// Préfixe du lien ami produit : `cubelink://add/<code>`.
+pub const LINK_PREFIX: &str = "cubelink://add/";
+/// Ancien préfixe, trop générique pour être enregistré : toujours **lu**, jamais produit.
+const LEGACY_LINK_PREFIX: &str = "launcher://add/";
 const FORMAT_VERSION: u8 = 2;
 /// Dernière version sans jeton (ancienne application).
 const LEGACY_VERSION: u8 = 1;
@@ -121,15 +128,22 @@ impl<'a> Reader<'a> {
     }
 }
 
-/// Parse tolérant : majuscules, espaces, retours à la ligne, tirets en trop,
-/// préfixe `launcher://add/`.
+/// Lien partageable `cubelink://add/<code>` : le même code, précédé du schéma enregistré auprès du système.
+/// Il porte le même jeton que le code : « Générer un nouveau code » invalide aussi les anciens liens.
+pub fn encode_link(p: &FriendCodePayload) -> String {
+    format!("{LINK_PREFIX}{}", encode(p))
+}
+
+/// Parse tolérant : majuscules, espaces, retours à la ligne, tirets en trop, préfixe `cubelink://add/`
+/// (ou l'ancien `launcher://add/`) et `/` final que le système ou le navigateur ajoute parfois à un lien.
 pub fn parse(input: &str) -> Result<FriendCodePayload> {
     if input.len() > 4 * MAX_NORMALIZED_LEN {
         return Err(invalid("trop long"));
     }
     let mut s: String = input.chars().filter(|c| !c.is_whitespace()).collect();
     s.make_ascii_lowercase();
-    let s = s.strip_prefix(LINK_PREFIX).unwrap_or(&s);
+    let s = s.strip_prefix(LINK_PREFIX).or_else(|| s.strip_prefix(LEGACY_LINK_PREFIX)).unwrap_or(&s);
+    let s = s.strip_suffix('/').unwrap_or(s);
     let body = s.strip_prefix(PREFIX).ok_or_else(|| invalid("préfixe mcl1- attendu"))?;
     let body: String = body.chars().filter(|&c| c != '-').collect();
     if body.len() > MAX_NORMALIZED_LEN {
@@ -203,6 +217,28 @@ mod tests {
         assert_eq!(parse(&format!("  {}\r\n", c.replace('-', "- \n"))).unwrap(), p);
         assert_eq!(parse(&c.replace('-', "--")).unwrap(), p);
         assert_eq!(parse(&format!("{LINK_PREFIX}{c}")).unwrap(), p);
+    }
+
+    #[test]
+    fn link_roundtrip_and_legacy_prefix() {
+        let p = sample();
+        let link = encode_link(&p);
+        assert_eq!(link, format!("cubelink://add/{}", encode(&p)));
+        assert_eq!(parse(&link).unwrap(), p);
+        // Le système ajoute parfois un « / » final, et la casse du schéma n'est pas garantie.
+        assert_eq!(parse(&format!("{link}/")).unwrap(), p);
+        assert_eq!(parse(&link.to_uppercase()).unwrap(), p);
+        // L'ancien schéma reste lu, mais n'est plus produit.
+        assert_eq!(parse(&format!("launcher://add/{}", encode(&p))).unwrap(), p);
+        assert!(!link.starts_with("launcher://"));
+    }
+
+    #[test]
+    fn link_with_foreign_scheme_or_action_rejected() {
+        let c = encode(&sample());
+        for bad in [format!("https://add/{c}"), format!("cubelink://evil/{c}"), format!("cubelink://add/x/{c}"), format!("cubelink://{c}")] {
+            assert!(parse(&bad).is_err(), "{bad}");
+        }
     }
 
     #[test]
@@ -284,7 +320,8 @@ mod tests {
         #[test]
         fn roundtrip(p in payload_strategy()) {
             prop_assert_eq!(parse(&encode(&p)).unwrap(), p.clone());
-            prop_assert_eq!(parse(&format!("{LINK_PREFIX}{}", encode(&p))).unwrap(), p);
+            prop_assert_eq!(parse(&encode_link(&p)).unwrap(), p.clone());
+            prop_assert_eq!(parse(&format!("launcher://add/{}", encode(&p))).unwrap(), p);
         }
 
         #[test]

@@ -1,9 +1,10 @@
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Shell, useScreenTitle } from "./shell";
 import { buildHash, navigate, parseHash, goBack, canGoBack, resetHistory, ROUTES } from "./router";
 import { ShellContext, type ShellContextValue } from "./context";
 import { createFakeServices } from "../services/fake";
+import { resetFriendLink } from "./friendLink";
 
 function go(hash: string) {
   act(() => {
@@ -12,7 +13,7 @@ function go(hash: string) {
   });
 }
 
-beforeEach(() => { window.location.hash = ""; resetHistory(); });
+beforeEach(() => { window.location.hash = ""; resetHistory(); resetFriendLink(); });
 afterEach(cleanup);
 
 describe("routeur", () => {
@@ -38,6 +39,64 @@ describe("routeur", () => {
     go("#/friends");
     expect(screen.getByRole("main").getAttribute("data-route")).toBe("settings");
     expect(screen.getByRole("tab", { name: "Amis" }).getAttribute("aria-selected")).toBe("true");
+  });
+
+  describe("lien ami ouvert depuis le système", () => {
+    const LINK = "cubelink://add/mcl1-0123456789abcdef0123";
+    const field = () => screen.findByLabelText("Code ami de ton ami") as Promise<HTMLInputElement>;
+
+    it("Cubelink ouvert : Paramètres > Amis, champ prérempli, rien d'envoyé", async () => {
+      const svc = createFakeServices({ tickMs: 0 });
+      render(<Shell services={svc} />);
+      go("#/legal");
+      await act(async () => { svc.openFriendLink(LINK); });
+      expect((await field()).value).toBe(LINK);
+      expect(screen.getByRole("main").getAttribute("data-route")).toBe("settings");
+      expect(screen.getByRole("tab", { name: "Amis" }).getAttribute("aria-selected")).toBe("true");
+      expect(screen.queryByText(/Demande envoyée/)).toBeNull();
+    });
+
+    it("lien passé au lancement : repris au démarrage de l'interface", async () => {
+      const svc = createFakeServices({ tickMs: 0 });
+      svc.openFriendLink(LINK, { pending: true });
+      go("#/legal");
+      render(<Shell services={svc} />);
+      expect((await field()).value).toBe(LINK);
+      expect(screen.getByRole("main").getAttribute("data-route")).toBe("settings");
+    });
+
+    it("déjà dans Paramètres sur un autre onglet : bascule sur Amis", async () => {
+      const svc = createFakeServices({ tickMs: 0 });
+      render(<Shell services={svc} />);
+      go("#/settings");
+      fireEvent.click(screen.getByRole("tab", { name: "Réseau" }));
+      expect(screen.getByRole("tab", { name: "Réseau" }).getAttribute("aria-selected")).toBe("true");
+      await act(async () => { svc.openFriendLink(LINK); });
+      expect((await field()).value).toBe(LINK);
+      expect(screen.getByRole("tab", { name: "Amis" }).getAttribute("aria-selected")).toBe("true");
+    });
+
+    it("sur l'écran de connexion : le lien attend la session, puis ouvre Amis", async () => {
+      const svc = createFakeServices({ tickMs: 0 });
+      render(<Shell services={svc} />);
+      go("#/login");
+      await act(async () => { svc.openFriendLink(LINK); });
+      expect(screen.getByRole("main").getAttribute("data-route")).toBe("login");
+      go("#/main");
+      expect((await field()).value).toBe(LINK);
+      expect(screen.getByRole("main").getAttribute("data-route")).toBe("settings");
+    });
+  });
+
+  it("lien ami pendant un transfert : l'utilisateur reste sur l'écran, le lien est repris à la sortie", async () => {
+    const LINK = "cubelink://add/mcl1-0123456789abcdef0123";
+    const svc = createFakeServices({ tickMs: 0 });
+    render(<Shell services={svc} />);
+    go("#/join");
+    await act(async () => { svc.openFriendLink(LINK); });
+    expect(document.getElementById("contenu")?.getAttribute("data-route")).toBe("join");
+    go("#/main");
+    await waitFor(() => expect(document.getElementById("contenu")?.getAttribute("data-route")).toBe("settings"));
   });
 
   it("route inconnue : repli sur login", () => {

@@ -40,6 +40,13 @@ export function sessionsFrom(invites: Invite[], nowSec = Math.floor(Date.now() /
   return [...byFriend.values()].sort((a, b) => b.received_at - a.received_at);
 }
 
+/** Amis « en partie » : invitation active ou ami en ligne dont Minecraft tourne (sans invitation, on peut le demander). */
+export function playingKeysOf(friends: FriendWithPresence[], sessions: Invite[]): Set<string> {
+  const keys = new Set(sessions.map((g) => g.public_key));
+  for (const f of friends) if (f.presence === "online" && f.in_game) keys.add(f.friend.public_key);
+  return keys;
+}
+
 const shortMeta = (i: Instance) => `${i.minecraft} · ${loaderLabel(i)}`;
 const friendsHere = (n: number) => (n === 1 ? "1 ami y joue" : `${badgeText(n)} amis y jouent`);
 const TABS = ["En partie", "En ligne", "Tous"] as const;
@@ -100,6 +107,9 @@ export default function Main() {
     const off = services.onHostState((h) => setHost(h));
     return () => { alive = false; off(); };
   }, [services]);
+  useEffect(() => services.onFriendAccepted(() => {
+    services.friendList().then((l) => setFriends(l), () => {});
+  }), [services]);
   useEffect(() => services.onFriendRequest(() => setRequests((n) => (n ?? 0) + 1)), [services]);
   // Demande expirée ou annulée : on relit le total plutôt que de décrémenter à l'aveugle.
   useEffect(() => services.onFriendRequestRemoved(() => {
@@ -165,7 +175,7 @@ export default function Main() {
 
   const onlineList = friends.filter((f) => f.presence === "online");
   const sessions = sessionsFrom(invites);
-  const playingKeys = new Set(sessions.map((g) => g.public_key));
+  const playingKeys = playingKeysOf(friends, sessions);
   const sessionOf = (key: string) => sessions.find((g) => g.public_key === key);
   const onPack = (inst: Instance) => sessions.filter((g) => g.pack === inst.name);
   const join = (key: string) => navigate("join", { friend: key });
@@ -274,14 +284,14 @@ export default function Main() {
             <div className="home-head-txt">
               <h1>Jouer avec tes amis</h1>
               <p className="home-stats">
-                <span className="dot is-play" aria-hidden="true">●</span> {badgeText(sessions.length)} en partie ·{" "}
+                <span className="dot is-play" aria-hidden="true">●</span> {badgeText(playingKeys.size)} en partie ·{" "}
                 <span className="dot is-on" aria-hidden="true">●</span> {badgeText(onlineList.length)} en ligne
                 {requests ? <> · <button type="button" className="home-link" onClick={() => navigate("settings", { tab: "amis" })}>{badgeText(requests)} demande{requests > 1 ? "s" : ""}</button></> : null}
               </p>
             </div>
           </div>
           {sessions.length === 0 ? (
-            <p className="home-nosession">Aucune partie en cours. Les mondes de tes amis apparaissent ici dès qu'ils jouent.</p>
+            <p className="home-nosession">{playingKeys.size > 0 ? "Aucun monde ouvert pour toi. Demande à un ami en jeu de le rejoindre, ou attends son invitation." : "Aucune partie en cours. Les mondes de tes amis apparaissent ici dès qu'ils jouent."}</p>
           ) : (
             <div className="home-sessions">
               <span className="home-sessions-t">Parties en cours · {badgeText(sessions.length)}</span>
@@ -384,18 +394,19 @@ export default function Main() {
             {rows.map((f) => {
               const g = sessionOf(f.friend.public_key);
               const on = f.presence === "online" || !!g;
+              const playing = !!g || (f.presence === "online" && f.in_game);
               const seen = on ? null : lastSeenText(f.last_seen, nowSec);
               const asked = askStates[f.friend.public_key];
               return (
                 <li key={f.friend.public_key} className={`side-row${on ? "" : " is-off"}`} onContextMenu={ctx.bind(`Actions pour ${f.friend.name}`, () => friendMenu(f))}>
                   <span className="side-head">
                     <NameHead services={services} name={f.friend.name} seed={f.friend.public_key} size={32} />
-                    <span className={`side-dot${g ? " is-play" : on ? " is-on" : ""}`} aria-hidden="true" />
+                    <span className={`side-dot${playing ? " is-play" : on ? " is-on" : ""}`} aria-hidden="true" />
                   </span>
                   <span className="side-txt">
                     <span className="n">{f.friend.name}</span>
-                    <span className={`s${g ? " is-play" : on ? " is-on" : ""}`}>
-                      {g ? `Joue à ${g.pack ?? g.world_name}` : on ? "En ligne" : "Hors ligne"}
+                    <span className={`s${playing ? " is-play" : on ? " is-on" : ""}`}>
+                      {g ? `Joue à ${g.pack ?? g.world_name}` : playing ? "En jeu" : on ? "En ligne" : "Hors ligne"}
                     </span>
                     {seen && <span className="s">{seen}</span>}
                     {!g && (asked === "refused" || asked === "expired") && <span className="s">{ASK_LABEL[asked]}</span>}

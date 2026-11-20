@@ -40,6 +40,10 @@ export interface FakeControls {
   emitHostState(e: HostState): void;
   /** Test : une demande reçue expire (retirée sans décision) : friend://request_removed. */
   expireRequest(publicKey: string): void;
+  /** Test : la demande envoyée avec ce code reçoit une réponse (friend://accepted, friend://refused ou friend://request_expired). Sans effet si elle a été annulée. */
+  answerSentRequest(code: string, answer: "accepted" | "refused" | "expired", name?: string): void;
+  /** Test : un lien ami est ouvert depuis le système (`pending: true` : au démarrage, repris au montage ; sinon événement friend://link). */
+  openFriendLink(link: string, opts?: { pending?: boolean }): void;
   /** Test : reçoit une invitation (friend://invite + friend://invites). */
   emitInvite(i: Partial<Invite> & { public_key: string }): Invite;
   /** Test : un ami demande à rejoindre ma partie (friend://join_request + friend://join_requests). */
@@ -238,6 +242,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     { name: "Efe", uuid: "61699b2e-d327-4a01-9f1e-0ea8c3f06bc6" },
   ];
   let codeN = 1;
+  let pendingLink: string | null = null;
   let cacheBytes = opts.cacheBytes ?? 12_400_000_000;
   let settings: Settings = {
     language: "fr", default_ram_mb: 0, java_path: null, ram_auto_migrated: true,
@@ -263,6 +268,8 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
   }];
   const artOf = (id: string) => need(id);
   let requests: FriendRequest[] = Array.from({ length: requestCount }, (_, i) => makeRequest(i));
+  /** Demandes d'ami envoyées en attente de réponse (par code, en minuscules). */
+  const sentRequests = new Set<string>();
   const friends: FriendWithPresence[] = [
     { friend: { public_key: hex(1, 64), name: "Alex", trust: "ask", added_at: NOW - 86400 }, presence: "online", in_game: true, last_seen: null },
     { friend: { public_key: hex(2, 64), name: "Noor", trust: "always", added_at: NOW - 172800 }, presence: "offline", in_game: false, last_seen: NOW - 3 * 3600 },
@@ -285,8 +292,12 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     launch: new Set<(s: LaunchState) => void>(),
     transfer: new Set<(p: TransferProgress) => void>(),
     presence: new Set<(e: PresenceEvent) => void>(),
+    link: new Set<() => void>(),
     request: new Set<(r: FriendRequest) => void>(),
     requestRemoved: new Set<(e: { public_key: string }) => void>(),
+    accepted: new Set<(e: { public_key: string; name: string }) => void>(),
+    refused: new Set<(e: { public_key: string }) => void>(),
+    expired: new Set<(e: { public_key: string }) => void>(),
     unknown: new Set<(e: UnknownModsEvent) => void>(),
     log: new Set<(e: LaunchLogEvent) => void>(),
     browse: new Set<(e: BrowseProgressEvent) => void>(),
@@ -648,6 +659,8 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     cacheSize: async () => cacheBytes,
     cacheClear: async () => { const freed = cacheBytes; cacheBytes = 0; return freed; },
     friendMyCode: async () => `mcl1-${hex(codeN * 7, 24)}`,
+    friendMyLink: async () => `cubelink://add/mcl1-${hex(codeN * 7, 24)}`,
+    friendTakePendingLink: async () => { const l = pendingLink; pendingLink = null; return l; },
     friendRegenerateCode: async () => { codeN += 1; return `mcl1-${hex(codeN * 7, 24)}`; },
     friendList: async () => friends.map((f) => ({ friend: { ...f.friend }, presence: f.presence, in_game: f.in_game, last_seen: f.last_seen })),
     friendInvite: async (pk) => {
@@ -898,9 +911,15 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     },
     gameJoinFriend: async (pk, instanceId) => { gameCalls.push({ kind: "join", arg: pk, instanceId }); },
     friendSendRequest: async (code) => {
-      if (!/^mcl1-[0-9a-f]{8,}$/i.test(code.trim())) throw new Error("Code ami invalide.");
+      // Comme `friend_code::parse` : le lien cubelink://add/<code> (ou l'ancien launcher://add/) vaut le code.
+      const bare = code.trim().replace(/^(cubelink|launcher):\/\/add\//i, "").replace(/\/$/, "");
+      if (!/^mcl1-[0-9a-f]{8,}$/i.test(bare)) throw new Error("Code ami invalide.");
+      const key = bare.toLowerCase();
+      if (sentRequests.has(key)) throw new Error("Une demande est déjà en cours pour ce pair.");
+      sentRequests.add(key);
       return verifyCode(code.length);
     },
+    friendCancelRequest: async (code) => { sentRequests.delete(code.trim().replace(/^(cubelink|launcher):\/\/add\//i, "").replace(/\/$/, "").toLowerCase()); },
     friendRequests: async ({ offset, limit, query }) => {
       const q = query?.trim().toLowerCase();
       const all = q ? requests.filter((r) => r.name.toLowerCase().includes(q)) : requests;
@@ -1092,6 +1111,22 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     },
     dropFiles: (paths) => emit(listeners.drop, paths),
     emitHostState: (e) => emit(listeners.host, e),
+    answerSentRequest: (code, answer, name = "Alex") => {
+      const key = code.trim().toLowerCase();
+      if (!sentRequests.delete(key)) return;
+      if (answer === "accepted") {
+        friends.push({
+          friend: { public_key: key, name, trust: "ask", added_at: NOW },
+          presence: "offline", in_game: false, last_seen: null,
+        });
+        emit(listeners.accepted, { public_key: key, name });
+      } else if (answer === "refused") emit(listeners.refused, { public_key: key });
+      else emit(listeners.expired, { public_key: key });
+    },
+    openFriendLink: (link, opts) => {
+      pendingLink = link;
+      if (!opts?.pending) emit(listeners.link, undefined);
+    },
     expireRequest: (pk) => {
       requests = requests.filter((x) => x.public_key !== pk);
       emit(listeners.requestRemoved, { public_key: pk });
@@ -1152,8 +1187,12 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     onHostState: (cb) => sub(listeners.host, cb),
     onTransferProgress: (cb) => sub(listeners.transfer, cb),
     onFriendPresence: (cb) => sub(listeners.presence, cb),
+    onFriendLink: (cb) => sub(listeners.link, cb),
     onFriendRequest: (cb) => sub(listeners.request, cb),
     onFriendRequestRemoved: (cb) => sub(listeners.requestRemoved, cb),
+    onFriendAccepted: (cb) => sub(listeners.accepted, cb),
+    onFriendRefused: (cb) => sub(listeners.refused, cb),
+    onFriendRequestExpired: (cb) => sub(listeners.expired, cb),
     onFriendInvite: (cb) => sub(listeners.invite, cb),
     onFriendInvites: (cb) => sub(listeners.invites, cb),
     onFriendCodeChanged: (cb) => sub(listeners.codeChanged, () => cb()),

@@ -9,6 +9,7 @@ import { formatBytes } from "../Install/format";
 import { IdentityBackup } from "./IdentityBackup";
 import { Accounts } from "./Accounts";
 import { useStageSupported } from "../../app/stage";
+import { usePendingFriendLink } from "../../app/friendLink";
 import type { NetTest, Settings as BaseSettings } from "../../services/types";
 import { Icon } from "../../ui";
 import "../Friends/friends.css";
@@ -180,6 +181,9 @@ export default function Settings({ testConnection }: SettingsProps = {}) {
   const [settings, setSettings] = useState<SettingsData | null>(null);
   const [saved, setSaved] = useState("");
   const [friendsRev, setFriendsRev] = useState(0);
+  // Lien ami ouvert depuis le système : on passe sur l'onglet Amis, où « Ajouter un ami » le reprend.
+  const incomingLink = usePendingFriendLink();
+  useEffect(() => { if (incomingLink) setSection("amis"); }, [incomingLink]);
   const [error, setError] = useState<string | null>(null);
   const [netMsg, setNetMsg] = useState("");
   const [confirmClear, setConfirmClear] = useState(false);

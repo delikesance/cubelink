@@ -2,6 +2,8 @@ import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRe
 import "./shell.css";
 import { createServices, type Services } from "../services";
 import { ShellContext, type ShellContextValue } from "./context";
+import { useFriendLinkIntake, usePendingFriendLink } from "./friendLink";
+import { useOutgoingIntake } from "./outgoingRequest";
 import { navigate, goBack, parseHash, takePendingFocus, useCanGoBack, useLocation, type RouteName } from "./router";
 import { TitleBar } from "./TitleBar";
 import { UpdateBanner } from "./UpdateBanner";
@@ -75,6 +77,9 @@ function Fallback({ route }: { route: RouteName }) {
   );
 }
 
+/** Écrans où un lien ami n'arrache pas l'utilisateur (connexion, transfert) : il attend la sortie de l'écran. */
+const LINK_WAITS_ON: ReadonlySet<RouteName> = new Set<RouteName>(["login", "join"]);
+
 export function Shell({ services }: { services?: Services } = {}) {
   const svc = useMemo(() => services ?? createServices(), [services]);
   const { route, params } = useLocation();
@@ -103,6 +108,15 @@ export function Shell({ services }: { services?: Services } = {}) {
     })();
     return () => { on = false; };
   }, [booting, svc]);
+
+  // Lien ami ouvert depuis le système : on ouvre Paramètres > Amis, où « Ajouter un ami » le reprend (champ prérempli,
+  // rien n'est envoyé). Sur l'écran de connexion il attend : on y va dès que la session est ouverte.
+  useFriendLinkIntake(svc);
+  useOutgoingIntake(svc);
+  const friendLink = usePendingFriendLink();
+  useEffect(() => {
+    if (friendLink && !booting && !LINK_WAITS_ON.has(route)) navigate("settings", { tab: "amis" });
+  }, [friendLink, booting, route]);
 
   // Focus sur le contenu à chaque changement de route (pas au premier rendu).
   useEffect(() => {

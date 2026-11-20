@@ -453,7 +453,7 @@ pub fn instances_delete(state: State<'_, Arc<AppState>>, id: String) -> Result<(
     state.instances_delete(&id)
 }
 
-/// Modifie les champs donnés d'une instance (les autres restent). `wrapper` : commande d'enrobage placée devant Java, Linux seulement ; chaîne vide = aucune.
+/// Modifie les champs donnés d'une instance (les autres restent). `wrapper` : commande d'enrobage placée devant Java, Linux seulement ; chaîne vide = aucune. `java_path` : `""` efface le chemin Java de l'instance, `null` le laisse inchangé ; un Java dont la version ne convient pas à Minecraft fait échouer le lancement (le Java global, lui, est alors ignoré). `jvm_args` et `wrapper` sont découpés façon shell (guillemets simples ou doubles pour une valeur avec espaces) ; un guillemet non fermé est refusé.
 #[tauri::command(rename_all = "snake_case")]
 #[specta::specta(rename_all = "snake_case")]
 pub fn instances_update(
@@ -502,6 +502,22 @@ mod tests {
         assert!(st.instances_update("../x", None, None, None, None, None).is_err());
         let u = st.instances_update(&i.id, Some("Neuf".into()), Some(3072), Some("java".into()), Some("-Xss2M".into()), None).unwrap();
         assert_eq!((u.name.as_str(), u.ram_mb, u.java_path.as_deref(), u.jvm_args.as_str()), ("Neuf", 3072, Some("java"), "-Xss2M"));
+    }
+
+    #[test]
+    fn update_efface_le_java_par_chaine_vide_et_garde_par_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let (st, _) = test_state(dir.path());
+        let i = st.instances.create("Java", "1.21.1", vanilla(), 2048).unwrap();
+        let u = st.instances_update(&i.id, None, None, Some("/usr/lib/jvm/java-17/bin/java".into()), None, None).unwrap();
+        assert_eq!(u.java_path.as_deref(), Some("/usr/lib/jvm/java-17/bin/java"));
+        // None = champ inchangé (c'est ce que le front envoyait à tort pour « vider »).
+        let u = st.instances_update(&i.id, Some("Java 2".into()), None, None, None, None).unwrap();
+        assert_eq!(u.java_path.as_deref(), Some("/usr/lib/jvm/java-17/bin/java"));
+        // Chaîne vide = effacé, et c'est persisté sur disque.
+        let u = st.instances_update(&i.id, None, None, Some(String::new()), None, None).unwrap();
+        assert_eq!(u.java_path, None);
+        assert_eq!(st.instances.get(&i.id).unwrap().java_path, None);
     }
 
     #[test]

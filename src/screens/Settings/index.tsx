@@ -424,7 +424,7 @@ export default function Settings({ testConnection, clearCache }: SettingsProps =
       </div>
 
       <div {...panel("java")}>
-        <p className="set-sub">Réglages appliqués par défaut aux nouvelles instances. Chaque instance garde ses propres valeurs.</p>
+        <p className="set-sub">Valeurs proposées pour toutes les instances qui n'ont pas les leurs.</p>
         <Card className="set-two">
           <Field label="Mémoire par défaut (Mo)" error={ramError} hint="Utilisée par toutes les instances réglées sur « Valeur des paramètres », dont les mondes de tes amis.">
             {(p) => (
@@ -433,7 +433,7 @@ export default function Settings({ testConnection, clearCache }: SettingsProps =
                 onKeyDown={(e) => { if (e.key === "Enter") commitRam(); }} />
             )}
           </Field>
-          <Field label="Chemin de Java" hint="Facultatif. Laisse vide si tu ne sais pas." error={javaError}>
+          <Field label="Chemin de Java" hint="Facultatif. Utilisé seulement si sa version convient à Minecraft ; sinon Cubelink choisit et installe la bonne. Laisse vide si tu ne sais pas." error={javaError}>
             {(p) => (
               <Input {...p} type="text" spellCheck={false} autoComplete="off" disabled={dis}
                 value={javaPath} onChange={(e) => setJavaPath(e.target.value)} onBlur={commitJava}

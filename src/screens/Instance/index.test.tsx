@@ -111,6 +111,29 @@ describe("Page modpack : lancement", () => {
   });
 });
 
+describe("Page modpack : échec de lancement d'un autre modpack", () => {
+  it("l'échec de l'appel pour A n'apparaît pas sur la page de B, mais reste sur celle de A", async () => {
+    const services = { ...createFakeServices({ tickMs: 0, requestCount: 0 }), modsCheck: async () => ({ issues: [], checked: 0 }), instancesLaunch: async () => { throw new Error("introuvable : Java"); } } as unknown as Services;
+    const view = (id: string) => (
+      <ShellContext.Provider value={{ services, route: "instance", params: { id }, navigate: vi.fn(), setTitle: () => {}, goBack: () => {}, canGoBack: true } as ShellContextValue}>
+        <InstancePage key={id} />
+      </ShellContext.Provider>
+    );
+    const { rerender } = render(view("inst-aeronautics"));
+    fireEvent.click(await screen.findByRole("button", { name: "Jouer" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("Java");
+
+    rerender(view("inst-atm10"));
+    expect(await screen.findByRole("heading", { level: 1, name: "All the Mods 10" })).toBeTruthy();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByText(/Échec du lancement/)).toBeNull();
+
+    rerender(view("inst-aeronautics"));
+    expect((await screen.findByRole("alert")).textContent).toContain("Java");
+  });
+});
+
 describe("Page modpack : amis sur ce pack", () => {
   it("liste les parties en cours sur ce pack et rejoint l'ami", async () => {
     const { services, navigate } = setup();
@@ -294,6 +317,27 @@ describe("Page modpack : onglet Réglages", () => {
     }));
     expect(await screen.findByRole("heading", { level: 1, name: "Renommé" })).toBeTruthy();
     expect(await within(screen.getByRole("tabpanel")).findByText("Réglages enregistrés.")).toBeTruthy();
+  });
+
+  it("vider le chemin de Java envoie une chaîne vide (jamais null) et l'efface vraiment", async () => {
+    const fake = createFakeServices({ tickMs: 0, requestCount: 0 });
+    const update = vi.fn(fake.instancesUpdate);
+    setup({ instancesUpdate: update });
+    await ready();
+    fireEvent.click(tab("Réglages"));
+    const panel = screen.getByRole("tabpanel");
+    fireEvent.change(within(panel).getByLabelText("Nom de l'instance"), { target: { value: "Aero" } });
+    const java = within(panel).getByLabelText(/Chemin de Java/) as HTMLInputElement;
+    fireEvent.change(java, { target: { value: "/usr/lib/jvm/java-17/bin/java" } });
+    fireEvent.click(within(panel).getByRole("button", { name: "Enregistrer" }));
+    await waitFor(() => expect(update).toHaveBeenCalledTimes(1));
+    expect(update.mock.calls[0][1].java_path).toBe("/usr/lib/jvm/java-17/bin/java");
+    await within(screen.getByRole("tabpanel")).findByText("Réglages enregistrés.");
+    fireEvent.change(java, { target: { value: "   " } });
+    fireEvent.click(within(screen.getByRole("tabpanel")).getByRole("button", { name: "Enregistrer" }));
+    await waitFor(() => expect(update).toHaveBeenCalledTimes(2));
+    expect(update.mock.calls[1][1].java_path).toBe("");
+    expect(await update.mock.results[1].value).toMatchObject({ java_path: null });
   });
 
   it("Linux : la commande d'enrobage s'enregistre avec les autres réglages (absente ailleurs)", async () => {

@@ -532,6 +532,47 @@ mod tests {
         assert_eq!(sel.major, 17);
     }
 
+    /// Non-régression #76 : un Java 8 32 bits seul (ex. `Program Files (x86)\\Java`) n'est pas
+    /// sélectionné sur un hôte 64 bits ; l'appelant installe alors le JRE 8 Adoptium 64 bits,
+    /// que `select_for` retrouve ensuite (à côté du 32 bits, quel que soit l'ordre).
+    #[cfg(target_pointer_width = "64")]
+    #[tokio::test]
+    async fn java_32_bits_seul_declenche_l_installation_64_bits() {
+        let server = MockServer::start().await;
+        let exe = format!("jdk8u402-b06-jre/{}", java_exe_rel());
+        let data = fake_zip(&[
+            (&exe, b"fake java"),
+            ("jdk8u402-b06-jre/release", b"JAVA_VERSION=\"1.8.0_402\"\nOS_ARCH=\"amd64\"\n"),
+        ]);
+        let body = serde_json::json!([{ "binary": { "package": {
+            "link": format!("{}/dl/jre.zip", server.uri()), "size": data.len(),
+            "checksum": hex::encode(Sha256::digest(&data)), "name": "jre.zip" } } }]);
+        Mock::given(method("GET")).and(path("/v3/assets/latest/8/hotspot")).respond_with(ResponseTemplate::new(200).set_body_json(body)).expect(1).mount(&server).await;
+        serve(&server, data).await;
+
+        let root = tempfile::tempdir().unwrap();
+        let x86 = root.path().join("x86").join("jre1.8.0_401");
+        std::fs::create_dir_all(x86.join("bin")).unwrap();
+        std::fs::write(x86.join("bin").join("java"), b"").unwrap();
+        std::fs::write(x86.join("release"), "JAVA_VERSION=\"1.8.0_401\"\nOS_ARCH=\"i586\"\n").unwrap();
+        let dirs = vec![root.path().join("x86")];
+        let found = crate::java::find_installed(&dirs);
+        assert!(crate::java::select_for(8, &found).is_none(), "le Java 32 bits ne doit pas être choisi");
+
+        let p = resolve_package_from(&server.uri(), 8, "linux", "x64").await.unwrap();
+        let managed = root.path().join("managed");
+        let inst = install_with(&p, &managed, |_, _| {}, Arc::new(AtomicBool::new(false)), Arc::new(FakeProbe(Some(8)))).await.unwrap();
+        assert_eq!(inst.major, 8);
+
+        let mut found = crate::java::find_installed(&[root.path().join("x86"), managed]);
+        assert_eq!(found.len(), 2);
+        for _ in 0..2 {
+            let sel = crate::java::select_for(8, &found).expect("le JRE 64 bits installé doit servir");
+            assert_eq!(sel.path, inst.java_exe);
+            found.reverse();
+        }
+    }
+
     #[tokio::test]
     async fn installation_nominale_puis_idempotente() {
         let server = MockServer::start().await;

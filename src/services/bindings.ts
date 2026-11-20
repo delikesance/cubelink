@@ -36,9 +36,9 @@ export const commands = {
 	authOfflineLogin: (name: string, options?: InvokeOptions) => __TAURI_INVOKE<Profile>("auth_offline_login", { name }, options),
 	/**  Instances installées. */
 	instancesList: (options?: InvokeOptions) => __TAURI_INVOKE<Instance_Serialize[]>("instances_list", undefined, options),
-	/**  Crée une instance vide. */
+	/**  Crée une instance vide, puis prépare le jeu (progression `import://progress`). Si cette préparation échoue (réseau, Java), l'instance est conservée et `import://deferred` l'annonce : le jeu sera téléchargé au premier lancement. */
 	instancesCreate: (name: string, minecraft: string, loader: LoaderSpec, ramMb: number, options?: InvokeOptions) => __TAURI_INVOKE<Instance_Serialize>("instances_create", { name, minecraft, loader, ram_mb: ramMb }, options),
-	/**  Importe un .mrpack, un zip CurseForge ou un zip brut (les champs facultatifs ne servent qu'au zip brut). Avertissements par `import://warning`. */
+	/**  Importe un .mrpack, un zip CurseForge ou un zip brut (les champs facultatifs ne servent qu'au zip brut). Avertissements par `import://warning`. La préparation du jeu qui suit l'import est « au mieux » : progression `import://progress` ; si elle échoue, l'instance et ses mods sont conservés et `import://deferred` l'annonce (le jeu sera téléchargé au premier lancement). Seule une erreur d'import elle-même renvoie une erreur. */
 	instancesImportMrpack: (path: string, name: string | null, minecraft: string | null, loader: LoaderSpec | null, ramMb: number | null, options?: InvokeOptions) => __TAURI_INVOKE<Instance_Serialize>("instances_import_mrpack", { path, name, minecraft, loader, ram_mb: ramMb }, options),
 	/**  Lance l'instance. Progression par `launch://state`, sortie du jeu par `launch://log`. */
 	instancesLaunch: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("instances_launch", { id }, options),
@@ -48,7 +48,7 @@ export const commands = {
 	instancesKill: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("instances_kill", { id }, options),
 	/**  Supprime l'instance (refusé si elle est en lancement ou en jeu). */
 	instancesDelete: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("instances_delete", { id }, options),
-	/**  Modifie les champs donnés d'une instance (les autres restent). `wrapper` : commande d'enrobage placée devant Java, Linux seulement ; chaîne vide = aucune. */
+	/**  Modifie les champs donnés d'une instance (les autres restent). `wrapper` : commande d'enrobage placée devant Java, Linux seulement ; chaîne vide = aucune. `java_path` : `""` efface le chemin Java de l'instance, `null` le laisse inchangé ; un Java dont la version ne convient pas à Minecraft fait échouer le lancement (le Java global, lui, est alors ignoré). `jvm_args` et `wrapper` sont découpés façon shell (guillemets simples ou doubles pour une valeur avec espaces) ; un guillemet non fermé est refusé. */
 	instancesUpdate: (id: string, name: string | null, ramMb: number | null, javaPath: string | null, jvmArgs: string | null, wrapper: string | null, options?: InvokeOptions) => __TAURI_INVOKE<Instance_Serialize>("instances_update", { id, name, ram_mb: ramMb, java_path: javaPath, jvm_args: jvmArgs, wrapper }, options),
 	/**  Ouvre le dossier de l'instance dans le gestionnaire de fichiers. */
 	instancesOpenFolder: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("instances_open_folder", { id }, options),

@@ -14,7 +14,7 @@ use core_lib::types::{Instance, Loader, LoaderSpec, Profile};
 use tauri::State;
 
 use crate::error::{sanitize, user_msg};
-use crate::install::{ensure_game, ensure_game_with, resolve_loader_version, safe_version, Progress};
+use crate::install::{ensure_game, ensure_game_with, resolve_loader_version, safe_version, JavaSetting, Progress};
 use crate::state::{lock, AppState};
 
 pub(crate) fn valid_id(id: &str) -> bool {
@@ -303,13 +303,30 @@ impl AppState {
         let spec = LoaderSpec { loader: loader.loader, version };
         let inst = self.instances.create(name.trim(), &minecraft, spec, ram_mb).map_err(|e| user_msg(&e))?;
         let _ = self.instances.mark_custom(&inst.id);
-        let java = self.settings_get().java_path;
-        let noop: Progress = Arc::new(|_| {});
-        match ensure_game(&self.paths, &inst, java, noop).await {
-            Ok(_) => Ok(inst),
+        self.prepare_game_best_effort(&inst).await;
+        Ok(inst)
+    }
+
+    /// Prépare le jeu (loader, Java, assets) juste après une création ou un import, « au mieux » : un échec (réseau coupé, Mojang
+    /// ou Adoptium indisponible…) ne supprime jamais l'instance, qui est valide ; `ensure_game` est idempotent et reprendra au
+    /// premier lancement. La progression passe par `import://progress`, l'échec par `import://deferred`. Renvoie `true` si le jeu est prêt.
+    async fn prepare_game_best_effort(&self, inst: &Instance) -> bool {
+        let emit = self.emit.clone();
+        let progress: Progress = Arc::new(move |message| emit("import://progress", serde_json::json!({ "message": message })));
+        let java = JavaSetting::global(self.settings_get().java_path);
+        let r = ensure_game(&self.paths, inst, java, progress).await;
+        self.note_prepare_result(inst, r.map(|_| ()))
+    }
+
+    /// Suite d'une préparation : sur échec, journalise et annonce `import://deferred` (l'instance reste).
+    fn note_prepare_result(&self, inst: &Instance, r: core_lib::types::Result<()>) -> bool {
+        match r {
+            Ok(()) => true,
             Err(e) => {
-                let _ = self.instances.delete(&inst.id);
-                Err(user_msg(&e))
+                let message = user_msg(&e);
+                eprintln!("[Cubelink] préparation du jeu différée pour l'instance {} : {message}", inst.id);
+                self.emit_event("import://deferred", &serde_json::json!({ "instance_id": inst.id, "message": message }));
+                false
             }
         }
     }
@@ -399,14 +416,9 @@ impl AppState {
             }
         };
         let inst = result.map_err(|_| "import interrompu".to_string())?.map_err(|e| user_msg(&e))?;
-        let noop: Progress = Arc::new(|_| {});
-        match ensure_game(&self.paths, &inst, self.settings_get().java_path, noop).await {
-            Ok(_) => Ok((inst, missing)),
-            Err(e) => {
-                let _ = self.instances.delete(&inst.id);
-                Err(user_msg(&e))
-            }
-        }
+        // Les mods sont déjà installés : un échec de préparation du jeu ne doit pas les effacer.
+        self.prepare_game_best_effort(&inst).await;
+        Ok((inst, missing))
     }
 
     pub async fn minecraft_versions(&self) -> Result<Vec<String>, String> {
@@ -555,7 +567,7 @@ impl AppState {
         let me = self.clone();
         let pid = id.clone();
         let progress: Progress = Arc::new(move |m| me.emit_state(&pid, LaunchPhase::Preparing, Some(m)));
-        let java_setting = inst.java_path.clone().filter(|j| !j.trim().is_empty()).or_else(|| self.settings_get().java_path);
+        let java_setting = JavaSetting::for_instance(inst.java_path.as_deref(), self.settings_get().java_path);
         let prepared = match ensure_game_with(&self.paths, &inst, java_setting, progress, cancel.clone()).await {
             Ok(p) => p,
             Err(core_lib::types::Error::Cancelled) => return true,
@@ -748,7 +760,7 @@ pub fn instances_list(state: State<'_, Arc<AppState>>) -> Result<Vec<Instance>, 
     Ok(state.instances_list().into_iter().filter(|i| !core_lib::guest::is_guest_instance(&state.instances, &i.id)).collect())
 }
 
-/// Crée une instance vide.
+/// Crée une instance vide, puis prépare le jeu (progression `import://progress`). Si cette préparation échoue (réseau, Java), l'instance est conservée et `import://deferred` l'annonce : le jeu sera téléchargé au premier lancement.
 #[tauri::command(rename_all = "snake_case")]
 #[specta::specta(rename_all = "snake_case")]
 pub async fn instances_create(
@@ -761,7 +773,7 @@ pub async fn instances_create(
     state.instances_create(name, minecraft, loader, ram_mb).await
 }
 
-/// Importe un .mrpack, un zip CurseForge ou un zip brut (les champs facultatifs ne servent qu'au zip brut). Avertissements par `import://warning`.
+/// Importe un .mrpack, un zip CurseForge ou un zip brut (les champs facultatifs ne servent qu'au zip brut). Avertissements par `import://warning`. La préparation du jeu qui suit l'import est « au mieux » : progression `import://progress` ; si elle échoue, l'instance et ses mods sont conservés et `import://deferred` l'annonce (le jeu sera téléchargé au premier lancement). Seule une erreur d'import elle-même renvoie une erreur.
 #[tauri::command(rename_all = "snake_case")]
 #[specta::specta(rename_all = "snake_case")]
 pub async fn instances_import_mrpack(

@@ -154,16 +154,66 @@ jobs:
       - name: Agent LAN (JDK 17 préinstallé sur le runner)
         shell: bash
         run: JAVA_HOME="$JAVA_HOME_17_X64" bash core/resources/lan-agent/build.sh
+      - name: Harnais E2E (logique de reconstruction)
+        run: npm run test:e2e-harness
       - name: Binaire de test (front embarqué)
         run: node e2e/harness/build.mjs
       - name: Playwright (mode simulé)
         run: npx playwright test --config e2e/playwright.config.ts
         env:
           E2E_WORKERS: '2'
+          CUBELINK_E2E_SKIP_BUILD: '1' # déjà construit à l'étape précédente
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: failure()
         with:
           name: e2e-artifacts
+          path: e2e/artifacts
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # Essai réel Linux, NON BLOQUANT (ticket #129) : l'app Tauri réelle sous Xvfb + openbox. bindings-real.mjs la pilote par
+  # WebDriver (tauri-driver + WebKitWebDriver) et vérifie que chaque commande atteint Rust avec les bons arguments ;
+  # background.sh vérifie tray/autostart/instance unique et « fermer = masquer ». Le binaire est le build debug (il charge
+  # l'interface depuis Vite, que les deux scripts démarrent eux-mêmes). Premier essai : jamais prouvé vert, donc
+  # `continue-on-error` et absent de `needs` (canary, release). Le promouvoir en bloquant (le remettre dans `needs` des deux
+  # jobs) seulement après un run vert, sur confirmation du mainteneur, comme `e2e-windows`.
+  e2e-linux:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    continue-on-error: true
+    env:
+      TAURI_DRIVER_VERSION: '2.1.0' # version figée (reproductible)
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with: { node-version: 22, cache: npm }
+      - name: Rust (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: ci-e2e-linux
+          save-if: ${{ github.event_name == 'push' }}
+      - name: Dépendances système (Xvfb, openbox, WebDriver)
+        run: bash scripts/ci-apt.sh xvfb webkit2gtk-driver openbox xdotool wmctrl x11-utils dbus-x11
+      - run: npm ci --ignore-scripts
+      - name: Agent LAN (JDK 17 préinstallé sur le runner)
+        run: JAVA_HOME="$JAVA_HOME_17_X64" bash core/resources/lan-agent/build.sh
+      # rust-cache met aussi en cache ~/.cargo/bin (cache-bin) : l'installation (longue) n'a lieu qu'au premier run.
+      - name: Installe tauri-driver
+        run: command -v tauri-driver || cargo install tauri-driver --locked --version "$TAURI_DRIVER_VERSION"
+      - name: Binaire debug
+        run: cargo build -p cubelink
+      - name: Liaisons réelles (WebDriver)
+        run: xvfb-run -a node e2e/linux/bindings-real.mjs
+      - name: Tray, autostart, instance unique, fermer = masquer
+        if: always()
+        run: bash e2e/linux/background.sh
+        env:
+          E2E_LOG_DIR: ${{ github.workspace }}/e2e/artifacts
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: failure()
+        with:
+          name: e2e-linux-artifacts
           path: e2e/artifacts
           retention-days: 7
           if-no-files-found: ignore
@@ -192,6 +242,7 @@ jobs:
   # Pré-version canary : seulement après un push sur `canary` et si les vérifications ont réussi.
   # `e2e-windows` n'en fait pas (encore) partie, par décision du mainteneur (2026-11-14) : des scénarios ne suivaient plus
   # l'interface actuelle (ticket #66, specs remises à jour ; pas de nombre en dur, `playwright test --list` donne le compte).
+  # `e2e-linux` (essai réel Linux) est dans le même cas.
   # Le job tourne toujours ; le remettre dans `needs` dès qu'un run Windows complet est vert (ici et dans `release`, qui a la
   # même liste), sur confirmation du mainteneur.
   canary:

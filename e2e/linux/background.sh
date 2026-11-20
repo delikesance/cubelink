@@ -1,13 +1,36 @@
 #!/bin/bash
-# Usage : Xvfb :99 + un gestionnaire de fenetres (openbox) + `npx vite` sur 5173, puis
-#   DISPLAY=:99 dbus-run-session -- bash e2e/linux/background.sh
+# Usage : `bash e2e/linux/background.sh` (autonome). Il demarre lui-meme Xvfb, openbox (un vrai gestionnaire de fenetres :
+# `wmctrl -c` lui demande de fermer la fenetre) et Vite sur 5173 (le binaire debug charge l'interface depuis devUrl),
+# et se relance sous `dbus-run-session` si aucun bus de session n'existe. Prerequis : xvfb, openbox, xdotool, wmctrl,
+# x11-utils (xwininfo), dbus-x11, un binaire `cargo build -p cubelink` et `npm ci`.
+# Variables : CUBELINK_BIN (binaire), CARGO_TARGET_DIR (sinon target/), E2E_DISPLAY (defaut :99), E2E_LOG_DIR (journaux
+# de l'app et de Xvfb/openbox/Vite ; defaut : dossier temporaire /tmp/cl-bg-logs.*, conserve).
 # Verifie : fenetre montree, entree de demarrage avec --background, fermer = masquer (processus vivant), avis unique,
 # instance unique (relancer remontre la fenetre), --background sans fenetre, start_with_os=false retire l entree.
 # Essai reel de la phase 1 sous Linux (Xvfb + openbox + D-Bus) : vraie app Tauri, vrai disque, HOME isole.
+# Code de sortie 0 seulement si toutes les verifications passent.
 set -u
-BIN=${CUBELINK_BIN:-$(cd "$(dirname "$0")/../.." && pwd)/target/debug/cubelink}
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then exec dbus-run-session -- bash "$0" "$@"; fi
+BIN=${CUBELINK_BIN:-${CARGO_TARGET_DIR:-$ROOT/target}/debug/cubelink}
+[ -x "$BIN" ] || { echo "FAIL binaire introuvable : $BIN (cargo build -p cubelink)"; exit 2; }
+for t in Xvfb openbox xdotool wmctrl xwininfo; do command -v $t >/dev/null || { echo "FAIL outil manquant : $t"; exit 2; }; done
+LOGS=${E2E_LOG_DIR:-$(mktemp -d /tmp/cl-bg-logs.XXXX)}; mkdir -p "$LOGS"
 export HOME=$(mktemp -d /tmp/clhome.XXXX)
-export DISPLAY=:99
+export DISPLAY=${E2E_DISPLAY:-:99}
+EXTRA_PIDS=""
+cleanup(){ for p in $EXTRA_PIDS; do kill "$p" 2>/dev/null; done; rm -rf "$HOME"; }
+trap cleanup EXIT
+
+Xvfb "$DISPLAY" -screen 0 1280x800x24 >"$LOGS/xvfb.log" 2>&1 & EXTRA_PIDS="$EXTRA_PIDS $!"
+for _ in $(seq 1 40); do xdotool getdisplaygeometry >/dev/null 2>&1 && break; sleep 0.25; done
+xdotool getdisplaygeometry >/dev/null 2>&1 || { echo "FAIL Xvfb ne repond pas ($DISPLAY)"; cat "$LOGS/xvfb.log"; exit 2; }
+openbox >"$LOGS/openbox.log" 2>&1 & EXTRA_PIDS="$EXTRA_PIDS $!"
+sleep 1
+if ! (exec 3<>/dev/tcp/127.0.0.1/5173) 2>/dev/null; then
+  (cd "$ROOT" && exec node_modules/.bin/vite --port 5173 --strictPort >"$LOGS/vite.log" 2>&1) & EXTRA_PIDS="$EXTRA_PIDS $!"
+  for _ in $(seq 1 120); do (exec 3<>/dev/tcp/127.0.0.1/5173) 2>/dev/null && break; sleep 0.5; done
+fi
 DATA="$HOME/.local/share/app.cubelink.launcher"
 AUTO="$HOME/.config/autostart"
 ok(){ echo "OK   $*"; }; ko(){ echo "FAIL $*"; FAILS=$((FAILS+1)); }
@@ -16,7 +39,7 @@ mapped(){ for id in $(xdotool search --name Cubelink 2>/dev/null); do xwininfo -
 wait_for(){ for _ in $(seq 1 60); do eval "$1" && return 0; sleep 0.5; done; return 1; }
 
 # 1. Premier lancement normal
-$BIN > /tmp/app1.log 2>&1 & P1=$!
+$BIN > "$LOGS/app1.log" 2>&1 & P1=$!
 wait_for mapped && ok "fenetre montree au lancement" || ko "fenetre non montree"
 wait_for "ls $AUTO/*.desktop >/dev/null 2>&1" && ok "entree de demarrage creee: $(grep -h '^Exec' $AUTO/*.desktop)" || ko "pas d'entree autostart"
 grep -q -- "--background" $AUTO/*.desktop 2>/dev/null && ok "argument --background present" || ko "argument --background absent"
@@ -28,14 +51,14 @@ mapped && ko "fenetre encore visible" || ok "fenetre masquee"
 [ -f "$DATA/background-notice-shown" ] && ok "avis du premier masquage note" || ko "pas de temoin d'avis"
 
 # 3. Relancer : instance unique, la fenetre existante revient
-$BIN > /tmp/app2.log 2>&1 & P2=$!
+$BIN > "$LOGS/app2.log" 2>&1 & P2=$!
 wait_for "! kill -0 $P2 2>/dev/null" && ok "seconde instance sortie" || { ko "seconde instance encore vivante"; kill $P2; }
 wait_for mapped && ok "fenetre existante remontree" || ko "fenetre pas remontree"
 [ "$(pgrep -fc "^$BIN$")" = "1" ] && ok "un seul processus Cubelink" || ko "plusieurs processus: $(pgrep -fa cubelink)"
 
 # 3 bis. Masquer puis relancer en --background (demarrage de session) : la fenetre reste masquee
 wmctrl -c Cubelink; sleep 2
-$BIN --background > /tmp/app2b.log 2>&1 & P2B=$!
+$BIN --background > "$LOGS/app2b.log" 2>&1 & P2B=$!
 wait_for "! kill -0 $P2B 2>/dev/null" && ok "seconde instance --background sortie" || { ko "seconde instance --background vivante"; kill $P2B; }
 sleep 1; mapped && ko "fenetre remontree par un demarrage de session" || ok "fenetre toujours masquee apres demarrage de session"
 
@@ -48,7 +71,7 @@ if s is None:
     print("pas de settings.json, cree"); s={"language":"fr","default_ram_mb":4096,"java_path":None,"trust_default":"ask","close_on_launch":False,"share_mods":True}
 s["start_with_os"]=False; json.dump(s,open(p,"w"))
 PY
-$BIN --background > /tmp/app3.log 2>&1 & P3=$!
+$BIN --background > "$LOGS/app3.log" 2>&1 & P3=$!
 sleep 6
 kill -0 $P3 2>/dev/null && ok "lancement --background vivant" || ko "lancement --background mort"
 mapped && ko "fenetre visible en --background" || ok "fenetre non montree en --background"
@@ -56,9 +79,10 @@ ls $AUTO/*.desktop >/dev/null 2>&1 && ko "entree autostart encore la" || ok "ent
 kill $P3; wait $P3 2>/dev/null
 # 5. Mode test (E2E Windows : fermeture par WM_CLOSE) : fermer quitte, comme avant
 TD=$(mktemp -d)
-CUBELINK_TEST_MODE=1 CUBELINK_DATA_DIR=$TD $BIN > /tmp/app4.log 2>&1 & P4=$!
+CUBELINK_TEST_MODE=1 CUBELINK_DATA_DIR=$TD $BIN > "$LOGS/app4.log" 2>&1 & P4=$!
 wait_for mapped && ok "mode test : fenetre montree" || ko "mode test : fenetre non montree"
 wmctrl -c Cubelink
 wait_for "! kill -0 $P4 2>/dev/null" && ok "mode test : fermer quitte" || { ko "mode test : processus encore vivant"; kill $P4; }
 rm -rf "$TD"
-echo "ECHECS: $FAILS"; rm -rf "$HOME"
+echo "ECHECS: $FAILS"
+[ "$FAILS" = 0 ]

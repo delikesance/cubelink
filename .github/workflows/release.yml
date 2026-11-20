@@ -5,7 +5,8 @@
 # « le tag existe déjà » (voulu : pas de double publication).
 # Flux de travail : les PR sont fusionnées dans `canary`, puis `canary` est fusionnée dans `main` (voir docs/release.md).
 # `workflow_dispatch` (depuis n'importe quelle branche) construit tout SANS jamais publier, pour vérifier les builds.
-# Windows : .msi (updater) + paquet .msix à téléverser dans le Microsoft Store (qui le signe).
+# Windows : .msi (updater). Le paquet .msix (Microsoft Store) n'est PAS joint à la release GitHub : non signé, il ne s'installe
+# pas d'un double-clic. Il reste un artefact du run (`windows-msix`), à téléverser à la main dans le Partner Center (qui le signe).
 name: release
 
 on:
@@ -39,7 +40,7 @@ env:
   CARGO_TERM_COLOR: always
   # Les secrets ne sont PAS dans l'environnement global : seules les étapes `tauri build` les reçoivent,
   # pour que ni npm ni les autres étapes ne les voient.
-  # - TAURI_SIGNING_PRIVATE_KEY(_PASSWORD) : signature des mises à jour (`tauri signer generate`).
+  # - TAURI_SIGNING_PRIVATE_KEY(_PASSWORD) : signature des mises à jour (`tauri signer generate`). Obligatoire pour publier (vérifié dès le job `version`).
   # - CUBELINK_CF_API_KEY : clé de développeur CurseForge, embarquée à la compilation (`option_env!`).
   #   Extractible de l'installeur : choix assumé, comme les autres launchers.
   # - CUBELINK_MS_CLIENT_ID : identifiant Azure (facultatif, l'app a une valeur par défaut).
@@ -73,7 +74,11 @@ jobs:
           if [ "$publish" = "true" ] && git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
             echo "Le tag v$version existe déjà" >&2; exit 1
           fi
-          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then echo "::warning::secret TAURI_SIGNING_PRIVATE_KEY absent : les mises à jour ne seront pas signées"; fi
+          # Sans clé de signature, make-latest-json.mjs et `gh release create` échoueraient (pas de .sig) : on le dit tout de suite, pas après 40 min de build.
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            if [ "$publish" = "true" ]; then echo "::error::secret TAURI_SIGNING_PRIVATE_KEY absent : publication impossible sans signature des mises à jour"; exit 1; fi
+            echo "::warning::secret TAURI_SIGNING_PRIVATE_KEY absent : les mises à jour ne seront pas signées, rien ne sera publié"
+          fi
           # Sans clé CurseForge, l'app publiée retomberait sur Modrinth seul (mods CurseForge « hors catalogue ») : on refuse de publier.
           if [ -z "$CUBELINK_CF_API_KEY" ]; then
             if [ "$publish" = "true" ]; then echo "::error::secret CUBELINK_CF_API_KEY absent : publication refusée (mods CurseForge non reconnus)"; exit 1; fi
@@ -118,7 +123,8 @@ jobs:
           name: windows-msi
           path: target/release/bundle/msi/*.msi
       # Paquet MSIX pour le Microsoft Store (non signé : le Store le signe). Les valeurs d'identité viennent du Partner Center
-      # (variables de dépôt MSIX_IDENTITY_NAME, MSIX_PUBLISHER, MSIX_PUBLISHER_DISPLAY_NAME) ; sans elles, paquet de test.
+      # (variables de dépôt MSIX_IDENTITY_NAME, MSIX_PUBLISHER, MSIX_PUBLISHER_DISPLAY_NAME) ; sans elles, identité Placeholder :
+      # paquet de test, à ne pas téléverser. Cet artefact n'est volontairement jamais ajouté à `gh release create` (public).
       - name: Paquet MSIX (Microsoft Store)
         shell: pwsh
         run: >
@@ -199,8 +205,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with: { node-version: 22 }
+      # Seulement les artefacts de build : appelé depuis `ci`, le job verrait aussi ceux des E2E (traces Playwright, volumineuses).
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with: { path: artifacts }
+        with: { pattern: 'windows-*', path: artifacts }
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with: { pattern: 'linux-*', path: artifacts }
       - name: Rassembler les signatures de mise à jour
         shell: bash
         # Les .sig doivent se trouver à côté des fichiers pour make-latest-json.
@@ -220,7 +229,6 @@ jobs:
           tag="${{ needs.version.outputs.tag }}"
           gh release create "$tag" --target "$GITHUB_SHA" --title "Cubelink ${{ needs.version.outputs.version }}" --notes-file notes.md \
             artifacts/windows-msi/*.msi artifacts/windows-msi/*.msi.sig \
-            artifacts/windows-msix/*.msix \
             artifacts/linux-appimage/*.AppImage artifacts/linux-appimage/*.AppImage.sig \
             artifacts/linux-rpm/*.rpm \
             artifacts/latest.json

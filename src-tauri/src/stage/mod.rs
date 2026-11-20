@@ -6,7 +6,8 @@
 //! - reglage « Jeu integre » (`set_wanted`) : lu au lancement, un jeu deja ouvert n'est jamais arrache a la fenetre ;
 //! - repli : quand l'hote renonce (`HostEvent::Fallback`), le lancement en cours n'est plus « dans la Scene » (`staged`),
 //!   l'interface redevient celle du launcher et le joueur est prevenu (`stage://fallback`) ;
-//! - apres `MAX_FALLBACK_STREAK` replis de suite, la Scene est coupee jusqu'au redemarrage (le reglage enregistre ne bouge pas) ;
+//! - apres `MAX_FALLBACK_STREAK` replis de suite, la Scene est coupee pour la session (le reglage enregistre ne bouge pas), jusqu'a `Stage::retry`
+//!   (bouton « Reessayer dans Cubelink ») ou au redemarrage du processus : fermer la fenetre ne fait que la masquer ;
 //! - un rideau ferme a toujours une suite : tout lancement qui n'a pas lieu apres un changement de modpack rouvre le rideau
 //!   sur le launcher (`abort_switch`), toute tache de jeu qui s'arrete le rouvre aussi (`run_finished`) ;
 //! - tout est consigne dans `logs/stage.log` (voir `stage_log`).
@@ -132,9 +133,17 @@ impl Health {
         std::mem::take(&mut self.fell_back)
     }
 
-    /// La Scene est coupee jusqu'au redemarrage.
+    /// La Scene est coupee pour la session (jusqu'a `reset` ou au redemarrage du processus).
     pub fn off(&self) -> bool {
         self.off
+    }
+
+    /// Le joueur redonne sa chance a la Scene : coupure levee, replis de suite oublies (il en faudra de nouveau
+    /// `MAX_FALLBACK_STREAK` pour la recouper). Ne touche ni `adopted` ni `fell_back` : ils decrivent le lancement EN COURS,
+    /// et `finish` doit en rendre le bon `Ending`.
+    pub fn reset(&mut self) {
+        self.streak.clear();
+        self.off = false;
     }
 }
 
@@ -264,7 +273,7 @@ impl Core {
 /// Pur : ligne du journal a la coupure de session, avec la raison de chacun des replis qui l'ont decidee.
 pub fn session_off_line(reasons: &[String]) -> String {
     format!(
-        "Scene desactivee jusqu'au redemarrage de Cubelink : {} replis de suite ({}) ; le reglage enregistre ne change pas",
+        "Scene desactivee pour la session (jusqu'au reessai du joueur ou au redemarrage de Cubelink) : {} replis de suite ({}) ; le reglage enregistre ne change pas",
         reasons.len(),
         reasons.join(", puis ")
     )
@@ -432,6 +441,15 @@ impl Stage {
 
     pub fn wanted(&self) -> bool {
         self.core.wanted.load(Ordering::SeqCst)
+    }
+
+    /// Le joueur demande a la Scene de reessayer (`stage_retry`) : la sante repart de zero, le PROCHAIN lancement repasse par
+    /// la Scene (le lancement en cours, s'il est deja dans sa propre fenetre, n'y revient pas). Rend `available()` : faux si
+    /// l'hote est absent ou si le reglage « Jeu integre » est desactive, pour que l'interface puisse l'expliquer.
+    pub fn retry(&self) -> bool {
+        lock(&self.core.health).reset();
+        self.note("Scene reactivee par le joueur (reessai apres des replis)");
+        self.available()
     }
 
     /// Le lancement EN COURS est dans la Scene : rideau a piloter, sortie du jeu a suivre, panneau « en jeu » possible. Faux

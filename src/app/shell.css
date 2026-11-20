@@ -40,6 +40,7 @@
 /* Jeu ouvert dans sa propre fenêtre (repli de la zone de jeu) : message discret en bas à gauche, superposé au contenu. */
 .stage-notice{position:fixed;left:20px;bottom:20px;z-index:30;display:flex;align-items:center;gap:12px;max-width:min(440px,calc(100vw - 2 * var(--page-pad)));padding:10px 10px 10px 16px;background:var(--surface);border:1px solid var(--line-strong);border-radius:var(--r-lg);box-shadow:var(--shadow-soft);font-size:13px;line-height:1.4;color:var(--text);animation:update-in var(--dur-enter) var(--ease)}
 .stage-notice-txt{min-width:0}
+.stage-notice-actions{display:flex;flex-wrap:wrap;gap:8px;flex:none;justify-content:flex-end}
 .stage-notice .cl-btn{flex:none}
 @media (prefers-reduced-motion:reduce){.stage-notice{animation:none}}
 

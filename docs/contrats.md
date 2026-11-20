@@ -108,6 +108,7 @@ Arguments : clés JSON envoyées à Tauri (snake_case) et leur type TypeScript. 
 | `stage_panel` | `open: boolean` | — | Ouvre (`true`) ou ferme (`false`) le panneau « en jeu » (Echap, bouton Fermer). |
 | `stage_layout` | `x: number`, `y: number`, `w: number`, `h: number`, `panel_w: number` | — | Zone de jeu mesuree par l'interface (element reserve du DOM), en pixels physiques dans la zone cliente de la fenetre. |
 | `stage_supported` | — | `boolean` | La zone de jeu integree existe sur cette plateforme (l'interface n'affiche le reglage « Jeu integre » que dans ce cas). |
+| `stage_retry` | — | `boolean` | Le joueur redonne sa chance a la Scene apres une coupure de session (replis de suite) : le prochain lancement y retourne. Rend vrai si ce prochain lancement ira dans la Scene (hote present, reglage « Jeu integre » actif). |
 | `update_state` | — | `UpdateState_Serialize` | État de la mise à jour automatique du launcher. |
 | `update_check` | — | `UpdateState_Serialize` | Vérifie s'il existe une mise à jour ; si oui, le téléchargement démarre en arrière-plan. |
 | `update_install` | — | — | Redémarre et installe la mise à jour téléchargée (refusé si une partie est en cours). |
@@ -147,7 +148,7 @@ Les types nommés (`Profile`, `TransferProgress`, `HostState`, `StageState`…) 
 | `mods-fix://progress` | `{ done, total, label }` : progression de `mods_fix_apply` |
 | `update://state` | `UpdateState` : état de la mise à jour automatique du launcher |
 | `stage://state` | `StageState` (`{ attached, game, panel }`) : zone de jeu intégrée (jeu rattaché, jeu visible, panneau « en jeu » ouvert) |
-| `stage://fallback` | `{ reason, session_off }` : le jeu n'a pas pu être affiché dans Cubelink et garde sa fenêtre ; `reason` va au journal `stage.log`, jamais au joueur ; `session_off` : repli jusqu'au redémarrage de Cubelink |
+| `stage://fallback` | `{ reason, session_off }` : le jeu n'a pas pu être affiché dans Cubelink et garde sa fenêtre ; `reason` va au journal `stage.log`, jamais au joueur ; `session_off` : la Scène est coupée pour la session (jusqu'à `stage_retry` ou au redémarrage du processus ; fermer la fenêtre ne suffit pas, elle reste en zone de notification) |
 | `stage://fullscreen` | `boolean` : le jeu demande (F11) ou quitte le plein écran ; le launcher passe la fenêtre en plein écran tant que le jeu est rattaché et visible |
 
 ## Règles

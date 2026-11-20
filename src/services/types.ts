@@ -326,6 +326,8 @@ export interface Services {
 
   /** Zone de jeu intégrée (Windows, Linux X11) : elle existe sur ce système. */
   stageSupported(): Promise<boolean>;
+  /** Redonne sa chance à la Scène après une coupure de session ; vrai si le prochain lancement ira dans la zone de jeu. */
+  stageRetry(): Promise<boolean>;
   stageState(): Promise<StageState>;
   /** Bascule entre le jeu (`true`) et le launcher (bouton de la barre de titre). */
   stageView(game: boolean): Promise<void>;

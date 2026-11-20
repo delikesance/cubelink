@@ -288,3 +288,24 @@ fn repli_apres_un_changement_de_modpack_le_rideau_se_rouvre() {
     stage.run_finished();
     assert_eq!(fake.count("run_finished"), before);
 }
+
+#[test]
+fn reessai_apres_coupure_le_lancement_suivant_repasse_par_la_scene() {
+    let (stage, _fake) = FakeHost::stage();
+    let p = Path::new("x");
+    for _ in 0..2 {
+        stage.begin("Jeu", p, p);
+        stage.core.on_fallback("no_window", "x");
+        stage.run_finished();
+    }
+    assert!(!stage.available(), "session coupee");
+    assert!(stage.retry(), "hote present et reglage actif : le prochain lancement ira dans la Scene");
+    assert!(stage.available());
+    stage.begin("Jeu", p, p);
+    assert!(stage.staged(), "le lancement suivant est de nouveau dans la Scene");
+    stage.core.on_fallback("no_window", "x");
+    stage.run_finished();
+    assert!(stage.available(), "un seul repli depuis le reessai : pas de nouvelle coupure");
+    stage.set_wanted(false);
+    assert!(!stage.retry(), "reglage « Jeu integre » desactive : rien a retenter");
+}

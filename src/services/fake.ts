@@ -69,7 +69,7 @@ export interface FakeControls {
   /** Test : émet stage://fullscreen. */
   emitStageFullscreen(on: boolean): void;
   /** Test : appels enregistrés de stageView, stagePanel, stageLayout et setFullscreen, dans l'ordre. */
-  readonly stageCalls: Array<{ cmd: "view" | "panel" | "layout" | "fullscreen"; arg: unknown }>;
+  readonly stageCalls: Array<{ cmd: "view" | "panel" | "layout" | "fullscreen" | "retry"; arg?: unknown }>;
 }
 
 /** Hash du manifeste simulé, renvoyé par `joinPlan` et exigé par `joinStart`. */
@@ -1053,6 +1053,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     onFilesDropped: (cb) => sub(listeners.drop, cb),
 
     stageSupported: async () => opts.stageSupported === true,
+    stageRetry: async () => { stageCalls.push({ cmd: "retry" }); return opts.stageSupported === true; },
     stageState: async () => ({ ...stageSt }),
     stageView: async (game) => { stageCalls.push({ cmd: "view", arg: game }); if (stageSt.attached) setStage({ game }); },
     stagePanel: async (open) => { stageCalls.push({ cmd: "panel", arg: open }); if (stageSt.attached) setStage({ panel: open }); },

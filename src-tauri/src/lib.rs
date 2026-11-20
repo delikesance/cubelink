@@ -136,6 +136,7 @@ macro_rules! commands {
             stage::commands::stage_panel,
             stage::commands::stage_layout,
             stage::commands::stage_supported,
+            stage::commands::stage_retry,
             $($extra)*
         ]
     };

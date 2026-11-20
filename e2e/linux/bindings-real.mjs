@@ -122,6 +122,7 @@ const SCENARIO = async () => {
   await step("gameCurrent", () => svc.gameCurrent());
   await step("browseCheck (inconnue)", () => svc.browseCheck("modrinth", "sodium", "mod", "absente", "v1"), true);
   await step("stageSupported", () => svc.stageSupported());
+  await step("stageRetry", () => svc.stageRetry());
   await step("stageState", () => svc.stageState());
   await step("stageLayout", () => svc.stageLayout({ x: 0, y: 36, w: 1100, h: 684, panel_w: 380 }));
   await step("stagePanel", () => svc.stagePanel(false));

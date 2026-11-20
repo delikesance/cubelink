@@ -39,6 +39,69 @@ fn deux_replis_de_suite_coupent_la_session() {
 }
 
 #[test]
+fn reessai_leve_la_coupure_et_recompte_depuis_zero() {
+    let mut h = Health::default();
+    for r in ["a", "b"] {
+        h.begin();
+        h.fallback(true, r);
+        h.finish();
+    }
+    assert!(h.off());
+    h.reset();
+    assert!(!h.off(), "coupure levee");
+    // un seul repli ne recoupe pas : la serie precedente est oubliee
+    h.begin();
+    assert_eq!(h.fallback(true, "c"), None);
+    h.finish();
+    assert!(!h.off());
+    h.begin();
+    assert_eq!(h.fallback(true, "d"), Some(vec!["c".to_string(), "d".to_string()]), "recoupe au deuxieme repli depuis le reessai");
+}
+
+#[test]
+fn reessai_pendant_un_lancement_garde_ses_drapeaux() {
+    let mut h = Health::default();
+    h.begin();
+    h.adopted();
+    h.fallback(true, "a");
+    h.reset();
+    assert!(h.finish(), "le lancement en cours reste replie : `finish` le rend une seule fois");
+    // lancement adopte et sain : sa fin efface la serie, meme apres un reset
+    h.begin();
+    h.adopted();
+    h.reset();
+    assert!(!h.finish());
+}
+
+#[test]
+fn stage_retry_rend_la_scene_au_prochain_lancement() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = Stage::default();
+    s.open_log(dir.path());
+    s.set_wanted(true);
+    for _ in 0..2 {
+        s.core.begin_launch();
+        s.core.on_fallback("adoption_failed", "styles refuses");
+        s.run_finished();
+    }
+    assert!(lock(&s.core.health).off(), "session coupee apres deux replis");
+    // sans hote (tests, Wayland natif) : rien a retenter, la reponse le dit, mais la sante est quand meme remise a zero
+    assert!(!s.retry());
+    assert!(!lock(&s.core.health).off());
+    assert_eq!(s.unavailable_reason(), Some("zone de jeu integree absente"), "plus la coupure de session");
+    // un nouveau repli ne recoupe pas tout de suite
+    s.core.begin_launch();
+    s.core.on_fallback("no_window", "x");
+    s.run_finished();
+    assert!(!lock(&s.core.health).off());
+    let Stage { core, .. } = s;
+    let core = Arc::try_unwrap(core).ok().expect("seul proprietaire");
+    core.outbox.into_inner().unwrap().finish();
+    let text = std::fs::read_to_string(dir.path().join(crate::stage_log::FILE_NAME)).unwrap();
+    assert!(text.contains("[launcher] Scene reactivee par le joueur"), "{text}");
+}
+
+#[test]
 fn un_lancement_reussi_efface_les_replis_precedents() {
     let mut h = Health::default();
     h.begin();
@@ -161,7 +224,7 @@ fn journal_decisions_et_evenements_de_l_hote() {
     assert!(lines[4].ends_with("[hote] repli (hook_failed) : acces refuse"));
     assert!(lines[5].ends_with("[launcher] jeu termine (hors Scene apres repli), code de sortie -1"), "{text}");
     assert!(lines[6].ends_with("[hote] repli (no_window) : rien apres 240 s"));
-    assert!(lines[7].contains("[launcher] Scene desactivee jusqu'au redemarrage de Cubelink : 2 replis de suite (hook_failed, puis no_window)"), "{text}");
+    assert!(lines[7].contains("[launcher] Scene desactivee pour la session (jusqu'au reessai du joueur ou au redemarrage de Cubelink) : 2 replis de suite (hook_failed, puis no_window)"), "{text}");
     assert!(lines[8].ends_with("[launcher] jeu termine (hors Scene apres repli)"), "sans code de sortie connu : {text}");
 }
 

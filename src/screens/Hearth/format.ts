@@ -81,6 +81,11 @@ export function crashText(c: HearthCard): string | null {
   return `${who} a planté (${cause}).`;
 }
 
+/** Le modpack contient Simple Voice Chat : le serveur ne le charge pas, la voix ne se connectera pas. `null` sinon. */
+export function voiceText(c: HearthCard): string | null {
+  return c.voice_unsupported ? "Chat vocal non pris en charge : le mod ne sera pas chargé sur le serveur du groupe." : null;
+}
+
 export type MainAction =
   | { kind: "play"; label: string }
   | { kind: "stop"; label: string }

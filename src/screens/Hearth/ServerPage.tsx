@@ -8,7 +8,7 @@ import type { FriendWithPresence, HearthDetail, HearthProposal, Instance, Servic
 import { Select, BackButton, Badge, Button, Card, Icon, ICONS, StatusDot } from "../../ui";
 import { Avatar } from "../Friends/Avatar";
 import { Modal } from "../Main/Modal";
-import { crashText, errText, fmtDate, fmtPlayed, fmtSize, mainAction, plural, resumeLabel, stateHint, stateText } from "./format";
+import { crashText, voiceText, errText, fmtDate, fmtPlayed, fmtSize, mainAction, plural, resumeLabel, stateHint, stateText } from "./format";
 import { useHearthRun } from "./usePlay";
 
 const TABS = [["membres", "Membres"], ["historique", "Historique"], ["reglages", "Réglages"]] as const;
@@ -353,6 +353,16 @@ export default function ServerPage({ id }: { id: string }) {
                 ? "Le monde de cette partie n'a pas été publié : il est gardé de côté sur ce PC, à toi de choisir ce que tu en fais."
                 : "Son monde n'a pas été publié : le groupe repart du dernier point de reprise."}
             </span>
+          </span>
+        </div>
+      )}
+
+      {voiceText(c) && (
+        <div className="hearth-banner" role="status">
+          <Icon d={ICONS.alert} size={20} />
+          <span className="hearth-row-txt">
+            <strong>Chat vocal non pris en charge</strong>
+            <span className="hearth-meta">Le serveur du groupe ne passe que par le tunnel de Cubelink, qui ne transporte pas la voix. Le mod reste chez toi mais ne sera pas chargé sur le serveur : jouez sans voix, ou utilisez une application de discussion à part.</span>
           </span>
         </div>
       )}

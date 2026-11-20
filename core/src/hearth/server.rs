@@ -156,38 +156,18 @@ pub fn eula_accepted(dir: &Path) -> bool {
 }
 
 /// Réglages imposés à `server.properties` : en ligne (comptes Mojang vérifiés), local seulement (les amis passent par
-/// le tunnel), port choisi, monde `world`.
+/// le tunnel), port choisi, monde `world`, et ni RCON ni `query` (deux ports que le pilotage par l'entrée standard rend
+/// inutiles, et qui écoutent sur toutes les interfaces quand ils sont activés).
 pub fn render_server_properties(existing: &str, port: u16) -> String {
-    let forced: [(&str, String); 4] = [
+    let forced: [(&str, String); 6] = [
         ("online-mode", "true".into()),
         ("server-ip", "127.0.0.1".into()),
         ("server-port", port.to_string()),
         ("level-name", "world".into()),
+        ("enable-rcon", "false".into()),
+        ("enable-query", "false".into()),
     ];
-    let mut done = [false; 4];
-    let mut out = String::new();
-    for line in existing.lines() {
-        let key = line.trim_start().split(['=', ':']).next().unwrap_or("").trim();
-        let idx = forced.iter().position(|(k, _)| !line.trim_start().starts_with(['#', '!']) && *k == key);
-        match idx {
-            Some(i) if !done[i] => {
-                done[i] = true;
-                out.push_str(&format!("{}={}\n", forced[i].0, forced[i].1));
-            }
-            // Doublon d'une clé déjà réécrite : supprimé.
-            Some(_) => {}
-            None => {
-                out.push_str(line);
-                out.push('\n');
-            }
-        }
-    }
-    for (i, (k, v)) in forced.iter().enumerate() {
-        if !done[i] {
-            out.push_str(&format!("{k}={v}\n"));
-        }
-    }
-    out
+    super::netguard::rewrite_properties(existing, &forced)
 }
 
 /// Un port TCP libre sur 127.0.0.1 (fenêtre de course minime entre ce choix et l'ouverture par le serveur).
@@ -257,6 +237,8 @@ pub struct ModSideInfo {
     pub server_side: Option<Side>,
     /// Le jar se déclare lui-même client seulement (`environment` de Fabric/Quilt, dépendance `side = "CLIENT"`).
     pub declares_client_only: bool,
+    /// Identifiants dont le jar dépend obligatoirement (pour retirer les addons d'un mod qu'on ne charge pas).
+    pub requires: Vec<String>,
 }
 
 /// Décision pour un mod : `Some(raison)` s'il faut l'écarter du serveur.
@@ -264,6 +246,9 @@ pub struct ModSideInfo {
 /// Ordre : la donnée explicite de Modrinth l'emporte (`unsupported` écarte, `required`/`optional` garde) ; sinon la
 /// déclaration du jar ; sinon la liste [`KNOWN_CLIENT_ONLY`].
 pub fn client_only_reason(info: &ModSideInfo) -> Option<String> {
+    if let Some(reason) = voice_chat_reason(info) {
+        return Some(reason);
+    }
     match info.server_side {
         Some(Side::Unsupported) => return Some("Modrinth : ne fonctionne pas côté serveur".into()),
         Some(Side::Required | Side::Optional) => return None,
@@ -276,6 +261,17 @@ pub fn client_only_reason(info: &ModSideInfo) -> Option<String> {
         .iter()
         .find(|id| KNOWN_CLIENT_ONLY.iter().any(|k| k.eq_ignore_ascii_case(id)))
         .map(|id| format!("mod client connu : {id}"))
+}
+
+/// Le chat vocal n'est pas chargé côté serveur : le tunnel ne transporte pas l'UDP, et Simple Voice Chat ouvre un port
+/// UDP sur toutes les interfaces. Écarte aussi ses addons (sans lui, le serveur refuserait de démarrer). Prime sur la
+/// donnée de Modrinth : même « requis » côté serveur, il n'a pas sa place ici.
+fn voice_chat_reason(info: &ModSideInfo) -> Option<String> {
+    use super::netguard::{is_voice_chat_id, VOICE_UNSUPPORTED};
+    if info.mod_ids.iter().any(|id| is_voice_chat_id(id)) {
+        return Some(VOICE_UNSUPPORTED.into());
+    }
+    info.requires.iter().any(|id| is_voice_chat_id(id)).then(|| format!("{VOICE_UNSUPPORTED} (addon du chat vocal)"))
 }
 
 /// Mod écarté, avec la raison.
@@ -319,6 +315,13 @@ pub fn jar_side_info(path: &Path) -> ModSideInfo {
                 .iter()
                 .all(|m| m.deps.iter().any(|d| d.id == "minecraft" && d.side.eq_ignore_ascii_case("CLIENT")));
         info.declares_client_only = forge_client;
+        info.requires = meta
+            .mods
+            .iter()
+            .flat_map(|m| m.deps.iter())
+            .filter(|d| d.kind == crate::mod_meta::DepKind::Required)
+            .map(|d| d.id.clone())
+            .collect();
     }
     if !info.declares_client_only {
         info.declares_client_only = jar_environment_is_client(path);
@@ -920,7 +923,7 @@ async fn get_limited(http: &reqwest::Client, url: &str, limit: u64) -> Result<Ve
     Ok(out)
 }
 
-async fn write_atomic(dest: &Path, data: &[u8]) -> Result<()> {
+pub(super) async fn write_atomic(dest: &Path, data: &[u8]) -> Result<()> {
     let mut tmp = dest.as_os_str().to_owned();
     tmp.push(".tmp");
     let tmp = PathBuf::from(tmp);
@@ -1059,7 +1062,29 @@ impl DedicatedServer {
             server.kill().await;
             return Err(e);
         }
+        if let Err(e) = server.check_exposure().await {
+            // Arrêt propre : le monde vient d'être chargé, rien à perdre, mais autant le laisser se refermer.
+            server.stop(Duration::from_secs(15)).await;
+            return Err(e);
+        }
         Ok(server)
+    }
+
+    /// Contrôle des sockets du processus Java (§ 6.7) : toute écoute hors boucle locale est une erreur qui nomme le mod
+    /// probable et le port. À appeler une fois `Done (` vu ; [`DedicatedServer::start`] le fait. Ne s'applique qu'au
+    /// processus lancé directement, pas à ses éventuels enfants.
+    pub async fn check_exposure(&self) -> Result<()> {
+        if self.pid == 0 || !self.is_running() {
+            return Ok(());
+        }
+        let found = super::netguard::audit(self.pid).await;
+        let Some(first) = found.first() else { return Ok(()) };
+        let lines = self.shared.tail(KEEP_LINES);
+        let dir = self.dir.clone();
+        let port = first.port;
+        let hint = tokio::task::spawn_blocking(move || super::netguard::probable_mod(port, &dir, &lines)).await.ok().flatten();
+        tracing::warn!("le serveur écoute hors de la boucle locale : {found:?}");
+        Err(Error::Other(super::netguard::exposure_message(first, hint.as_deref())))
     }
 
     /// Comme [`DedicatedServer::start`], sans attendre que le serveur soit prêt.
@@ -1084,6 +1109,10 @@ impl DedicatedServer {
         let props_path = dir.join("server.properties");
         let existing = tokio::fs::read_to_string(&props_path).await.unwrap_or_default();
         tokio::fs::write(&props_path, render_server_properties(&existing, port)).await?;
+        // Configs des mods qui ouvrent un port : liées à la boucle locale avant le démarrage (§ 6.7).
+        for rel in super::netguard::harden_configs(&dir).await? {
+            tracing::info!("config du serveur liée à 127.0.0.1 : {rel}");
+        }
 
         let mut args: Vec<String> = vec![format!("-Xmx{}M", cfg.ram_mb), format!("-Xms{}M", cfg.ram_mb.min(1024))];
         args.extend(cfg.extra_jvm_args.iter().cloned());
@@ -1421,7 +1450,10 @@ mod tests {
         assert!(eula_accepted(t.path()));
 
         let out = render_server_properties("", 25599);
-        assert_eq!(out, "online-mode=true\nserver-ip=127.0.0.1\nserver-port=25599\nlevel-name=world\n");
+        assert_eq!(
+            out,
+            "online-mode=true\nserver-ip=127.0.0.1\nserver-port=25599\nlevel-name=world\nenable-rcon=false\nenable-query=false\n"
+        );
         let existing = "#Minecraft server properties\nmotd=Chez nous\nonline-mode=false\nserver-port : 25565\nserver-ip=\nonline-mode=false\n#level-name=autre\nmax-players=5\n";
         let out = render_server_properties(existing, 4242);
         assert!(out.contains("motd=Chez nous\n"));
@@ -1433,6 +1465,10 @@ mod tests {
         assert!(out.contains("server-port=4242\n"));
         assert!(!out.contains("25565"));
         assert!(out.contains("level-name=world\n"));
+        // RCON et `query` ouvrent des ports sur toutes les interfaces : forcés éteints, même si le pack les active.
+        let out = render_server_properties("enable-rcon=true\nrcon.port=25575\nenable-query=true\n", 4242);
+        assert!(out.contains("enable-rcon=false\n") && out.contains("enable-query=false\n") && out.contains("rcon.port=25575\n"));
+        assert!(!out.contains("=true\nrcon") && !out.contains("enable-rcon=true"));
         // Idempotent.
         assert_eq!(render_server_properties(&out, 4242), out);
     }
@@ -1459,6 +1495,7 @@ mod tests {
             mod_ids: ids.iter().map(|s| s.to_string()).collect(),
             server_side: side,
             declares_client_only: client,
+            ..ModSideInfo::default()
         };
         let mods = vec![
             info("a.jar", &["lithium"], None, false),
@@ -1521,6 +1558,38 @@ mod tests {
         // Dossier du pack absent : serveur sans mods.
         assert_eq!(sync_server_mods(&t.path().join("absent"), &srv, &side).unwrap(), ModFilter::default());
         assert!(std::fs::read_dir(&srv).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn voice_chat_and_its_addons_stay_off_the_server() {
+        let t = tempfile::tempdir().unwrap();
+        let pack = t.path().join("pack");
+        let srv = t.path().join("srv").join("mods");
+        std::fs::create_dir_all(&pack).unwrap();
+        std::fs::create_dir_all(&srv).unwrap();
+        make_jar(&pack.join("lithium.jar"), &[("fabric.mod.json", r#"{"schemaVersion":1,"id":"lithium","version":"1"}"#)]);
+        make_jar(&pack.join("voicechat-fabric.jar"), &[("fabric.mod.json", r#"{"schemaVersion":1,"id":"voicechat","version":"2.5","environment":"*"}"#)]);
+        make_jar(
+            &pack.join("addon.jar"),
+            &[("fabric.mod.json", r#"{"schemaVersion":1,"id":"svc_addon","version":"1","depends":{"voicechat":"*"}}"#)],
+        );
+        make_jar(
+            &pack.join("forge-voice.jar"),
+            &[("META-INF/mods.toml", "modLoader=\"javafml\"\nloaderVersion=\"[1,)\"\n[[mods]]\nmodId=\"voicechat\"\nversion=\"2.5\"\n")],
+        );
+        // Déjà copié lors d'un démarrage précédent : retiré aussi.
+        std::fs::copy(pack.join("voicechat-fabric.jar"), srv.join("voicechat-fabric.jar")).unwrap();
+        // Modrinth le dit « requis » côté serveur : la donnée explicite ne le garde pas.
+        let mut side = HashMap::new();
+        side.insert("voicechat-fabric.jar".to_string(), Side::Required);
+        let f = sync_server_mods(&pack, &srv, &side).unwrap();
+        assert_eq!(f.kept, vec!["lithium.jar"]);
+        let mut skipped: Vec<(&str, &str)> = f.skipped.iter().map(|s| (s.file_name.as_str(), s.reason.as_str())).collect();
+        skipped.sort();
+        assert_eq!(skipped.iter().map(|s| s.0).collect::<Vec<_>>(), vec!["addon.jar", "forge-voice.jar", "voicechat-fabric.jar"]);
+        assert!(skipped.iter().all(|s| s.1.starts_with("Chat vocal non pris en charge")), "{skipped:?}");
+        let present: Vec<String> = std::fs::read_dir(&srv).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        assert_eq!(present, vec!["lithium.jar"]);
     }
 
     #[test]
@@ -1812,6 +1881,82 @@ done
             let msg = err.to_string();
             assert!(msg.contains("badmod"), "{msg}");
             assert!(msg.contains("code 1"), "{msg}");
+        }
+
+        /// Faux serveur qui ouvre un vrai socket TCP sur `bind:port` puis annonce `Done (` ; c'est le processus lancé par
+        /// `DedicatedServer` lui-même (`exec`), comme le Java réel : le contrôle voit donc ses sockets.
+        fn listening_java(dir: &Path, bind: &str, port: u16) -> PathBuf {
+            let py = format!(
+                "import socket,sys\ns=socket.socket()\ns.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)\ns.bind(('{bind}',{port}))\ns.listen(5)\nprint('[12:00:01] [Server thread/INFO]: Done (1s)!',flush=True)\nfor l in sys.stdin:\n    if l.strip()=='stop': sys.exit(0)\n"
+            );
+            std::fs::write(dir.join("listen.py"), py).unwrap();
+            fake_java(dir, &format!("exec python3 {}", dir.join("listen.py").display()))
+        }
+
+        fn connectable(port: u16) -> bool {
+            std::net::TcpStream::connect_timeout(&std::net::SocketAddr::from(([127, 0, 0, 1], port)), Duration::from_millis(500)).is_ok()
+        }
+
+        #[tokio::test]
+        async fn exposed_listener_stops_the_server_and_names_the_mod() {
+            let t = tempfile::tempdir().unwrap();
+            let dir = t.path().join("srv");
+            let port = free_port().unwrap();
+            // BlueMap est installé, mais sa config n'existait pas au premier démarrage : la garde est le filet.
+            std::fs::create_dir_all(dir.join("config/bluemap")).unwrap();
+            std::fs::write(dir.join("config/bluemap/other.conf"), format!("port: {port}\n")).unwrap();
+            let java = listening_java(t.path(), "0.0.0.0", port);
+            let err = DedicatedServer::start(&cfg(&dir, &java), &installed(&dir)).await.err().expect("doit être refusé");
+            let msg = err.to_string();
+            assert!(msg.starts_with(&format!("BlueMap ouvre le port {port} sur ton réseau : le serveur a été arrêté.")), "{msg}");
+            // Rien n'écoute plus.
+            assert!(!connectable(port), "le serveur est encore joignable");
+        }
+
+        #[tokio::test]
+        async fn exposed_listener_without_known_mod_is_still_refused() {
+            let t = tempfile::tempdir().unwrap();
+            let dir = t.path().join("srv");
+            let port = free_port().unwrap();
+            let java = listening_java(t.path(), "0.0.0.0", port);
+            let err = DedicatedServer::start(&cfg(&dir, &java), &installed(&dir)).await.err().expect("doit être refusé");
+            assert!(err.to_string().starts_with(&format!("Un mod du serveur ouvre le port {port}")), "{err}");
+            assert!(!connectable(port));
+        }
+
+        #[tokio::test]
+        async fn loopback_only_listener_is_accepted() {
+            let t = tempfile::tempdir().unwrap();
+            let dir = t.path().join("srv");
+            let port = free_port().unwrap();
+            let java = listening_java(t.path(), "127.0.0.1", port);
+            let server = DedicatedServer::start(&cfg(&dir, &java), &installed(&dir)).await.unwrap();
+            assert!(connectable(port));
+            // Le contrôle voit bien le socket (sinon le test précédent passerait pour de mauvaises raisons).
+            let all = crate::hearth::netguard::listeners_of(server.pid()).unwrap();
+            assert!(all.iter().any(|l| l.port == port && crate::hearth::netguard::is_loopback(&l.addr)), "{all:?}");
+            assert!(crate::hearth::netguard::audit(server.pid()).await.is_empty());
+            server.stop(Duration::from_secs(10)).await;
+        }
+
+        #[tokio::test]
+        async fn known_web_configs_are_bound_to_loopback_before_start() {
+            let t = tempfile::tempdir().unwrap();
+            let dir = t.path().join("srv");
+            std::fs::create_dir_all(dir.join("config/bluemap")).unwrap();
+            std::fs::create_dir_all(dir.join("config/dynmap")).unwrap();
+            std::fs::write(dir.join("config/bluemap/webserver.conf"), "ip: \"0.0.0.0\"\nport: 8100\n").unwrap();
+            std::fs::write(dir.join("config/dynmap/configuration.txt"), "webserver-bindaddress: 0.0.0.0\nwebserver-port: 8123\n").unwrap();
+            let java = fake_java(t.path(), WORKING);
+            let server = DedicatedServer::start(&cfg(&dir, &java), &installed(&dir)).await.unwrap();
+            assert_eq!(std::fs::read_to_string(dir.join("config/bluemap/webserver.conf")).unwrap(), "ip: \"127.0.0.1\"\nport: 8100\n");
+            assert_eq!(
+                std::fs::read_to_string(dir.join("config/dynmap/configuration.txt")).unwrap(),
+                "webserver-bindaddress: 127.0.0.1\nwebserver-port: 8123\n"
+            );
+            // Squaremap et Simple Voice Chat ne sont pas installés : rien n'est créé.
+            assert!(!dir.join("config/squaremap").exists() && !dir.join("config/voicechat").exists());
+            server.stop(Duration::from_secs(10)).await;
         }
 
         #[tokio::test]

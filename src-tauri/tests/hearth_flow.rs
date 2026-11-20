@@ -481,6 +481,30 @@ async fn on_peut_heberger_sans_personne_d_autre_en_ligne() {
     a.stop().await;
 }
 
+/// Simple Voice Chat dans les mods de l'instance (§ 6.7) : la carte porte `voice_unsupported`, qui suit l'ajout et le
+/// retrait du jar (le serveur du groupe ne charge pas le chat vocal).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn carte_signale_le_chat_vocal_non_pris_en_charge() {
+    let a = Peer::start("Alice").await;
+    let b = Peer::start("Bob").await;
+    befriend(&a.node, &b.node).await;
+    wait_for("ami chez Bob", 20, || b.node.st.friends.is_friend(&a.node.key()).unwrap()).await;
+    let card = a.node.st.hearth_create("Duo", &a.instance, None, vec![b.node.key()]).await.unwrap();
+    b.stop().await;
+    let g = GroupId::from_hex(&card.id).unwrap();
+    assert!(!a.rt().card(&g).unwrap().voice_unsupported);
+    let mods = a.node.st.instances.game_dir(&a.instance).unwrap().join("mods");
+    std::fs::create_dir_all(&mods).unwrap();
+    std::fs::write(mods.join("lithium-fabric-0.13.jar"), b"x").unwrap();
+    assert!(!a.rt().card(&g).unwrap().voice_unsupported, "un autre mod ne déclenche rien");
+    std::fs::write(mods.join("voicechat-fabric-1.21.1-2.5.26.jar"), b"x").unwrap();
+    // La date du dossier change à chaque ajout : le cache ne masque pas le nouveau jar.
+    assert!(a.rt().card(&g).unwrap().voice_unsupported);
+    std::fs::remove_file(mods.join("voicechat-fabric-1.21.1-2.5.26.jar")).unwrap();
+    assert!(!a.rt().card(&g).unwrap().voice_unsupported);
+    a.stop().await;
+}
+
 /// Point de reprise interrompu pendant l'attente de `save-on` (arrêt du serveur au même moment) : la version de reprise
 /// est déjà enregistrée, la `Session` finale doit en être l'enfant. Sinon V et S seraient deux enfants du même parent :
 /// deux têtes, donc une fausse fourche « Deux versions » après une partie normale.

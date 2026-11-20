@@ -585,6 +585,21 @@ describe("Page du serveur", () => {
     expect(screen.queryByText(/a planté/)).toBeNull();
   });
 
+  it("chat vocal (§ 6.7) : la carte et la page disent que le mod n'est pas pris en charge", async () => {
+    home({ id: "g1", name: "Les copains", voice_unsupported: true });
+    const card = await screen.findByRole("listitem", { name: "Serveur Les copains" });
+    expect(within(card).getByText(/Chat vocal non pris en charge/)).toBeTruthy();
+    cleanup();
+    page({ id: "g1" }, { id: "g1", name: "Les copains", voice_unsupported: true });
+    expect(await screen.findByText("Chat vocal non pris en charge")).toBeTruthy();
+  });
+
+  it("sans chat vocal dans le modpack, aucun message de voix", async () => {
+    home({ id: "g1", name: "Les copains" });
+    await screen.findByRole("listitem", { name: "Serveur Les copains" });
+    expect(screen.queryByText(/Chat vocal/)).toBeNull();
+  });
+
   it("modpack absent : associer une instance locale", async () => {
     const { services } = page({ id: "g1" }, { id: "g1", name: "Les copains", state: "pack_missing", can_host: false, instance_id: null });
     fireEvent.click(await screen.findByRole("button", { name: /Utiliser Create: Aeronautics/ }));

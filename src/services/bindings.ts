@@ -567,6 +567,11 @@ export type HearthCard_Deserialize = {
 	orphans: number,
 	/**  Le serveur a planté à la fin de la dernière partie (`None` tant qu'un nouveau serveur n'a pas été lancé). */
 	crash?: HearthCrash_Deserialize | null,
+	/**
+	 *  Le modpack de l'instance liée contient Simple Voice Chat : le serveur ne le charge pas (le tunnel ne transporte
+	 *  pas l'UDP), la voix ne fonctionnera pas. Repéré sur les noms de jars de l'instance, sans les ouvrir.
+	 */
+	voice_unsupported?: boolean,
 };
 
 /**  Carte d'un serveur de groupe sur l'accueil (événement `hearth://state`, commande `hearth_list`). */
@@ -602,6 +607,11 @@ export type HearthCard_Serialize = {
 	orphans: number,
 	/**  Le serveur a planté à la fin de la dernière partie (`None` tant qu'un nouveau serveur n'a pas été lancé). */
 	crash: HearthCrash_Serialize | null,
+	/**
+	 *  Le modpack de l'instance liée contient Simple Voice Chat : le serveur ne le charge pas (le tunnel ne transporte
+	 *  pas l'UDP), la voix ne fonctionnera pas. Repéré sur les noms de jars de l'instance, sans les ouvrir.
+	 */
+	voice_unsupported: boolean,
 };
 
 /**  Dernier plantage du serveur d'un groupe : qui l'hébergeait et le mod probablement en cause. */

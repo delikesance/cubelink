@@ -585,6 +585,8 @@ pub struct HearthRuntime {
     /// Dernier plantage de serveur connu par groupe (hôte, mod probable) : annoncé par `LeaseRelease { Crashed }`, ou vu
     /// chez moi. Effacé dès qu'un nouveau bail est accepté ou que je lance un serveur.
     crashes: Mutex<HashMap<GroupId, (PeerKey, Option<String>)>>,
+    /// Simple Voice Chat présent dans les mods d'une instance : (date du dossier `mods`, réponse), par instance.
+    voice_cache: Mutex<HashMap<String, (Option<std::time::SystemTime>, bool)>>,
     me_weak: Weak<HearthRuntime>,
 }
 
@@ -759,6 +761,7 @@ impl HearthRuntime {
             clock: Mutex::new(Arc::new(SystemClock)),
             best_effort: Mutex::new(HashMap::new()),
             crashes: Mutex::new(HashMap::new()),
+            voice_cache: Mutex::new(HashMap::new()),
             me_weak: w.clone(),
         }))
     }
@@ -3298,6 +3301,25 @@ impl HearthRuntime {
         self.emit_json("hearth://state", &self.cards());
     }
 
+    /// Le dossier `mods` de l'instance contient Simple Voice Chat (ou un addon), repéré sur le nom des jars : le serveur
+    /// du groupe ne le charge pas (§ 6.7). Le cache est par dossier et date de modification, la carte est recalculée souvent.
+    fn pack_has_voice_chat(&self, instance_id: &str) -> bool {
+        let Ok(dir) = self.instances.game_dir(instance_id) else { return false };
+        let mods = dir.join("mods");
+        let stamp = std::fs::metadata(&mods).and_then(|m| m.modified()).ok();
+        let mut cache = lock(&self.voice_cache);
+        if let Some((s, v)) = cache.get(instance_id) {
+            if *s == stamp {
+                return *v;
+            }
+        }
+        let found = std::fs::read_dir(&mods)
+            .map(|rd| rd.filter_map(Result::ok).any(|e| core_lib::hearth::netguard::is_voice_chat_file(&e.file_name().to_string_lossy())))
+            .unwrap_or(false);
+        cache.insert(instance_id.to_string(), (stamp, found));
+        found
+    }
+
     pub fn cards(&self) -> Vec<HearthCard> {
         let mut v: Vec<HearthCard> = self.group_ids().iter().filter_map(|g| self.card(g)).collect();
         v.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()).then(a.id.cmp(&b.id)));
@@ -3331,6 +3353,7 @@ impl HearthRuntime {
             version: heads.first().map(|h| h.header.number),
             orphans: self.orphan_count(gid) as u32,
             crash: None,
+            voice_unsupported: instance_id.as_deref().is_some_and(|i| self.pack_has_voice_chat(i)),
         };
         let decision = self.decision(gid);
         let holder_of = |k: &PeerKey| Some(self.lite(&st, k));

@@ -354,7 +354,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     ];
     const card: HearthCard = {
       minecraft: "1.21.1", loader: "NeoForge", state: "idle", host: null, players: 0, progress: null, step: null, step_index: null,
-      step_count: 3, unclean: null, crash: null, members_online: [], members_total: members.length, is_creator: true, can_host: true,
+      step_count: 3, unclean: null, crash: null, voice_unsupported: false, members_online: [], members_total: members.length, is_creator: true, can_host: true,
       instance_id: "inst-aeronautics", version: 1, orphans: d.orphans?.length ?? 0, ...p,
     };
     const g: HearthDetail = {

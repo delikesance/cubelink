@@ -887,7 +887,7 @@ impl P2pBackend for IrohBackend {
         let Some(k) = hex::decode(public_key).ok().and_then(|b| <[u8; 32]>::try_from(b).ok()) else {
             return Presence::Offline;
         };
-        self.presence.snapshot().get(&k).copied().unwrap_or(Presence::Offline)
+        self.presence.presence_of(&k)
     }
 
     fn in_game(&self, public_key: &str) -> bool {

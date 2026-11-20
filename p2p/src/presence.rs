@@ -333,6 +333,13 @@ impl PresenceService {
             .collect()
     }
 
+    /// Présence d'un seul pair : lecture mémoire en O(1), sans relire la liste d'amis en base (contrairement à
+    /// `snapshot`). Hors ligne tant qu'aucune sonde n'a réussi ; un ami retiré garde son état jusqu'au prochain tour
+    /// (qui oublie les non-amis), ce qui est sans effet pour un appelant qui n'interroge que ses amis.
+    pub fn presence_of(&self, key: &PeerKey) -> Presence {
+        self.inner.lock().get(key).map_or(Presence::Offline, |s| s.presence)
+    }
+
     /// Sonde immédiatement un ami (soumis à la même limite de concurrence) et renvoie son état.
     pub async fn probe_now(&self, key: PeerKey) -> Presence {
         self.inner.probe(key).await
@@ -597,6 +604,53 @@ mod tests {
         assert_eq!(snap.len(), 40);
         assert!(snap.values().all(|p| *p == Presence::Online));
         assert_eq!(events.lock().unwrap().len(), 40);
+        svc.stop().await;
+    }
+
+    /// Faux annuaire qui compte les relectures de la liste d'amis (une requête SQLite en production).
+    struct CountingFriends {
+        keys: Vec<PeerKey>,
+        listed: AtomicUsize,
+    }
+
+    impl FriendLookup for CountingFriends {
+        fn friend_keys(&self) -> Vec<PeerKey> {
+            self.listed.fetch_add(1, Ordering::SeqCst);
+            self.keys.clone()
+        }
+        fn is_friend(&self, key: &PeerKey) -> bool {
+            self.keys.contains(key)
+        }
+    }
+
+    #[tokio::test]
+    async fn presence_of_equivaut_a_snapshot_sans_relire_les_amis() {
+        // Les clés paires répondent, les impaires non : un mélange de En ligne et Hors ligne.
+        let pinger: PingFn = Arc::new(|k| {
+            let up = k[0] % 2 == 0;
+            Box::pin(async move { up.then_some(false) })
+        });
+        let keys: Vec<PeerKey> = (0..40u8).map(key).collect();
+        let friends = Arc::new(CountingFriends { keys: keys.clone(), listed: AtomicUsize::new(0) });
+        let (sink, _events) = collector();
+        let svc = fake(pinger, friends.clone(), sink, fast_cfg());
+
+        // Jamais sondé : hors ligne, comme `snapshot`.
+        assert_eq!(svc.presence_of(&keys[0]), Presence::Offline);
+        svc.probe_all().await;
+
+        let listed_before = friends.listed.load(Ordering::SeqCst);
+        let snap = svc.snapshot();
+        assert_eq!(friends.listed.load(Ordering::SeqCst), listed_before + 1, "snapshot relit la liste d'amis");
+        let listed_before = friends.listed.load(Ordering::SeqCst);
+        for k in &keys {
+            assert_eq!(svc.presence_of(k), snap[k]);
+        }
+        assert_eq!(svc.presence_of(&keys[2]), Presence::Online);
+        assert_eq!(svc.presence_of(&keys[3]), Presence::Offline);
+        // Un inconnu est hors ligne.
+        assert_eq!(svc.presence_of(&key(200)), Presence::Offline);
+        assert_eq!(friends.listed.load(Ordering::SeqCst), listed_before, "presence_of ne relit pas les amis");
         svc.stop().await;
     }
 

@@ -30,8 +30,11 @@ use tokio::time::timeout;
 /// Attente du refus éventuel de l'hôte après l'établissement de la connexion.
 const SETTLE: Duration = Duration::from_millis(350);
 
-/// Période de revérification de l'autorisation d'une connexion déjà établie (révocation d'accès).
-const AUTHZ_RECHECK: Duration = Duration::from_millis(500);
+/// Période de revérification de l'autorisation d'une connexion déjà établie (révocation d'accès). Chaque revérification
+/// coûte une requête en base sous le mutex partagé : 2 s borne la coupure d'une connexion inactive sans la payer
+/// toutes les 500 ms par connexion. Chaque nouveau flux est de toute façon revérifié (`accept_bi`) : aucun accès
+/// n'est possible après révocation.
+const AUTHZ_RECHECK: Duration = Duration::from_secs(2);
 
 /// ALPN dédié au tunnel de jeu.
 pub const TUNNEL_ALPN: &[u8] = b"cubelink/tunnel/1";

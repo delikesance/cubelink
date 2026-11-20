@@ -26,6 +26,7 @@ cubelink-p2p = { path = "../p2p" }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+futures-util.workspace = true
 reqwest.workspace = true
 base64 = "0.23"
 iroh = { version = "=1.4.1", features = ["unstable-net-report"] }

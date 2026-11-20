@@ -235,9 +235,10 @@ pub fn hooks() -> &'static Hooks {
     HOOKS.get_or_init(|| from_env().unwrap_or_default())
 }
 
-/// `http://` n'est toléré que vers le loopback, et seulement en mode test.
+/// `http://` n'est toléré que vers le loopback, et seulement en mode test (ou dans les tests unitaires du crate :
+/// `hooks()` est figé au premier appel du processus, on ne peut pas y compter).
 pub fn http_allowed(url: &str) -> bool {
-    hooks().test_mode && url.starts_with("http://") && parse_loopback_url(url).is_ok()
+    (cfg!(test) || hooks().test_mode) && url.starts_with("http://") && parse_loopback_url(url).is_ok()
 }
 
 static TUNNEL_PORT: AtomicU16 = AtomicU16::new(0);

@@ -3,14 +3,15 @@
 
 use std::path::{Path, PathBuf};
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 
 use core_lib::java::{check_configured, default_search_dirs, find_installed, required_java_major, select_for, ConfiguredJava};
 use core_lib::java_install;
+use futures_util::{stream, StreamExt};
 use core_lib::launch_args::LaunchVersion;
 use core_lib::loader::{fabric, forge, neoforge, quilt};
-use core_lib::mojang::assets::{download_assets_with, fetch_asset_index, DownloadOptions};
+use core_lib::mojang::assets::{download_assets_with, fetch_asset_index, AssetProgress, DownloadOptions};
 use core_lib::loader::fabric::FabricClient;
 use core_lib::mojang::libraries::{self, Arch, Library, Os};
 use core_lib::mojang::natives::extract_natives;
@@ -148,7 +149,10 @@ async fn write_atomic(dest: &Path, data: &[u8]) -> Result<()> {
     if let Some(parent) = dest.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
-    let tmp = dest.with_extension("part");
+    // Le nom complet + `.part` : `with_extension` ferait collision entre `x.jar` et `x.pom`, écrits en parallèle.
+    let mut name = dest.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+    name.push(".part");
+    let tmp = dest.with_file_name(name);
     tokio::fs::write(&tmp, data).await?;
     tokio::fs::rename(&tmp, dest).await?;
     Ok(())
@@ -258,7 +262,7 @@ async fn resolve_setting(setting: &JavaSetting, required: u32, mc: &str) -> Resu
     }
 }
 
-async fn resolve_java(paths: &Paths, required: u32, mc: &str, setting: Option<&JavaSetting>, cancel: &Arc<AtomicBool>) -> Result<PathBuf> {
+async fn resolve_java(paths: &Paths, required: u32, mc: &str, setting: Option<&JavaSetting>, cancel: &Arc<AtomicBool>, progress: &Progress) -> Result<PathBuf> {
     // Mode test : chemin de java imposé (faux java), pris tel quel, jamais sondé.
     if let Some(p) = crate::test_hooks::hooks().java_path.as_ref() {
         return if p.is_file() { Ok(p.clone()) } else { Err(Error::NotFound("l'exécutable Java configuré est introuvable".into())) };
@@ -285,11 +289,12 @@ async fn resolve_java(paths: &Paths, required: u32, mc: &str, setting: Option<&J
     .await?;
     // `install` lit le drapeau pendant le téléchargement et avant l'extraction.
     let cancel = cancel.clone();
+    let report = pct_reporter(progress.clone(), "Téléchargement de Java…");
     let done = if crate::test_hooks::hooks().skip_java_probe {
         let probe = Arc::new(crate::test_hooks::FakeProbe(pkg.major));
-        java_install::install_with(&pkg, &paths.java, |_, _| {}, cancel, probe).await?
+        java_install::install_with(&pkg, &paths.java, report, cancel, probe).await?
     } else {
-        java_install::install(&pkg, &paths.java, |_, _| {}, cancel).await?
+        java_install::install(&pkg, &paths.java, report, cancel).await?
     };
     Ok(done.java_exe)
 }
@@ -323,7 +328,37 @@ pub async fn resolve_loader_version(mc: &str, spec: &LoaderSpec) -> Result<Strin
     }
 }
 
-async fn missing_libs(client: &reqwest::Client, libs: &[Library], libs_dir: &Path) -> Result<()> {
+/// Nombre de bibliothèques téléchargées en même temps (comme les assets).
+const LIB_CONCURRENCY: usize = 8;
+
+/// Pourcentage entier (0 à 100) ; `None` si le total est inconnu (0).
+fn pct(done: u64, total: u64) -> Option<u8> {
+    if total == 0 {
+        return None;
+    }
+    Some((u128::from(done) * 100 / u128::from(total)).min(100) as u8)
+}
+
+/// Rappel `(fait, total)` qui annonce « `label` xx % » à `progress`, uniquement quand le pourcentage entier change
+/// (les rappels viennent de tâches concurrentes et arrivent par centaines : pas d'inondation de `launch://state`).
+fn pct_reporter(progress: Progress, label: &'static str) -> impl Fn(u64, u64) + Send + Sync + 'static {
+    let last = AtomicU8::new(u8::MAX);
+    move |done, total| {
+        if let Some(p) = pct(done, total) {
+            if last.swap(p, Ordering::Relaxed) != p {
+                progress(format!("{label} {p} %"));
+            }
+        }
+    }
+}
+
+/// Télécharge les bibliothèques manquantes, `LIB_CONCURRENCY` à la fois. `on_progress(faits, total)` compte les seules
+/// bibliothèques à télécharger (rien si tout est déjà sur le disque). Le premier échec arrête tout : les requêtes en vol
+/// sont abandonnées avec le flux, sans risque grâce à l'écriture atomique.
+async fn missing_libs(client: &reqwest::Client, libs: &[Library], libs_dir: &Path, on_progress: impl Fn(usize, usize) + Send) -> Result<()> {
+    // Passe synchrone : tous les chemins sont validés avant la moindre requête.
+    let mut seen = std::collections::HashSet::new();
+    let mut todo = Vec::new();
     for lib in libs {
         safe_rel(&lib.path)?;
         let dest = libs_dir.join(&lib.path);
@@ -334,7 +369,23 @@ async fn missing_libs(client: &reqwest::Client, libs: &[Library], libs_dir: &Pat
             // Produite localement par les processeurs du loader.
             continue;
         }
-        download_verified(client, &lib.url, &dest, lib.sha1.as_deref(), lib.size).await?;
+        // Deux entrées vers le même fichier : une seule requête.
+        if seen.insert(lib.path.clone()) {
+            todo.push((lib.url.clone(), dest, lib.sha1.clone(), lib.size));
+        }
+    }
+    let total = todo.len();
+    let mut results = stream::iter(todo)
+        .map(|(url, dest, sha1, size)| {
+            let client = client.clone();
+            async move { download_verified(&client, &url, &dest, sha1.as_deref(), size).await }
+        })
+        .buffer_unordered(LIB_CONCURRENCY);
+    let mut done = 0;
+    while let Some(r) = results.next().await {
+        r?;
+        done += 1;
+        on_progress(done, total);
     }
     Ok(())
 }
@@ -469,7 +520,7 @@ pub async fn ensure_game_with(
 
     progress("Recherche de Java…".into());
     let required = required_java_major(&inst.minecraft, vanilla.java_version.as_ref().map(|j| j.major_version));
-    let java = resolve_java(paths, required, &inst.minecraft, java_setting.as_ref(), &cancel).await?;
+    let java = resolve_java(paths, required, &inst.minecraft, java_setting.as_ref(), &cancel, &progress).await?;
 
     progress("Téléchargement du jeu…".into());
     let client_jar = paths.versions.join(&inst.minecraft).join(format!("{}.jar", inst.minecraft));
@@ -488,7 +539,9 @@ pub async fn ensure_game_with(
         LaunchVersion::Merged(m) => m.libraries.clone(),
     };
     let libs = libraries::resolve(&raw_libs, Os::current(), Arch::current())?;
-    cancellable(&cancel, missing_libs(&client, &libs, &paths.libraries)).await?;
+    let lib_progress = progress.clone();
+    let on_lib = move |done: usize, total: usize| lib_progress(format!("Téléchargement des bibliothèques… {done}/{total}"));
+    cancellable(&cancel, missing_libs(&client, &libs, &paths.libraries, on_lib)).await?;
 
     check_cancel(&cancel)?;
     let natives_dir = paths.natives.join(&inst.id);
@@ -502,7 +555,9 @@ pub async fn ensure_game_with(
     let resources = crate::test_hooks::hooks().resources_url();
     // `download_assets_with` lit le drapeau entre les objets ; les requêtes en vol sont abandonnées avec lui.
     let opts = DownloadOptions { cancel: cancel.clone(), ..DownloadOptions::default() };
-    cancellable(&cancel, download_assets_with(&index, &paths.assets, resources.as_deref(), |_| {}, &opts)).await?;
+    let report = pct_reporter(progress.clone(), "Téléchargement des ressources…");
+    let on_assets = move |p: AssetProgress| report(p.bytes_done, p.bytes_total);
+    cancellable(&cancel, download_assets_with(&index, &paths.assets, resources.as_deref(), on_assets, &opts)).await?;
 
 
     // Vieux clients (index legacy / pre-1.6) : les sons sont lus par nom, pas par hash.
@@ -528,6 +583,245 @@ pub async fn ensure_game_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn quiet() -> Progress {
+        Arc::new(|_| {})
+    }
+
+    /// Serveur HTTP minimal : sert `GET /<nom>` (corps = `contenu-<nom>`) après `delay`, compte les requêtes et la
+    /// concurrence maximale observée. Renvoie (base_url, requêtes, concurrence max, tâche).
+    async fn serveur_libs(
+        delay: std::time::Duration,
+    ) -> (String, Arc<std::sync::atomic::AtomicUsize>, Arc<std::sync::atomic::AtomicUsize>, tokio::task::JoinHandle<()>) {
+        use std::sync::atomic::AtomicUsize;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", l.local_addr().unwrap());
+        let (reqs, max) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let (r2, m2) = (reqs.clone(), max.clone());
+        let live = Arc::new(AtomicUsize::new(0));
+        let h = tokio::spawn(async move {
+            while let Ok((mut sock, _)) = l.accept().await {
+                let (reqs, max, live) = (r2.clone(), m2.clone(), live.clone());
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 2048];
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let path = head.split_whitespace().nth(1).unwrap_or("/").trim_start_matches('/').to_string();
+                    reqs.fetch_add(1, Ordering::SeqCst);
+                    let now = live.fetch_add(1, Ordering::SeqCst) + 1;
+                    max.fetch_max(now, Ordering::SeqCst);
+                    tokio::time::sleep(delay).await;
+                    live.fetch_sub(1, Ordering::SeqCst);
+                    let body = format!("contenu-{path}");
+                    let resp = format!("HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len());
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+        (base, reqs, max, h)
+    }
+
+    fn lib(base: &str, name: &str) -> Library {
+        let body = format!("contenu-{name}");
+        Library {
+            name: name.into(),
+            path: format!("org/x/{name}"),
+            url: format!("{base}/{name}"),
+            sha1: Some(sha1_hex(body.as_bytes())),
+            size: Some(body.len() as u64),
+            is_native: false,
+            extract_excludes: vec![],
+        }
+    }
+
+    #[test]
+    fn pct_borne_et_total_nul() {
+        assert_eq!(pct(0, 0), None);
+        assert_eq!(pct(5, 0), None);
+        assert_eq!(pct(0, 10), Some(0));
+        assert_eq!(pct(5, 10), Some(50));
+        assert_eq!(pct(10, 10), Some(100));
+        assert_eq!(pct(99, 10), Some(100));
+        assert_eq!(pct(u64::MAX, u64::MAX), Some(100));
+    }
+
+    #[test]
+    fn pct_reporter_emet_au_changement_de_pourcent_seulement() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let s2 = seen.clone();
+        let r = pct_reporter(Arc::new(move |m| s2.lock().unwrap().push(m)), "Java");
+        r(1, 0); // total inconnu : rien
+        for i in 0..=1000 {
+            r(i, 1000);
+        }
+        r(2000, 1000); // au-delà : reste à 100, pas de doublon
+        let got = seen.lock().unwrap().clone();
+        assert_eq!(got.len(), 101, "{got:?}");
+        assert_eq!(got.first().unwrap(), "Java 0 %");
+        assert_eq!(got.last().unwrap(), "Java 100 %");
+    }
+
+    /// Les bibliothèques se téléchargent en parallèle (borné à `LIB_CONCURRENCY`), la progression est strictement
+    /// croissante jusqu'au total, et tout est sur le disque avec le bon contenu.
+    #[tokio::test]
+    async fn missing_libs_en_parallele_avec_progression() {
+        let (base, reqs, max, srv) = serveur_libs(std::time::Duration::from_millis(60)).await;
+        let dir = tempfile::tempdir().unwrap();
+        let libs: Vec<Library> = (0..20).map(|i| lib(&base, &format!("l{i}.jar"))).collect();
+        let client = http().unwrap();
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<(usize, usize)>::new()));
+        let s2 = seen.clone();
+        let t = std::time::Instant::now();
+        missing_libs(&client, &libs, dir.path(), move |d, t| s2.lock().unwrap().push((d, t))).await.unwrap();
+        // 20 requêtes de 60 ms : en série ce serait >= 1,2 s.
+        assert!(t.elapsed() < std::time::Duration::from_millis(900), "{:?}", t.elapsed());
+        let m = max.load(Ordering::SeqCst);
+        assert!(m > 1 && m <= LIB_CONCURRENCY, "concurrence max {m}");
+        assert_eq!(reqs.load(Ordering::SeqCst), 20);
+        let got = seen.lock().unwrap().clone();
+        assert_eq!(got, (1..=20).map(|d| (d, 20)).collect::<Vec<_>>());
+        for l in &libs {
+            assert_eq!(std::fs::read_to_string(dir.path().join(&l.path)).unwrap(), format!("contenu-{}", l.name));
+        }
+        srv.abort();
+    }
+
+    /// Déjà valides : zéro requête, aucun rappel. Même chemin deux fois : une seule requête. `x.jar` et `x.pom` en
+    /// parallèle ne partagent pas de fichier `.part`.
+    #[tokio::test]
+    async fn missing_libs_saute_le_present_et_dedoublonne() {
+        let (base, reqs, _max, srv) = serveur_libs(std::time::Duration::from_millis(20)).await;
+        let dir = tempfile::tempdir().unwrap();
+        let client = http().unwrap();
+        let present = lib(&base, "deja.jar");
+        let p = dir.path().join(&present.path);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, "contenu-deja.jar").unwrap();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let c2 = calls.clone();
+        missing_libs(&client, &[present], dir.path(), move |_, _| {
+            c2.fetch_add(1, Ordering::SeqCst);
+        })
+        .await
+        .unwrap();
+        assert_eq!((reqs.load(Ordering::SeqCst), calls.load(Ordering::SeqCst)), (0, 0));
+
+        let a = lib(&base, "dup.jar");
+        let (jar, pom) = (lib(&base, "x.jar"), lib(&base, "x.pom"));
+        let c = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let c3 = c.clone();
+        missing_libs(&client, &[a.clone(), a, jar, pom], dir.path(), move |_, _| {
+            c3.fetch_add(1, Ordering::SeqCst);
+        })
+        .await
+        .unwrap();
+        assert_eq!(reqs.load(Ordering::SeqCst), 3);
+        assert_eq!(c.load(Ordering::SeqCst), 3);
+        assert!(dir.path().join("org/x/x.jar").is_file() && dir.path().join("org/x/x.pom").is_file());
+        srv.abort();
+    }
+
+    /// Un sha1 faux : `Integrity`, pas de fichier final pour cette lib ; un chemin piégé échoue avant toute requête.
+    #[tokio::test]
+    async fn missing_libs_refuse_sha1_faux_et_chemin_piege() {
+        let (base, reqs, _max, srv) = serveur_libs(std::time::Duration::from_millis(5)).await;
+        let dir = tempfile::tempdir().unwrap();
+        let client = http().unwrap();
+        let mut bad = lib(&base, "mauvais.jar");
+        bad.sha1 = Some("0".repeat(40));
+        bad.size = None;
+        let err = missing_libs(&client, &[bad.clone()], dir.path(), |_, _| {}).await.unwrap_err();
+        assert!(matches!(err, Error::Integrity { .. }), "{err:?}");
+        assert!(!dir.path().join(&bad.path).exists());
+
+        let before = reqs.load(Ordering::SeqCst);
+        let mut evil = lib(&base, "evil.jar");
+        evil.path = "../evil.jar".into();
+        let err = missing_libs(&client, &[lib(&base, "ok.jar"), evil], dir.path(), |_, _| {}).await.unwrap_err();
+        assert!(matches!(err, Error::Invalid(_)), "{err:?}");
+        assert_eq!(reqs.load(Ordering::SeqCst), before, "aucune requête avant la validation des chemins");
+        srv.abort();
+    }
+
+    /// Le drapeau levé pendant des requêtes qui ne répondent jamais interrompt le lot tout de suite.
+    #[tokio::test]
+    async fn missing_libs_annulation_rapide() {
+        use std::time::{Duration, Instant};
+        let (base, _reqs, _max, srv) = serveur_libs(Duration::from_secs(60)).await;
+        let dir = tempfile::tempdir().unwrap();
+        let libs: Vec<Library> = (0..10).map(|i| lib(&base, &format!("l{i}.jar"))).collect();
+        let client = core_lib::http::builder_with(Duration::from_secs(30), Duration::from_secs(30)).build().unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let c2 = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            c2.store(true, Ordering::SeqCst);
+        });
+        let t = Instant::now();
+        let err = cancellable(&cancel, missing_libs(&client, &libs, dir.path(), |_, _| {})).await.unwrap_err();
+        assert!(matches!(err, Error::Cancelled), "{err:?}");
+        assert!(t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
+        srv.abort();
+    }
+
+    /// Les assets relaient leur progression en octets vers `progress` (« xx % », croissant, fini à 100 %), avec le vrai
+    /// téléchargeur de `core` contre un serveur loopback.
+    #[tokio::test]
+    async fn assets_relaient_la_progression_en_pourcentage() {
+        use core_lib::mojang::assets::{AssetIndex, AssetObject};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut objects = std::collections::BTreeMap::new();
+        let mut bodies = std::collections::HashMap::new();
+        for i in 0..8 {
+            let body = format!("asset numero {i}").repeat(i + 1);
+            let hash = sha1_hex(body.as_bytes());
+            objects.insert(format!("f{i}"), AssetObject { hash: hash.clone(), size: body.len() as u64 });
+            bodies.insert(format!("/{}/{hash}", &hash[..2]), body);
+        }
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", l.local_addr().unwrap());
+        let bodies = Arc::new(bodies);
+        let srv = tokio::spawn(async move {
+            while let Ok((mut sock, _)) = l.accept().await {
+                let bodies = bodies.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 2048];
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let path = head.split_whitespace().nth(1).unwrap_or("/").to_string();
+                    let body = bodies.get(&path).cloned().unwrap_or_default();
+                    let resp = format!("HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len());
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+        let index = AssetIndex { objects, map_to_resources: false, virtual_: false };
+        let dir = tempfile::tempdir().unwrap();
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let s2 = seen.clone();
+        let report = pct_reporter(Arc::new(move |m| s2.lock().unwrap().push(m)), "Téléchargement des ressources…");
+        let on_assets = move |p: AssetProgress| report(p.bytes_done, p.bytes_total);
+        let opts = DownloadOptions::default();
+        download_assets_with(&index, dir.path(), Some(&base), on_assets, &opts).await.unwrap();
+        let got = seen.lock().unwrap().clone();
+        assert!(got.len() >= 2 && got.last().unwrap() == "Téléchargement des ressources… 100 %", "{got:?}");
+        let nums: Vec<u8> = got.iter().map(|m| m.rsplit(' ').nth(1).unwrap().parse().unwrap()).collect();
+        assert!(nums.windows(2).all(|w| w[0] < w[1]), "{nums:?}");
+        srv.abort();
+    }
+
+    /// Le `.part` garde le nom complet : `x.jar` et `x.pom` n'écrivent pas dans le même fichier temporaire.
+    #[tokio::test]
+    async fn write_atomic_nom_temporaire_unique_par_fichier() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (dir.path().join("x.jar"), dir.path().join("x.pom"));
+        let (ra, rb) = tokio::join!(write_atomic(&a, b"aaa"), write_atomic(&b, b"bbb"));
+        ra.unwrap();
+        rb.unwrap();
+        assert_eq!((std::fs::read(&a).unwrap(), std::fs::read(&b).unwrap()), (b"aaa".to_vec(), b"bbb".to_vec()));
+        assert!(std::fs::read_dir(dir.path()).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().ends_with(".part")));
+    }
 
     /// Une connexion qui accepte puis ne répond plus doit échouer en `Network` (le lancement ne reste pas figé).
     /// Délai court injecté ; le client de production utilise `core_lib::http::builder()` (30 s).
@@ -671,13 +965,13 @@ mod tests {
         let j17 = fake_java(dir.path(), "j17", &says("17.0.9")).display().to_string();
         let cancel = Arc::new(AtomicBool::new(false));
 
-        let got = resolve_java(&paths, 21, "1.21.1", Some(&JavaSetting::Global(j17.clone())), &cancel).await.unwrap();
+        let got = resolve_java(&paths, 21, "1.21.1", Some(&JavaSetting::Global(j17.clone())), &cancel, &quiet()).await.unwrap();
         assert_eq!(got, exe);
         // Le même Java 17, propre à l'instance : le lancement échoue au lieu de planter dans la JVM.
-        let err = resolve_java(&paths, 21, "1.21.1", Some(&JavaSetting::Instance(j17.clone())), &cancel).await.unwrap_err();
+        let err = resolve_java(&paths, 21, "1.21.1", Some(&JavaSetting::Instance(j17.clone())), &cancel, &quiet()).await.unwrap_err();
         assert!(err.to_string().contains("Java 17"), "{err}");
         // Et pour une version de Minecraft qui accepte Java 17, le global est bien utilisé.
-        let got = resolve_java(&paths, 17, "1.18.2", Some(&JavaSetting::Global(j17.clone())), &cancel).await.unwrap();
+        let got = resolve_java(&paths, 17, "1.18.2", Some(&JavaSetting::Global(j17.clone())), &cancel, &quiet()).await.unwrap();
         assert_eq!(got, PathBuf::from(j17));
     }
 

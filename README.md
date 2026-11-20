@@ -144,7 +144,7 @@ Pas sûr que ton idée rentre dans le projet ? Ouvre une issue pour en discuter 
 
 ### Règles de la maison
 
-- **Pas de logique sans test** : un correctif de bug vient avec le test qui l'aurait attrapé. La CI exécute clippy en `-D warnings` et les tests Rust sous Windows et Linux, `tsc`, vitest, les E2E Playwright simulés et `cargo deny`.
+- **Pas de logique sans test** : un correctif de bug vient avec le test qui l'aurait attrapé. La CI exécute clippy en `-D warnings` et les tests Rust sous Windows et Linux, `tsc`, vitest, les E2E Playwright simulés, `cargo deny`, et un essai réel Linux non bloquant (`e2e/linux/` : liaisons par WebDriver, tray, autostart, instance unique).
 - **Pas de réseau réel dans les tests** : Microsoft, Mojang et Modrinth sont simulés ; le P2P se teste entre deux nœuds locaux.
 - **Pas d'entrée réelle non plus** : un test ne pilote jamais la vraie souris, le vrai clavier ou le focus de ta machine ; on simule dans l'application.
 - **Touche peu aux fichiers partagés** (`Cargo.toml`, `Cargo.lock`, `package.json`, `core/src/types.rs`, `docs/contrats.md`) et mentionne-le dans la PR si tu le fais : ce sont eux qui créent des conflits.

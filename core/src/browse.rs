@@ -243,6 +243,17 @@ fn mc_ok(versions: &[String], mc: Option<&str>) -> bool {
     mc.is_none_or(|m| versions.is_empty() || versions.iter().any(|v| v == m))
 }
 
+/// Loaders envoyés au catalogue pour une recherche. Pour les mods : tous les loaders acceptés
+/// (Quilt exécute aussi les mods Fabric, donc OU Quilt/Fabric). Pour les modpacks : le loader
+/// exact seulement (le pack crée sa propre instance, rien ne justifie d'élargir).
+fn search_loaders(kind: BrowseKind, loader: Option<Loader>) -> Vec<&'static str> {
+    let mut acc = accepted(loader);
+    if kind != BrowseKind::Mod {
+        acc.truncate(1); // le loader exact est toujours en tête de `accepted`
+    }
+    acc
+}
+
 /// Filtre loader pour les requêtes serveur : seulement s'il n'y a qu'un loader accepté.
 fn server_loader(acc: &[&str], l: Option<Loader>) -> Option<Loader> {
     if acc.len() == 1 {
@@ -283,11 +294,12 @@ pub async fn search(p: &Providers, q: &BrowseQuery) -> Result<BrowsePage> {
     if query.chars().count() > 200 {
         return Err(invalid("recherche trop longue"));
     }
+    let acc = search_loaders(q.kind, loader);
     match q.source {
         BrowseSource::Modrinth => {
             let f = SearchFilters {
                 minecraft_version: mc,
-                loader,
+                loaders: acc.iter().map(|s| s.to_string()).collect(),
                 project_type: Some(q.kind.as_str().to_string()),
                 limit: Some(limit),
                 offset: Some(q.offset),
@@ -313,9 +325,13 @@ pub async fn search(p: &Providers, q: &BrowseQuery) -> Result<BrowsePage> {
             Ok(BrowsePage { hits, total: r.total_hits.min(u32::MAX as u64) as u32 })
         }
         BrowseSource::Curseforge => {
+            // CurseForge n'accepte qu'un `modLoaderType` : sans filtre quand plusieurs loaders sont
+            // acceptés (Quilt), comme pour les versions. Les résultats incluent alors du bruit
+            // Forge/NeoForge, rejeté à l'installation (`loader_ok`). Deux requêtes fusionnées
+            // fausseraient `total` et la pagination.
             let r = p
                 .cf
-                .search(q.kind.cf_class(), query, mc.as_deref(), loader.and_then(cfapi::loader_type), cfapi::sort_field(sort), q.offset, limit)
+                .search(q.kind.cf_class(), query, mc.as_deref(), server_loader(&acc, loader).and_then(cfapi::loader_type), cfapi::sort_field(sort), q.offset, limit)
                 .await?;
             let total = r.pagination.map_or(r.data.len() as u64, |p| p.total_count).min(u32::MAX as u64) as u32;
             let hits = r
@@ -860,6 +876,63 @@ mod tests {
         assert!(search(&providers(&mr, &cf), &bad).await.is_err());
     }
 
+    fn quilt_query(source: BrowseSource, kind: BrowseKind, loader: &str) -> BrowseQuery {
+        BrowseQuery { source, kind, query: "sodium".into(), minecraft: Some("1.20.1".into()), loader: Some(loader.into()), sort: None, offset: 0, limit: 5 }
+    }
+
+    #[tokio::test]
+    async fn search_modrinth_quilt_includes_fabric_for_mods_but_not_modpacks() {
+        let (mr, cf) = (MockServer::start().await, MockServer::start().await);
+        let empty = || ResponseTemplate::new(200).set_body_json(json!({"hits": [], "total_hits": 0}));
+        Mock::given(method("GET"))
+            .and(path("/v2/search"))
+            .and(query_param("facets", r#"[["versions:1.20.1"],["categories:quilt","categories:fabric"],["project_type:mod"]]"#))
+            .respond_with(empty())
+            .expect(1)
+            .mount(&mr)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v2/search"))
+            .and(query_param("facets", r#"[["versions:1.20.1"],["categories:quilt"],["project_type:modpack"]]"#))
+            .respond_with(empty())
+            .expect(1)
+            .mount(&mr)
+            .await;
+        let p = providers(&mr, &cf);
+        search(&p, &quilt_query(BrowseSource::Modrinth, BrowseKind::Mod, "quilt")).await.unwrap();
+        search(&p, &quilt_query(BrowseSource::Modrinth, BrowseKind::Modpack, "quilt")).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn search_curseforge_quilt_sends_no_loader_filter_fabric_keeps_it() {
+        let (mr, cf) = (MockServer::start().await, MockServer::start().await);
+        let empty = || ResponseTemplate::new(200).set_body_json(json!({"data": [], "pagination": {"totalCount": 0}}));
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/search"))
+            .and(query_param("modLoaderType", "4"))
+            .respond_with(empty())
+            .expect(1)
+            .mount(&cf)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/search"))
+            .and(query_param("modLoaderType", "5"))
+            .respond_with(empty())
+            .expect(1)
+            .mount(&cf)
+            .await;
+        Mock::given(method("GET")).and(path("/v1/mods/search")).respond_with(empty()).expect(1).mount(&cf).await;
+        let p = providers(&mr, &cf);
+        search(&p, &quilt_query(BrowseSource::Curseforge, BrowseKind::Mod, "fabric")).await.unwrap();
+        // Modpack Quilt : loader exact (5).
+        search(&p, &quilt_query(BrowseSource::Curseforge, BrowseKind::Modpack, "quilt")).await.unwrap();
+        // Mod Quilt : aucun modLoaderType (reçu par le mock sans matcher).
+        search(&p, &quilt_query(BrowseSource::Curseforge, BrowseKind::Mod, "quilt")).await.unwrap();
+        let reqs = cf.received_requests().await.unwrap();
+        assert_eq!(reqs.len(), 3);
+        assert!(!reqs[2].url.query().unwrap_or("").contains("modLoaderType"), "{:?}", reqs[2].url);
+    }
+
     #[tokio::test]
     async fn versions_modrinth_sorted_filtered_and_cf_downloadable() {
         let (mr, cf) = (MockServer::start().await, MockServer::start().await);
@@ -1122,6 +1195,11 @@ mod tests {
                 assert!(len > 1000, "{f} trop petit ({len} o)");
             }
         }
+        // Quilt 1.20.1 : les mods Fabric (Sodium) doivent apparaître (ticket #78).
+        let q = BrowseQuery { source: BrowseSource::Modrinth, kind: BrowseKind::Mod, query: "sodium".into(), minecraft: Some("1.20.1".into()), loader: Some("quilt".into()), sort: Some("downloads".into()), offset: 0, limit: 10 };
+        let page = search(&p, &q).await.expect("recherche Quilt");
+        println!("[Quilt] {} résultats : {:?}", page.total, page.hits.iter().map(|h| &h.name).collect::<Vec<_>>());
+        assert!(page.hits.iter().any(|h| h.name.to_lowercase().contains("sodium")), "Sodium (Fabric) absent sous Quilt");
         // modpacks : recherche + versions seulement (pas d'installation, fichiers volumineux)
         for source in [BrowseSource::Modrinth, BrowseSource::Curseforge] {
             let q = BrowseQuery { source, kind: BrowseKind::Modpack, query: "fabulously optimized".into(), minecraft: None, loader: None, sort: None, offset: 0, limit: 3 };

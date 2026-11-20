@@ -14,7 +14,9 @@ pub const DEFAULT_BASE_URL: &str = "https://api.modrinth.com/v2";
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SearchFilters {
     pub minecraft_version: Option<String>,
-    pub loader: Option<Loader>,
+    /// Loaders de la facette `categories` (noms Modrinth, vide : aucun filtre). Plusieurs noms
+    /// forment un groupe OU (ex. Quilt exécute aussi les mods Fabric).
+    pub loaders: Vec<String>,
     /// Ex. "mod", "modpack", "resourcepack", "shader".
     pub project_type: Option<String>,
     pub limit: Option<u32>,
@@ -296,17 +298,17 @@ fn encode_segment(s: &str) -> String {
     out
 }
 
-/// `[["versions:1.21.1"],["categories:neoforge"],["project_type:mod"]]` (ET entre groupes).
+/// `[["versions:1.21.1"],["categories:neoforge"],["project_type:mod"]]` (ET entre groupes, OU dans un groupe).
 fn facets(f: &SearchFilters) -> Option<String> {
-    let mut groups: Vec<[String; 1]> = Vec::new();
+    let mut groups: Vec<Vec<String>> = Vec::new();
     if let Some(v) = &f.minecraft_version {
-        groups.push([format!("versions:{v}")]);
+        groups.push(vec![format!("versions:{v}")]);
     }
-    if let Some(l) = f.loader.and_then(loader_name) {
-        groups.push([format!("categories:{l}")]);
+    if !f.loaders.is_empty() {
+        groups.push(f.loaders.iter().map(|l| format!("categories:{l}")).collect());
     }
     if let Some(t) = &f.project_type {
-        groups.push([format!("project_type:{t}")]);
+        groups.push(vec![format!("project_type:{t}")]);
     }
     if groups.is_empty() {
         None
@@ -357,7 +359,7 @@ mod tests {
             .await;
         let f = SearchFilters {
             minecraft_version: Some("1.21.1".into()),
-            loader: Some(Loader::NeoForge),
+            loaders: vec!["neoforge".into()],
             project_type: Some("mod".into()),
             limit: Some(5),
             offset: Some(10),
@@ -491,7 +493,19 @@ mod tests {
     #[test]
     fn facets_empty_and_vanilla() {
         assert_eq!(facets(&SearchFilters::default()), None);
-        let f = SearchFilters { loader: Some(Loader::Vanilla), ..Default::default() };
-        assert_eq!(facets(&f), None);
+        assert_eq!(facets(&SearchFilters { loaders: vec![], ..Default::default() }), None);
+    }
+
+    #[test]
+    fn facets_loaders_form_an_or_group() {
+        let f = SearchFilters {
+            minecraft_version: Some("1.20.1".into()),
+            loaders: vec!["quilt".into(), "fabric".into()],
+            project_type: Some("mod".into()),
+            ..Default::default()
+        };
+        assert_eq!(facets(&f).unwrap(), r#"[["versions:1.20.1"],["categories:quilt","categories:fabric"],["project_type:mod"]]"#);
+        let f = SearchFilters { loaders: vec!["fabric".into()], ..Default::default() };
+        assert_eq!(facets(&f).unwrap(), r#"[["categories:fabric"]]"#);
     }
 }

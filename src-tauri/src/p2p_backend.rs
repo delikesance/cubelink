@@ -155,6 +155,8 @@ pub trait P2pBackend: Send + Sync {
     fn host_stop_sharing(&self) {}
     /// Hôte : le monde LAN vient de s'ouvrir sur `port` (127.0.0.1) ; 0 le referme. N'altère pas le partage de fichiers.
     fn host_set_world_port(&self, _port: u16) {}
+    /// Hôte : les demandes à rejoindre en attente ne valent plus rien (monde fermé) ; les demandeurs reçoivent « expirée ».
+    fn host_cancel_join_requests(&self) {}
     /// Invité : ouvre un tunnel local vers le monde de l'ami ; renvoie le port local (127.0.0.1) pour Minecraft.
     fn join_open_tunnel(&self, _friend_public_key: String) -> BoxFuture<'_, Result<u16, String>> {
         Box::pin(async { Err(UNAVAILABLE.to_string()) })

@@ -475,7 +475,7 @@ mod tests {
         {
             let st = lock(&l.inner);
             assert_eq!(st.per_peer.len(), 1, "les entrées expirées sont purgées");
-            assert_eq!(st.global.len(), 1);
+            assert_eq!(st.global[0].len(), 1);
         }
         // Un refus (même pair) ne rallonge pas sa fenêtre : il repasse 60 s après la première notification.
         assert!(!l.allow(Kind::Request, "nouveau", t1 + Duration::from_secs(50)));

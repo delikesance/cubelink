@@ -1,7 +1,7 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
 
 export const ROUTES = [
-  "login", "main", "instance", "create", "install", "join", "settings", "error", "legal", "browse", "hearth",
+  "login", "main", "instance", "create", "join", "settings", "error", "legal", "browse", "hearth",
 ] as const;
 export type RouteName = (typeof ROUTES)[number];
 export const DEFAULT_ROUTE: RouteName = "login";
@@ -20,6 +20,8 @@ export function parseHash(hash: string): Location {
   new URLSearchParams(query).forEach((v, k) => { params[k] = v; });
   // Ancien écran Amis : ses réglages vivent maintenant dans Paramètres > Amis.
   if (name === "friends") return { route: "settings", params: { ...params, tab: "amis" } };
+  // Ancien écran Install (supprimé) : le transfert d'un ami vit dans Rejoindre.
+  if (name === "install") return params.friend ? { route: "join", params } : { route: "main", params: {} };
   const route = (ROUTES as readonly string[]).includes(name) ? (name as RouteName) : DEFAULT_ROUTE;
   return { route, params };
 }

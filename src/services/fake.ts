@@ -572,7 +572,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
         inst.name = patch.name.trim();
       }
       if (patch.ram_mb !== undefined) inst.ram_mb = patch.ram_mb;
-      if (patch.java_path !== undefined) inst.java_path = patch.java_path;
+      if (patch.java_path !== undefined) inst.java_path = patch.java_path.trim() || null;
       if (patch.jvm_args !== undefined) inst.jvm_args = patch.jvm_args;
       if (patch.wrapper !== undefined) inst.wrapper = patch.wrapper;
       return { ...inst };

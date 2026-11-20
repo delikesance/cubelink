@@ -296,6 +296,27 @@ describe("Page modpack : onglet Réglages", () => {
     expect(await within(screen.getByRole("tabpanel")).findByText("Réglages enregistrés.")).toBeTruthy();
   });
 
+  it("vider le chemin de Java envoie une chaîne vide (jamais null) et l'efface vraiment", async () => {
+    const fake = createFakeServices({ tickMs: 0, requestCount: 0 });
+    const update = vi.fn(fake.instancesUpdate);
+    setup({ instancesUpdate: update });
+    await ready();
+    fireEvent.click(tab("Réglages"));
+    const panel = screen.getByRole("tabpanel");
+    fireEvent.change(within(panel).getByLabelText("Nom de l'instance"), { target: { value: "Aero" } });
+    const java = within(panel).getByLabelText(/Chemin de Java/) as HTMLInputElement;
+    fireEvent.change(java, { target: { value: "/usr/lib/jvm/java-17/bin/java" } });
+    fireEvent.click(within(panel).getByRole("button", { name: "Enregistrer" }));
+    await waitFor(() => expect(update).toHaveBeenCalledTimes(1));
+    expect(update.mock.calls[0][1].java_path).toBe("/usr/lib/jvm/java-17/bin/java");
+    await within(screen.getByRole("tabpanel")).findByText("Réglages enregistrés.");
+    fireEvent.change(java, { target: { value: "   " } });
+    fireEvent.click(within(screen.getByRole("tabpanel")).getByRole("button", { name: "Enregistrer" }));
+    await waitFor(() => expect(update).toHaveBeenCalledTimes(2));
+    expect(update.mock.calls[1][1].java_path).toBe("");
+    expect(await update.mock.results[1].value).toMatchObject({ java_path: null });
+  });
+
   it("Linux : la commande d'enrobage s'enregistre avec les autres réglages (absente ailleurs)", async () => {
     expect(isLinuxHost("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15")).toBe(true);
     expect(isLinuxHost("Mozilla/5.0 (Windows NT 10.0; Win64; x64)")).toBe(false);

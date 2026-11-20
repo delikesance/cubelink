@@ -505,6 +505,22 @@ mod tests {
     }
 
     #[test]
+    fn update_efface_le_java_par_chaine_vide_et_garde_par_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let (st, _) = test_state(dir.path());
+        let i = st.instances.create("Java", "1.21.1", vanilla(), 2048).unwrap();
+        let u = st.instances_update(&i.id, None, None, Some("/usr/lib/jvm/java-17/bin/java".into()), None, None).unwrap();
+        assert_eq!(u.java_path.as_deref(), Some("/usr/lib/jvm/java-17/bin/java"));
+        // None = champ inchangé (c'est ce que le front envoyait à tort pour « vider »).
+        let u = st.instances_update(&i.id, Some("Java 2".into()), None, None, None, None).unwrap();
+        assert_eq!(u.java_path.as_deref(), Some("/usr/lib/jvm/java-17/bin/java"));
+        // Chaîne vide = effacé, et c'est persisté sur disque.
+        let u = st.instances_update(&i.id, None, None, Some(String::new()), None, None).unwrap();
+        assert_eq!(u.java_path, None);
+        assert_eq!(st.instances.get(&i.id).unwrap().java_path, None);
+    }
+
+    #[test]
     fn suppression_refusee_pendant_le_jeu_puis_nettoie() {
         let dir = tempfile::tempdir().unwrap();
         let (st, _) = test_state(dir.path());

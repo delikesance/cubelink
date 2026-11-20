@@ -47,7 +47,7 @@ export function SettingsDialog({ instance, onSave, onClose, onOpenFolder, onDele
     setSaved(false);
     setBusy(true);
     try {
-      const patch: InstancePatch = { name: name.trim(), ram_mb: ram, java_path: java.trim() || null, jvm_args: jvm.trim() };
+      const patch: InstancePatch = { name: name.trim(), ram_mb: ram, java_path: java.trim(), jvm_args: jvm.trim() };
       if (linux) patch.wrapper = wrapper.trim();
       await onSave(patch);
       // En tiroir le parent se ferme ; en page on reste là et on le dit.

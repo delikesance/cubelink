@@ -53,7 +53,8 @@ export type BrowseInstallInput = B.BrowseInstallInput_Deserialize;
 export type Sha256Hex = string;
 
 /** Champs modifiables d'une instance (instances_update). */
-export interface InstancePatch { name?: string; ram_mb?: number; java_path?: string | null; jvm_args?: string; wrapper?: string }
+/** Champ absent = inchangé. `java_path` : chaîne vide = effacer (retour au Java automatique) ; jamais `null`, que le backend lit comme « inchangé ». */
+export interface InstancePatch { name?: string; ram_mb?: number; java_path?: string; jvm_args?: string; wrapper?: string }
 /** Demande à rejoindre reçue d'un ami (hôte), en attente de sa décision. Timestamps en secondes Unix. */
 export type JoinRequest = B.JoinRequest;
 /** Réponse de l'hôte à ma demande à rejoindre. */

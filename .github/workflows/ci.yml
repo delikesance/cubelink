@@ -154,12 +154,15 @@ jobs:
       - name: Agent LAN (JDK 17 préinstallé sur le runner)
         shell: bash
         run: JAVA_HOME="$JAVA_HOME_17_X64" bash core/resources/lan-agent/build.sh
+      - name: Harnais E2E (logique de reconstruction)
+        run: npm run test:e2e-harness
       - name: Binaire de test (front embarqué)
         run: node e2e/harness/build.mjs
       - name: Playwright (mode simulé)
         run: npx playwright test --config e2e/playwright.config.ts
         env:
           E2E_WORKERS: '2'
+          CUBELINK_E2E_SKIP_BUILD: '1' # déjà construit à l'étape précédente
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: failure()
         with:

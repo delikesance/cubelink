@@ -275,8 +275,8 @@ export const test = base.extend<{ appOptions: AppOptions; world: World; appA: Ap
   binary: [async ({}, use) => {
     let bin = process.env.CUBELINK_E2E_BIN; // construit une seule fois par e2e/harness/global-setup.ts
     if (!bin) {
-      const { binaryPath, build } = await import(pathToFileURL(path.join(HERE, 'build.mjs')).href);
-      bin = process.env.CUBELINK_E2E_BUILD === '1' || !fs.existsSync(binaryPath({})) ? build({}) : binaryPath({});
+      const { resolveBinary } = await import(pathToFileURL(path.join(HERE, 'build.mjs')).href);
+      bin = resolveBinary({}) as string;
     }
     await use(bin);
   }, { scope: 'worker', timeout: 900_000 }],

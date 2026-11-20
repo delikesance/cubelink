@@ -156,9 +156,10 @@ function History({ d, services, ask }: { d: HearthDetail; services: Services; as
             <span className="hearth-meta">
               {v.author_name} · {fmtDate(v.created_at)} · {fmtPlayed(v.played_secs)} de jeu · {fmtSize(v.total_size)}
               {v.side_branch ? " · mise de côté" : ""}
+              {!v.is_head && !v.available ? " · contenu libéré de ce PC" : ""}
             </span>
           </span>
-          {!v.is_head && (
+          {!v.is_head && v.available && (
             <Button
               variant="secondary" aria-label={`Restaurer la version ${v.number}`}
               onClick={() => ask({

@@ -84,6 +84,31 @@ impl Default for Timings {
     }
 }
 
+/// Protège une collection du ramasse-miettes des versions tant qu'il est en vie (restauration en cours).
+struct GcHold<'a> {
+    rt: &'a HearthRuntime,
+    collection: [u8; 32],
+}
+
+impl<'a> GcHold<'a> {
+    fn new(rt: &'a HearthRuntime, collection: [u8; 32]) -> Self {
+        *lock(&rt.gc_hold).entry(collection).or_insert(0) += 1;
+        Self { rt, collection }
+    }
+}
+
+impl Drop for GcHold<'_> {
+    fn drop(&mut self) {
+        let mut h = lock(&self.rt.gc_hold);
+        if let Some(n) = h.get_mut(&self.collection) {
+            *n -= 1;
+            if *n == 0 {
+                h.remove(&self.collection);
+            }
+        }
+    }
+}
+
 /// Jours sans nouvelles avant de pouvoir continuer sans un membre.
 pub const CONTINUE_AFTER_DAYS: u32 = 7;
 /// Versions plus jeunes que cela sont gardées par le ramasse-miettes des versions.
@@ -560,6 +585,12 @@ pub struct HearthRuntime {
     active: Mutex<HashMap<GroupId, Arc<ActiveHost>>>,
     /// Collections dont on a tout le contenu (répond à `HaveVersion`, qui est synchrone).
     complete: Mutex<HashSet<[u8; 32]>>,
+    /// Octets des blobs de chaque groupe dans le magasin (« place prise sur ce disque »), recalculés en tâche de fond :
+    /// après un rapatriement, une libération et au démarrage. La page du serveur (synchrone) ne fait que les lire.
+    group_bytes: Mutex<HashMap<GroupId, u64>>,
+    /// Collections qu'une restauration ou une résolution de fourche vient de rapatrier et qui n'ont pas encore leur
+    /// version : le ramasse-miettes des versions n'y touche pas.
+    gc_hold: Mutex<HashMap<[u8; 32], usize>>,
     /// Mondes en cours de rapatriement : pour cent.
     fetching: Mutex<HashMap<GroupId, u8>>,
     /// Groupes dont une sonde tourne déjà.
@@ -749,6 +780,8 @@ impl HearthRuntime {
             play: Mutex::new(HashMap::new()),
             active: Mutex::new(HashMap::new()),
             complete: Mutex::new(HashSet::new()),
+            group_bytes: Mutex::new(HashMap::new()),
+            gc_hold: Mutex::new(HashMap::new()),
             fetching: Mutex::new(HashMap::new()),
             probing: Mutex::new(HashSet::new()),
             background: Mutex::new(Vec::new()),
@@ -1398,6 +1431,9 @@ impl HearthRuntime {
                 break;
             }
         }
+        // Un membre qui ne fait que rejoindre reçoit toutes les versions : c'est ici, après chaque synchro (sonde, Hello,
+        // rattrapage), qu'il libère les mondes des vieilles, comme l'hôte le fait à la fin d'une partie.
+        self.gc_versions(gid).await;
     }
 
     /// Rapatrie le monde d'une version (sans l'écrire sur le disque de jeu). Sans effet s'il est déjà là.
@@ -1469,6 +1505,7 @@ impl HearthRuntime {
             Ok(_) => {
                 lock(&self.complete).insert(coll);
                 lock(&self.oversize).remove(&v.id());
+                self.refresh_group_bytes(gid).await;
                 Ok(())
             }
             Err(SyncError::Oversize { expected, previous }) => {
@@ -1497,6 +1534,9 @@ impl HearthRuntime {
                     lock(&self.complete).insert(c);
                 }
             }
+            // À l'ouverture de l'application : ce qu'un ancien Cubelink a laissé s'accumuler est libéré, et la place
+            // prise est mesurée une première fois.
+            self.gc_versions(gid).await;
         }
         self.emit_state();
     }
@@ -1677,15 +1717,26 @@ impl HearthRuntime {
         if head.id() == from || head.header.collection == src.header.collection {
             return Err("c'est déjà la version actuelle".into());
         }
-        self.fetch_version_user(gid, &src, None).await?;
-        self.record_version(
+        // La version n'est plus sur ce PC (libérée par le ramasse-miettes) : on la rapatrie chez un membre en ligne, et sinon
+        // on le dit en clair plutôt que de montrer l'erreur de transfert.
+        let hold = GcHold::new(self, src.header.collection);
+        if let Err(e) = self.fetch_version_user(gid, &src, None).await {
+            return Err(if e == NO_MEMBER_ONLINE && !self.world_complete(&src) {
+                "le contenu de cette version n'est plus sur ce PC et aucun membre ne l'a en ligne".into()
+            } else {
+                e
+            });
+        }
+        let out = self.record_version(
             gid,
             VersionKind::Restore { from },
             Some((head.id(), head.header.number)),
             0,
             src.header.collection,
             src.header.total_size,
-        )
+        );
+        drop(hold);
+        out
     }
 
     /// Fourche : garde la version `keep`. Chaque autre tête reçoit une version `Restore` de `keep`.
@@ -1696,6 +1747,7 @@ impl HearthRuntime {
         if !open.iter().any(|h| h.header.collection == kept.header.collection) {
             return Err("cette version n'est pas l'une des deux en jeu".into());
         }
+        let _hold = GcHold::new(self, kept.header.collection);
         self.fetch_version_user(gid, &kept, None).await?;
         for h in open.into_iter().filter(|h| h.header.collection != kept.header.collection) {
             self.record_version(
@@ -1710,11 +1762,22 @@ impl HearthRuntime {
         Ok(())
     }
 
-    /// Libère les mondes des vieilles versions (gardées : tête, parent, moins de 14 jours, file d'envoi).
+    /// Libère les mondes des vieilles versions (gardées : têtes, parent, partie matérialisée, file d'envoi, moins de
+    /// 14 jours depuis la réception ici). Chez tous les membres, pas seulement l'hôte. Les en-têtes restent : l'historique
+    /// garde la ligne, sans le bouton « Restaurer » (voir `HearthVersion.available`).
     pub async fn gc_versions(&self, gid: GroupId) {
+        self.gc_versions_at(gid, now_secs().max(0) as u64).await;
+    }
+
+    /// [`HearthRuntime::gc_versions`] avec l'heure donnée (tests).
+    pub async fn gc_versions_at(&self, gid: GroupId, now: u64) {
         let Ok(world) = self.world() else { return };
-        let now = now_secs().max(0) as u64;
+        // Un rapatriement du groupe est en cours : ce qu'il vient de télécharger ne doit pas disparaître sous ses pieds.
+        if lock(&self.fetching).contains_key(&gid) {
+            return;
+        }
         let mut keep: HashSet<[u8; 32]> = self.outbox.pinned_collections().into_iter().map(|(_, c)| c).collect();
+        keep.extend(lock(&self.gc_hold).keys().copied());
         let all: Vec<SignedVersion> = self.with_group(&gid, |g| g.graph().iter().map(|(_, v)| v.clone()).collect()).unwrap_or_default();
         let mut keep_ids: HashSet<VersionId> = HashSet::new();
         for h in self.heads_of(&gid).unwrap_or_default() {
@@ -1723,7 +1786,9 @@ impl HearthRuntime {
         }
         keep_ids.extend(self.materialized(&gid));
         for v in &all {
-            if keep_ids.contains(&v.id()) || v.header.created_at + KEEP_VERSIONS_SECS > now {
+            // L'âge court depuis l'arrivée sur ce PC, pas depuis `created_at` que l'auteur déclare lui-même.
+            let received = self.with_group(&gid, |g| g.received_at(&v.id())).ok().flatten().unwrap_or(now);
+            if keep_ids.contains(&v.id()) || received.saturating_add(KEEP_VERSIONS_SECS) > now {
                 keep.insert(v.header.collection);
             }
         }
@@ -1734,6 +1799,39 @@ impl HearthRuntime {
                 let _ = world.release(&gid, &c).await;
             }
         }
+        self.refresh_group_bytes(gid).await;
+        if !released.is_empty() {
+            self.emit_state();
+        }
+    }
+
+    /// Mesure les blobs du groupe dans le magasin et garde le résultat pour la page du serveur.
+    pub async fn refresh_group_bytes(&self, gid: GroupId) {
+        let Ok(world) = self.world() else { return };
+        let bytes = world.group_bytes(&gid).await;
+        lock(&self.group_bytes).insert(gid, bytes);
+    }
+
+    /// Place prise par le groupe : ses blobs (mesurés en tâche de fond) plus ses petits fichiers (en-têtes, opérations,
+    /// file d'envoi). Avant la première mesure, repli sur la taille signée des mondes complets, sans doublon de
+    /// collection : jamais « 300 Mo » quand le magasin en pèse bien plus.
+    fn group_disk_bytes(&self, gid: &GroupId) -> u64 {
+        let files = dir_size(&self.store.group_dir(gid));
+        if let Some(b) = lock(&self.group_bytes).get(gid) {
+            return files + b;
+        }
+        let complete = lock(&self.complete).clone();
+        let mut seen: HashSet<[u8; 32]> = HashSet::new();
+        let estimate: u64 = self
+            .with_group(gid, |g| {
+                g.graph()
+                    .iter()
+                    .filter(|(_, v)| complete.contains(&v.header.collection) && seen.insert(v.header.collection))
+                    .map(|(_, v)| v.header.total_size)
+                    .sum()
+            })
+            .unwrap_or(0);
+        files + estimate
     }
 }
 
@@ -1961,6 +2059,7 @@ impl HearthDelegate for HearthRuntime {
             spawn(async move {
                 if rt.pull_from_wanting(gid, from, &wanted, full).await.is_ok() && rt.version(&gid, &v.id()).is_some() {
                     let _ = rt.fetch_version(gid, &v, Some(from)).await;
+                    rt.gc_versions(gid).await;
                 }
             });
             return Ok(());
@@ -1968,6 +2067,8 @@ impl HearthDelegate for HearthRuntime {
         let rt = self.arc();
         spawn(async move {
             let _ = rt.fetch_version(gid, &version, Some(from)).await;
+            // Une version offerte par un membre : le monde reçu, on libère les vieilles (comme après une synchro).
+            rt.gc_versions(gid).await;
         });
         self.emit_state();
         Ok(())
@@ -3466,6 +3567,7 @@ impl HearthRuntime {
             .collect();
         let mainline: HashSet<VersionId> = head.as_ref().map(|h| graph.ancestry(&h.id()).into_iter().collect()).unwrap_or_default();
         let head_ids: HashSet<VersionId> = heads.iter().map(SignedVersion::id).collect();
+        let complete = lock(&self.complete).clone();
         let mut versions: Vec<HearthVersion> = graph
             .iter()
             .map(|(id, v)| HearthVersion {
@@ -3484,6 +3586,7 @@ impl HearthRuntime {
                 total_size: v.header.total_size,
                 is_head: head_ids.contains(id),
                 side_branch: v.header.epoch < st.epoch && head.is_some() && !mainline.contains(id),
+                available: complete.contains(&v.header.collection),
             })
             .collect();
         versions.sort_by(|a, b| b.number.cmp(&a.number).then(a.id.cmp(&b.id)));
@@ -3535,7 +3638,7 @@ impl HearthRuntime {
         };
         let settings = HearthSettings {
             keep_background: meta.keep_background,
-            disk_bytes: dir_size(&self.store.group_dir(gid)),
+            disk_bytes: self.group_disk_bytes(gid),
             outbox_pending: self.outbox.pending().iter().filter(|e| e.group_id() == *gid).count() as u32,
             instance_name: self.instance_of(gid).and_then(|i| self.instances.get(&i).ok()).map(|i| i.name),
         };

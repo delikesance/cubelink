@@ -342,7 +342,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
   const newVersion = (g: HearthDetail, kind: "session" | "checkpoint" | "restore") => {
     const number = (g.versions[0]?.number ?? 0) + 1;
     g.versions = [
-      { id: `v-${g.card.id}-${number}`, number, kind, author: ME.public_key, author_name: ME.name, created_at: Math.floor(Date.now() / 1000), played_secs: 1800, total_size: 410_000_000, is_head: true, side_branch: false },
+      { id: `v-${g.card.id}-${number}`, number, kind, author: ME.public_key, author_name: ME.name, created_at: Math.floor(Date.now() / 1000), played_secs: 1800, total_size: 410_000_000, is_head: true, side_branch: false, available: true },
       ...g.versions.map((v) => ({ ...v, is_head: false })),
     ];
     g.card.version = number;
@@ -362,7 +362,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     };
     const g: HearthDetail = {
       card, members, proposals: [], blocker: null, fork: [], orphans: [],
-      versions: [{ id: `v-${p.id}-1`, number: 1, kind: "session", author: ME.public_key, author_name: ME.name, created_at: NOW - 86400, played_secs: 5400, total_size: 380_000_000, is_head: true, side_branch: false }],
+      versions: [{ id: `v-${p.id}-1`, number: 1, kind: "session", author: ME.public_key, author_name: ME.name, created_at: NOW - 86400, played_secs: 5400, total_size: 380_000_000, is_head: true, side_branch: false, available: true }],
       settings: { keep_background: false, disk_bytes: 380_000_000, outbox_pending: 0, instance_name: "Create: Aeronautics" },
       ...d,
     };

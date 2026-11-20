@@ -319,6 +319,9 @@ pub struct HearthVersion {
     pub is_head: bool,
     /// Branche mise de côté (époque révolue) : restaurable, jamais tête.
     pub side_branch: bool,
+    /// Le monde de cette version est en entier sur ce PC : « Restaurer » marche sans réseau. `false` : son contenu a été
+    /// libéré (vieille version) ou n'a jamais été reçu, l'historique ne garde alors que l'en-tête.
+    pub available: bool,
 }
 
 /// Décision du groupe en attente de votes.

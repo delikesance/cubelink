@@ -495,8 +495,8 @@ describe("Page du serveur", () => {
     const { services } = page({ id: "g1" }, { id: "g1", name: "Les copains" });
     services.setHearthDetail("g1", {
       versions: [
-        { id: "v3", number: 3, kind: "session", author: "k", author_name: "Alex", created_at: 1_760_000_100, played_secs: 3600, total_size: 400_000_000, is_head: true, side_branch: false },
-        { id: "v2", number: 2, kind: "checkpoint", author: "k", author_name: "Noor", created_at: 1_760_000_000, played_secs: 900, total_size: 390_000_000, is_head: false, side_branch: false },
+        { id: "v3", number: 3, kind: "session", author: "k", author_name: "Alex", created_at: 1_760_000_100, played_secs: 3600, total_size: 400_000_000, is_head: true, side_branch: false, available: true },
+        { id: "v2", number: 2, kind: "checkpoint", author: "k", author_name: "Noor", created_at: 1_760_000_000, played_secs: 900, total_size: 390_000_000, is_head: false, side_branch: false, available: true },
       ],
     });
     fireEvent.click(await screen.findByRole("tab", { name: "Historique" }));
@@ -506,6 +506,21 @@ describe("Page du serveur", () => {
     fireEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Restaurer" }));
     await waitFor(() => expect(services.hearthCalls).toEqual([{ kind: "Restore", args: ["g1", "v2"] }]));
     await screen.findByText(/Version 4 · Restauration · actuelle/);
+  });
+
+  it("Historique : une version dont le contenu est libéré n'a pas de bouton Restaurer (#96)", async () => {
+    const { services } = page({ id: "g1" }, { id: "g1", name: "Les copains" });
+    services.setHearthDetail("g1", {
+      versions: [
+        { id: "v3", number: 3, kind: "session", author: "k", author_name: "Alex", created_at: 1_760_000_100, played_secs: 3600, total_size: 400_000_000, is_head: true, side_branch: false, available: true },
+        { id: "v2", number: 2, kind: "checkpoint", author: "k", author_name: "Noor", created_at: 1_760_000_000, played_secs: 900, total_size: 390_000_000, is_head: false, side_branch: false, available: true },
+        { id: "v1", number: 1, kind: "session", author: "k", author_name: "Noor", created_at: 1_750_000_000, played_secs: 900, total_size: 380_000_000, is_head: false, side_branch: false, available: false },
+      ],
+    });
+    fireEvent.click(await screen.findByRole("tab", { name: "Historique" }));
+    expect(await screen.findByRole("button", { name: "Restaurer la version 2" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Restaurer la version 1" })).toBeNull();
+    expect(screen.getAllByText(/contenu libéré de ce PC/)).toHaveLength(1);
   });
 
   it("Réglages : garder le serveur, proposer la mise à jour du modpack (pas de bouton Quitter ici)", async () => {

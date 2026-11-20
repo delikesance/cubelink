@@ -1494,3 +1494,108 @@ async fn serveur_arrete_proprement_de_lui_meme_publie_la_session() {
         p.stop().await;
     }
 }
+
+// ---------------------------------------------------------------------------------------------------------
+// #96 : un membre qui ne fait que rejoindre libère aussi les vieilles versions
+// ---------------------------------------------------------------------------------------------------------
+
+/// Un monde d'environ `len` octets, distinct selon `seed`.
+fn big_world(dir: &Path, seed: u8, len: usize) {
+    std::fs::create_dir_all(dir).unwrap();
+    let data: Vec<u8> = (0..len).map(|i| (i as u8).wrapping_mul(31).wrapping_add(seed).wrapping_add((i >> 8) as u8)).collect();
+    std::fs::write(dir.join("region.mca"), data).unwrap();
+}
+
+/// Alice publie quatre versions, Bob (qui ne fait que rejoindre) les reçoit toutes. Sa synchro libère toute seule les
+/// vieilles (date de réception ici, pas `created_at`), la page du serveur mesure les blobs, « Restaurer » n'est proposé
+/// que pour les mondes présents.
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn un_membre_qui_ne_fait_que_rejoindre_libere_les_vieilles_versions() {
+    let (peers, g, _id) = group_of(&["Alice", "Bob"]).await;
+    let (a, b) = (&peers[0], &peers[1]);
+    let mut vs = Vec::new();
+    for n in 1..=3u8 {
+        let d = a.dir.path().join(format!("monde-{n}"));
+        big_world(&d, n, 60_000);
+        let parent = vs.last().map(|v: &p2p_lib::hearth::version::SignedVersion| (v.id(), v.header.number));
+        let v = a.rt().publish_version(g, &d, VersionKind::Session, parent, 60).await.unwrap();
+        wait_for("monde complet chez Bob", 40, || b.rt().head(&g).is_some_and(|h| h.id() == v.id() && b.rt().world_complete(&h))).await;
+        vs.push(v);
+    }
+    let (v1, v2, v3) = (&vs[0], &vs[1], &vs[2]);
+    let detail = || b.node.st.hearth.detail(&g).unwrap();
+    let d = detail();
+    assert!(d.versions.iter().all(|v| v.available), "Bob a les trois mondes");
+    // La place mesurée, ce sont les blobs (3 x 60 Ko), pas les quelques Ko d'en-têtes du dossier du groupe.
+    assert!(d.settings.disk_bytes >= 180_000, "les blobs comptent : {}", d.settings.disk_bytes);
+    let full = d.settings.disk_bytes;
+
+    // Récent : rien n'est libéré, même 13 jours plus tard.
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    b.rt().gc_versions_at(g, now + 13 * 86_400).await;
+    assert!(vs.iter().all(|v| b.rt().world_complete(v)), "moins de 14 jours depuis la réception : tout reste");
+
+    // La n° 1 est arrivée chez Bob il y a 20 jours : la prochaine synchro (après la n° 4 d'Alice) la libère toute seule.
+    let file = b.rt().server_dir(&g).parent().unwrap().join("versions").join(format!("{}.json", v1.id()));
+    let old = std::time::SystemTime::now() - Duration::from_secs(20 * 86_400);
+    std::fs::File::options().write(true).open(&file).unwrap().set_modified(old).unwrap();
+    let d4 = a.dir.path().join("monde-4");
+    big_world(&d4, 4, 60_000);
+    let v4 = a.rt().publish_version(g, &d4, VersionKind::Session, Some((v3.id(), 3)), 60).await.unwrap();
+    wait_for("n° 4 chez Bob", 40, || b.rt().head(&g).is_some_and(|h| h.id() == v4.id() && b.rt().world_complete(&h))).await;
+    wait_for("n° 1 libérée par la synchro", 40, || !b.rt().world_complete(v1)).await;
+    assert!(b.rt().world_complete(v2) && b.rt().world_complete(v3) && b.rt().world_complete(&v4), "récentes, parent et tête restent");
+    let d = detail();
+    let avail = |n: u64| d.versions.iter().find(|v| v.number == n).unwrap().available;
+    assert_eq!((avail(1), avail(2), avail(3), avail(4)), (false, true, true, true));
+    assert!(d.versions.len() == 4, "l'historique garde la ligne de la n° 1");
+
+    // 15 jours plus tard : seules la tête (n° 4) et son parent (n° 3) restent ; la place mesurée baisse.
+    b.rt().gc_versions_at(g, now + 15 * 86_400).await;
+    assert!(!b.rt().world_complete(v2) && b.rt().world_complete(v3) && b.rt().world_complete(&v4));
+    let d = detail();
+    assert!(d.versions.iter().filter(|v| v.available).count() == 2);
+    assert!(d.settings.disk_bytes < full, "n° 1 et n° 2 libérées : {} contre {full}", d.settings.disk_bytes);
+    assert!(d.settings.disk_bytes >= 120_000, "les blobs des deux versions gardées comptent encore");
+
+    for p in &peers {
+        p.stop().await;
+    }
+}
+
+/// Bob était éteint pendant les n° 2 et n° 3 : à son retour il reprend la tête (n° 3) mais pas le monde de la n° 2, dont il
+/// n'a que l'en-tête. Alice éteinte, restaurer la n° 2 dit en clair que le contenu n'est plus sur ce PC et que personne ne
+/// l'a en ligne, pas l'erreur de transfert ; la page du serveur ne propose pas « Restaurer » (`available` faux) (#96).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn restaurer_un_monde_absent_sans_personne_en_ligne_le_dit_en_clair() {
+    let (mut peers, g, id) = group_of(&["Alice", "Bob"]).await;
+    let d1 = peers[0].dir.path().join("monde-1");
+    big_world(&d1, 1, 10_000);
+    let v1 = peers[0].rt().publish_version(g, &d1, VersionKind::Session, None, 60).await.unwrap();
+    wait_for("n° 1 complète chez Bob", 40, || peers[1].rt().head(&g).is_some_and(|h| h.id() == v1.id() && peers[1].rt().world_complete(&h))).await;
+    peers[1].stop().await;
+    let mut parent = (v1.id(), 1);
+    let mut vs = Vec::new();
+    for n in 2..=3u8 {
+        let d = peers[0].dir.path().join(format!("monde-{n}"));
+        big_world(&d, n, 10_000);
+        let v = peers[0].rt().publish_version(g, &d, VersionKind::Session, Some(parent), 60).await.unwrap();
+        parent = (v.id(), u64::from(n));
+        vs.push(v);
+    }
+    let v3 = vs.pop().unwrap();
+    let v2 = vs.pop().unwrap();
+    peers[1].restart().await;
+    peers[1].rt().probe_all().await;
+    let b = &peers[1];
+    wait_for("n° 3 complète chez Bob", 60, || b.rt().head(&g).is_some_and(|h| h.id() == v3.id() && b.rt().world_complete(&h))).await;
+    assert!(!b.rt().world_complete(&v2), "seule la tête est rapatriée : Bob n'a que l'en-tête de la n° 2");
+    peers[0].stop().await;
+    b.rt().probe_all().await;
+    let d = b.node.st.hearth.detail(&g).unwrap();
+    assert!(d.versions.iter().find(|v| v.number == 2).is_some_and(|v| !v.available), "la n° 2 n'a pas de contenu ici");
+    assert!(d.versions.iter().find(|v| v.number == 1).is_some_and(|v| v.available));
+    let err = b.node.st.hearth_restore(&id, &v2.id().to_hex()).await.unwrap_err();
+    assert!(err.contains("n'est plus sur ce PC"), "{err}");
+    b.stop().await;
+}

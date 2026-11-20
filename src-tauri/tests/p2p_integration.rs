@@ -164,7 +164,6 @@ async fn amis_presence_partage_join_coupure_et_refus() {
     assert_eq!(last.phase, TransferPhase::Done, "{last:?}");
     assert!(a.be.cut_consumed(), "la coupure injectée a eu lieu, puis reprise");
     assert!(prog.iter().any(|p| p.phase == TransferPhase::Receiving && p.bytes_done > 0));
-    assert!(!last.via_relay);
     assert_eq!(last.files_done, 3);
     // Avertissement fiable calculé côté invité après réception.
     let um = a.events("transfer://unknown_mods");

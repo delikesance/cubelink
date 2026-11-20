@@ -403,8 +403,6 @@ pub struct TransferProgress {
     pub bytes_total: u64,
     /// Octets par seconde, 0 si inconnu.
     pub speed_bps: u64,
-    /// Vrai si le transfert passe par un relais.
-    pub via_relay: bool,
     /// Message d'échec (phase `failed`), en français.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,

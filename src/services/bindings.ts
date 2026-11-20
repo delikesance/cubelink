@@ -1118,8 +1118,13 @@ export type ModIssue_Serialize = {
  *  si cet appareil est joignable directement par un ami (IPv6 publique ou port ouvert sur la box).
  */
 export type NetTest = {
-	/**  Une adresse IPv6 publique est disponible : un ami peut s'y connecter sans que la box ouvre quoi que ce soit. */
+	/**
+	 *  Une adresse IPv6 globale est disponible : un ami peut s'y connecter sans que la box ouvre quoi que ce soit (si
+	 *  aucun pare-feu ne la filtre).
+	 */
 	ipv6: boolean,
+	/**  Une adresse IPv4 publique est portée directement par l'appareil (sans NAT). */
+	ipv4_public: boolean,
 	/**  La box a ouvert le port UDP de Cubelink (UPnP, NAT-PMP ou PCP). */
 	port_mapped: boolean,
 };
@@ -1282,8 +1287,6 @@ export type TransferProgress_Deserialize = {
 	bytes_total: number,
 	/**  Octets par seconde, 0 si inconnu. */
 	speed_bps: number,
-	/**  Vrai si le transfert passe par un relais. */
-	via_relay: boolean,
 	/**  Message d'échec (phase `failed`), en français. */
 	error?: string | null,
 };
@@ -1296,8 +1299,6 @@ export type TransferProgress_Serialize = {
 	bytes_total: number,
 	/**  Octets par seconde, 0 si inconnu. */
 	speed_bps: number,
-	/**  Vrai si le transfert passe par un relais. */
-	via_relay: boolean,
 	/**  Message d'échec (phase `failed`), en français. */
 	error?: string,
 };

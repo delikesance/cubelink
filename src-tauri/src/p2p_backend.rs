@@ -88,8 +88,11 @@ pub struct HostManifest {
 /// si cet appareil est joignable directement par un ami (IPv6 publique ou port ouvert sur la box).
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize, specta::Type)]
 pub struct NetTest {
-    /// Une adresse IPv6 publique est disponible : un ami peut s'y connecter sans que la box ouvre quoi que ce soit.
+    /// Une adresse IPv6 globale est disponible : un ami peut s'y connecter sans que la box ouvre quoi que ce soit (si
+    /// aucun pare-feu ne la filtre).
     pub ipv6: bool,
+    /// Une adresse IPv4 publique est portée directement par l'appareil (sans NAT).
+    pub ipv4_public: bool,
     /// La box a ouvert le port UDP de Cubelink (UPnP, NAT-PMP ou PCP).
     pub port_mapped: bool,
 }

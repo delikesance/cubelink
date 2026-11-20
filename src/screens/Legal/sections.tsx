@@ -48,7 +48,7 @@ export const SECTIONS: LegalSection[] = [
       <>
         <h3>Pas de relais</h3>
         <p>Un relais est un serveur intermédiaire qui transmet du trafic quand deux appareils ne peuvent pas se joindre. Cubelink n'en utilise aucun&nbsp;: ni les relais publics du projet Iroh (société n0), ni un relais de Cubelink. Tes connexions avec tes amis sont directes, et aucun annuaire public ne connaît ta clé ni ton adresse.</p>
-        <p>Pour que ça marche, au moins l'un de vous deux doit être joignable&nbsp;: adresse IPv6, ou port ouvert automatiquement sur ta box (UPnP). En attendant la découverte par DHT Mainline et des relais Cubelink, deux amis tous deux derrière un réseau très fermé (NAT strict ou CGNAT, sans IPv6 ni UPnP) peuvent ne pas se joindre. Réglages, onglet Réseau, «&nbsp;Tester ma connexion&nbsp;» indique où tu en es.</p>
+        <p>Pour que ça marche, au moins l'un de vous deux doit être joignable&nbsp;: adresse IPv6 ou IPv4 publique, ou port ouvert automatiquement sur ta box (UPnP). En attendant la découverte par DHT Mainline et des relais Cubelink, deux amis tous deux derrière un réseau très fermé (NAT strict ou CGNAT, sans IPv6 ni UPnP) peuvent ne pas se joindre. Réglages, onglet Réseau, «&nbsp;Tester ma connexion&nbsp;» indique où tu en es.</p>
       </>
     ),
   },

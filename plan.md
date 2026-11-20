@@ -39,7 +39,7 @@ Chaque tâche a un livrable vérifiable (code, tests, rapport). Tests et lint pa
 
 ## Vérification
 - `npm test` : clippy `-D warnings`, `cargo test --workspace`, `tsc --noEmit`, vitest.
-- `npm run e2e` : scénarios Playwright `e2e/01` à `11` (ajout d'ami, join, installation, lancement, mod inconnu, échecs, relais, accessibilité, tailles, parcourir, art).
+- `npm run e2e` : scénarios Playwright `e2e/01` à `11` (ajout d'ami, join, installation, lancement, mod inconnu, échecs, réseau sans relais, accessibilité, tailles, parcourir, art).
 - Test réel sur deux machines pour le P2P (ajout d'ami par code, join avec manifeste, hashes identiques, mod maison absent des catalogues).
 
 ## Points ouverts

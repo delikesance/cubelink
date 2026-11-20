@@ -80,17 +80,22 @@ export interface NetCheck { label: string; ok: boolean | null; detail: string }
 export interface NetVerdict { tone: NetTone; label: string; summary: string; checks: NetCheck[] }
 
 /**
- * Aucun relais ni serveur tiers : tes amis ne te joignent que par une adresse directe (IPv6 publique ou port ouvert sur
- * ta box). Sans l'une ni l'autre, tu ne peux te connecter qu'à un ami qui, lui, est joignable.
+ * Aucun relais ni serveur tiers : tes amis ne te joignent que par une adresse directe (IPv6 globale, IPv4 publique ou
+ * port ouvert sur ta box). On ne peut pas vérifier depuis l'appareil qu'un pare-feu ne la filtre pas : d'où
+ * « probablement ». Sans aucune de ces adresses, tu ne peux te connecter qu'à un ami qui, lui, est joignable.
  */
 export function netVerdict(t: NetTest): NetVerdict {
   const checks: NetCheck[] = [
-    { label: "Adresse IPv6 publique", ok: t.ipv6, detail: t.ipv6 ? "disponible" : "indisponible chez ton fournisseur ou sur ta box" },
+    { label: "Adresse IPv6", ok: t.ipv6, detail: t.ipv6 ? "publique, disponible" : "indisponible chez ton fournisseur ou sur ta box" },
+    { label: "Adresse IPv4 publique", ok: t.ipv4_public, detail: t.ipv4_public ? "portée directement par ton appareil" : "non (derrière une box ou un CGNAT)" },
     { label: "Port ouvert sur la box", ok: t.port_mapped, detail: t.port_mapped ? "ouvert automatiquement (UPnP)" : "non ouvert (UPnP, NAT-PMP et PCP absents ou désactivés)" },
   ];
   const v = (tone: NetTone, label: string, summary: string): NetVerdict => ({ tone, label, summary, checks });
-  if (t.ipv6 || t.port_mapped) {
-    return v("ok", "Joignable", "Tes amis peuvent se connecter directement à toi, sans serveur intermédiaire.");
+  if (t.port_mapped) {
+    return v("ok", "Joignable", "Ta box a ouvert le port : tes amis peuvent se connecter directement à toi, sans serveur intermédiaire.");
+  }
+  if (t.ipv6 || t.ipv4_public) {
+    return v("ok", "Probablement joignable", "Tu as une adresse publique : tes amis devraient pouvoir se connecter directement à toi, sauf si un pare-feu la bloque.");
   }
   return v("warn", "Peu joignable", "Tes amis ne peuvent pas se connecter à toi, sauf sur le même réseau local. Toi, tu peux rejoindre un ami qui est joignable. Active l'UPnP sur ta box ou l'IPv6 pour y remédier.");
 }

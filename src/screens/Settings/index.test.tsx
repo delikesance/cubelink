@@ -23,22 +23,24 @@ describe("validation", () => {
 });
 
 describe("test de connexion", () => {
-  const base: NetTest = { ipv6: false, port_mapped: true };
-  it("verdicts : joignable par IPv6 ou par un port ouvert, sinon peu joignable (aucun relais)", () => {
+  const base: NetTest = { ipv6: false, ipv4_public: false, port_mapped: true };
+  it("verdicts : port ouvert = joignable ; adresse publique = probablement ; sinon peu joignable (aucun relais)", () => {
     const v = netVerdict(base);
     expect([v.tone, v.label]).toEqual(["ok", "Joignable"]);
-    expect(v.checks.map((c) => [c.label, c.ok])).toEqual([["Adresse IPv6 publique", false], ["Port ouvert sur la box", true]]);
+    expect(v.checks.map((c) => [c.label, c.ok])).toEqual([["Adresse IPv6", false], ["Adresse IPv4 publique", false], ["Port ouvert sur la box", true]]);
     const lbl = (t: Partial<NetTest>) => { const r = netVerdict({ ...base, ...t }); return `${r.tone}:${r.label}`; };
-    expect(lbl({ ipv6: true, port_mapped: false })).toBe("ok:Joignable");
-    expect(lbl({ ipv6: false, port_mapped: false })).toBe("warn:Peu joignable");
-    const w = netVerdict({ ipv6: false, port_mapped: false });
+    expect(lbl({ ipv6: true, port_mapped: false })).toBe("ok:Probablement joignable");
+    expect(lbl({ ipv4_public: true, port_mapped: false })).toBe("ok:Probablement joignable");
+    expect(lbl({ ipv6: true })).toBe("ok:Joignable");
+    expect(lbl({ port_mapped: false })).toBe("warn:Peu joignable");
+    const w = netVerdict({ ipv6: false, ipv4_public: false, port_mapped: false });
     expect(w.summary).toMatch(/même réseau local/);
     expect(JSON.stringify(w)).not.toMatch(/relais de secours|n0/i);
   });
 
   it("le bouton lance le vrai test et affiche le verdict", async () => {
     const services = createFakeServices({ tickMs: 0 });
-    const spy = vi.spyOn(services, "netTest").mockResolvedValue({ ipv6: false, port_mapped: false });
+    const spy = vi.spyOn(services, "netTest").mockResolvedValue({ ipv6: false, ipv4_public: false, port_mapped: false });
     window.location.hash = "#/settings";
     render(<Shell services={services} />);
     goTab("Réseau");

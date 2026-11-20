@@ -2,7 +2,7 @@
 //   E2E_REAL=1 npx playwright test -c e2e 12-multiplayer-real --workers=1
 // Deux apps A (hote) et B (invite) sur la meme machine : connexion directe par les adresses IP du code ami (aucun relais,
 // aucun annuaire). Parcours complet : ajout d'ami (code, verification, acceptation), partage auto, join_plan, transfert
-// (via_relay === false, hash verifies), tunnel TCP reel jusqu'au faux monde. Les temps mesures sont journalises
+// (hash verifies), tunnel TCP reel jusqu'au faux monde. Les temps mesures sont journalises
 // (console + annotations).
 import net from 'node:net';
 import path from 'node:path';
@@ -67,12 +67,11 @@ test('multijoueur reel sans relais : ami, partage, join, transfert direct, tunne
     await joinStart(appB.page, keyA);
     await waitProgress(appB.page, (p) => p.phase === 'done' || p.phase === 'failed', 300_000, 'fin du transfert');
   });
-  const last = await lastProgress(appB.page) as { phase: string; error?: string; via_relay?: boolean; bytes_done: number; speed_bps?: number };
+  const last = await lastProgress(appB.page) as { phase: string; error?: string; bytes_done: number; speed_bps?: number };
   expect(last.phase, last.error).toBe('done');
-  const prog = await (await import('./helpers/e2e2-common')).events<{ phase: string; via_relay: boolean; speed_bps: number }>(appB.page, 'transfer://progress');
+  const prog = await (await import('./helpers/e2e2-common')).events<{ phase: string; speed_bps: number }>(appB.page, 'transfer://progress');
   const rcv = prog.filter((p) => p.phase === 'receiving');
   expect(rcv.length).toBeGreaterThan(0);
-  expect(rcv.some((p) => p.via_relay), 'aucun relais : aucune reception relayee').toBe(false);
   const maxSpeed = Math.max(...prog.map((p) => p.speed_bps ?? 0));
   console.log(`[real] debit max observe : ${(maxSpeed / 1e6).toFixed(2)} Mo/s ; octets : ${last.bytes_done}`);
   timings['debit_max_Mo_s'] = Math.round(maxSpeed / 1e4) / 100;

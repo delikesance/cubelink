@@ -270,6 +270,8 @@ export interface Services {
   onFriendInvite(cb: (i: Invite) => void): Unsubscribe;
   /** Liste complète des invitations à chaque changement. */
   onFriendInvites(cb: (l: Invite[]) => void): Unsubscribe;
+  /** Mes adresses ont changé (réseau, IPv6, port ouvert sur la box) : le code ami est à redemander. */
+  onFriendCodeChanged(cb: () => void): Unsubscribe;
   /** Hôte : une demande à rejoindre vient d'arriver. */
   onFriendJoinRequest(cb: (r: JoinRequest) => void): Unsubscribe;
   /** Hôte : liste complète des demandes en attente, à chaque changement. */

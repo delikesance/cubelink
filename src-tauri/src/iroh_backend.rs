@@ -23,7 +23,6 @@ use core_lib::instance::InstanceKind;
 use core_lib::manifest::{build_manifest, ManifestOptions};
 use core_lib::unknown_mods::UnknownReport;
 use core_lib::types::{Error, Friend, ManifestFile, Presence, Result as CoreResult, Settings, TransferProgress, VerifyCode};
-use iroh::endpoint::Connection;
 use iroh::protocol::Router;
 use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
 use p2p_lib::friend_code::{self, FriendCodePayload};
@@ -35,7 +34,7 @@ use p2p_lib::join_request::{send_join_request as p2p_send_join_request, Decision
 use p2p_lib::presence::PeerKey;
 use p2p_lib::presence::{ping_reach, PresenceConfig, PresenceService, PRESENCE_ALPN};
 use p2p_lib::reach::Reach;
-use p2p_lib::relay::{self, PathKind, PathObserver};
+use p2p_lib::relay;
 use p2p_lib::transfer::plan::Plan;
 use p2p_lib::transfer::recv::RecvOptions;
 use p2p_lib::transfer::resume::{ResumableReceive, ResumeConfig};
@@ -49,7 +48,6 @@ use crate::p2p_backend::{BoxFuture, Cmd, HostManifest, NetTest, P2pBackend, Prog
 use crate::state::{lock, AppState, EventSink};
 
 pub use p2p_lib::manifest_channel::MANIFEST_ALPN;
-const NET_TIMEOUT: Duration = Duration::from_secs(15);
 /// Sans aucun octet reçu pendant ce délai, le transfert passe en `failed` (message français).
 pub const DEFAULT_INACTIVITY: Duration = Duration::from_secs(60);
 /// Un téléchargement muet depuis ce délai est interrompu : l'adresse de l'hôte est re-résolue puis on réessaie.
@@ -136,7 +134,6 @@ struct Fetcher {
     /// Test : fait échouer le n-ième `fetch` (1 = premier), une fois, par une coupure réseau.
     cut_at: Arc<Mutex<Option<usize>>>,
     calls: AtomicUsize,
-    observer: Mutex<Option<PathObserver>>,
     /// Dernière activité (octets reçus) : alimente le délai d'inactivité.
     activity: Arc<Activity>,
     /// Silence maximal d'un téléchargement avant de le relancer.
@@ -217,22 +214,6 @@ pub async fn run_with_watchdog<T>(
     }
 }
 
-/// Adresse à réessayer pour un hôte : l'adresse connue sans ses adresses IP directes si un relais est
-/// connu (elles changent quand l'hôte redémarre ; le relais le retrouve par sa clé), sinon inchangée.
-pub fn refreshed_addr(stored: &EndpointAddr) -> EndpointAddr {
-    let mut a = EndpointAddr::new(stored.id);
-    let mut has_relay = false;
-    for u in stored.relay_urls() {
-        a = a.with_relay_url(u.clone());
-        has_relay = true;
-    }
-    if has_relay {
-        a
-    } else {
-        stored.clone()
-    }
-}
-
 impl BlobTransport for Fetcher {
     async fn serve(&self, _host: Arc<Host>) -> CoreResult<()> {
         Ok(())
@@ -284,39 +265,31 @@ impl BlobTransport for Fetcher {
         }
         res
     }
-
-    fn via_relay(&self, peer: &str) -> bool {
-        let seen = lock(&self.observer).as_ref().map(|o| o.current() == PathKind::Relay);
-        seen.unwrap_or_else(|| self.inner.via_relay(peer))
-    }
 }
 
 // ---------- adresses de contact des amis ----------
 
-/// Fusionne une adresse observée dans la connue : les IP et le relais observés remplacent les anciens
-/// (qui sont périmés si le pair a redémarré) ; ce qui manque à l'observation (p. ex. connexion purement
-/// relayée, donc sans IP) est conservé.
-pub fn merge_addr(old: Option<&EndpointAddr>, new: &EndpointAddr) -> EndpointAddr {
-    let mut out = EndpointAddr::new(new.id);
-    let relays: Vec<_> = match (new.relay_urls().next(), old) {
-        (Some(_), _) | (None, None) => new.relay_urls().cloned().collect(),
-        (None, Some(o)) => o.relay_urls().cloned().collect(),
-    };
-    let ips: Vec<SocketAddr> = match (new.ip_addrs().next(), old) {
-        (Some(_), _) | (None, None) => new.ip_addrs().copied().collect(),
-        (None, Some(o)) => o.ip_addrs().copied().collect(),
-    };
-    for r in relays {
-        out = out.with_relay_url(r);
+/// Pur : IP connues d'un pair après une observation. Union bornée (`MAX_PEER_ADDRS`), l'observation la plus récente en
+/// tête. Une seule observation, peut-être inatteignable (VPN, carte virtuelle, ancienne session), n'écrase donc jamais
+/// des IP déjà connues ; les plus anciennes sortent en premier.
+pub fn merge_ips(old: &[SocketAddr], new: &[SocketAddr]) -> Vec<SocketAddr> {
+    let mut ips: Vec<SocketAddr> = Vec::new();
+    for ip in new.iter().chain(old) {
+        if !ips.contains(ip) && ips.len() < p2p_lib::friends_db::MAX_PEER_ADDRS {
+            ips.push(*ip);
+        }
     }
-    for ip in ips {
-        out = out.with_ip_addr(ip);
-    }
-    out
+    ips
 }
 
-fn to_peer_addr(a: &EndpointAddr) -> PeerAddr {
-    PeerAddr { relay: None, addrs: relay::endpoint_addr_info(a).addrs }
+/// `EndpointAddr` d'un pair à partir de ses IP. Aucun relais n'est conservé (#55).
+fn addr_of_ips(id: EndpointId, ips: &[SocketAddr]) -> EndpointAddr {
+    ips.iter().fold(EndpointAddr::new(id), |a, ip| a.with_ip_addr(*ip))
+}
+
+/// Ligne de base : les IP dans l'ordre de récence (la plus récente en tête), jamais de relais.
+fn to_peer_addr(ips: &[SocketAddr]) -> PeerAddr {
+    PeerAddr { relay: None, addrs: ips.iter().map(ToString::to_string).take(p2p_lib::friends_db::MAX_PEER_ADDRS).collect() }
 }
 
 /// Reconstruit une adresse iroh depuis la base ; IP illisibles : ignorées. Le relais mémorisé (anciennes versions :
@@ -334,6 +307,8 @@ pub fn addr_from_stored(key_hex: &str, p: &PeerAddr) -> Option<EndpointAddr> {
 #[derive(Clone)]
 struct AddrBook {
     peers: Arc<Mutex<HashMap<String, EndpointAddr>>>,
+    /// IP de chaque pair dans l'ordre de récence (un `EndpointAddr` les range par ordre de tri, pas de récence).
+    order: Arc<Mutex<HashMap<String, Vec<SocketAddr>>>>,
     /// Faible : le service de présence détient le destinataire d'adresses (pas de cycle).
     presence: std::sync::Weak<PresenceService>,
     transport: Arc<IrohTransport>,
@@ -344,20 +319,24 @@ impl AddrBook {
     /// Fusionne, applique et persiste (seulement si l'adresse a changé). Ne journalise aucune adresse.
     fn remember(&self, addr: EndpointAddr) {
         let key = hex::encode(addr.id.as_bytes());
-        let merged = {
-            let mut peers = lock(&self.peers);
-            let merged = merge_addr(peers.get(&key), &addr);
-            if peers.get(&key) == Some(&merged) {
+        let new_ips: Vec<SocketAddr> = addr.ip_addrs().copied().collect();
+        let (merged, ordered) = {
+            let (mut peers, mut order) = (lock(&self.peers), lock(&self.order));
+            let known = order.get(&key).cloned().unwrap_or_default();
+            let ordered = merge_ips(&known, &new_ips);
+            let merged = addr_of_ips(addr.id, &ordered);
+            if peers.get(&key) == Some(&merged) && known == ordered {
                 return;
             }
             peers.insert(key.clone(), merged.clone());
-            merged
+            order.insert(key.clone(), ordered.clone());
+            (merged, ordered)
         };
         if let Some(p) = self.presence.upgrade() {
             p.add_addr(merged.clone());
         }
         self.transport.add_peer(merged.clone());
-        if let Err(e) = self.db.set_friend_addr(&key, &to_peer_addr(&merged)) {
+        if let Err(e) = self.db.set_friend_addr(&key, &to_peer_addr(&ordered)) {
             eprintln!("[cubelink] adresse d'ami non persistée : {e}");
         }
     }
@@ -469,7 +448,10 @@ impl IrohBackend {
             .map(|a| a.to_vec())
             .collect();
         let secret = SecretKey::from_bytes(&st.identity.secret_bytes());
-        let endpoint = relay::build_endpoint(secret, alpns).await.map_err(|e| user_msg(&e))?;
+        // Port UDP fixe (choisi au premier lancement) : les adresses mémorisées par les amis ne se périment plus à chaque
+        // démarrage ; occupé, repli sur un port libre.
+        let port = relay::load_or_pick_port(&st.paths.p2p);
+        let endpoint = relay::build_endpoint(secret, alpns, Some(port)).await.map_err(|e| user_msg(&e))?;
         // Sans relais, Iroh n'ouvre pas de port sur la box : on le fait toujours (sauf dans les tests, `opts.portmap`).
         let portmap = opts.portmap
             .then(|| p2p_lib::portmap::DirectPortmap::spawn(endpoint.clone()))
@@ -509,13 +491,14 @@ impl IrohBackend {
         });
         // Adresses mémorisées lors d'une session précédente : disponibles dès la première sonde.
         let _ = st.friends.prune_friend_addrs();
-        let stored: Vec<(String, EndpointAddr)> = st
-            .friends
-            .list_friend_addrs()
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|(k, p)| addr_from_stored(&k, &p).map(|a| (k, a)))
+        let saved = st.friends.list_friend_addrs().unwrap_or_default();
+        // L'ordre de récence mémorisé en base (la plus récente en tête) est repris tel quel.
+        let stored_order: Vec<(String, Vec<SocketAddr>)> = saved
+            .iter()
+            .map(|(k, p)| (k.clone(), p.addrs.iter().filter_map(|a| a.parse().ok()).collect()))
             .collect();
+        let stored: Vec<(String, EndpointAddr)> =
+            saved.into_iter().filter_map(|(k, p)| addr_from_stored(&k, &p).map(|a| (k, a))).collect();
         let presence = Arc::new(PresenceService::start_with_addrs(
             endpoint.clone(),
             authz.clone(),
@@ -549,7 +532,10 @@ impl IrohBackend {
         for (_, a) in &stored {
             transport.add_peer(a.clone());
         }
-        let book = AddrBook { peers: peers.clone(), presence: Arc::downgrade(&presence), transport: transport.clone(), db: st.friends.clone() };
+        let order: Arc<Mutex<HashMap<String, Vec<SocketAddr>>>> = Arc::new(Mutex::new(
+            stored_order.into_iter().collect(),
+        ));
+        let book = AddrBook { peers: peers.clone(), order, presence: Arc::downgrade(&presence), transport: transport.clone(), db: st.friends.clone() };
         let sink_book = book.clone();
         let friend_book = book.clone();
         presence.set_addr_sink(Arc::new(move |a| sink_book.remember(a)));
@@ -613,6 +599,27 @@ impl IrohBackend {
             })
         }));
 
+        // Les adresses de l'appareil changent (réseau, IPv6, adresse ouverte sur la box quelques secondes après le
+        // démarrage) : `friend://code_changed` dit à l'écran du code ami de le redemander.
+        {
+            let (ep, emit) = (endpoint.clone(), st.emit.clone());
+            tokio::spawn(async move {
+                use iroh::Watcher as _;
+                let mut w = ep.watch_addr();
+                loop {
+                    tokio::select! {
+                        _ = ep.closed() => break,
+                        r = w.updated() => {
+                            if r.is_err() {
+                                break;
+                            }
+                            emit("friend://code_changed", serde_json::json!({}));
+                        }
+                    }
+                }
+            });
+        }
+
         let be = Arc::new_cyclic(|me| Self {
             portmap,
             endpoint,
@@ -653,6 +660,11 @@ impl IrohBackend {
             }
         });
         Ok(be)
+    }
+
+    /// Adresse publique ouverte sur la box par le portmapper (UPnP / NAT-PMP / PCP), si la box l'a accordée.
+    fn mapped_addr(&self) -> Option<SocketAddr> {
+        self.portmap.as_ref().and_then(|p| p.external()).map(SocketAddr::V4)
     }
 
     pub fn endpoint_addr(&self) -> EndpointAddr {
@@ -809,31 +821,24 @@ impl IrohBackend {
         }
     }
 
-    /// Connexion gardée vers l'ami (ALPN de contrôle, sans flux) : sert à observer le chemin (relais ou direct).
-    async fn hold(&self, key: &str) -> Option<Connection> {
-        let addr = self.addr_for(key).ok()?;
-        tokio::time::timeout(NET_TIMEOUT, self.endpoint.connect(addr, CONTROL_ALPN)).await.ok()?.ok()
-    }
 }
 
 /// Durée maximale d'attente de l'ouverture du port sur la box.
 const NET_TEST_WAIT: Duration = Duration::from_secs(5);
 
-/// Pur : une de ces adresses est-elle une IPv6 publique (ni locale au lien, ni ULA, ni loopback) ?
-pub fn has_public_ipv6(addrs: &[SocketAddr]) -> bool {
-    addrs.iter().any(|a| match a.ip() {
-        std::net::IpAddr::V6(ip) => {
-            let first = ip.segments()[0];
-            !(ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() || first & 0xffc0 == 0xfe80 || first & 0xfe00 == 0xfc00)
-        }
-        std::net::IpAddr::V4(_) => false,
-    })
+/// Pur : (IPv6 globale présente, IPv4 publique présente) parmi les adresses de l'endpoint. Une IPv4 publique portée
+/// directement par l'appareil (sans NAT) est joignable comme une IPv6 ; un pare-feu peut encore la filtrer.
+pub fn public_addr_flags(addrs: &[SocketAddr]) -> (bool, bool) {
+    let has = |class: relay::AddrClass| addrs.iter().any(|a| relay::classify(a.ip()) == class);
+    (has(relay::AddrClass::GlobalV6), has(relay::AddrClass::PublicV4))
 }
 
 impl IrohBackend {
-    /// Ce qui rend l'appareil joignable sans aucun tiers : une IPv6 publique, ou un port ouvert sur la box.
+    /// Ce qui rend l'appareil joignable sans aucun tiers : une adresse publique (IPv6 globale, IPv4 publique) ou un port
+    /// ouvert sur la box.
     async fn net_test_impl(&self) -> NetTest {
         let ips: Vec<SocketAddr> = self.endpoint.addr().ip_addrs().copied().collect();
+        let (ipv6, ipv4_public) = public_addr_flags(&ips);
         let deadline = tokio::time::Instant::now() + NET_TEST_WAIT;
         let port_mapped = loop {
             let mapped = self.portmap.as_ref().is_some_and(|p| p.external().is_some());
@@ -842,7 +847,7 @@ impl IrohBackend {
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
         };
-        NetTest { ipv6: has_public_ipv6(&ips), port_mapped }
+        NetTest { ipv6, ipv4_public, port_mapped }
     }
 }
 
@@ -892,9 +897,9 @@ impl P2pBackend for IrohBackend {
     }
 
     fn code_hints(&self) -> (Option<String>, Vec<String>) {
-        let info = relay::endpoint_addr_info(&self.endpoint.addr());
         // Les IP sont le seul moyen de nous joindre (aucun relais, aucune découverte) : elles partent dans le code ami,
-        // donc chez quiconque le reçoit (un ami).
+        // donc chez quiconque le reçoit (un ami). L'adresse ouverte sur la box et l'IPv6 globale passent en premier.
+        let info = relay::endpoint_addr_info(&self.endpoint.addr(), self.mapped_addr());
         (None, info.addrs)
     }
 
@@ -985,23 +990,19 @@ impl P2pBackend for IrohBackend {
         Box::pin(async move {
             let addr = self.addr_for(&key).map_err(Error::Invalid)?;
             let peer = self.transport.add_peer(addr);
-            // Connexion gardée pendant le transfert : `PathObserver` dit si on passe par un relais.
-            let keep = self.hold(&key).await;
-            let observer = keep.as_ref().map(|c| PathObserver::spawn(c.clone()));
             let activity = Arc::new(Activity::new());
             activity.touch();
             let (peers, transport, pkey) = (self.peers.clone(), self.transport.clone(), key.clone());
             let refresh: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
                 let stored = lock(&peers).get(&pkey).cloned();
                 if let Some(a) = stored {
-                    transport.add_peer(refreshed_addr(&a));
+                    transport.add_peer(a);
                 }
             });
             let fetcher = Arc::new(Fetcher {
                 inner: self.transport.clone(),
                 cut_at: self.cut_at.clone(),
                 calls: AtomicUsize::new(0),
-                observer: Mutex::new(observer),
                 activity: activity.clone(),
                 stall_retry: self.opts.stall_retry,
                 refresh,
@@ -1044,9 +1045,6 @@ impl P2pBackend for IrohBackend {
                 WATCHDOG_GRACE,
             )
             .await;
-            if let Some(c) = keep {
-                c.close(0u32.into(), b"done");
-            }
             self.transport.close_peer(&peer);
             res
         })
@@ -1156,43 +1154,34 @@ mod tests {
     }
 
     #[test]
-    fn adresse_hote_re_resolue_sans_ip_perimees() {
-        let id = SecretKey::from_bytes(&[7u8; 32]).public();
-        let relay: iroh::RelayUrl = "https://relay.example./".parse().unwrap();
-        let ip: SocketAddr = "127.0.0.1:4000".parse().unwrap();
-        let stored = EndpointAddr::new(id).with_relay_url(relay.clone()).with_ip_addr(ip);
-        let r = refreshed_addr(&stored);
-        assert_eq!(r.id, id);
-        assert_eq!(r.ip_addrs().count(), 0, "IP directes périmées retirées");
-        assert_eq!(r.relay_urls().count(), 1);
-        // Sans relais : l'adresse est conservée (seul indice disponible).
-        let direct = EndpointAddr::new(id).with_ip_addr(ip);
-        assert_eq!(refreshed_addr(&direct), direct);
-    }
-
-    #[test]
     fn fusion_d_adresses_observees() {
         let id = SecretKey::from_bytes(&[9u8; 32]).public();
+        let ip = |n: u16| -> SocketAddr { format!("10.0.0.{n}:{n}").parse().unwrap() };
+        // Une observation ne remplace pas les IP connues : union, la plus récente en tête.
+        assert_eq!(merge_ips(&[ip(1), ip(2)], &[ip(3)]), vec![ip(3), ip(1), ip(2)]);
+        // Observation sans IP : IP conservées. Sans ancien : tel quel. Doublons écartés, l'observée remonte en tête.
+        assert_eq!(merge_ips(&[ip(1), ip(2)], &[]), vec![ip(1), ip(2)]);
+        assert_eq!(merge_ips(&[], &[ip(1)]), vec![ip(1)]);
+        assert_eq!(merge_ips(&[ip(1), ip(2)], &[ip(2)]), vec![ip(2), ip(1)]);
+        // Borne : les plus anciennes sortent en premier.
+        let many: Vec<SocketAddr> = (1..=8).map(ip).collect();
+        let m = merge_ips(&many, &[ip(9)]);
+        assert_eq!(m.len(), p2p_lib::friends_db::MAX_PEER_ADDRS);
+        assert_eq!(m[0], ip(9));
+        assert!(!m.contains(&ip(8)), "la plus ancienne est sortie");
+        // Aucun relais dans l'adresse reconstruite, même si l'observation en portait un (#55).
         let relay: iroh::RelayUrl = "https://relay.example./".parse().unwrap();
-        let (ip1, ip2): (SocketAddr, SocketAddr) = ("10.0.0.1:1".parse().unwrap(), "10.0.0.2:2".parse().unwrap());
-        let old = EndpointAddr::new(id).with_relay_url(relay.clone()).with_ip_addr(ip1);
-        // Observation directe seule : nouvelles IP, relais conservé.
-        let m = merge_addr(Some(&old), &EndpointAddr::new(id).with_ip_addr(ip2));
-        assert_eq!(m.ip_addrs().copied().collect::<Vec<_>>(), vec![ip2]);
-        assert_eq!(m.relay_urls().count(), 1);
-        // Observation relayée seule : IP conservées.
-        let m = merge_addr(Some(&old), &EndpointAddr::new(id).with_relay_url(relay.clone()));
-        assert_eq!(m.ip_addrs().copied().collect::<Vec<_>>(), vec![ip1]);
-        // Sans ancien : tel quel.
-        assert_eq!(merge_addr(None, &old), old);
-        // Aller-retour base : les IP sont restituées, jamais le relais (#55 : aucun relais contacté, même un ancien relais
-        // n0 mémorisé) ; valeurs illisibles ignorées.
+        let observed = addr_of_ips(id, &[ip(1)]).with_relay_url(relay);
+        assert_eq!(addr_of_ips(observed.id, &merge_ips(&[], &observed.ip_addrs().copied().collect::<Vec<_>>())).relay_urls().count(), 0);
+        // Aller-retour base : l'ordre de récence et les IP sont restitués, jamais le relais (aucun relais contacté, même
+        // un ancien relais n0 mémorisé) ; valeurs illisibles ignorées.
         let key = hex::encode(id.as_bytes());
-        let stored = to_peer_addr(&old);
+        let ordered = [ip(3), ip(1), ip(2)];
+        let stored = to_peer_addr(&ordered);
         assert!(stored.relay.is_none(), "plus de relais écrit en base");
-        let back = addr_from_stored(&key, &stored).unwrap();
-        assert_eq!(back, EndpointAddr::new(id).with_ip_addr(ip1));
-        let legacy = PeerAddr { relay: Some("https://euc1-1.relay.n0.iroh.link./".into()), addrs: vec![ip1.to_string()] };
+        assert_eq!(stored.addrs, ["10.0.0.3:3", "10.0.0.1:1", "10.0.0.2:2"], "ordre de récence conservé");
+        assert_eq!(addr_from_stored(&key, &stored).unwrap(), addr_of_ips(id, &ordered));
+        let legacy = PeerAddr { relay: Some("https://euc1-1.relay.n0.iroh.link./".into()), addrs: vec![ip(1).to_string()] };
         assert_eq!(addr_from_stored(&key, &legacy).unwrap().relay_urls().count(), 0, "relais mémorisé par une ancienne version ignoré");
         let junk = PeerAddr { relay: Some("pas une url".into()), addrs: vec!["x".into()] };
         assert_eq!(addr_from_stored(&key, &junk).unwrap(), EndpointAddr::new(id));
@@ -1200,14 +1189,16 @@ mod tests {
     }
 
     #[test]
-    fn ipv6_publique_seulement_si_globale() {
+    fn adresses_publiques_detectees() {
         let a = |s: &str| s.parse::<SocketAddr>().unwrap();
-        assert!(has_public_ipv6(&[a("[2a01:e0a:1:2::3]:4000")]));
-        assert!(has_public_ipv6(&[a("192.168.1.2:1"), a("[2001:db8::1]:1")]));
-        for local in ["[::1]:1", "[fe80::1]:1", "[fd12:3456::1]:1", "[ff02::1]:1", "192.168.1.2:1", "8.8.8.8:1"] {
-            assert!(!has_public_ipv6(&[a(local)]), "{local}");
+        assert_eq!(public_addr_flags(&[a("[2a01:e0a:1:2::3]:4000")]), (true, false));
+        assert_eq!(public_addr_flags(&[a("192.168.1.2:1"), a("[2001:db8::1]:1")]), (true, false));
+        // IPv4 publique directe, sans NAT : joignable aussi.
+        assert_eq!(public_addr_flags(&[a("93.184.216.34:1"), a("192.168.1.2:1")]), (false, true));
+        for local in ["[::1]:1", "[fe80::1]:1", "[fd12:3456::1]:1", "[ff02::1]:1", "192.168.1.2:1", "100.64.1.2:1", "169.254.1.2:1", "127.0.0.1:1"] {
+            assert_eq!(public_addr_flags(&[a(local)]), (false, false), "{local}");
         }
-        assert!(!has_public_ipv6(&[]));
+        assert_eq!(public_addr_flags(&[]), (false, false));
     }
 
     #[test]

@@ -6,6 +6,7 @@ import { navigate, goBack, parseHash, takePendingFocus, useCanGoBack, useLocatio
 import { TitleBar } from "./TitleBar";
 import { UpdateBanner } from "./UpdateBanner";
 import { StageNotice } from "./StageNotice";
+import { HearthMoments } from "../screens/Hearth/Moments";
 import { useContextMenu, useSuppressNativeMenu } from "./useContextMenu";
 import { openExternal } from "./externalLinks";
 import { useStage, useStageFullscreen, useStageLayout } from "./stage";
@@ -196,6 +197,8 @@ export function Shell({ services }: { services?: Services } = {}) {
         </main>
         {linkMenu.menu}
         <UpdateBanner services={svc} />
+        {/* Moments du groupe (invitation, passage de relais, serveur resté ouvert, mémoire) : écoutés sur toutes les routes, car ces événements ne sont pas rejoués. */}
+        <HearthMoments services={svc} />
         <StageNotice services={svc} />
         <div className="stage-slot" ref={slotRef} aria-hidden="true" />
         {/* Monté (et déjà dessiné) sous la fenêtre du jeu tant que le jeu est affiché : la découpe animée de la fenêtre du jeu

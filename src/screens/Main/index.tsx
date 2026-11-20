@@ -17,7 +17,6 @@ import { useContextMenu, type MenuItem } from "../../app/useContextMenu";
 import { useModCheckGate } from "../../app/useModCheck";
 import { Modal } from "./Modal";
 import { HearthSection } from "../Hearth/HearthSection";
-import { HearthMoments } from "../Hearth/Moments";
 
 const LOADERS: Record<string, string> = {
   vanilla: "Vanilla", neoforge: "NeoForge", fabric: "Fabric", quilt: "Quilt", forge: "Forge",
@@ -415,7 +414,6 @@ export default function Main() {
       </aside>
       {ctx.menu}
       {gate.modal}
-      <HearthMoments services={services} />
       {toDelete && (
         <Modal title="Supprimer l'instance ?" role="alertdialog" onClose={() => setToDelete(null)}>
           <p className="home-modal-text">L'instance « {toDelete.name} » et ses fichiers (mondes, configuration) seront supprimés définitivement.</p>

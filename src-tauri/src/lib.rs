@@ -79,6 +79,7 @@ macro_rules! commands {
             commands_join::join_close_tunnel,
             commands_join::join_play,
             commands_settings::settings_get,
+            commands_settings::system_ram_mb,
             commands_settings::settings_set,
             commands_browse::browse_search,
             commands_browse::browse_versions,

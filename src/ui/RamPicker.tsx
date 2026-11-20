@@ -23,7 +23,7 @@ export interface RamPickerProps {
   /** Mo, ou `RAM_DEFAULT` (0) pour suivre la valeur globale. */
   value: number;
   onChange: (mb: number) => void;
-  /** Valeur globale des paramètres (`null` : pas encore connue). */
+  /** Valeur globale des paramètres en Mo (`0` : « Automatique » ; `null` : pas encore connue). */
   defaultMb: number | null;
   label?: string;
   /** Conseil sous le réglage (ex. besoin d'un gros modpack). */
@@ -38,17 +38,18 @@ export interface RamPickerProps {
 export function RamPicker({ value, onChange, defaultMb, label = "Mémoire allouée", hint, disabled }: RamPickerProps) {
   const uid = useId();
   const inherit = value === RAM_DEFAULT;
+  const auto = defaultMb === 0;
   const shown = inherit ? defaultMb : value;
-  const custom = inherit ? (defaultMb ?? 4 * GB) : value;
+  const custom = inherit ? (defaultMb || 4 * GB) : value;
   const maxGb = Math.max(16, Math.ceil(custom / GB), Math.ceil((defaultMb ?? 0) / GB));
   const gb = Math.min(maxGb, Math.max(MIN_GB, Math.round(custom / GB)));
-  const defLabel = defaultMb ? ramLabel(defaultMb) : "…";
+  const defLabel = auto ? "Automatique" : defaultMb ? ramLabel(defaultMb) : "…";
 
   return (
     <div className="cl-ram" role="group" aria-labelledby={`${uid}-l`}>
       <div className="cl-ram-head">
         <span id={`${uid}-l`} className="cl-label">{label}</span>
-        <output className="cl-ram-val" aria-live="polite">{shown ? ramLabel(shown) : "…"}</output>
+        <output className="cl-ram-val" aria-live="polite">{inherit && auto ? "Automatique" : shown ? ramLabel(shown) : "…"}</output>
       </div>
       <label className="cl-ram-default">
         <input

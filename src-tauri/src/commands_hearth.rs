@@ -470,7 +470,7 @@ impl AppState {
             minecraft: inst.minecraft.clone(),
             loader: inst.loader.clone(),
             mods_src: game_dir.join("mods"),
-            ram_mb: core_lib::instance::effective_ram_mb(inst.ram_mb, settings.default_ram_mb).clamp(1024, 8192),
+            ram_mb: self.launch_ram_mb(inst).clamp(1024, 8192),
             java_override: settings.java_path.as_deref().map(PathBuf::from),
             java_root: self.paths.java.clone(),
         };

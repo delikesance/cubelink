@@ -363,7 +363,7 @@ pub fn now_secs() -> i64 {
 pub fn default_settings() -> Settings {
     Settings {
         language: "fr".into(),
-        default_ram_mb: 4096,
+        default_ram_mb: core_lib::instance::RAM_AUTO,
         java_path: None,
         trust_default: TrustLevel::Ask,
         allow_relay: true,
@@ -377,6 +377,7 @@ pub fn default_settings() -> Settings {
         embedded_game: true,
         open_to_all_friends: false,
         start_with_os: true,
+        ram_auto_migrated: true,
     }
 }
 

@@ -105,9 +105,59 @@ describe("écran Paramètres", () => {
     await waitFor(() => expect(window.location.hash).toBe("#/login"));
   });
 
+  it("Java : mémoire Automatique par défaut, champ Mo grisé, PC lu et affiché", async () => {
+    const svc = createFakeServices({ tickMs: 0 });
+    render(<Shell services={svc} />);
+    goTab("Java");
+    const auto = screen.getByRole("checkbox", { name: /Mémoire automatique/ }) as HTMLInputElement;
+    await waitFor(() => expect(auto.checked).toBe(true));
+    expect((screen.getByLabelText("Mémoire par défaut (Mo)") as HTMLInputElement).disabled).toBe(true);
+    expect(await screen.findByText(/≈\s16 Go sur ce PC/)).toBeTruthy();
+  });
+
+  it("Java : décocher Automatique enregistre une valeur manuelle, recocher revient à 0", async () => {
+    const svc = createFakeServices({ tickMs: 0 });
+    const set = vi.spyOn(svc, "settingsSet");
+    render(<Shell services={svc} />);
+    goTab("Java");
+    const auto = screen.getByRole("checkbox", { name: /Mémoire automatique/ }) as HTMLInputElement;
+    await waitFor(() => expect(auto.disabled).toBe(false));
+    fireEvent.click(auto);
+    await waitFor(() => expect(set).toHaveBeenCalledTimes(1));
+    expect(set.mock.calls[0]![0].default_ram_mb).toBe(4096);
+    const ram = screen.getByLabelText("Mémoire par défaut (Mo)") as HTMLInputElement;
+    await waitFor(() => expect(ram.disabled).toBe(false));
+    expect(ram.value).toBe("4096");
+    fireEvent.click(screen.getByRole("checkbox", { name: /Mémoire automatique/ }));
+    await waitFor(() => expect(set).toHaveBeenCalledTimes(2));
+    expect(set.mock.calls[1]![0].default_ram_mb).toBe(0);
+  });
+
+  it("Java : avertissement non bloquant au-delà de 75 % de la RAM du PC", async () => {
+    const svc = createFakeServices({ tickMs: 0 });
+    const set = vi.spyOn(svc, "settingsSet");
+    await svc.settingsSet({ ...(await svc.settingsGet()), default_ram_mb: 4096 });
+    set.mockClear();
+    render(<Shell services={svc} />);
+    goTab("Java");
+    const ram = screen.getByLabelText("Mémoire par défaut (Mo)") as HTMLInputElement;
+    await waitFor(() => expect(ram.value).toBe("4096"));
+    await waitFor(() => expect(ram.disabled).toBe(false));
+    expect(screen.queryByText(/dépassent 75/)).toBeNull();
+    fireEvent.change(ram, { target: { value: "12288" } }); // PC simulé : 16 Go, 75 % = 12 Go : pas au-dessus
+    expect(screen.queryByText(/dépassent 75/)).toBeNull();
+    fireEvent.change(ram, { target: { value: "12544" } });
+    expect((await screen.findByText(/dépassent 75/)).textContent).toMatch(/12,3 Go.*16 Go/);
+    fireEvent.blur(ram);
+    await waitFor(() => expect(set).toHaveBeenCalledTimes(1)); // jamais bloquant : la valeur est enregistrée
+    expect(set.mock.calls[0]![0].default_ram_mb).toBe(12544);
+  });
+
   it("Java : mémoire par défaut validée puis enregistrée à la sortie du champ", async () => {
     const svc = createFakeServices({ tickMs: 0 });
     const set = vi.spyOn(svc, "settingsSet");
+    await svc.settingsSet({ ...(await svc.settingsGet()), default_ram_mb: 4096 });
+    set.mockClear();
     render(<Shell services={svc} />);
     goTab("Java");
     const ram = screen.getByLabelText("Mémoire par défaut (Mo)") as HTMLInputElement;

@@ -96,6 +96,11 @@ export const commands = {
 	joinPlay: (friendPublicKey: string, instanceId: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("join_play", { friend_public_key: friendPublicKey, instance_id: instanceId }, options),
 	/**  Réglages. */
 	settingsGet: (options?: InvokeOptions) => __TAURI_INVOKE<Settings_Serialize>("settings_get", undefined, options),
+	/**
+	 *  Mémoire physique de l'ordinateur en Mo, `None` si elle est illisible : Paramètres affiche « Automatique (≈ X Go sur
+	 *  ce PC) » et prévient quand une valeur manuelle dépasse 75 % de cette mémoire.
+	 */
+	systemRamMb: (options?: InvokeOptions) => __TAURI_INVOKE<number | null>("system_ram_mb", undefined, options),
 	/**  Le front envoie les réglages dans `{ settings }`. */
 	settingsSet: (settings: SettingsInput_Deserialize, options?: InvokeOptions) => __TAURI_INVOKE<Settings_Serialize>("settings_set", { settings }, options),
 	/**  Recherche dans le catalogue (Modrinth ou CurseForge). */
@@ -1211,6 +1216,10 @@ export type SettingsInput_Serialize = {
 /**  Paramètres de l'application (écran Paramètres). Forme alignée sur `src/services/types.ts`. */
 export type Settings_Deserialize = {
 	language: string,
+	/**
+	 *  Mémoire par défaut des instances (Mo). `0` : « Automatique », calculée au lancement selon le PC et le nombre de
+	 *  mods (`instance::auto_ram_mb`). Valeur par défaut : `0`.
+	 */
 	default_ram_mb: number,
 	java_path?: string | null,
 	trust_default: TrustLevel,
@@ -1250,11 +1259,20 @@ export type Settings_Deserialize = {
 	 *  `true` par défaut (fichiers de réglages anciens : `true`).
 	 */
 	start_with_os?: boolean,
+	/**
+	 *  Interne : vrai une fois la migration « 4096 Mo (ancienne valeur d'usine) devient Automatique » faite. Absent des
+	 *  anciens fichiers (`false`) ; le front ne le modifie pas (`settings_set` garde la valeur actuelle).
+	 */
+	ram_auto_migrated?: boolean,
 };
 
 /**  Paramètres de l'application (écran Paramètres). Forme alignée sur `src/services/types.ts`. */
 export type Settings_Serialize = {
 	language: string,
+	/**
+	 *  Mémoire par défaut des instances (Mo). `0` : « Automatique », calculée au lancement selon le PC et le nombre de
+	 *  mods (`instance::auto_ram_mb`). Valeur par défaut : `0`.
+	 */
 	default_ram_mb: number,
 	java_path: string | null,
 	trust_default: TrustLevel,
@@ -1294,6 +1312,11 @@ export type Settings_Serialize = {
 	 *  `true` par défaut (fichiers de réglages anciens : `true`).
 	 */
 	start_with_os: boolean,
+	/**
+	 *  Interne : vrai une fois la migration « 4096 Mo (ancienne valeur d'usine) devient Automatique » faite. Absent des
+	 *  anciens fichiers (`false`) ; le front ne le modifie pas (`settings_set` garde la valeur actuelle).
+	 */
+	ram_auto_migrated: boolean,
 };
 
 /**  Etat publie a l'interface (`stage://state`). */

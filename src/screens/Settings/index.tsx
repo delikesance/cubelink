@@ -28,6 +28,17 @@ export type SettingsData = BaseSettings;
 
 export const RAM_MIN_MB = 512;
 export const RAM_MAX_MB = 65536;
+/** Valeur « Automatique » de la mémoire par défaut : calculée au lancement selon le PC et le nombre de mods. */
+export const RAM_AUTO_MB = 0;
+/** Valeur proposée quand on quitte « Automatique » sans valeur manuelle connue. */
+const RAM_MANUAL_START_MB = 4096;
+/** Au-delà de cette part de la RAM du PC, une valeur manuelle fait ralentir Windows : on prévient (sans bloquer). */
+const RAM_WARN_SHARE = 0.75;
+
+/** « 16 Go », « 7,5 Go » : arrondi au dixième. */
+export function gbLabel(mb: number): string {
+  return `${Math.round((mb / 1024) * 10) / 10} Go`.replace(".", ",");
+}
 
 /** Message d'erreur en français ou null. */
 export function validateRam(mb: number): string | null {
@@ -197,6 +208,8 @@ export default function Settings({ testConnection, clearCache }: SettingsProps =
   const [cacheMsg, setCacheMsg] = useState("");
   const [javaPath, setJavaPath] = useState("");
   const [ram, setRam] = useState("");
+  // RAM physique du PC en Mo (`null` : illisible ou pas encore lue).
+  const [sysRam, setSysRam] = useState<number | null>(null);
   const [hotkey, setHotkey] = useState(DEFAULT_HOTKEY);
   // Interrupteur de sécurité des serveurs de groupe : `null` tant qu'il n'est pas lu.
   const [hearthOn, setHearthOn] = useState<boolean | null>(null);
@@ -212,11 +225,12 @@ export default function Settings({ testConnection, clearCache }: SettingsProps =
         if (!alive.current) return;
         setSettings(s);
         setJavaPath(s.java_path ?? "");
-        setRam(String(s.default_ram_mb));
+        setRam(String(s.default_ram_mb === RAM_AUTO_MB ? RAM_MANUAL_START_MB : s.default_ram_mb));
         setHotkey(s.overlay_hotkey || DEFAULT_HOTKEY);
       },
       (e) => { if (alive.current) setError(messageOf(e)); },
     );
+    services.systemRamMb().then((mb) => { if (alive.current) setSysRam(mb); }, () => {});
     services.hearthEnabled().then((v) => { if (alive.current) setHearthOn(v); }, () => { if (alive.current) setHearthOn(false); });
     return () => { alive.current = false; };
   }, [services]);
@@ -309,10 +323,19 @@ export default function Settings({ testConnection, clearCache }: SettingsProps =
     const next = hotkey.trim();
     if (next !== (settings.overlay_hotkey || DEFAULT_HOTKEY)) void update({ overlay_hotkey: next });
   };
+  const ramAuto = settings ? settings.default_ram_mb === RAM_AUTO_MB : true;
   const commitRam = () => {
-    if (!settings || ramError) return;
+    if (!settings || ramAuto || ramError) return;
     if (ramNum !== settings.default_ram_mb) void update({ default_ram_mb: ramNum });
   };
+  // Passer en manuel reprend la dernière valeur saisie (4 Go au départ) ; revenir à « Automatique » la garde en réserve.
+  const toggleRamAuto = (auto: boolean) => {
+    if (!settings) return;
+    if (auto) void update({ default_ram_mb: RAM_AUTO_MB });
+    else if (!ramError) void update({ default_ram_mb: ramNum });
+    else { setRam(String(RAM_MANUAL_START_MB)); void update({ default_ram_mb: RAM_MANUAL_START_MB }); }
+  };
+  const ramTooHigh = !ramAuto && !ramError && sysRam !== null && ramNum > sysRam * RAM_WARN_SHARE;
 
   // Focus initial dans la confirmation (bouton le moins destructeur), restitué à la fermeture.
   useEffect(() => {
@@ -456,13 +479,32 @@ export default function Settings({ testConnection, clearCache }: SettingsProps =
       <div {...panel("java")}>
         <p className="set-sub">Valeurs proposées pour toutes les instances qui n'ont pas les leurs.</p>
         <Card className="set-two">
-          <Field label="Mémoire par défaut (Mo)" error={ramError} hint="Utilisée par toutes les instances réglées sur « Valeur des paramètres », dont les mondes de tes amis.">
+          <div style={{ gridColumn: "1 / -1" }}>
+            <label className="set-row" style={{ cursor: "pointer" }}>
+              <div className="set-txt">
+                <b>Mémoire automatique (recommandé)</b>
+                <span>
+                  Cubelink choisit à chaque lancement selon le nombre de mods et la mémoire de ton PC
+                  {sysRam !== null ? ` (≈\u00a0${gbLabel(sysRam)} sur ce PC)` : ""}. S'applique aux instances réglées sur «&nbsp;Valeur des paramètres&nbsp;», dont les mondes de tes amis.
+                </span>
+              </div>
+              <input type="checkbox" className="set-check" disabled={dis} checked={ramAuto} onChange={(e) => toggleRamAuto(e.target.checked)} />
+            </label>
+          </div>
+          <Field label="Mémoire par défaut (Mo)" error={ramAuto ? undefined : ramError} hint={ramAuto ? "Décoche « Mémoire automatique » pour choisir une valeur toi-même." : "Utilisée par toutes les instances réglées sur « Valeur des paramètres », dont les mondes de tes amis."}>
             {(p) => (
-              <Input {...p} type="number" inputMode="numeric" min={RAM_MIN_MB} max={RAM_MAX_MB} step={256} disabled={dis}
+              <Input {...p} type="number" inputMode="numeric" min={RAM_MIN_MB} max={RAM_MAX_MB} step={256} disabled={dis || ramAuto}
                 value={ram} onChange={(e) => setRam(e.target.value)} onBlur={commitRam}
                 onKeyDown={(e) => { if (e.key === "Enter") commitRam(); }} />
             )}
           </Field>
+          <div role="status" aria-live="polite" style={{ gridColumn: "1 / -1" }}>
+            {ramTooHigh && sysRam !== null && (
+              <p className="set-hint">
+                Attention&nbsp;: {gbLabel(ramNum)} dépassent 75&nbsp;% de la mémoire de ce PC ({gbLabel(sysRam)}). Windows risque de ralentir, voire de fermer le jeu. Repasse en «&nbsp;Mémoire automatique&nbsp;» si tu hésites.
+              </p>
+            )}
+          </div>
           <Field label="Chemin de Java" hint="Facultatif. Utilisé seulement si sa version convient à Minecraft ; sinon Cubelink choisit et installe la bonne. Laisse vide si tu ne sais pas." error={javaError}>
             {(p) => (
               <Input {...p} type="text" spellCheck={false} autoComplete="off" disabled={dis}

@@ -30,6 +30,16 @@ describe("RamPicker", () => {
     expect(screen.queryByRole("slider")).toBeNull();
   });
 
+  it("réglage global Automatique : « Automatique » au lieu de 0 Mo, et la valeur propre part de 4 Go", () => {
+    const changed = vi.fn();
+    render(<RamPicker value={RAM_DEFAULT} defaultMb={0} onChange={changed} />);
+    expect(screen.getByRole("checkbox", { name: /Valeur des paramètres \(Automatique\)/ })).toBeTruthy();
+    expect(screen.getByText("Automatique", { selector: "output" })).toBeTruthy();
+    expect(screen.queryByText(/0 Go|0 Mo/)).toBeNull();
+    fireEvent.click(screen.getByRole("checkbox"));
+    expect(changed).toHaveBeenLastCalledWith(4096);
+  });
+
   it("libellés en Go", () => {
     expect(ramLabel(8192)).toBe("8 Go");
     expect(ramLabel(1536)).toBe("1,5 Go");

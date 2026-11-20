@@ -83,6 +83,7 @@ export function createTauriServices(): Services {
     joinCancel: () => done(commands.joinCancel()),
 
     settingsGet: () => commands.settingsGet(),
+    systemRamMb: () => commands.systemRamMb(),
     settingsSet: (settings) => commands.settingsSet(settings),
 
     browseSearch: (query) => commands.browseSearch(query),

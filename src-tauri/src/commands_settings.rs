@@ -3,7 +3,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use core_lib::instance::{MAX_RAM_MB, MIN_RAM_MB};
+use core_lib::instance::{MAX_RAM_MB, MIN_RAM_MB, RAM_AUTO};
 use core_lib::types::{Settings, TrustLevel};
 use tauri::State;
 
@@ -14,8 +14,30 @@ pub fn load_settings(path: &Path) -> Settings {
     std::fs::read(path)
         .ok()
         .and_then(|b| serde_json::from_slice::<Settings>(&b).ok())
+        .map(migrate_ram)
         .filter(|s| validate(s).is_ok())
         .unwrap_or_else(default_settings)
+}
+
+/// Une seule fois : l'ancienne valeur d'usine (4096 Mo) devient « Automatique ». Les autres valeurs, choisies à la main,
+/// sont gardées. Le drapeau est enregistré au prochain `settings_set` ; d'ici là, le calcul se refait à l'identique à
+/// chaque chargement. Un 4096 choisi ensuite à la main (drapeau vrai) reste manuel.
+fn migrate_ram(mut s: Settings) -> Settings {
+    if !s.ram_auto_migrated {
+        if s.default_ram_mb == 4096 {
+            s.default_ram_mb = RAM_AUTO;
+        }
+        s.ram_auto_migrated = true;
+    }
+    s
+}
+
+/// Mémoire physique de l'ordinateur en Mo, `None` si elle est illisible : Paramètres affiche « Automatique (≈ X Go sur
+/// ce PC) » et prévient quand une valeur manuelle dépasse 75 % de cette mémoire.
+#[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
+pub fn system_ram_mb() -> Option<u32> {
+    core_lib::sysmem::physical_ram_mb().map(|mb| mb.min(u64::from(u32::MAX)) as u32)
 }
 
 pub fn validate(s: &Settings) -> Result<(), String> {
@@ -30,8 +52,8 @@ pub fn validate_with(s: &Settings, test_mode: bool) -> Result<(), String> {
     if !lang_ok {
         return Err("langue invalide".into());
     }
-    if !(MIN_RAM_MB..=MAX_RAM_MB).contains(&s.default_ram_mb) {
-        return Err(format!("la mémoire doit être comprise entre {MIN_RAM_MB} et {MAX_RAM_MB} Mo"));
+    if s.default_ram_mb != RAM_AUTO && !(MIN_RAM_MB..=MAX_RAM_MB).contains(&s.default_ram_mb) {
+        return Err(format!("la mémoire doit être « Automatique » (0) ou comprise entre {MIN_RAM_MB} et {MAX_RAM_MB} Mo"));
     }
     if s.relay_only && !s.allow_relay {
         return Err("« Toujours le relais » est incompatible avec un relais désactivé : autorisez le relais ou désactivez « Toujours le relais »".into());
@@ -132,6 +154,7 @@ pub fn settings_set(state: State<'_, Arc<AppState>>, settings: SettingsInput, ap
         embedded_game: i.embedded_game.unwrap_or(cur.embedded_game),
         start_with_os: i.start_with_os.unwrap_or(cur.start_with_os),
         open_to_all_friends: i.open_to_all_friends.unwrap_or(cur.open_to_all_friends),
+        ram_auto_migrated: cur.ram_auto_migrated,
     })?;
     crate::hotkey::apply_settings(&app);
     crate::background::apply_autostart(&app);
@@ -166,9 +189,80 @@ mod tests {
         s.default_ram_mb = 10;
         assert!(st.settings_set(s).is_err());
         let mut s = default_settings();
+        s.default_ram_mb = 511;
+        assert!(st.settings_set(s).is_err());
+        let mut s = default_settings();
+        s.default_ram_mb = MAX_RAM_MB + 1;
+        assert!(st.settings_set(s).is_err());
+        let mut s = default_settings();
         s.java_path = Some("C:\\Windows\\notepad.exe".into());
         assert!(st.settings_set(s).is_err());
         assert_eq!(st.settings_get(), default_settings());
+    }
+
+    #[test]
+    fn memoire_automatique_par_defaut_et_acceptee() {
+        let dir = tempfile::tempdir().unwrap();
+        let (st, _) = test_state(dir.path());
+        assert_eq!(default_settings().default_ram_mb, RAM_AUTO);
+        assert!(default_settings().ram_auto_migrated);
+        assert_eq!(st.settings_get().default_ram_mb, 0);
+        let mut s = default_settings();
+        s.default_ram_mb = 512;
+        assert!(st.settings_set(s).is_ok());
+        let mut s = default_settings();
+        s.default_ram_mb = RAM_AUTO;
+        assert_eq!(st.settings_set(s).unwrap().default_ram_mb, 0);
+    }
+
+    fn old_json(ram: u32, migrated: Option<bool>) -> String {
+        let flag = migrated.map(|m| format!(r#","ram_auto_migrated":{m}"#)).unwrap_or_default();
+        format!(r#"{{"language":"fr","default_ram_mb":{ram},"java_path":null,"trust_default":"ask","allow_relay":true,"close_on_launch":true,"relay_only":false,"share_mods":true{flag}}}"#)
+    }
+
+    #[test]
+    fn migration_de_l_ancienne_valeur_d_usine_vers_automatique() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("settings.json");
+        // 4096 jamais migré : devient Automatique.
+        std::fs::write(&f, old_json(4096, None)).unwrap();
+        let s = load_settings(&f);
+        assert_eq!((s.default_ram_mb, s.ram_auto_migrated), (RAM_AUTO, true));
+        // Une valeur choisie à la main reste manuelle.
+        std::fs::write(&f, old_json(6144, None)).unwrap();
+        let s = load_settings(&f);
+        assert_eq!((s.default_ram_mb, s.ram_auto_migrated), (6144, true));
+        // Déjà migré : un 4096 choisi ensuite à la main est gardé.
+        std::fs::write(&f, old_json(4096, Some(true))).unwrap();
+        assert_eq!(load_settings(&f).default_ram_mb, 4096);
+        // Automatique enregistré : rien ne bouge.
+        std::fs::write(&f, old_json(0, Some(true))).unwrap();
+        assert_eq!(load_settings(&f).default_ram_mb, RAM_AUTO);
+    }
+
+    #[test]
+    fn migration_enregistree_au_premier_settings_set() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("settings.json"), old_json(4096, None)).unwrap();
+        let (st, _) = test_state(dir.path());
+        assert_eq!(st.settings_get().default_ram_mb, RAM_AUTO);
+        // L'utilisateur passe en manuel à 4096 : après redémarrage, c'est toujours 4096.
+        let mut s = st.settings_get();
+        s.default_ram_mb = 4096;
+        st.settings_set(s).unwrap();
+        let (st2, _) = test_state(dir.path());
+        assert_eq!(st2.settings_get().default_ram_mb, 4096);
+    }
+
+    #[test]
+    fn system_ram_mb_lit_la_vraie_memoire() {
+        #[cfg(target_os = "linux")]
+        {
+            let kib: u64 = std::fs::read_to_string("/proc/meminfo").unwrap().lines().find_map(|l| l.strip_prefix("MemTotal:")).unwrap()
+                .split_whitespace().next().unwrap().parse().unwrap();
+            assert_eq!(u64::from(system_ram_mb().unwrap()), kib / 1024);
+        }
+        assert!(system_ram_mb().is_some_and(|m| m >= 256));
     }
 
     #[test]

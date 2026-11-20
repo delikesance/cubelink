@@ -237,6 +237,8 @@ export interface Services {
   joinCancel(): Promise<void>;
 
   settingsGet(): Promise<Settings>;
+  /** Mémoire physique du PC en Mo, `null` si illisible. */
+  systemRamMb(): Promise<number | null>;
   settingsSet(settings: Settings): Promise<Settings>;
 
   browseSearch(q: BrowseQuery): Promise<BrowsePage>;

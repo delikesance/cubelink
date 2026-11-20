@@ -451,3 +451,54 @@ pub fn card_prop_typed(win: u32, name: &str, ty: &str) -> Vec<u32> {
     let r = x().0.get_property(false, win, atom(name), atom(ty), 0, 16).unwrap().reply().unwrap();
     r.value32().map(|v| v.collect()).unwrap_or_default()
 }
+
+// ------------------------------------------------------------------------------------------------ plusieurs moniteurs (RandR 1.5)
+
+/// Dispose deux moniteurs RandR cote a cote, `largeur` x `hauteur` chacun, en `(0, 0)` et `(largeur, 0)`, sur une racine qui
+/// couvre les deux (2 x `largeur` de large). Rend leurs rectangles `(x, y, largeur, hauteur)`, ou `None` (avec un message) si le
+/// serveur X11 de test ne sait pas le faire : le test se met alors en retrait, comme `available()`. A utiliser sur un serveur nu
+/// (`xvfb-run -a`), qui est remis a zero quand le dernier client part : rien ne subsiste d'un test a l'autre.
+pub fn two_monitors(width: u16, height: u16) -> Option<[(i32, i32, i32, i32); 2]> {
+    use x11rb::connection::RequestConnection as _;
+    use x11rb::protocol::randr;
+    let (c, root) = x();
+    let skip = |why: String| {
+        eprintln!("test X11 multi-moniteurs ignore : {why}");
+        None
+    };
+    if c.extension_information(randr::X11_EXTENSION_NAME).ok().flatten().is_none() {
+        return skip("extension RandR absente".into());
+    }
+    let (mw, mh) = (u32::from(width) * 25 / 96, u32::from(height) * 25 / 96); // ~96 dpi, en millimetres
+    let size = c.get_geometry(*root).unwrap().reply().unwrap();
+    if size.width != width * 2 || size.height != height {
+        let done = randr::set_screen_size(c, *root, width * 2, height, mw * 2, mh).ok().is_some_and(|k| k.check().is_ok());
+        c.flush().unwrap();
+        let now = c.get_geometry(*root).unwrap().reply().unwrap();
+        if !done || (now.width, now.height) != (width * 2, height) {
+            return skip(format!("racine de {}x{} impossible a obtenir (lancer sous `xvfb-run -a -s \"-screen 0 {}x{}x24\"`)", width * 2, height, width * 2, height));
+        }
+    }
+    let mut out = [(0, 0, 0, 0); 2];
+    for (i, name) in ["CUBELINK-TEST-A", "CUBELINK-TEST-B"].into_iter().enumerate() {
+        let atom = c.intern_atom(false, name.as_bytes()).unwrap().reply().unwrap().atom;
+        let info = randr::MonitorInfo {
+            name: atom,
+            primary: i == 0,
+            automatic: false,
+            x: i as i16 * width as i16,
+            y: 0,
+            width,
+            height,
+            width_in_millimeters: mw,
+            height_in_millimeters: mh,
+            outputs: Vec::new(),
+        };
+        if randr::set_monitor(c, *root, info).ok().is_none_or(|k| k.check().is_err()) {
+            return skip("RandR 1.5 `SetMonitor` refuse par le serveur".into());
+        }
+        out[i] = (i as i32 * i32::from(width), 0, i32::from(width), i32::from(height));
+    }
+    c.flush().unwrap();
+    Some(out)
+}

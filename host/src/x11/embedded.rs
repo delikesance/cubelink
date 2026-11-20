@@ -603,10 +603,11 @@ pub(super) fn game_moved(s: &Shared, win: u32, got: (i32, i32, i32, i32)) {
     if got.0 <= -30000 {
         return; // notre propre garage
     }
-    let (sw, sh) = util::screen_size(&s.conn, s.root);
     if current && !closing {
-        let covers = (got.2, got.3) == (sw, sh);
-        let on = if fullscreen { covers || s.lock().fullscreen_msg } else { covers && (zone.2, zone.3) != (sw, sh) };
+        // le moniteur du launcher, pas le bureau virtuel : un jeu 1920 x 1080 sur le moniteur de 3840 x 1080 est en plein ecran
+        let (_, _, mw, mh) = util::monitor_rect(&s.conn, s.root, s.parent);
+        let covers = (got.2, got.3) == (mw, mh);
+        let on = if fullscreen { covers || s.lock().fullscreen_msg } else { covers && (zone.2, zone.3) != (mw, mh) };
         if on != fullscreen {
             set_fullscreen(s, on, if on { "fenetre a la taille de l'ecran" } else { "fenetre plus a la taille de l'ecran" });
         }
@@ -767,7 +768,7 @@ fn give_back(s: &Shared, r: &Returned, front: bool) {
         let _ = c.delete_property(g, a._NET_WM_STATE);
     }
     let (ox, oy, ow, oh) = r.origin.rect;
-    let (x, y, w, h) = if show || ox <= -30000 || oy <= -30000 { guard::returned_rect(util::work_area(c, a, s.root), (ow, oh)) } else { (ox, oy, ow, oh) };
+    let (x, y, w, h) = if show || ox <= -30000 || oy <= -30000 { guard::returned_rect(util::work_area(c, a, s.root, s.parent), (ow, oh)) } else { (ox, oy, ow, oh) };
     let _ = c.reparent_window(g, s.root, clamp16(x), clamp16(y));
     place(s, g, (x, y, w, h));
     if show {

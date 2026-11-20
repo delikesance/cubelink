@@ -131,6 +131,8 @@ jobs:
       - name: Agent LAN (JDK 17 préinstallé sur le runner)
         run: JAVA_HOME="$JAVA_HOME_17_X64" bash core/resources/lan-agent/build.sh
       - run: xvfb-run -a cargo test --workspace
+      # Scène X11 sur deux moniteurs : la racine doit faire 3840x1080 d'emblée (sous l'écran par défaut, le test s'ignore)
+      - run: xvfb-run -a -s "-screen 0 3840x1080x24" cargo test -p cubelink-host --test x11_fullscreen_multihead
 
   # E2E Playwright en mode simulé : l'app Tauri réelle (deux profils) contre de faux serveurs locaux
   # (auth, Mojang, Modrinth) et un faux Java. Le harnais pilote WebView2 par CDP : Windows seulement.

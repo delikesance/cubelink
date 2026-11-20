@@ -2,8 +2,11 @@
 //! et detruit des fenetres d'essai a toute allure, une requete sur l'une d'elles n'est jamais une erreur.
 
 use x11rb::connection::Connection;
+use x11rb::protocol::randr;
 use x11rb::protocol::xproto::*;
 use x11rb::rust_connection::RustConnection;
+
+use crate::guard;
 
 x11rb::atom_manager! {
     pub Atoms: AtomsCookie {
@@ -91,22 +94,52 @@ pub fn exists(c: &RustConnection, win: u32) -> bool {
     attrs(c, win).is_some()
 }
 
-/// Taille de l'ecran (racine).
+/// Taille de l'ecran (racine) : le bureau virtuel, tous moniteurs confondus. Sert de repli quand RandR ne dit rien.
 pub fn screen_size(c: &RustConnection, root: u32) -> (i32, i32) {
     geometry(c, root).map_or((1280, 720), |(_, _, w, h)| (w, h))
 }
 
-/// Zone de travail du bureau `(gauche, haut, droite, bas)` : `_NET_WORKAREA` s'il existe, sinon tout l'ecran.
-pub fn work_area(c: &RustConnection, a: &Atoms, root: u32) -> (i32, i32, i32, i32) {
+type Rect = (i32, i32, i32, i32);
+
+/// Moniteurs `(x, y, largeur, hauteur)` d'apres RandR 1.5 et celui marque principal ; vide si RandR est absent, trop ancien ou
+/// refuse la requete (l'appelant retombe alors sur la racine).
+fn monitors(c: &RustConnection, root: u32) -> (Vec<Rect>, Option<Rect>) {
+    let Some(reply) = randr::get_monitors(c, root, true).ok().and_then(|k| k.reply().ok()) else {
+        return (Vec::new(), None);
+    };
+    let rect = |m: &randr::MonitorInfo| (i32::from(m.x), i32::from(m.y), i32::from(m.width), i32::from(m.height));
+    let all: Vec<_> = reply.monitors.iter().map(rect).collect();
+    let primary = reply.monitors.iter().find(|m| m.primary).map(rect);
+    (all, primary)
+}
+
+/// Rectangle `(x, y, largeur, hauteur)` du moniteur ou se trouve le centre de la fenetre `win` (la fenetre du launcher, jamais celle
+/// du jeu, qui peut etre garee hors ecran) ; le plus proche si le centre est hors des ecrans, le principal si `win` est illisible.
+/// Sans RandR : la racine entiere, comme avant. Parite avec `monitor_sized` de Windows.
+pub fn monitor_rect(c: &RustConnection, root: u32, win: u32) -> (i32, i32, i32, i32) {
+    let (all, primary) = monitors(c, root);
+    let found = match screen_rect(c, root, win) {
+        Some((x, y, w, h)) => guard::monitor_for(&all, (x + w / 2, y + h / 2)),
+        None => primary.or_else(|| all.first().copied()),
+    };
+    found.unwrap_or_else(|| {
+        let (w, h) = screen_size(c, root);
+        (0, 0, w, h)
+    })
+}
+
+/// Zone de travail `(gauche, haut, droite, bas)` du moniteur de la fenetre `win` : `_NET_WORKAREA` (globale en multi-ecrans)
+/// restreinte a ce moniteur, sinon tout le moniteur.
+pub fn work_area(c: &RustConnection, a: &Atoms, root: u32, win: u32) -> (i32, i32, i32, i32) {
+    let mon = monitor_rect(c, root, win);
     if let Some(v) = prop32(c, root, a._NET_WORKAREA, AtomEnum::CARDINAL, 4) {
         if let [x, y, w, h, ..] = v[..] {
             if w > 0 && h > 0 {
-                return (x as i32, y as i32, (x + w) as i32, (y + h) as i32);
+                return guard::intersect_work((x as i32, y as i32, (x + w) as i32, (y + h) as i32), mon);
             }
         }
     }
-    let (w, h) = screen_size(c, root);
-    (0, 0, w, h)
+    (mon.0, mon.1, mon.0 + mon.2, mon.1 + mon.3)
 }
 
 /// Message client `WM_PROTOCOLS / WM_DELETE_WINDOW` : la fermeture que declenche la croix de la fenetre. Faux si la fenetre ne la

@@ -23,6 +23,21 @@ pub struct DeviceCodeInfo {
     pub expires_in: u64,
 }
 
+/// Marge de validité exigée du jeton Minecraft au lancement du jeu : le jeu ne le renouvelle pas, et un jeton qui
+/// expire en pleine partie fait refuser toute connexion à un serveur en `online-mode` (monde LAN d'un ami compris).
+/// Le jeton dure 24 h : au pire un aller-retour réseau par jour.
+const MIN_LAUNCH_TOKEN_SECS: i64 = 4 * 3600;
+/// Marge minimale en dessous de laquelle un jeton n'est plus utilisable du tout (repli hors ligne).
+const MIN_USABLE_TOKEN_SECS: i64 = 30;
+/// Marge habituelle de renouvellement (statut du compte, démarrage).
+const REFRESH_MARGIN_SECS: i64 = 60;
+
+/// Vrai si le jeton Minecraft est encore valide au-delà de `margin` secondes. Seul ce jeton compte ici : le jeton
+/// Microsoft (~1 h) sert à renouveler, pas à jouer.
+fn mc_token_usable(minecraft_expires_at: i64, now: i64, margin: i64) -> bool {
+    minecraft_expires_at > now.saturating_add(margin)
+}
+
 /// Identifiant d'application Azure public par défaut (n'est pas un secret).
 const DEFAULT_MS_CLIENT_ID: &str = "d5b2e079-2c2c-4ade-9dab-1c1eb204162a";
 
@@ -143,7 +158,8 @@ impl AppState {
 
     /// Renouvelle la session du compte actif (refresh_token Microsoft puis Xbox, XSTS, Minecraft) et la réenregistre.
     /// Si les jetons sont déjà frais (renouvelés entre-temps), les renvoie tels quels. Messages sans secret.
-    pub(crate) async fn refresh_with(&self, ms: &DeviceCodeClient, xbox: &XboxClient, mc: &MinecraftClient) -> Result<StoredTokens, RefreshFailure> {
+    /// `mc_margin` : validité minimale exigée du jeton Minecraft pour s'en contenter (sinon on renouvelle).
+    pub(crate) async fn refresh_with(&self, ms: &DeviceCodeClient, xbox: &XboxClient, mc: &MinecraftClient, mc_margin: i64) -> Result<StoredTokens, RefreshFailure> {
         let _guard = REFRESH_LOCK.lock().await;
         let file = {
             let _g = ACCOUNTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -153,7 +169,7 @@ impl AppState {
         let Some(old) = entry.to_stored() else { return Err(RefreshFailure::NoSession) };
         let id = entry.id.clone();
         let now = now_secs();
-        if !old.needs_refresh(now, 60) {
+        if !old.needs_refresh(now, REFRESH_MARGIN_SECS) && mc_token_usable(old.minecraft_expires_at, now, mc_margin) {
             return Ok(old);
         }
         let new = match tokio::time::timeout(REFRESH_TIMEOUT, refresh_tokens(ms, xbox, mc, &old, now)).await {
@@ -183,7 +199,7 @@ impl AppState {
 
     async fn refresh_session(&self) -> Result<StoredTokens, RefreshFailure> {
         let ms = ms_client(ms_client_id().map_err(RefreshFailure::Revoked)?);
-        self.refresh_with(&ms, &xbox_client(), &mc_client()).await
+        self.refresh_with(&ms, &xbox_client(), &mc_client(), REFRESH_MARGIN_SECS).await
     }
 
     /// Profil du compte actif avec renouvellement transparent : mémoire, sinon jetons valides (ou compte hors ligne),
@@ -199,7 +215,7 @@ impl AppState {
             *lock(&self.profile) = Some(entry.profile.clone());
             return Some(entry.profile.clone());
         };
-        if !stored.needs_refresh(now_secs(), 60) {
+        if !stored.needs_refresh(now_secs(), REFRESH_MARGIN_SECS) {
             *lock(&self.profile) = Some(stored.profile.clone());
             return Some(stored.profile);
         }
@@ -323,19 +339,33 @@ impl AppState {
         Ok(p)
     }
 
-    /// Jeton Minecraft valide pour le compte actif (en ligne).
+    /// Jeton Minecraft pour lancer le jeu avec le compte actif (en ligne) : renouvelé dès qu'il reste moins de
+    /// `MIN_LAUNCH_TOKEN_SECS`, car le jeu ne le renouvelle pas. Si le renouvellement échoue pour une raison
+    /// transitoire (hors ligne), l'ancien jeton est gardé tant qu'il est encore valide.
     pub async fn online_token(&self) -> Result<String, String> {
+        let ms = ms_client(ms_client_id().map_err(|_| "session expirée : reconnectez-vous".to_string())?);
+        self.online_token_with(&ms, &xbox_client(), &mc_client()).await
+    }
+
+    async fn online_token_with(&self, ms: &DeviceCodeClient, xbox: &XboxClient, mc: &MinecraftClient) -> Result<String, String> {
         let file = self.read_accounts();
         let Some(entry) = file.active_entry() else { return Err("connectez-vous avant de lancer le jeu".into()) };
         let Some(t) = entry.to_stored() else {
             return Err("ce compte est hors ligne : connectez-vous avec un compte Microsoft pour jouer en ligne".into());
         };
-        if t.minecraft_expires_at > now_secs() + 30 {
+        if mc_token_usable(t.minecraft_expires_at, now_secs(), MIN_LAUNCH_TOKEN_SECS) {
             return Ok(t.minecraft_token);
         }
-        match self.refresh_session().await {
+        match self.refresh_with(ms, xbox, mc, MIN_LAUNCH_TOKEN_SECS).await {
             Ok(t) => Ok(t.minecraft_token),
-            Err(RefreshFailure::Transient(m)) => Err(format!("impossible de renouveler la session Minecraft ({m}) : vérifiez la connexion Internet")),
+            Err(RefreshFailure::Transient(m)) => {
+                if mc_token_usable(t.minecraft_expires_at, now_secs(), MIN_USABLE_TOKEN_SECS) {
+                    tracing::warn!("session : renouvellement impossible ({m}), jeton Minecraft encore valide réutilisé");
+                    Ok(t.minecraft_token)
+                } else {
+                    Err(format!("impossible de renouveler la session Minecraft ({m}) : vérifiez la connexion Internet"))
+                }
+            }
             Err(_) => Err("session expirée : reconnectez-vous".into()),
         }
     }
@@ -674,7 +704,7 @@ mod tests {
         mount(&s, "POST", "/token", 200, json!({"access_token":"ms-at","refresh_token":"new-rt","expires_in":3600})).await;
         mount_chain(&s).await;
         let (a, b, c) = clients(&s);
-        let t = st.refresh_with(&a, &b, &c).await.unwrap();
+        let t = st.refresh_with(&a, &b, &c, REFRESH_MARGIN_SECS).await.unwrap();
         assert_eq!(t.minecraft_token, "new-mc");
         let saved = entry_of(&st, UUID).to_stored().unwrap();
         assert_eq!(saved.ms_refresh_token, "new-rt", "nouveau refresh_token réenregistré");
@@ -682,7 +712,7 @@ mod tests {
         assert!(!saved.needs_refresh(now_secs(), 60));
         assert_eq!(st.auth_status(), Some(saved.profile), "profil en mémoire");
         // deuxième appel : jetons frais, aucun nouvel échange
-        assert_eq!(st.refresh_with(&a, &b, &c).await.unwrap().minecraft_token, "new-mc");
+        assert_eq!(st.refresh_with(&a, &b, &c, REFRESH_MARGIN_SECS).await.unwrap().minecraft_token, "new-mc");
     }
 
     #[tokio::test]
@@ -696,7 +726,7 @@ mod tests {
         mount(&s, "POST", "/token", 200, json!({"access_token":"ms-at","refresh_token":"new-rt","expires_in":3600})).await;
         mount_chain(&s).await;
         let (a, b, c) = clients(&s);
-        st.refresh_with(&a, &b, &c).await.unwrap();
+        st.refresh_with(&a, &b, &c, REFRESH_MARGIN_SECS).await.unwrap();
         assert_eq!(entry_of(&st, UUID).to_stored().unwrap().ms_refresh_token, "new-rt");
         assert_eq!(entry_of(&st, "u-b").to_stored(), Some(other), "l'autre compte (expiré) reste intact");
         assert_eq!(st.auth_accounts().active.as_deref(), Some(UUID));
@@ -704,7 +734,7 @@ mod tests {
         // basculer sur le compte expiré, puis le renouveler : seul lui change
         st.auth_switch("u-b").unwrap();
         let before = entry_of(&st, UUID);
-        st.refresh_with(&a, &b, &c).await.unwrap();
+        st.refresh_with(&a, &b, &c, REFRESH_MARGIN_SECS).await.unwrap();
         assert_eq!(entry_of(&st, UUID), before);
         assert_eq!(entry_of(&st, "u-b").to_stored().unwrap().minecraft_token, "new-mc");
     }
@@ -718,7 +748,7 @@ mod tests {
         let s = MockServer::start().await;
         mount(&s, "POST", "/token", 400, json!({"error":"invalid_grant","error_description":"expired"})).await;
         let (a, b, c) = clients(&s);
-        let e = st.refresh_with(&a, &b, &c).await.unwrap_err();
+        let e = st.refresh_with(&a, &b, &c, REFRESH_MARGIN_SECS).await.unwrap_err();
         assert!(matches!(&e, RefreshFailure::Revoked(m) if m.contains("reconnectez-vous") && !m.contains("old-rt")), "{e:?}");
         assert_eq!(entry_of(&st, UUID).to_stored(), Some(old), "jetons inchangés");
         assert!(st.auth_status().is_none());
@@ -734,12 +764,102 @@ mod tests {
         let (st, _) = test_state(dir.path());
         let s = MockServer::start().await;
         let (a, b, c) = clients(&s);
-        assert_eq!(st.refresh_with(&a, &b, &c).await.unwrap_err(), RefreshFailure::NoSession);
+        assert_eq!(st.refresh_with(&a, &b, &c, REFRESH_MARGIN_SECS).await.unwrap_err(), RefreshFailure::NoSession);
         st.auth_offline_login("Notch").unwrap();
-        assert_eq!(st.refresh_with(&a, &b, &c).await.unwrap_err(), RefreshFailure::NoSession, "compte hors ligne : pas de jeton");
+        assert_eq!(st.refresh_with(&a, &b, &c, REFRESH_MARGIN_SECS).await.unwrap_err(), RefreshFailure::NoSession, "compte hors ligne : pas de jeton");
         seed(&st, expired(now_secs()), true);
         mount(&s, "POST", "/token", 503, json!({"error":"temporarily_unavailable"})).await;
-        assert!(matches!(st.refresh_with(&a, &b, &c).await.unwrap_err(), RefreshFailure::Transient(_)));
+        assert!(matches!(st.refresh_with(&a, &b, &c, REFRESH_MARGIN_SECS).await.unwrap_err(), RefreshFailure::Transient(_)));
         assert_eq!(entry_of(&st, UUID).to_stored().unwrap().ms_refresh_token, "old-rt");
+    }
+
+    // --- Marge du jeton Minecraft au lancement (#73) ---
+
+    /// Jeton Minecraft à `mc_in` secondes, jeton Microsoft frais (~1 h comme en réel).
+    fn mc_in(mc_in: i64) -> StoredTokens {
+        let now = now_secs();
+        StoredTokens { ms_expires_at: now + 3600, minecraft_expires_at: now + mc_in, ..online("Steve", UUID, "old-rt", 0) }
+    }
+
+    #[test]
+    fn marge_du_jeton_minecraft() {
+        let now = 1_000_000;
+        assert!(mc_token_usable(now + 4 * 3600 + 1, now, MIN_LAUNCH_TOKEN_SECS));
+        assert!(!mc_token_usable(now + 4 * 3600, now, MIN_LAUNCH_TOKEN_SECS));
+        assert!(!mc_token_usable(now + 3600, now, MIN_LAUNCH_TOKEN_SECS));
+        assert!(!mc_token_usable(now + 30, now, MIN_LAUNCH_TOKEN_SECS));
+        assert!(mc_token_usable(now + 31, now, MIN_USABLE_TOKEN_SECS));
+        assert!(!mc_token_usable(now + 30, now, MIN_USABLE_TOKEN_SECS));
+        assert!(!mc_token_usable(now - 1, now, MIN_USABLE_TOKEN_SECS));
+        assert!(!mc_token_usable(i64::MAX, i64::MAX, 60), "pas de dépassement");
+    }
+
+    #[tokio::test]
+    async fn lancement_renouvelle_un_jeton_qui_expire_dans_une_heure() {
+        let dir = tempfile::tempdir().unwrap();
+        let (st, _) = test_state(dir.path());
+        seed(&st, mc_in(3600), true);
+        let s = MockServer::start().await;
+        mount(&s, "POST", "/token", 200, json!({"access_token":"ms-at","refresh_token":"new-rt","expires_in":3600})).await;
+        mount_chain(&s).await;
+        let (a, b, c) = clients(&s);
+        assert_eq!(st.online_token_with(&a, &b, &c).await.unwrap(), "new-mc");
+        let saved = entry_of(&st, UUID).to_stored().unwrap();
+        assert_eq!((saved.minecraft_token.as_str(), saved.ms_refresh_token.as_str()), ("new-mc", "new-rt"), "jeton neuf réenregistré");
+        assert!(saved.minecraft_expires_at > now_secs() + MIN_LAUNCH_TOKEN_SECS, "pas de boucle de renouvellement");
+        // lancement suivant : jeton à 24 h, aucun appel réseau de plus
+        let calls = s.received_requests().await.unwrap().len();
+        assert_eq!(st.online_token_with(&a, &b, &c).await.unwrap(), "new-mc");
+        assert_eq!(s.received_requests().await.unwrap().len(), calls);
+    }
+
+    #[tokio::test]
+    async fn lancement_garde_un_jeton_frais_sans_reseau() {
+        let dir = tempfile::tempdir().unwrap();
+        let (st, _) = test_state(dir.path());
+        seed(&st, mc_in(24 * 3600), true);
+        let s = MockServer::start().await;
+        let (a, b, c) = clients(&s);
+        assert_eq!(st.online_token_with(&a, &b, &c).await.unwrap(), "mc-old-rt");
+        assert!(s.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn lancement_hors_ligne_reutilise_un_jeton_encore_valide() {
+        let dir = tempfile::tempdir().unwrap();
+        let (st, _) = test_state(dir.path());
+        seed(&st, mc_in(3600), true);
+        let s = MockServer::start().await;
+        mount(&s, "POST", "/token", 503, json!({"error":"temporarily_unavailable"})).await;
+        let (a, b, c) = clients(&s);
+        assert_eq!(st.online_token_with(&a, &b, &c).await.unwrap(), "mc-old-rt");
+        // serveur injoignable (échec réseau, port fermé) : même repli
+        let down = DeviceCodeClient::with_base_url("cid", "http://127.0.0.1:1");
+        assert_eq!(st.online_token_with(&down, &b, &c).await.unwrap(), "mc-old-rt");
+    }
+
+    #[tokio::test]
+    async fn lancement_hors_ligne_refuse_un_jeton_expire_ou_presque() {
+        for left in [-10, 10] {
+            let dir = tempfile::tempdir().unwrap();
+            let (st, _) = test_state(dir.path());
+            seed(&st, mc_in(left), true);
+            let s = MockServer::start().await;
+            mount(&s, "POST", "/token", 503, json!({"error":"temporarily_unavailable"})).await;
+            let (a, b, c) = clients(&s);
+            let e = st.online_token_with(&a, &b, &c).await.unwrap_err();
+            assert!(e.contains("impossible de renouveler"), "{e}");
+        }
+    }
+
+    #[tokio::test]
+    async fn lancement_session_revoquee_ne_reutilise_pas_le_jeton() {
+        let dir = tempfile::tempdir().unwrap();
+        let (st, _) = test_state(dir.path());
+        seed(&st, mc_in(3600), true);
+        let s = MockServer::start().await;
+        mount(&s, "POST", "/token", 400, json!({"error":"invalid_grant","error_description":"expired"})).await;
+        let (a, b, c) = clients(&s);
+        assert_eq!(st.online_token_with(&a, &b, &c).await.unwrap_err(), "session expirée : reconnectez-vous");
     }
 }

@@ -48,7 +48,6 @@ export default function Main() {
   const [instances, setInstances] = useState<Instance[] | null>(null);
   const { launch, error: launchError, play: startGame, kill: stopGame, clearError } = useLaunch(services);
   /** Dernier modpack lancé depuis l'accueil : nomme l'échec quand l'appel de lancement lui-même est rejeté. */
-  const [lastPlayed, setLastPlayed] = useState<string | null>(null);
   /** Événement d'échec que l'utilisateur a fermé (comparé par identité). */
   const [dismissed, setDismissed] = useState<unknown>(null);
   const [requests, setRequests] = useState<number | null>(null);
@@ -126,7 +125,7 @@ export default function Main() {
   const play = (id: string) => {
     setActionError(null);
     const inst = instances?.find((x) => x.id === id);
-    gate.guard(inst ?? { id, name: id }, () => { setLastPlayed(id); void startGame(id); }, () => navigate("instance", { id, tab: "mods" }), () => navigate("instance", { id, tab: "mods", fix: "1" }));
+    gate.guard(inst ?? { id, name: id }, () => { void startGame(id); }, () => navigate("instance", { id, tab: "mods" }), () => navigate("instance", { id, tab: "mods", fix: "1" }));
   };
   const kill = async (id: string) => {
     setActionError(null);
@@ -215,8 +214,8 @@ export default function Main() {
   };
 
   // Échec de lancement rapide : bandeau en haut, avec accès aux logs du modpack concerné.
-  const failedId = launch?.state === "failed" && launch !== dismissed ? launch.id : launchError !== null ? lastPlayed : null;
-  const failMsg = launchError ?? (launch?.state === "failed" ? launch.message ?? "" : "");
+  const failedId = launch?.state === "failed" && launch !== dismissed ? launch.id : launchError ? launchError.id : null;
+  const failMsg = launchError?.message ?? (launch?.state === "failed" ? launch.message ?? "" : "");
   const failInst = failedId ? instances?.find((i) => i.id === failedId) : undefined;
 
   // Colonne d'amis : en partie, en ligne, tous ; filtre par pseudo.

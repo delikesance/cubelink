@@ -111,6 +111,29 @@ describe("Page modpack : lancement", () => {
   });
 });
 
+describe("Page modpack : échec de lancement d'un autre modpack", () => {
+  it("l'échec de l'appel pour A n'apparaît pas sur la page de B, mais reste sur celle de A", async () => {
+    const services = { ...createFakeServices({ tickMs: 0, requestCount: 0 }), modsCheck: async () => ({ issues: [], checked: 0 }), instancesLaunch: async () => { throw new Error("introuvable : Java"); } } as unknown as Services;
+    const view = (id: string) => (
+      <ShellContext.Provider value={{ services, route: "instance", params: { id }, navigate: vi.fn(), setTitle: () => {}, goBack: () => {}, canGoBack: true } as ShellContextValue}>
+        <InstancePage key={id} />
+      </ShellContext.Provider>
+    );
+    const { rerender } = render(view("inst-aeronautics"));
+    fireEvent.click(await screen.findByRole("button", { name: "Jouer" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("Java");
+
+    rerender(view("inst-atm10"));
+    expect(await screen.findByRole("heading", { level: 1, name: "All the Mods 10" })).toBeTruthy();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByText(/Échec du lancement/)).toBeNull();
+
+    rerender(view("inst-aeronautics"));
+    expect((await screen.findByRole("alert")).textContent).toContain("Java");
+  });
+});
+
 describe("Page modpack : amis sur ce pack", () => {
   it("liste les parties en cours sur ce pack et rejoint l'ami", async () => {
     const { services, navigate } = setup();

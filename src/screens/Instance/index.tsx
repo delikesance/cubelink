@@ -213,8 +213,10 @@ export default function InstancePage() {
 
   const shots = inst.art?.screenshots ?? [];
   const packFriends = sessionsFrom(invites).filter((g) => g.pack === inst.name);
-  const failed = launchError !== null || state?.state === "failed";
-  const failMsg = launchError ?? (state?.state === "failed" ? state.message ?? "" : null);
+  // L'erreur d'appel est globale au magasin : on ne l'affiche que sur la page de l'instance fautive.
+  const ownError = launchError?.id === id ? launchError.message : null;
+  const failed = ownError !== null || state?.state === "failed";
+  const failMsg = ownError ?? (state?.state === "failed" ? state.message ?? "" : null);
   const otherBusy = !!launch && launch.id !== id && isBusy(launch.id);
   const tabId = (t: string) => `${uid}-tab-${t}`;
   const panelId = (t: string) => `${uid}-panel-${t}`;

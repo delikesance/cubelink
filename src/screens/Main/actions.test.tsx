@@ -41,6 +41,18 @@ describe("Main : échec du lancement rapide", () => {
   });
 });
 
+describe("Main : échec d'appel sur le bon modpack", () => {
+  it("le bandeau nomme l'instance lancée, pas la précédente", async () => {
+    const { navigate } = setup({ instancesLaunch: async () => { throw new Error("Java introuvable."); } });
+    fireEvent.click(await screen.findByRole("button", { name: "Jouer à All the Mods 10" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("Échec du lancement de All the Mods 10");
+    expect(alert.textContent).toContain("Java introuvable.");
+    fireEvent.click(within(alert).getByRole("button", { name: "Voir les logs" }));
+    expect(navigate).toHaveBeenCalledWith("instance", { id: "inst-atm10", tab: "logs" });
+  });
+});
+
 describe("Main : préparation du jeu différée", () => {
   it("bandeau non bloquant avec la cause, Ignorer le retire", async () => {
     let push: (e: { instance_id: string; message: string }) => void = () => {};

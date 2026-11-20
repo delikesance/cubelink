@@ -149,6 +149,7 @@ export type HearthEula = B.HearthEula;
 // Charges d'événements (typées à la main).
 export interface HearthHandover { group_id: string; name: string; from_name: string }
 export interface HearthHostPrompt { group_id: string; name: string; players: number }
+export interface HearthRamWarning { group_id: string; name: string; message: string }
 
 export interface HearthCreateInput {
   name: string;
@@ -341,6 +342,7 @@ export interface Services {
   onHearthInvites(cb: (l: HearthInvite[]) => void): Unsubscribe;
   onHearthHandover(cb: (e: HearthHandover) => void): Unsubscribe;
   onHearthHostPrompt(cb: (e: HearthHostPrompt) => void): Unsubscribe;
+  onHearthRamWarning(cb: (e: HearthRamWarning) => void): Unsubscribe;
   onUnknownMods(cb: (e: UnknownModsEvent) => void): Unsubscribe;
   onTransferErrorDetails(cb: (e: TransferErrorDetails) => void): Unsubscribe;
   onBrowseProgress(cb: (e: BrowseProgressEvent) => void): Unsubscribe;

@@ -164,6 +164,7 @@ export function createTauriServices(): Services {
     onHearthInvites: (cb) => on("hearth://invites", cb),
     onHearthHandover: (cb) => on("hearth://handover", cb),
     onHearthHostPrompt: (cb) => on("hearth://host_prompt", cb),
+    onHearthRamWarning: (cb) => on("hearth://ram_warning", cb),
     onUnknownMods: (cb) => on("transfer://unknown_mods", cb),
     onTransferErrorDetails: (cb) => on("transfer://error_details", cb),
     updateState: () => commands.updateState(),

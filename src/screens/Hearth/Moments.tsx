@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import "./hearth.css";
-import type { HearthHandover, HearthHostPrompt, Services } from "../../services/types";
+import type { HearthHandover, HearthHostPrompt, HearthRamWarning, Services } from "../../services/types";
 import { Button } from "../../ui";
 import { Modal } from "../Main/Modal";
 import { useHearthInvites } from "../../app/useHearth";
@@ -95,18 +95,36 @@ function HostPromptMoment({ services, e, onClose }: { services: Services; e: Hea
   );
 }
 
-/** Les moments du groupe qui interrompent : invitation reçue, passage de relais, serveur resté ouvert. */
+/** Le serveur démarre, mais le PC risque de manquer de mémoire : simple information, le lancement continue. */
+function RamWarningMoment({ e, onClose }: { e: HearthRamWarning; onClose: () => void }) {
+  return (
+    <Modal title="Ton PC risque de manquer de mémoire" onClose={onClose}>
+      <div className="home-modal-text hearth-moment">
+        <p>{e.message}</p>
+        <p className="hearth-hint">Le serveur « {e.name} » démarre quand même.</p>
+      </div>
+      <div className="home-modal-foot">
+        <Button data-autofocus onClick={onClose}>Compris</Button>
+      </div>
+    </Modal>
+  );
+}
+
+/** Les moments du groupe qui interrompent : invitation reçue, passage de relais, serveur resté ouvert, mémoire juste. */
 export function HearthMoments({ services }: { services: Services }) {
   const [handover, setHandover] = useState<HearthHandover | null>(null);
   const [prompt, setPrompt] = useState<HearthHostPrompt | null>(null);
+  const [ram, setRam] = useState<HearthRamWarning | null>(null);
   const enabled = useHearthEnabled(services);
   useEffect(() => services.onHearthHandover((e) => setHandover(e)), [services]);
   useEffect(() => services.onHearthHostPrompt((e) => setPrompt(e)), [services]);
+  useEffect(() => services.onHearthRamWarning((e) => setRam(e)), [services]);
   return (
     <>
       {enabled && <InviteMoment services={services} />}
       {handover && <HandoverMoment services={services} e={handover} onClose={() => setHandover(null)} />}
       {prompt && <HostPromptMoment services={services} e={prompt} onClose={() => setPrompt(null)} />}
+      {ram && <RamWarningMoment e={ram} onClose={() => setRam(null)} />}
     </>
   );
 }

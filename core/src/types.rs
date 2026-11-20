@@ -401,6 +401,15 @@ pub struct HearthHandover {
     pub from_name: String,
 }
 
+/// Événement `hearth://ram_warning` : même après réduction de la mémoire du serveur, jeu et serveur occupent plus de 85 % de la mémoire du PC.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+pub struct HearthRamWarning {
+    pub group_id: String,
+    pub name: String,
+    /// Phrase en langage courant, prête à afficher.
+    pub message: String,
+}
+
 /// Événement `hearth://host_prompt` : notre jeu s'est fermé alors que d'autres joueurs sont encore sur notre serveur.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct HearthHostPrompt {

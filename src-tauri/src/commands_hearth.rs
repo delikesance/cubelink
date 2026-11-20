@@ -7,11 +7,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use core_lib::hearth::server::{ram_pressure_warning, server_ram_mb};
 use core_lib::hearth::world;
 use core_lib::instance::InstanceKind;
 use core_lib::manifest::{build_manifest, manifest_hash, ManifestOptions};
 use core_lib::types::{
-    HearthCard, HearthDetail, HearthHostPrompt, HearthInvite, HearthWorld, Instance,
+    HearthCard, HearthDetail, HearthHostPrompt, HearthInvite, HearthRamWarning, HearthWorld, Instance,
 };
 use p2p_lib::hearth::lease::Decision;
 use p2p_lib::hearth::model::{GroupOp, GroupId, PackPin};
@@ -541,12 +542,22 @@ impl AppState {
         rt.prepare_world(g, head).await?;
         rt.set_play(&g, Some(Play::Launching { steps: HOST_STEPS, index: 1 }));
         let settings = self.settings_get();
+        // Le serveur et le jeu partagent la mémoire de ce PC : le serveur reçoit sa propre part, pas celle du jeu.
+        let client_mb = core_lib::instance::effective_ram_mb(inst.ram_mb, settings.default_ram_mb);
+        let physical_mb = core_lib::sysmem::physical_memory_mb();
+        let ram_mb = server_ram_mb(client_mb, physical_mb);
+        eprintln!("[cubelink] mémoire : jeu {client_mb} Mo, serveur {ram_mb} Mo, PC {physical_mb:?} Mo");
+        if let Some(message) = ram_pressure_warning(client_mb, ram_mb, physical_mb) {
+            // Non bloquant : le serveur démarre quand même.
+            let name = rt.state(&g).map(|s| s.name).unwrap_or_default();
+            rt.emit_json("hearth://ram_warning", &HearthRamWarning { group_id: g.to_hex(), name, message });
+        }
         let params = HostParams {
             instance_id: instance.to_string(),
             minecraft: inst.minecraft.clone(),
             loader: inst.loader.clone(),
             mods_src: game_dir.join("mods"),
-            ram_mb: core_lib::instance::effective_ram_mb(inst.ram_mb, settings.default_ram_mb).clamp(1024, 8192),
+            ram_mb,
             java_override: settings.java_path.as_deref().map(PathBuf::from),
             java_root: self.paths.java.clone(),
         };

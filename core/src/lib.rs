@@ -4,6 +4,7 @@ pub mod java;
 pub mod lan_map;
 pub mod java_install;
 pub mod instance;
+pub mod sysmem;
 pub mod launch_args;
 pub mod launch_run;
 #[cfg(windows)]

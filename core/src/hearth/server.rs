@@ -176,18 +176,31 @@ pub fn free_port() -> Result<u16> {
     Ok(l.local_addr()?.port())
 }
 
-/// Mémoire du serveur selon la RAM disponible (Mo) : le quart, entre 2 Go et 8 Go, jamais plus que la moitié.
-pub fn suggest_ram_mb(available_mb: u64) -> u32 {
-    let quarter = (available_mb / 4).clamp(2048, 8192);
-    quarter.min((available_mb / 2).max(1024)) as u32
+/// Mémoire minimale et maximale du serveur de groupe (Mo).
+pub const SERVER_RAM_MIN_MB: u32 = 1024;
+pub const SERVER_RAM_MAX_MB: u32 = 8192;
+/// Marge laissée au système, au lanceur et à sa fenêtre web en plus du jeu et du serveur (Mo).
+const RESERVED_MB: u64 = 3072;
+
+/// Mémoire du serveur de groupe (Mo), pour un client réglé à `client_mb`. Le serveur et le jeu tournent sur le même PC :
+/// la moitié de la mémoire du jeu (entre 1 et 8 Go), sans dépasser ce qui reste une fois le jeu et 3 Go de marge retirés de la
+/// mémoire physique (jamais moins de 1 Go). Mémoire physique inconnue : la moitié du jeu, sans autre borne.
+pub fn server_ram_mb(client_mb: u32, physical_mb: Option<u64>) -> u32 {
+    let base = (client_mb / 2).clamp(SERVER_RAM_MIN_MB, SERVER_RAM_MAX_MB);
+    let Some(phys) = physical_mb else { return base };
+    let room = phys.saturating_sub(client_mb as u64).saturating_sub(RESERVED_MB);
+    base.min(u32::try_from(room).unwrap_or(u32::MAX)).max(SERVER_RAM_MIN_MB)
 }
 
-/// Avertissement à afficher quand la machine a moins de 12 Go de RAM au total.
-pub fn ram_warning(total_mb: u64) -> Option<String> {
-    (total_mb < 12 * 1024).then(|| {
+/// Avertissement (langage courant) quand, serveur et jeu additionnés, on dépasse 85 % de la mémoire physique malgré la
+/// réduction de `server_ram_mb`. `None` : tout tient, ou mémoire physique inconnue.
+pub fn ram_pressure_warning(client_mb: u32, server_mb: u32, physical_mb: Option<u64>) -> Option<String> {
+    let phys = physical_mb.filter(|p| *p > 0)?;
+    let used = client_mb as u64 + server_mb as u64;
+    (used * 100 > phys * 85).then(|| {
         format!(
-            "Cet ordinateur a {} Go de mémoire : héberger un serveur moddé en jouant peut être lent. Un ami mieux équipé gagnerait à lancer la partie.",
-            total_mb / 1024
+            "Ton PC a {} Go de mémoire : le serveur et le jeu risquent d'en manquer. Baisse la mémoire du jeu dans les réglages de l'instance, ou ferme d'autres applications avant de jouer.",
+            (phys + 512) / 1024
         )
     })
 }
@@ -1474,15 +1487,69 @@ mod tests {
     }
 
     #[test]
-    fn ports_and_ram() {
+    fn ports() {
         let p = free_port().unwrap();
         assert!(p > 0);
-        assert_eq!(suggest_ram_mb(4 * 1024), 2048);
-        assert_eq!(suggest_ram_mb(16 * 1024), 4096);
-        assert_eq!(suggest_ram_mb(64 * 1024), 8192);
-        assert_eq!(suggest_ram_mb(2 * 1024), 1024);
-        assert!(ram_warning(8 * 1024).is_some());
-        assert!(ram_warning(16 * 1024).is_none());
+    }
+
+    const GO: u64 = 1024;
+
+    #[test]
+    fn server_ram_follows_client_and_physical_memory() {
+        // Le cas du ticket : 16 Go, jeu à 8 Go -> la moitié (4 Go), qui tient dans 16 - 8 - 3 = 5 Go.
+        assert_eq!(server_ram_mb(8192, Some(16 * GO)), 4096);
+        // 16 Go, jeu à 12 Go : il ne reste que 1 Go.
+        assert_eq!(server_ram_mb(12 * 1024, Some(16 * GO)), 1024);
+        // PC de 8 Go, jeu à 4 Go : 8 - 4 - 3 = 1 Go.
+        assert_eq!(server_ram_mb(4096, Some(8 * GO)), 1024);
+        // Gros PC : la moitié du jeu, plafonnée à 8 Go.
+        assert_eq!(server_ram_mb(8192, Some(32 * GO)), 4096);
+        assert_eq!(server_ram_mb(16 * 1024, Some(64 * GO)), 8192);
+        assert_eq!(server_ram_mb(40 * 1024, Some(128 * GO)), 8192);
+        // Petit jeu : plancher d'1 Go.
+        assert_eq!(server_ram_mb(1024, Some(32 * GO)), 1024);
+        assert_eq!(server_ram_mb(0, Some(32 * GO)), 1024);
+        // Mémoire inconnue : la moitié du jeu, bornée.
+        assert_eq!(server_ram_mb(8192, None), 4096);
+        assert_eq!(server_ram_mb(65536, None), 8192);
+        assert_eq!(server_ram_mb(1024, None), 1024);
+        // Mémoire physique inférieure au jeu : pas de dépassement arithmétique, plancher d'1 Go.
+        assert_eq!(server_ram_mb(8192, Some(2 * GO)), 1024);
+        assert_eq!(server_ram_mb(u32::MAX, Some(u64::MAX)), 8192);
+    }
+
+    #[test]
+    fn server_ram_stays_in_bounds_and_never_exceeds_the_old_value() {
+        for client in (0..=65536u32).step_by(512) {
+            for phys in [None, Some(0), Some(2 * GO), Some(4 * GO), Some(8 * GO), Some(16 * GO), Some(32 * GO), Some(128 * GO)] {
+                let s = server_ram_mb(client, phys);
+                assert!((SERVER_RAM_MIN_MB..=SERVER_RAM_MAX_MB).contains(&s), "client {client}, phys {phys:?} -> {s}");
+                // Avant le correctif, le serveur recevait la mémoire du client (bornée 1..8 Go) : jamais plus qu'avant.
+                assert!(s <= client.clamp(SERVER_RAM_MIN_MB, SERVER_RAM_MAX_MB));
+                if let Some(p) = phys.filter(|p| *p >= client as u64 + RESERVED_MB + SERVER_RAM_MIN_MB as u64) {
+                    assert!(client as u64 + s as u64 + RESERVED_MB <= p, "client {client}, phys {p} -> {s}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pressure_warning_only_when_still_above_85_percent() {
+        let w = |c, p| { let s = server_ram_mb(c, Some(p)); ram_pressure_warning(c, s, Some(p)) };
+        // 16 Go / jeu 8 Go : le serveur est réduit à 4 Go (75 %), pas de message.
+        assert_eq!(w(8192, 16 * GO), None);
+        // 16 Go / jeu 12 Go : 12 + 1 = 13 Go = 81 %.
+        assert_eq!(w(12 * 1024, 16 * GO), None);
+        // 16 Go / jeu 14 Go : 15 Go = 94 %.
+        let m = w(14 * 1024, 16 * GO).expect("message attendu");
+        assert!(m.contains("16 Go") && m.contains("Baisse la mémoire du jeu"), "{m}");
+        // 8 Go / jeu 4 Go : 4 + 1 = 5 Go = 62 %.
+        assert_eq!(w(4096, 8 * GO), None);
+        // 4 Go / jeu 4 Go : 5 Go sur 4.
+        assert!(w(4096, 4 * GO).unwrap().contains("4 Go"));
+        // Mémoire inconnue : pas de message.
+        assert_eq!(ram_pressure_warning(8192, 4096, None), None);
+        assert_eq!(ram_pressure_warning(8192, 4096, Some(0)), None);
     }
 
     #[test]
@@ -1810,6 +1877,26 @@ done
             c.accept_eula = true;
             c.ready_timeout = Duration::from_secs(20);
             c
+        }
+
+        /// Chaîne réelle : mémoire physique de cette machine -> `server_ram_mb` -> ligne de commande du processus serveur (`-Xmx`).
+        #[tokio::test]
+        async fn xmx_on_the_command_line_follows_the_machine_memory() {
+            let phys = crate::sysmem::physical_memory_mb();
+            assert!(phys.is_some_and(|p| p > 0), "mémoire physique illisible");
+            for client in [2048u32, 8192, 16384] {
+                let t = tempfile::tempdir().unwrap();
+                let dir = t.path().join("srv");
+                let argv = t.path().join("argv.txt");
+                let java = fake_java(t.path(), &format!("echo \"$@\" > '{}'\n{WORKING}", argv.display()));
+                let mb = server_ram_mb(client, phys);
+                let mut c = cfg(&dir, &java);
+                c.ram_mb = mb;
+                let server = DedicatedServer::start(&c, &installed(&dir)).await.unwrap();
+                let line = std::fs::read_to_string(&argv).unwrap();
+                assert!(line.starts_with(&format!("-Xmx{mb}M ")), "{line}");
+                server.stop(Duration::from_secs(10)).await;
+            }
         }
 
         #[tokio::test]

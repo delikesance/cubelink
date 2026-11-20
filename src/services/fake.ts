@@ -5,7 +5,7 @@ import type {
   CreateInstanceInput, DeviceCode, HostState, Invite, JoinAnswer, JoinRequest, ImportWarningEvent, LaunchLogEvent, FriendRequest, FriendWithPresence, Instance, InstanceArt,
   JoinPlan, LaunchState, Manifest, PresenceEvent, UnknownModsEvent, Profile, Services, Settings,
   StageFallback, StageState, TransferProgress, Unsubscribe, UpdateState,
-  HearthCard, HearthDetail, HearthHandover, HearthHostPrompt, HearthInvite, HearthMember, HearthMemberLite,
+  HearthCard, HearthDetail, HearthHandover, HearthHostPrompt, HearthInvite, HearthRamWarning, HearthMember, HearthMemberLite,
 } from "./types";
 
 export interface FakeOptions {
@@ -58,6 +58,8 @@ export interface FakeControls {
   emitHearthHandover(e: HearthHandover): void;
   /** Test : émet hearth://host_prompt. */
   emitHearthHostPrompt(e: HearthHostPrompt): void;
+  /** Test : émet hearth://ram_warning. */
+  emitHearthRamWarning(e: HearthRamWarning): void;
   /** Test : le contrat d'utilisation de Minecraft est déjà accepté (ou non). Défaut : non. */
   setHearthEula(accepted: boolean): void;
   /** Test : la dernière version n'a de contenu chez personne : `hearthPlay` rejette avec `head_unavailable` jusqu'à `hearthPlayFromPrevious`. `previous: null` : aucune version complète. */
@@ -281,6 +283,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     hearthInvites: new Set<(l: HearthInvite[]) => void>(),
     hearthHandover: new Set<(e: HearthHandover) => void>(),
     hearthHostPrompt: new Set<(e: HearthHostPrompt) => void>(),
+    hearthRamWarning: new Set<(e: HearthRamWarning) => void>(),
     stage: new Set<(s: StageState) => void>(),
     stageFallback: new Set<(f: StageFallback) => void>(),
     stageFullscreen: new Set<(on: boolean) => void>(),
@@ -808,6 +811,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     onHearthInvites: (cb) => sub(listeners.hearthInvites, cb),
     onHearthHandover: (cb) => sub(listeners.hearthHandover, cb),
     onHearthHostPrompt: (cb) => sub(listeners.hearthHostPrompt, cb),
+    onHearthRamWarning: (cb) => sub(listeners.hearthRamWarning, cb),
     seedHearth: (p, d) => {
       const g = makeHearth(p, d);
       hearthGroups.set(g.card.id, g);
@@ -832,6 +836,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     },
     emitHearthHandover: (e) => emit(listeners.hearthHandover, e),
     emitHearthHostPrompt: (e) => emit(listeners.hearthHostPrompt, e),
+    emitHearthRamWarning: (e) => emit(listeners.hearthRamWarning, e),
     setHearthEula: (a) => { hearthEula = a; },
     setHearthHeadUnavailable: (i) => { hearthHeadMissing = i; },
     hearthCalls,

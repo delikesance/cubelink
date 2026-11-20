@@ -229,6 +229,21 @@ describe("Moments du groupe", () => {
   });
 });
 
+describe("Mémoire du PC", () => {
+  it("avertissement de mémoire : message affiché, non bloquant, « Compris » le ferme", async () => {
+    const services = createFakeServices({ tickMs: 0 });
+    render(<HearthMoments services={services} />);
+    await act(async () => {});
+    act(() => { services.emitHearthRamWarning({ group_id: "g1", name: "Les copains", message: "Ton PC a 16 Go de mémoire : le serveur et le jeu risquent d'en manquer." }); });
+    const dlg = await screen.findByRole("dialog", { name: "Ton PC risque de manquer de mémoire" });
+    expect(within(dlg).getByText(/Ton PC a 16 Go de mémoire/)).toBeTruthy();
+    expect(within(dlg).getByText(/démarre quand même/)).toBeTruthy();
+    fireEvent.click(within(dlg).getByRole("button", { name: "Compris" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(services.hearthCalls).toEqual([]);
+  });
+});
+
 describe("Création d'un serveur", () => {
   it("trois étapes : monde, membres, ce qui change ; puis création et ouverture de la page", async () => {
     const services = createFakeServices({ tickMs: 0 });

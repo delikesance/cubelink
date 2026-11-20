@@ -32,6 +32,11 @@ iroh-blobs = "=0.105.0"
 # Même version que celle d'iroh (déjà dans Cargo.lock) : mappage de port quand le relais est coupé.
 portmapper = "=0.19.3"
 n0-future = "0.3"
+# Découverte des amis sans tiers (#136) : DHT Mainline (amorçage BitTorrent public) et mDNS (crate officielle d'iroh).
+mainline = "=8.0.1"
+iroh-mdns-address-lookup = "=0.6.1"
+hkdf = "0.12"
+aes-gcm.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -207,8 +207,9 @@ function Settings({ d, services, instances, ask, onError }: { d: HearthDetail; s
           <h2>Serveur</h2>
           <p className="hearth-meta">
             Place prise sur ce disque : {fmtSize(d.settings.disk_bytes)}.
-            {d.settings.outbox_pending > 0 && ` ${plural(d.settings.outbox_pending, "version attend", "versions attendent")} d'être envoyée aux autres membres.`}
+            {d.settings.outbox_pending > 0 && !d.settings.outbox_failed && ` ${plural(d.settings.outbox_pending, "version attend", "versions attendent")} d'être envoyée aux autres membres.`}
           </p>
+          {d.settings.outbox_failed && <p className="hearth-meta" role="status">{d.settings.outbox_failed}</p>}
         </div>
         <label className="hearth-check">
           <input type="checkbox" checked={d.settings.keep_background} onChange={(e) => { services.hearthSetBackground(id, e.target.checked).catch((x: unknown) => onError(errText(x))); }} />

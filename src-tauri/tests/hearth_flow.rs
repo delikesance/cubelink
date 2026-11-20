@@ -351,7 +351,13 @@ async fn serveur_de_groupe_de_la_creation_a_la_fourche() {
     let v2 = b.rt().head(&g).unwrap();
     assert_eq!(v2.header.kind, VersionKind::Session);
     assert_eq!(v2.header.author, a.key());
-    wait_for("file d'envoi d'Alice vidée (B a tout)", 40, || a.rt().pending_outbox() == 0).await;
+    // Trois membres : la version doit être confirmée par `min(2, 2)` = 2 membres (#99). Bob seul ne la libère pas.
+    wait_for("Bob a confirmé la n° 2 (un accusé sur deux)", 40, || {
+        a.rt().outbox().pending().iter().any(|e| e.version.header.number == 2 && e.stored.len() == 1)
+    })
+    .await;
+    let queued: Vec<(u64, usize)> = a.rt().outbox().pending().iter().map(|e| (e.version.header.number, e.stored.len())).collect();
+    assert!(queued.contains(&(2, 1)), "Carol est hors ligne : la n° 2 reste en file, avec l'accusé de Bob : {queued:?}");
     b.close_game();
 
     // 6. Seconde partie : B quitte pendant qu'Alice joue. La version part dans la file, puis arrive chez C.
@@ -363,12 +369,15 @@ async fn serveur_de_groupe_de_la_creation_a_la_fourche() {
     wait_for("serveur d'Alice arrêté (2)", 30, || a.state_of(&g) != HearthStateKind::Hosting).await;
     assert_eq!(a.rt().head(&g).unwrap().header.number, 3);
     tokio::time::sleep(Duration::from_secs(2)).await;
-    assert_eq!(a.rt().pending_outbox(), 1, "personne de joignable : la version 3 attend en file");
+    assert!(a.rt().outbox().pending().iter().any(|e| e.version.header.number == 3), "personne de joignable : la n° 3 attend en file");
+    assert!(a.rt().pending_outbox() >= 2, "les versions à un seul accusé (Bob) attendent aussi : Carol est partie");
     c.restart().await;
     c.rt().probe_all().await;
     wait_for("C a rattrapé la version 3", 40, || c.rt().head(&g).is_some_and(|h| h.header.number == 3 && c.rt().world_complete(&h))).await;
     a.rt().probe_all().await;
-    wait_for("file d'envoi d'Alice vidée (C a tout)", 40, || a.rt().pending_outbox() == 0).await;
+    // Les n° 1 et 2 ont leurs deux accusés (Bob, Carol) ; la n° 3 n'en a qu'un (Carol) tant que Bob est hors ligne.
+    wait_for("les n° 1 et 2 sont livrées à Bob et Carol", 40, || a.rt().pending_outbox() == 1).await;
+    assert!(a.rt().outbox().pending().iter().all(|e| e.version.header.number == 3 && e.stored.len() == 1));
     assert_eq!(c.rt().head(&g).unwrap().id(), a.rt().head(&g).unwrap().id());
 
     // 7. Bail expiré : l'hôte a disparu sans relâcher son bail, B voit « partie mal terminée ».
@@ -376,6 +385,8 @@ async fn serveur_de_groupe_de_la_creation_a_la_fourche() {
     b.rt().probe_all().await;
     wait_for("B à jour", 40, || b.rt().head(&g).is_some_and(|h| h.header.number == 3 && b.rt().world_complete(&h))).await;
     let head3 = b.rt().head(&g).unwrap();
+    a.rt().probe_all().await;
+    wait_for("file d'envoi d'Alice vidée (Bob et Carol ont tout)", 40, || a.rt().pending_outbox() == 0).await;
     // Alice a disparu (PC éteint) : si elle répondait sans bail, Bob effacerait le sien (bail périmé).
     b.node.be.add_peer_addr(c.node.be.endpoint_addr()); // Chloé a changé d'adresse en redémarrant : seule elle reste joignable.
     a.stop().await;
@@ -1598,4 +1609,87 @@ async fn restaurer_un_monde_absent_sans_personne_en_ligne_le_dit_en_clair() {
     let err = b.node.st.hearth_restore(&id, &v2.id().to_hex()).await.unwrap_err();
     assert!(err.contains("n'est plus sur ce PC"), "{err}");
     b.stop().await;
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// #99 : file d'envoi (regroupement des points de reprise, refus explicite d'une version trop grosse)
+// ---------------------------------------------------------------------------------------------------------
+
+/// Deux points de reprise de la même lignée en file : seul le dernier est envoyé (la Session, elle, n'est jamais
+/// regroupée). Bob, hors ligne pendant ce temps, reçoit le dernier, rattrape l'en-tête du premier auprès d'Alice, et la
+/// file d'Alice se vide.
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn file_d_envoi_ne_garde_que_le_dernier_point_de_reprise() {
+    let (mut peers, g, id) = group_of(&["Alice", "Bob"]).await;
+    let d1 = peers[0].dir.path().join("monde-1");
+    small_world(&d1, "monde n° 1");
+    let v1 = peers[0].rt().publish_version(g, &d1, VersionKind::Session, None, 60).await.unwrap();
+    wait_for("n° 1 complète chez Bob", 40, || peers[1].rt().head(&g).is_some_and(|h| h.id() == v1.id() && peers[1].rt().world_complete(&h))).await;
+    peers[1].stop().await;
+    let mut parent = (v1.id(), 1);
+    let mut cps = Vec::new();
+    for n in 2..=3u64 {
+        let d = peers[0].dir.path().join(format!("monde-{n}"));
+        small_world(&d, &format!("point de reprise n° {n}"));
+        let v = peers[0].rt().publish_version(g, &d, VersionKind::Checkpoint, Some(parent), 60).await.unwrap();
+        parent = (v.id(), n);
+        cps.push(v);
+    }
+    let (c3, c2) = (cps.pop().unwrap(), cps.pop().unwrap());
+    let a = &peers[0];
+    let queued: Vec<u64> = a.rt().outbox().pending().iter().map(|e| e.version.header.number).collect();
+    assert!(queued.contains(&3) && !queued.contains(&2), "le point de reprise n° 2 est remplacé par le n° 3 : {queued:?}");
+    assert_eq!(queued.len(), a.rt().pending_outbox());
+
+    peers[1].restart().await;
+    peers[1].rt().probe_all().await;
+    let b = &peers[1];
+    wait_for("le point de reprise n° 3 est complet chez Bob", 60, || {
+        b.rt().head(&g).is_some_and(|h| h.id() == c3.id() && b.rt().world_complete(&h))
+    })
+    .await;
+    assert!(b.rt().version(&g, &c2.id()).is_some(), "Bob a rattrapé l'en-tête du n° 2 auprès d'Alice");
+    peers[0].rt().probe_all().await;
+    wait_for("file d'Alice vidée", 40, || peers[0].rt().pending_outbox() == 0).await;
+    let _ = id;
+    for p in &peers {
+        p.stop().await;
+    }
+}
+
+/// Une version bien plus grosse que la précédente (plus de 3 fois + 2 Gio, `Oversize`) est refusée par Bob sans qu'il en
+/// tire un octet : Alice le sait tout de suite, ne la repousse plus, l'affiche (`outbox_failed`) et « Quitter » n'attend pas
+/// cinq minutes. La version reste en file et épinglée (Bob pourra la tirer chez elle après un « Jouer » confirmé).
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn file_d_envoi_refus_explicite_d_une_version_trop_grosse() {
+    let (peers, g, id) = group_of(&["Alice", "Bob"]).await;
+    let (a, b) = (&peers[0], &peers[1]);
+    let d1 = a.dir.path().join("monde-1");
+    small_world(&d1, "monde n° 1");
+    let v1 = a.rt().publish_version(g, &d1, VersionKind::Session, None, 60).await.unwrap();
+    wait_for("n° 1 complète chez Bob", 40, || b.rt().head(&g).is_some_and(|h| h.id() == v1.id() && b.rt().world_complete(&h))).await;
+    wait_for("file d'Alice vidée", 40, || a.rt().pending_outbox() == 0).await;
+    // 2,5 Gio annoncés pour un monde de quelques octets : l'en-tête est signé, le contenu n'existe pas (et n'est jamais lu).
+    let v2 = a.rt().record_version(g, VersionKind::Session, Some((v1.id(), 1)), 90, [9; 32], 5 * (1 << 29)).unwrap();
+    wait_for("la version est refusée pour de bon", 40, || a.rt().outbox().pending().iter().any(|e| e.id() == v2.id() && e.failed.is_some())).await;
+    let e = a.rt().outbox().pending().into_iter().find(|e| e.id() == v2.id()).unwrap();
+    assert_eq!(e.failed.as_deref(), Some("oversize"));
+    assert_eq!(e.attempts, 1, "une seule remise : le refus arrête les tentatives");
+    assert!(!b.rt().world_complete(&v2), "Bob n'a rien tiré");
+    let d = a.node.st.hearth.detail(&g).unwrap();
+    assert_eq!(d.settings.outbox_pending, 1);
+    assert!(d.settings.outbox_failed.as_deref().is_some_and(|t| t.contains("n'a pas été envoyée")), "{:?}", d.settings.outbox_failed);
+    // Aucune nouvelle tentative : ni sur réveil, ni au passage suivant de la boucle.
+    a.rt().outbox().wake();
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(a.rt().outbox().pending().iter().find(|e| e.id() == v2.id()).unwrap().attempts, 1);
+    assert!(a.rt().outbox().pinned_collections().iter().any(|(_, c)| *c == v2.header.collection), "la version reste épinglée");
+    // Quitter ne patiente pas : la version refusée ne partira pas toute seule.
+    a.close_game();
+    let t = std::time::Instant::now();
+    assert_eq!(a.node.st.hearth_leave(&id, false).await.unwrap_err(), LeaveError::OutboxPending);
+    assert!(t.elapsed() < Duration::from_secs(30), "pas d'attente de 5 minutes ({:?})", t.elapsed());
+    for p in &peers {
+        p.stop().await;
+    }
 }

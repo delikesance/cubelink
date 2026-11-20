@@ -363,7 +363,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     const g: HearthDetail = {
       card, members, proposals: [], blocker: null, fork: [], orphans: [],
       versions: [{ id: `v-${p.id}-1`, number: 1, kind: "session", author: ME.public_key, author_name: ME.name, created_at: NOW - 86400, played_secs: 5400, total_size: 380_000_000, is_head: true, side_branch: false, available: true }],
-      settings: { keep_background: false, disk_bytes: 380_000_000, outbox_pending: 0, instance_name: "Create: Aeronautics" },
+      settings: { keep_background: false, disk_bytes: 380_000_000, outbox_pending: 0, outbox_failed: null, instance_name: "Create: Aeronautics" },
       ...d,
     };
     g.card = card;

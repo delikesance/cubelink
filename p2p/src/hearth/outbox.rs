@@ -4,8 +4,15 @@
 //! `<id de version>.json` écrits de façon atomique : la file **survit au redémarrage**. [`Outbox::drain`] pousse
 //! chaque entrée vers les cibles joignables ([`Replica`]) :
 //!
-//! * une cible **membre** accepte quand elle a l'en-tête *et* tout le contenu : dès qu'**au moins un membre** a
-//!   accepté, l'entrée quitte la file (les autres membres rattrapent auprès de lui ou de nous) ;
+//! * une cible **membre** accepte quand elle a l'en-tête *et* tout le contenu (`Stored`) : l'entrée quitte la file
+//!   quand `min(2, autres membres)` membres ont accepté (les accusés s'accumulent d'un passage à l'autre, sur
+//!   disque) ; les autres rattrapent auprès d'eux ou de nous ;
+//! * les cibles sont **indépendantes** : un membre lent ou en panne ne retarde ni les autres entrées ni la
+//!   confirmation d'un autre membre, et ses remises encore en cours sont abandonnées dès que le quorum est atteint ;
+//! * un membre peut **refuser** définitivement (`PushError::refused`, par exemple une version trop grosse
+//!   d'un coup) : il n'est plus retenté, et si le quorum devient impossible l'entrée passe en `failed` : elle reste en
+//!   file et épinglée (le destinataire pourra la tirer chez nous) mais n'est plus poussée ;
+//! * à l'ajout, un point de reprise remplace ceux de la même lignée encore en file ([`Outbox::enqueue`]) ;
 //! * une cible **gardien** (réseau de relais, plus tard) reçoit l'entrée mais ne la retire pas : seule la remise à
 //!   un membre libère la file. On retient à quels gardiens l'entrée est déjà partie pour ne pas la renvoyer ;
 //! * aucune cible joignable : l'entrée reste, et part dès qu'un membre apparaît (l'application rappelle `drain`, ou
@@ -22,16 +29,17 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures_util::future::{join_all, BoxFuture};
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use iroh::{Endpoint, EndpointAddr};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio::sync::{watch, Notify};
+use tokio::sync::{watch, Notify, Semaphore};
 use tokio::task::JoinHandle;
 
 use super::model::GroupId;
-use super::proto::HearthConn;
-use super::version::{BlobHash, SignedVersion, VersionId};
+use super::proto::{HearthConn, NetError};
+use super::version::{BlobHash, SignedVersion, VersionId, VersionKind};
 use crate::util::{lock, now_secs};
 
 /// Entrées au plus dans la file (au-delà, `enqueue` refuse : mieux vaut le dire que perdre une version).
@@ -44,6 +52,10 @@ pub const PUSH_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 pub const CONFIRM_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 /// Intervalle entre deux questions « as-tu tout ? ».
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
+/// Entrées poussées en même temps (au-delà, elles attendent : la bande passante du membre est partagée).
+const MAX_PARALLEL_ENTRIES: usize = 4;
+/// Préfixe de la raison d'un refus définitif, dans `Response::Rejected` à une question `HaveVersion`.
+pub const REFUSED_PREFIX: &str = "refused:";
 
 /// Erreurs de la file (messages affichables).
 #[derive(Debug, Error)]
@@ -68,10 +80,18 @@ pub struct OutboxEntry {
     pub version: SignedVersion,
     /// Secondes depuis l'epoch Unix.
     pub queued_at: u64,
-    /// Cibles déjà servies (identifiants de [`Replica::id`]) ; seuls les gardiens y restent, une remise à un membre
-    /// retire l'entrée.
+    /// Gardiens déjà servis (identifiants de [`Replica::id`]) : ils ne reçoivent pas deux fois la même entrée.
     #[serde(default)]
     pub delivered: BTreeSet<String>,
+    /// Membres qui ont répondu `Stored` (collection entière) ; l'entrée part quand il y en a assez.
+    #[serde(default)]
+    pub stored: BTreeSet<String>,
+    /// Membres qui ont refusé définitivement : identifiant, raison. Ils ne sont plus retentés.
+    #[serde(default)]
+    pub refused: BTreeMap<String, String>,
+    /// Remise abandonnée (trop de refus pour atteindre le quorum) : raison. L'entrée reste en file, épinglée.
+    #[serde(default)]
+    pub failed: Option<String>,
     /// Tentatives de remise échouées.
     #[serde(default)]
     pub attempts: u32,
@@ -106,8 +126,24 @@ pub enum ReplicaKind {
 
 /// Échec d'une remise.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
-#[error("{0}")]
-pub struct PushError(pub String);
+#[error("{message}")]
+pub struct PushError {
+    pub message: String,
+    /// Refus **définitif** de la cible (elle a répondu qu'elle ne prendrait pas cette version) : inutile de réessayer.
+    pub refused: bool,
+}
+
+impl PushError {
+    /// Échec ordinaire : la cible sera retentée au passage suivant.
+    pub fn new(message: impl Into<String>) -> Self {
+        Self { message: message.into(), refused: false }
+    }
+
+    /// Refus définitif, `reason` étant un code court (`oversize`).
+    pub fn refused(reason: impl Into<String>) -> Self {
+        Self { message: reason.into(), refused: true }
+    }
+}
 
 /// Une cible où pousser les versions. `push` rend `Ok` seulement quand la cible a **tout** (en-tête et contenu).
 pub trait Replica: Send + Sync {
@@ -122,7 +158,7 @@ pub trait Replica: Send + Sync {
 /// Bilan d'un passage de [`Outbox::drain`].
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct DrainReport {
-    /// Versions remises à au moins un membre (retirées de la file).
+    /// Versions remises à assez de membres (retirées de la file).
     pub delivered: Vec<VersionId>,
     /// Entrées encore en file après le passage.
     pub pending: usize,
@@ -132,10 +168,21 @@ pub struct DrainReport {
     pub busy: bool,
 }
 
+/// Donne le nombre d'**autres** membres d'un groupe (le quorum en découle).
+pub type OthersFn = Arc<dyn Fn(&GroupId) -> usize + Send + Sync>;
+
+/// Ce qu'un passage a fait d'une entrée.
+#[derive(Default)]
+struct EntryOutcome {
+    delivered: bool,
+    failures: Vec<(VersionId, String, String)>,
+}
+
 /// File d'envoi persistante.
 pub struct Outbox {
     dir: PathBuf,
     entries: Mutex<BTreeMap<VersionId, OutboxEntry>>,
+    others: Mutex<Option<OthersFn>>,
     drain_lock: tokio::sync::Mutex<()>,
     wake: Notify,
     skipped: Vec<String>,
@@ -194,7 +241,7 @@ impl Outbox {
                 Err(why) => skipped.push(format!("{name} : {why}")),
             }
         }
-        Ok(Self { dir, entries: Mutex::new(entries), drain_lock: tokio::sync::Mutex::new(()), wake: Notify::new(), skipped })
+        Ok(Self { dir, entries: Mutex::new(entries), others: Mutex::new(None), drain_lock: tokio::sync::Mutex::new(()), wake: Notify::new(), skipped })
     }
 
     fn read_entry(path: &Path) -> Result<OutboxEntry, String> {
@@ -224,9 +271,24 @@ impl Outbox {
     }
 
     /// Met une version en file. `Ok(false)` si elle y était déjà (rien ne change). Réveille la boucle d'envoi.
+    ///
+    /// **Regroupement** : un point de reprise remplace les points de reprise de sa lignée encore en file (on remonte
+    /// les parents à travers les entrées du même groupe et on retire les `Checkpoint` rencontrés ; on s'arrête à
+    /// la première `Session`, `Restore` ou version absente de la file, qui ne sont jamais retirées). Les membres
+    /// rattrapent les en-têtes manquants auprès de nous (`unknown_parent`), et les blobs communs ne voyagent qu'une
+    /// fois. Les collections retirées ne sont plus épinglées : le prochain ménage du magasin les libère.
     pub fn enqueue(&self, version: SignedVersion) -> Result<bool, OutboxError> {
         check_version(&version).map_err(OutboxError::Invalid)?;
-        let entry = OutboxEntry { version, queued_at: now_secs(), delivered: BTreeSet::new(), attempts: 0, last_error: None };
+        let entry = OutboxEntry {
+            version,
+            queued_at: now_secs(),
+            delivered: BTreeSet::new(),
+            stored: BTreeSet::new(),
+            refused: BTreeMap::new(),
+            failed: None,
+            attempts: 0,
+            last_error: None,
+        };
         let id = entry.id();
         {
             let map = lock(&self.entries);
@@ -239,7 +301,18 @@ impl Outbox {
         }
         // Le fichier d'abord : une entrée qui n'est pas sur le disque n'existe pas.
         self.persist(&entry)?;
-        lock(&self.entries).insert(id, entry);
+        let superseded = {
+            let mut map = lock(&self.entries);
+            let old = if entry.version.header.kind == VersionKind::Checkpoint { superseded_checkpoints(&map, &entry) } else { Vec::new() };
+            for o in &old {
+                map.remove(o);
+            }
+            map.insert(id, entry);
+            old
+        };
+        for o in superseded {
+            let _ = fs::remove_file(self.path_of(&o));
+        }
         self.wake.notify_one();
         Ok(true)
     }
@@ -287,62 +360,136 @@ impl Outbox {
         self.wake.notify_one();
     }
 
-    /// Un passage : pousse chaque entrée vers les cibles joignables de `reachable`. Un seul passage à la fois
-    /// (un deuxième appel simultané rend `busy` sans rien faire).
-    pub async fn drain(&self, reachable: &[Arc<dyn Replica>]) -> DrainReport {
-        let Ok(_guard) = self.drain_lock.try_lock() else { return DrainReport { busy: true, pending: self.len(), ..Default::default() } };
-        let mut report = DrainReport::default();
-        for entry in self.pending() {
-            let group = entry.group_id();
-            // Les membres d'abord ; les gardiens déjà servis sont sautés.
-            let targets: Vec<&Arc<dyn Replica>> = reachable
-                .iter()
-                .filter(|r| r.serves(&group) && !(r.kind() == ReplicaKind::Guardian && entry.delivered.contains(&r.id())))
-                .collect();
-            if targets.is_empty() {
+    /// Donne à la file le moyen de connaître le nombre d'autres membres d'un groupe (pour le quorum).
+    pub fn set_others(&self, f: OthersFn) {
+        *lock(&self.others) = Some(f);
+    }
+
+    /// `(autres membres, accusés `Stored` requis)` : `min(2, autres)`, au moins 1. Sans fonction donnée par
+    /// [`Self::set_others`], un seul autre membre est supposé.
+    fn counts(&self, group: &GroupId) -> (usize, usize) {
+        let f = lock(&self.others).clone();
+        let others = f.map_or(1, |f| f(group));
+        (others, others.clamp(1, 2))
+    }
+
+    /// Remet à l'essai les entrées abandonnées (`failed`) et les refus : un destinataire a pu confirmer la version
+    /// entre-temps (« Jouer »). À appeler au démarrage seulement, sinon une version refusée serait reproposée sans fin.
+    pub fn retry_failed(&self) {
+        let mut map = lock(&self.entries);
+        for e in map.values_mut() {
+            if e.failed.is_none() && e.refused.is_empty() {
                 continue;
             }
-            let results = join_all(targets.iter().map(|r| async {
-                let out = match tokio::time::timeout(PUSH_TIMEOUT, r.push(&entry)).await {
-                    Ok(res) => res,
-                    Err(_) => Err(PushError("délai dépassé".into())),
-                };
-                (r.id(), r.kind(), out)
-            }))
-            .await;
-            let mut member_ok = false;
-            let mut updated = entry.clone();
-            for (rid, kind, out) in results {
-                match out {
-                    Ok(()) => match kind {
-                        ReplicaKind::Member => member_ok = true,
-                        ReplicaKind::Guardian => {
-                            updated.delivered.insert(rid);
-                        }
-                    },
-                    Err(e) => {
-                        let text: String = e.0.chars().filter(|c| !c.is_control()).take(200).collect();
-                        updated.attempts = updated.attempts.saturating_add(1);
-                        updated.last_error = Some(text.clone());
-                        report.failures.push((entry.id(), rid, text));
-                    }
-                }
+            let before = e.clone();
+            e.failed = None;
+            e.refused.clear();
+            if self.persist(e).is_err() {
+                *e = before;
             }
-            if member_ok {
-                if self.remove(&entry.id()).is_ok() {
-                    report.delivered.push(entry.id());
-                }
-            } else if updated != entry {
-                // Mémorise gardiens servis et échecs ; si le disque refuse, l'entrée reste telle quelle en file.
-                if self.persist(&updated).is_ok() {
-                    if let Some(slot) = lock(&self.entries).get_mut(&entry.id()) {
-                        *slot = updated;
-                    }
-                }
+        }
+    }
+
+    /// Un passage : pousse chaque entrée vers les cibles joignables de `reachable`. Un seul passage à la fois
+    /// (un deuxième appel simultané rend `busy` sans rien faire). Les entrées avancent en parallèle (au plus
+    /// [`MAX_PARALLEL_ENTRIES`], la plus ancienne en premier) et, dans une entrée, chaque cible est indépendante.
+    pub async fn drain(&self, reachable: &[Arc<dyn Replica>]) -> DrainReport {
+        let Ok(_guard) = self.drain_lock.try_lock() else { return DrainReport { busy: true, pending: self.len(), ..Default::default() } };
+        let permits = Arc::new(Semaphore::new(MAX_PARALLEL_ENTRIES));
+        let todo: Vec<OutboxEntry> = self.pending().into_iter().filter(|e| e.failed.is_none()).collect();
+        let outcomes = join_all(todo.into_iter().map(|entry| {
+            let permits = permits.clone();
+            async move {
+                let _permit = permits.acquire_owned().await.ok();
+                let id = entry.id();
+                (id, self.drain_entry(entry, reachable).await)
             }
+        }))
+        .await;
+        let mut report = DrainReport::default();
+        for (id, out) in outcomes {
+            if out.delivered {
+                report.delivered.push(id);
+            }
+            report.failures.extend(out.failures);
         }
         report.pending = self.len();
         report
+    }
+
+    /// Pousse une entrée vers toutes ses cibles à la fois, et note chaque résultat dès qu'il arrive.
+    async fn drain_entry(&self, entry: OutboxEntry, reachable: &[Arc<dyn Replica>]) -> EntryOutcome {
+        let (id, group) = (entry.id(), entry.group_id());
+        let (others, quorum) = self.counts(&group);
+        let mut out = EntryOutcome::default();
+        if entry.stored.len() >= quorum {
+            // Le groupe a rétréci depuis les accusés : ils suffisent maintenant.
+            out.delivered = self.remove(&id).is_ok();
+            return out;
+        }
+        let targets = reachable.iter().filter(|r| {
+            r.serves(&group)
+                && match r.kind() {
+                    ReplicaKind::Guardian => !entry.delivered.contains(&r.id()),
+                    ReplicaKind::Member => !entry.stored.contains(&r.id()) && !entry.refused.contains_key(&r.id()),
+                }
+        });
+        let mut pushes = FuturesUnordered::new();
+        for r in targets {
+            let entry = &entry;
+            pushes.push(async move {
+                let res = match tokio::time::timeout(PUSH_TIMEOUT, r.push(entry)).await {
+                    Ok(res) => res,
+                    Err(_) => Err(PushError::new("délai dépassé")),
+                };
+                (r.id(), r.kind(), res)
+            });
+        }
+        while let Some((rid, kind, res)) = pushes.next().await {
+            let mut map = lock(&self.entries);
+            // Retirée entre-temps (regroupée, groupe oublié) : on ne recrée rien sur le disque.
+            let Some(cur) = map.get_mut(&id) else { break };
+            let before = cur.clone();
+            match res {
+                Ok(()) => {
+                    if kind == ReplicaKind::Member {
+                        cur.stored.insert(rid);
+                    } else {
+                        cur.delivered.insert(rid);
+                    }
+                }
+                Err(e) => {
+                    let text: String = e.message.chars().filter(|c| !c.is_control()).take(200).collect();
+                    cur.attempts = cur.attempts.saturating_add(1);
+                    if e.refused && kind == ReplicaKind::Member {
+                        cur.last_error = Some(format!("refusée : {text}"));
+                        cur.refused.insert(rid.clone(), text.clone());
+                        // Même avec tous les autres membres, le quorum n'est plus atteignable.
+                        let possible = cur.stored.len() + others.saturating_sub(cur.stored.len() + cur.refused.len());
+                        if possible < quorum {
+                            cur.failed = Some(text.clone());
+                        }
+                    } else {
+                        cur.last_error = Some(text.clone());
+                    }
+                    out.failures.push((id, rid, text));
+                }
+            }
+            if cur.stored.len() >= quorum {
+                drop(map);
+                out.delivered = self.remove(&id).is_ok();
+                // Les remises encore en cours sont abandonnées : le membre lent rattrape de son côté.
+                break;
+            }
+            if *cur != before && self.persist(cur).is_err() {
+                // Le disque refuse : l'entrée reste telle quelle en file.
+                *cur = before;
+            }
+            if cur.failed.is_some() {
+                break;
+            }
+        }
+        out
     }
 
     /// Lance la boucle d'envoi : un passage toutes les `interval`, ou tout de suite sur [`Self::wake`] /
@@ -385,6 +532,23 @@ fn check_version(v: &SignedVersion) -> Result<(), String> {
         return Err("signature invalide".into());
     }
     Ok(())
+}
+
+/// Points de reprise en file que `new` remplace : ses ancêtres, à travers les entrées du même groupe, tant que ce
+/// sont des `Checkpoint`.
+fn superseded_checkpoints(map: &BTreeMap<VersionId, OutboxEntry>, new: &OutboxEntry) -> Vec<VersionId> {
+    let mut out = Vec::new();
+    let mut cur = new.version.header.parent;
+    while let Some(p) = cur {
+        match map.get(&p) {
+            Some(e) if e.group_id() == new.group_id() && e.version.header.kind == VersionKind::Checkpoint && !out.contains(&p) => {
+                out.push(p);
+                cur = e.version.header.parent;
+            }
+            _ => break,
+        }
+    }
+    out
 }
 
 /// Poignée de la boucle d'envoi.
@@ -450,17 +614,23 @@ impl Replica for MemberReplica {
 
     fn push<'a>(&'a self, entry: &'a OutboxEntry) -> BoxFuture<'a, Result<(), PushError>> {
         Box::pin(async move {
-            let conn = HearthConn::connect(&self.endpoint, self.addr.clone()).await.map_err(|e| PushError(e.to_string()))?;
-            conn.offer_version(&entry.version).await.map_err(|e| PushError(e.to_string()))?;
+            let conn = HearthConn::connect(&self.endpoint, self.addr.clone()).await.map_err(|e| PushError::new(e.to_string()))?;
+            conn.offer_version(&entry.version).await.map_err(|e| PushError::new(e.to_string()))?;
             let group = entry.group_id();
             let id = entry.id();
             let deadline = tokio::time::Instant::now() + self.confirm_timeout;
             loop {
-                if conn.have_version(&group, &id).await.map_err(|e| PushError(e.to_string()))? {
-                    return Ok(());
+                match conn.have_version(&group, &id).await {
+                    Ok(true) => return Ok(()),
+                    Ok(false) => {}
+                    // Le membre ne prendra pas cette version (trop grosse d'un coup) : inutile de l'attendre.
+                    Err(NetError::Rejected(r)) if r.starts_with(REFUSED_PREFIX) => {
+                        return Err(PushError::refused(r[REFUSED_PREFIX.len()..].trim()));
+                    }
+                    Err(e) => return Err(PushError::new(e.to_string())),
                 }
                 if tokio::time::Instant::now() >= deadline {
-                    return Err(PushError("le membre n'a pas fini de récupérer la version".into()));
+                    return Err(PushError::new("le membre n'a pas fini de récupérer la version"));
                 }
                 tokio::time::sleep(POLL_INTERVAL).await;
             }
@@ -521,7 +691,7 @@ mod tests {
             Box::pin(async move {
                 self.calls.fetch_add(1, Ordering::SeqCst);
                 if self.fail {
-                    Err(PushError("hors ligne\nbizarre".into()))
+                    Err(PushError::new("hors ligne\nbizarre"))
                 } else {
                     Ok(())
                 }
@@ -685,5 +855,296 @@ mod tests {
         }
         assert!(ob.is_empty());
         task.stop().await;
+    }
+
+    // --- #99 : quorum, cibles indépendantes, refus, regroupement -------------------------------------------
+
+    /// Une version d'une chaîne réelle (le parent est l'identifiant du parent donné).
+    fn chain(group: GroupId, number: u64, parent: Option<&SignedVersion>, kind: VersionKind) -> SignedVersion {
+        let k = testutil::key(1);
+        let header = VersionHeader {
+            group_id: group,
+            number,
+            parent: parent.map(SignedVersion::id),
+            epoch: 0,
+            author: k.peer_key(),
+            pack_hash: "a".repeat(64),
+            created_at: 100 + number,
+            played_secs: 5,
+            kind,
+            collection: [number as u8; 32],
+            total_size: 9,
+        };
+        SignedVersion::sign(&k, header).unwrap()
+    }
+
+    #[derive(Clone, Copy)]
+    enum Behavior {
+        Ok,
+        Fail,
+        Refuse,
+        /// Ne rend jamais la main (membre en panne ou très lent).
+        Hang,
+    }
+
+    struct Scripted {
+        id: &'static str,
+        group: GroupId,
+        behavior: Mutex<Behavior>,
+        calls: AtomicUsize,
+    }
+
+    impl Scripted {
+        fn new(id: &'static str, group: GroupId, behavior: Behavior) -> Arc<Self> {
+            Arc::new(Self { id, group, behavior: Mutex::new(behavior), calls: AtomicUsize::new(0) })
+        }
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+        fn dynr(self: &Arc<Self>) -> Arc<dyn Replica> {
+            self.clone()
+        }
+    }
+
+    impl Replica for Scripted {
+        fn id(&self) -> String {
+            self.id.into()
+        }
+        fn kind(&self) -> ReplicaKind {
+            ReplicaKind::Member
+        }
+        fn serves(&self, g: &GroupId) -> bool {
+            *g == self.group
+        }
+        fn push<'a>(&'a self, _e: &'a OutboxEntry) -> BoxFuture<'a, Result<(), PushError>> {
+            Box::pin(async move {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                let b = *lock(&self.behavior);
+                match b {
+                    Behavior::Ok => Ok(()),
+                    Behavior::Fail => Err(PushError::new("hors ligne")),
+                    Behavior::Refuse => Err(PushError::refused("oversize")),
+                    Behavior::Hang => std::future::pending().await,
+                }
+            })
+        }
+    }
+
+    /// Un passage qui ne doit pas attendre le membre lent : sinon le test échoue au lieu de bloquer.
+    async fn quick(ob: &Outbox, reachable: &[Arc<dyn Replica>]) -> DrainReport {
+        tokio::time::timeout(Duration::from_secs(5), ob.drain(reachable)).await.expect("le passage attend un membre lent")
+    }
+
+    #[tokio::test]
+    async fn needs_two_acks_with_three_members_and_does_not_wait_for_the_slow_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let g = GroupId([1; 16]);
+        let ob = Outbox::open(tmp.path()).unwrap();
+        ob.set_others(Arc::new(|_| 2));
+        let v = version(g, 1, 1);
+        ob.enqueue(v.clone()).unwrap();
+        let (a, b, slow) = (Scripted::new("a", g, Behavior::Ok), Scripted::new("b", g, Behavior::Ok), Scripted::new("lent", g, Behavior::Hang));
+        let r = quick(&ob, &[slow.dynr(), a.dynr(), b.dynr()]).await;
+        assert_eq!(r.delivered, vec![v.id()]);
+        assert!(ob.is_empty());
+        assert!(!tmp.path().join(format!("{}.json", v.id())).exists());
+    }
+
+    #[tokio::test]
+    async fn one_ack_is_kept_on_disk_until_a_second_member_confirms() {
+        let tmp = tempfile::tempdir().unwrap();
+        let g = GroupId([1; 16]);
+        let ob = Outbox::open(tmp.path()).unwrap();
+        ob.set_others(Arc::new(|_| 2));
+        let v = version(g, 1, 1);
+        ob.enqueue(v.clone()).unwrap();
+        let (a, b) = (Scripted::new("a", g, Behavior::Ok), Scripted::new("b", g, Behavior::Fail));
+        let r = quick(&ob, &[a.dynr(), b.dynr()]).await;
+        assert_eq!((r.delivered.len(), r.pending), (0, 1), "un seul accusé ne suffit pas");
+        assert_eq!(ob.pending()[0].stored, BTreeSet::from(["a".to_string()]));
+        // Redémarrage : l'accusé est conservé, et `a` n'est pas redérangé.
+        drop(ob);
+        let ob = Outbox::open(tmp.path()).unwrap();
+        ob.set_others(Arc::new(|_| 2));
+        assert_eq!(ob.pending()[0].stored.len(), 1);
+        *lock(&b.behavior) = Behavior::Ok;
+        let r = quick(&ob, &[a.dynr(), b.dynr()]).await;
+        assert_eq!(r.delivered, vec![v.id()]);
+        assert_eq!(a.calls(), 1, "un membre déjà accusé n'est pas renvoyé");
+    }
+
+    #[tokio::test]
+    async fn a_group_of_two_needs_a_single_ack() {
+        let tmp = tempfile::tempdir().unwrap();
+        let g = GroupId([1; 16]);
+        let ob = Outbox::open(tmp.path()).unwrap();
+        ob.set_others(Arc::new(|_| 1));
+        ob.enqueue(version(g, 1, 1)).unwrap();
+        let a = Scripted::new("a", g, Behavior::Ok);
+        assert_eq!(quick(&ob, &[a.dynr()]).await.delivered.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_slow_target_does_not_hold_back_another_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (g1, g2) = (GroupId([1; 16]), GroupId([2; 16]));
+        let ob = Arc::new(Outbox::open(tmp.path()).unwrap());
+        let (v1, v2) = (version(g1, 1, 1), version(g2, 1, 2));
+        ob.enqueue(v1.clone()).unwrap();
+        ob.enqueue(v2.clone()).unwrap();
+        let reach = vec![Scripted::new("lent", g1, Behavior::Hang).dynr(), Scripted::new("vif", g2, Behavior::Ok).dynr()];
+        let ob2 = ob.clone();
+        let pass = tokio::spawn(async move { ob2.drain(&reach).await });
+        for _ in 0..100 {
+            if !ob.contains(&v2.id()) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(!ob.contains(&v2.id()), "l'entrée du groupe rapide part sans attendre le membre lent de l'autre");
+        assert!(ob.contains(&v1.id()));
+        pass.abort();
+    }
+
+    #[tokio::test]
+    async fn explicit_refusal_stops_retries_and_marks_the_entry_failed_but_pinned() {
+        let tmp = tempfile::tempdir().unwrap();
+        let g = GroupId([1; 16]);
+        let ob = Outbox::open(tmp.path()).unwrap();
+        ob.set_others(Arc::new(|_| 1));
+        let v = version(g, 1, 1);
+        ob.enqueue(v.clone()).unwrap();
+        let refuser = Scripted::new("bob", g, Behavior::Refuse);
+        let r = quick(&ob, &[refuser.dynr()]).await;
+        assert_eq!((r.delivered.len(), r.pending, r.failures.len()), (0, 1, 1));
+        let e = &ob.pending()[0];
+        assert_eq!(e.failed.as_deref(), Some("oversize"));
+        assert_eq!(e.refused.get("bob").map(String::as_str), Some("oversize"));
+        assert_eq!(e.attempts, 1, "le refus compte une tentative : le départ ne l'attend pas");
+        assert_eq!(ob.pinned_collections(), vec![(g, v.header.collection)], "la version reste épinglée");
+        // Plus aucune tentative, ni au passage suivant ni après redémarrage.
+        quick(&ob, &[refuser.dynr()]).await;
+        drop(ob);
+        let ob = Outbox::open(tmp.path()).unwrap();
+        quick(&ob, &[refuser.dynr()]).await;
+        assert_eq!(refuser.calls(), 1);
+        assert_eq!(ob.len(), 1);
+        // Au démarrage de l'application, les refus sont rejoués (le membre a pu confirmer entre-temps).
+        ob.retry_failed();
+        *lock(&refuser.behavior) = Behavior::Ok;
+        assert_eq!(quick(&ob, &[refuser.dynr()]).await.delivered, vec![v.id()]);
+    }
+
+    #[tokio::test]
+    async fn one_refusal_does_not_fail_the_entry_while_the_quorum_is_reachable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let g = GroupId([1; 16]);
+        let ob = Outbox::open(tmp.path()).unwrap();
+        ob.set_others(Arc::new(|_| 3)); // quorum 2 parmi 3 autres
+        let v = version(g, 1, 1);
+        ob.enqueue(v.clone()).unwrap();
+        let (a, b, c) = (Scripted::new("a", g, Behavior::Refuse), Scripted::new("b", g, Behavior::Ok), Scripted::new("c", g, Behavior::Fail));
+        quick(&ob, &[a.dynr(), b.dynr(), c.dynr()]).await;
+        assert!(ob.pending()[0].failed.is_none());
+        *lock(&c.behavior) = Behavior::Ok;
+        let r = quick(&ob, &[a.dynr(), b.dynr(), c.dynr()]).await;
+        assert_eq!(r.delivered, vec![v.id()]);
+        assert_eq!(a.calls(), 1, "le refus n'est pas retenté");
+    }
+
+    #[tokio::test]
+    async fn two_refusals_out_of_two_others_make_the_quorum_impossible() {
+        let tmp = tempfile::tempdir().unwrap();
+        let g = GroupId([1; 16]);
+        let ob = Outbox::open(tmp.path()).unwrap();
+        ob.set_others(Arc::new(|_| 2));
+        ob.enqueue(version(g, 1, 1)).unwrap();
+        let (a, b) = (Scripted::new("a", g, Behavior::Ok), Scripted::new("b", g, Behavior::Refuse));
+        quick(&ob, &[a.dynr(), b.dynr()]).await;
+        assert!(ob.pending()[0].failed.is_some(), "un accusé et un refus : le quorum de 2 n'arrivera pas");
+    }
+
+    #[tokio::test]
+    async fn a_new_checkpoint_replaces_the_queued_checkpoints_of_its_lineage() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (g, other) = (GroupId([1; 16]), GroupId([2; 16]));
+        let ob = Outbox::open(tmp.path()).unwrap();
+        let c1 = chain(g, 1, None, VersionKind::Checkpoint);
+        let c2 = chain(g, 2, Some(&c1), VersionKind::Checkpoint);
+        let c3 = chain(g, 3, Some(&c2), VersionKind::Checkpoint);
+        let alien = chain(other, 1, None, VersionKind::Checkpoint);
+        ob.enqueue(alien.clone()).unwrap();
+        ob.enqueue(c1.clone()).unwrap();
+        ob.enqueue(c2.clone()).unwrap();
+        assert!(!ob.contains(&c1.id()) && ob.contains(&c2.id()));
+        assert!(!tmp.path().join(format!("{}.json", c1.id())).exists(), "le fichier de l'ancien point de reprise est supprimé");
+        ob.enqueue(c3.clone()).unwrap();
+        assert_eq!(ob.len(), 2);
+        assert!(ob.contains(&c3.id()) && ob.contains(&alien.id()));
+        assert_eq!(ob.pinned_collections().len(), 2, "la collection retirée n'est plus épinglée");
+    }
+
+    #[tokio::test]
+    async fn sessions_and_restores_are_never_grouped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let g = GroupId([1; 16]);
+        let ob = Outbox::open(tmp.path()).unwrap();
+        let c1 = chain(g, 1, None, VersionKind::Checkpoint);
+        let s2 = chain(g, 2, Some(&c1), VersionKind::Session);
+        let c3 = chain(g, 3, Some(&s2), VersionKind::Checkpoint);
+        let r4 = chain(g, 4, Some(&c3), VersionKind::Restore { from: c1.id() });
+        let c5 = chain(g, 5, Some(&r4), VersionKind::Checkpoint);
+        for v in [&c1, &s2, &c3, &r4, &c5] {
+            ob.enqueue(v.clone()).unwrap();
+        }
+        // Chaque Checkpoint s'arrête au premier Session/Restore de sa lignée : seuls les ancêtres directs partent.
+        assert!(ob.contains(&c1.id()) && ob.contains(&s2.id()) && ob.contains(&r4.id()) && ob.contains(&c5.id()));
+        assert!(ob.contains(&c3.id()), "c3 est parent d'un Restore, pas d'un Checkpoint");
+        assert_eq!(ob.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn an_entry_removed_during_a_pass_is_not_recreated_on_disk() {
+        struct Remover(Arc<Outbox>);
+        impl Replica for Remover {
+            fn id(&self) -> String {
+                "a".into()
+            }
+            fn kind(&self) -> ReplicaKind {
+                ReplicaKind::Member
+            }
+            fn serves(&self, _: &GroupId) -> bool {
+                true
+            }
+            fn push<'a>(&'a self, e: &'a OutboxEntry) -> BoxFuture<'a, Result<(), PushError>> {
+                Box::pin(async move {
+                    self.0.remove(&e.id()).unwrap(); // regroupée ou groupe oublié pendant la remise
+                    Ok(())
+                })
+            }
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let g = GroupId([1; 16]);
+        let ob = Arc::new(Outbox::open(tmp.path()).unwrap());
+        ob.set_others(Arc::new(|_| 2)); // un accusé ne suffit pas : l'entrée serait réécrite
+        let v = version(g, 1, 1);
+        ob.enqueue(v.clone()).unwrap();
+        let r = quick(&ob, &[Arc::new(Remover(ob.clone())) as Arc<dyn Replica>]).await;
+        assert!(r.delivered.is_empty() && ob.is_empty());
+        assert!(!tmp.path().join(format!("{}.json", v.id())).exists());
+    }
+
+    #[tokio::test]
+    async fn entries_written_before_the_quorum_fields_still_load() {
+        let tmp = tempfile::tempdir().unwrap();
+        let g = GroupId([1; 16]);
+        let v = version(g, 1, 1);
+        let old = serde_json::json!({ "version": v, "queued_at": 5, "delivered": [], "attempts": 2, "last_error": "x" });
+        fs::write(tmp.path().join(format!("{}.json", v.id())), serde_json::to_vec(&old).unwrap()).unwrap();
+        let ob = Outbox::open(tmp.path()).unwrap();
+        assert!(ob.skipped().is_empty());
+        let e = &ob.pending()[0];
+        assert!(e.stored.is_empty() && e.refused.is_empty() && e.failed.is_none());
+        assert_eq!(e.attempts, 2);
     }
 }

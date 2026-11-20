@@ -170,7 +170,7 @@ export const commands = {
 	hearthAddMember: (id: string, publicKey: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_add_member", { id, public_key: publicKey }, options),
 	/**  Propose de retirer un membre du groupe. */
 	hearthRemoveMember: (id: string, publicKey: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_remove_member", { id, public_key: publicKey }, options),
-	/**  Quitte le groupe, après avoir attendu (jusqu'à 5 min) que ma dernière partie soit remise à un membre. Rejette `{ code: "last_member" | "unreachable" | "outbox_pending" | "orphan_pending" | "other", message? }` : rien n'est supprimé dans ces cas. `force: true` saute l'attente de la file d'envoi (la dernière partie est perdue pour le groupe) et la garde d'une fin de partie non publiée (elle est supprimée avec le monde). */
+	/**  Quitte le groupe, après avoir attendu (jusqu'à 5 min) que ma dernière partie soit remise à `min(2, autres membres)` membres (sortie immédiate si trop peu sont en ligne pour y arriver, ou si les amis l'ont refusée : `HearthSettings.outbox_failed`). Rejette `{ code: "last_member" | "unreachable" | "outbox_pending" | "orphan_pending" | "other", message? }` : rien n'est supprimé dans ces cas. `force: true` saute l'attente de la file d'envoi (la dernière partie est perdue pour le groupe) et la garde d'une fin de partie non publiée (elle est supprimée avec le monde). */
 	hearthLeave: (id: string, force: boolean | null, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_leave", { id, force }, options),
 	/**  Supprime le serveur de ce PC seulement, sans prévenir le groupe : arrête mon serveur, libère les blobs et efface le dossier (choix explicite de l'utilisateur quand personne n'est joignable, jamais un repli automatique). */
 	hearthForget: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_forget", { id }, options),
@@ -795,6 +795,11 @@ export type HearthSettings_Deserialize = {
 	disk_bytes: number,
 	/**  Versions en attente d'envoi chez les autres membres. */
 	outbox_pending: number,
+	/**
+	 *  Phrase prête à afficher quand ma dernière partie a été refusée pour de bon par les amis (trop grosse d'un coup,
+	 *  #99) ; elle reste chez moi et sera tirée quand un ami clique sur Jouer. `None` sinon.
+	 */
+	outbox_failed?: string | null,
 	/**  Nom de l'instance locale du modpack. */
 	instance_name?: string | null,
 };
@@ -807,6 +812,11 @@ export type HearthSettings_Serialize = {
 	disk_bytes: number,
 	/**  Versions en attente d'envoi chez les autres membres. */
 	outbox_pending: number,
+	/**
+	 *  Phrase prête à afficher quand ma dernière partie a été refusée pour de bon par les amis (trop grosse d'un coup,
+	 *  #99) ; elle reste chez moi et sera tirée quand un ami clique sur Jouer. `None` sinon.
+	 */
+	outbox_failed: string | null,
 	/**  Nom de l'instance locale du modpack. */
 	instance_name: string | null,
 };

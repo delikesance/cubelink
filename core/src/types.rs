@@ -378,6 +378,9 @@ pub struct HearthSettings {
     pub disk_bytes: u64,
     /// Versions en attente d'envoi chez les autres membres.
     pub outbox_pending: u32,
+    /// Phrase prête à afficher quand ma dernière partie a été refusée pour de bon par les amis (trop grosse d'un coup,
+    /// #99) ; elle reste chez moi et sera tirée quand un ami clique sur Jouer. `None` sinon.
+    pub outbox_failed: Option<String>,
     /// Nom de l'instance locale du modpack.
     pub instance_name: Option<String>,
 }

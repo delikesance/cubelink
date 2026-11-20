@@ -843,7 +843,7 @@ pub async fn hearth_remove_member(state: S<'_>, id: String, public_key: String) 
     state.hearth_remove_member(&id, &public_key).await
 }
 
-/// Quitte le groupe, après avoir attendu (jusqu'à 5 min) que ma dernière partie soit remise à un membre. Rejette `{ code: "last_member" | "unreachable" | "outbox_pending" | "orphan_pending" | "other", message? }` : rien n'est supprimé dans ces cas. `force: true` saute l'attente de la file d'envoi (la dernière partie est perdue pour le groupe) et la garde d'une fin de partie non publiée (elle est supprimée avec le monde).
+/// Quitte le groupe, après avoir attendu (jusqu'à 5 min) que ma dernière partie soit remise à `min(2, autres membres)` membres (sortie immédiate si trop peu sont en ligne pour y arriver, ou si les amis l'ont refusée : `HearthSettings.outbox_failed`). Rejette `{ code: "last_member" | "unreachable" | "outbox_pending" | "orphan_pending" | "other", message? }` : rien n'est supprimé dans ces cas. `force: true` saute l'attente de la file d'envoi (la dernière partie est perdue pour le groupe) et la garde d'une fin de partie non publiée (elle est supprimée avec le monde).
 #[tauri::command(rename_all = "snake_case")]
 #[specta::specta(rename_all = "snake_case")]
 pub async fn hearth_leave(state: S<'_>, id: String, force: Option<bool>) -> Result<(), LeaveError> {

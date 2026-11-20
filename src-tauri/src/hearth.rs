@@ -36,7 +36,7 @@ use p2p_lib::hearth::model::{GroupId, GroupOp, GroupState, OpHash, PackPin, Prop
 use p2p_lib::hearth::outbox::{MemberReplica, Outbox, Replica};
 use p2p_lib::hearth::proto::{HearthConn, HearthDelegate, NetError};
 use p2p_lib::hearth::store::{Group, GroupKey, GroupStore};
-use p2p_lib::hearth::sync::{human_size, FetchOptions, GroupMembers, PublishedWorld, SyncError, WorldStore};
+use p2p_lib::hearth::sync::{check_incoming, human_size, FetchOptions, GroupMembers, PublishedWorld, SyncError, WorldStore};
 use p2p_lib::hearth::version::{SignedVersion, VersionGraph, VersionHeader, VersionId, VersionKind, VersionPoint};
 use p2p_lib::identity::Identity;
 use p2p_lib::presence::PeerKey;
@@ -1460,6 +1460,13 @@ impl HearthRuntime {
             lock(&self.complete).insert(coll);
             return Ok(());
         }
+        // Garde-fou de croissance AVANT tout le reste (présence, rapatriement déjà en cours) : le refus ne dépend ni du
+        // réseau ni d'un autre téléchargement, et l'émetteur le lit tout de suite (`refused_version`, #99).
+        let previous_total = v.header.parent.and_then(|p| self.version(&gid, &p)).map(|p| p.header.total_size);
+        let growth = FetchOptions { previous_total, confirmed, ..FetchOptions::default() };
+        if let Err(SyncError::Oversize { expected, previous }) = check_incoming(v.header.total_size, &growth) {
+            return Err(self.oversize_refusal(v, expected, previous));
+        }
         let addrs = self.online_addrs(&gid, prefer);
         if addrs.is_empty() {
             return Err(NO_MEMBER_ONLINE.into());
@@ -1491,7 +1498,6 @@ impl HearthRuntime {
         });
         let net = self.net()?;
         // Garde-fous avant le premier octet : une grande `total_size` ne coûte à l'émetteur que sa signature.
-        let previous_total = v.header.parent.and_then(|p| self.version(&gid, &p)).map(|p| p.header.total_size);
         let opts = FetchOptions {
             on_progress: Some(on_progress),
             previous_total,
@@ -1508,19 +1514,22 @@ impl HearthRuntime {
                 self.refresh_group_bytes(gid).await;
                 Ok(())
             }
-            Err(SyncError::Oversize { expected, previous }) => {
-                lock(&self.oversize).insert(v.id());
-                Err(format!(
-                    "La partie de {} fait {} contre {} avant. Elle n'est pas téléchargée toute seule : relance Jouer si tu veux la récupérer quand même.",
-                    self.name_of(&v.header.author),
-                    human_size(expected),
-                    human_size(previous),
-                ))
-            }
+            Err(SyncError::Oversize { expected, previous }) => Err(self.oversize_refusal(v, expected, previous)),
             Err(e) => Err(e.to_string()),
         };
         self.emit_state();
         out
+    }
+
+    /// Retient qu'on refuse cette version (trop grosse d'un coup) et rend le message pour la personne.
+    fn oversize_refusal(&self, v: &SignedVersion, expected: u64, previous: u64) -> String {
+        lock(&self.oversize).insert(v.id());
+        format!(
+            "La partie de {} fait {} contre {} avant. Elle n'est pas téléchargée toute seule : relance Jouer si tu veux la récupérer quand même.",
+            self.name_of(&v.header.author),
+            human_size(expected),
+            human_size(previous),
+        )
     }
 
     /// Fait le point sur ce qu'on a déjà en entier (démarrage).
@@ -1553,6 +1562,13 @@ impl HearthRuntime {
         lock(&self.background).push(probe);
         let rt = self.clone();
         let reach: Arc<dyn Fn() -> Vec<Arc<dyn Replica>> + Send + Sync> = Arc::new(move || rt.reachable_replicas());
+        // Quorum de la file : `min(2, autres membres)` accusés par version (#99).
+        let weak = Arc::downgrade(self);
+        self.outbox.set_others(Arc::new(move |gid| {
+            weak.upgrade().and_then(|rt| rt.state(gid).map(|st| rt.others(&st).len())).unwrap_or(1)
+        }));
+        // Les versions abandonnées ou refusées sont rejouées une fois par démarrage : un ami a pu confirmer entre-temps.
+        self.outbox.retry_failed();
         *lock(&self.drain) = Some(self.outbox.spawn_drain_loop(reach, Duration::from_secs(30)));
     }
 
@@ -1880,6 +1896,12 @@ impl HearthDelegate for HearthRuntime {
         coll.is_some_and(|c| lock(&self.complete).contains(&c))
     }
 
+    /// Une version offerte que `fetch_version` a refusée pour sa taille (`oversize`) : l'émetteur le sait tout de suite
+    /// au lieu d'attendre en vain (#99). Elle redevient normale dès que la personne confirme (Jouer).
+    fn refused_version(&self, _group: &GroupId, version: &VersionId) -> Option<String> {
+        lock(&self.oversize).contains(version).then(|| "oversize".to_string())
+    }
+
     fn on_status(&self, from: PeerKey, group: &GroupId, op_seq: u64, heads: &[VersionId], complete_heads: Option<&[VersionId]>) {
         // Sa version : ce qu'il peut servir en entier (un nœud ancien qui ne le dit pas : ses têtes).
         let announced = complete_heads.unwrap_or(heads);
@@ -2168,14 +2190,28 @@ impl HearthRuntime {
     }
 
     /// Versions de ce groupe encore en file d'envoi (une remise réussie à un membre retire l'entrée).
-    fn group_pending(&self, gid: &GroupId) -> Vec<(VersionId, u32)> {
-        self.outbox.pending().iter().filter(|e| e.group_id() == *gid).map(|e| (e.id(), e.attempts)).collect()
+    fn group_pending(&self, gid: &GroupId) -> Vec<(VersionId, u32, bool)> {
+        self.outbox.pending().iter().filter(|e| e.group_id() == *gid).map(|e| (e.id(), e.attempts, e.failed.is_some())).collect()
     }
 
-    /// Attend que la file d'envoi du groupe soit vidée, donc que chaque version ait été remise à au moins un membre
-    /// (#56 : `forget_now` jette ce qui reste en file). Rend `true` quand elle est vide. Rend `false` tout de suite si aucun
-    /// membre ne répond, ou si une remise vient d'échouer ; sinon au bout de `timeout`. Ne supprime rien : la boucle
-    /// d'envoi continue en fond tant que le groupe existe.
+    /// Une version en file de ce groupe ne peut pas atteindre son quorum (`min(2, autres membres)` accusés), même avec
+    /// tous les membres actuellement en ligne qui ne l'ont ni confirmée ni refusée.
+    fn quorum_out_of_reach(&self, gid: &GroupId) -> bool {
+        let Some(st) = self.state(gid) else { return false };
+        let others = self.others(&st);
+        let need = others.len().clamp(1, 2);
+        let online: Vec<String> = others.iter().filter(|k| self.is_online(gid, k)).map(key_hex).collect();
+        self.outbox.pending().iter().filter(|e| e.group_id() == *gid).any(|e| {
+            let more = online.iter().filter(|k| !e.stored.contains(*k) && !e.refused.contains_key(*k)).count();
+            e.stored.len() + more < need
+        })
+    }
+
+    /// Attend que la file d'envoi du groupe soit vidée, donc que chaque version ait été remise à `min(2, autres membres)`
+    /// membres (#56 : `forget_now` jette ce qui reste en file). Rend `true` quand elle est vide. Rend `false` tout de suite
+    /// si aucun membre ne répond, si trop peu répondent pour atteindre ce nombre, si une version a été refusée pour de bon
+    /// ou si une remise vient d'échouer ; sinon au bout de `timeout`. Ne supprime rien : la boucle d'envoi continue en fond
+    /// tant que le groupe existe.
     pub async fn flush_group_outbox(self: &Arc<Self>, gid: &GroupId, timeout: Duration) -> bool {
         let mut base = self.group_pending(gid);
         if base.is_empty() {
@@ -2183,6 +2219,11 @@ impl HearthRuntime {
         }
         // Présence fraîche : le cache peut dater de la dernière ronde (une minute) et garder en ligne un ami parti.
         if self.probe_round(*gid).await.answers.is_empty() {
+            return false;
+        }
+        // Chaque version doit être remise à `min(2, autres membres)` membres (#99) : si trop peu sont en ligne pour y
+        // arriver, inutile d'attendre cinq minutes.
+        if self.quorum_out_of_reach(gid) {
             return false;
         }
         let deadline = Instant::now() + timeout;
@@ -2198,8 +2239,11 @@ impl HearthRuntime {
                 self.emit_state();
             }
             // Une tentative de plus sur une version encore en file : le dernier passage a échoué chez tous les membres.
-            base.retain(|(id, _)| now.iter().any(|(n, _)| n == id));
-            let failed = now.iter().any(|(id, a)| base.iter().find(|(b, _)| b == id).is_some_and(|(_, a0)| a > a0));
+            base.retain(|(id, ..)| now.iter().any(|(n, ..)| n == id));
+            // Une version refusée pour de bon (`failed`) n'arrivera pas en attendant : sortie tout de suite.
+            let failed = now
+                .iter()
+                .any(|(id, a, dead)| *dead || base.iter().find(|(b, ..)| b == id).is_some_and(|(_, a0, _)| a > a0));
             if failed || Instant::now() >= deadline {
                 return false;
             }
@@ -3640,9 +3684,22 @@ impl HearthRuntime {
             keep_background: meta.keep_background,
             disk_bytes: self.group_disk_bytes(gid),
             outbox_pending: self.outbox.pending().iter().filter(|e| e.group_id() == *gid).count() as u32,
+            outbox_failed: self.outbox_failed_text(gid),
             instance_name: self.instance_of(gid).and_then(|i| self.instances.get(&i).ok()).map(|i| i.name),
         };
         Ok(HearthDetail { card, members, versions, proposals, blocker, fork, orphans: self.orphans_view(gid), settings })
+    }
+
+    /// Phrase affichable sur la version de ce groupe que les amis ont refusée pour de bon (file d'envoi, état `failed`).
+    fn outbox_failed_text(&self, gid: &GroupId) -> Option<String> {
+        let e = self.outbox.pending().into_iter().rfind(|e| e.group_id() == *gid && e.failed.is_some())?;
+        let size = human_size(e.version.header.total_size);
+        Some(match e.failed.as_deref() {
+            Some("oversize") => format!(
+                "Ta dernière partie ({size}) n'a pas été envoyée : elle est beaucoup plus grosse que la précédente et tes amis ne la prennent pas toute seule. Elle sera récupérée chez toi quand un ami clique sur Jouer ; garde Cubelink ouvert d'ici là."
+            ),
+            _ => format!("Ta dernière partie ({size}) n'a pas pu être envoyée : tes amis l'ont refusée."),
+        })
     }
 
     /// Le membre qui bloque le groupe (bannière « Continuer sans X »), s'il y en a un.

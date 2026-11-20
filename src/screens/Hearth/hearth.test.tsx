@@ -380,7 +380,7 @@ describe("Page du serveur", () => {
 
   it("Quitter alors que ma dernière partie n'est pas partie (#56) : boîte « Quitter quand même », hearthLeave rappelé avec force, rien n'est jeté avant", async () => {
     const services = createFakeServices({ tickMs: 0 });
-    services.seedHearth({ id: "g10", name: "Les copains" }, { members: [{ ...me }, { ...noor }], settings: { keep_background: false, disk_bytes: 1, outbox_pending: 1, instance_name: "x" } });
+    services.seedHearth({ id: "g10", name: "Les copains" }, { members: [{ ...me }, { ...noor }], settings: { keep_background: false, disk_bytes: 1, outbox_pending: 1, outbox_failed: null, instance_name: "x" } });
     const s = shell(services, { id: "g10" });
     render(<ShellContext.Provider value={s.value}><Hearth /></ShellContext.Provider>);
     fireEvent.click(within(await clickQuitter()).getByRole("button", { name: "Quitter" }));
@@ -405,7 +405,7 @@ describe("Page du serveur", () => {
 
   it("Quitter quand même, puis personne n'est joignable : on retombe sur la confirmation de suppression avec la partie perdue", async () => {
     const services = createFakeServices({ tickMs: 0 });
-    services.seedHearth({ id: "g12", name: "Les copains" }, { members: [{ ...me }, { ...noor }], settings: { keep_background: false, disk_bytes: 1, outbox_pending: 2, instance_name: "x" } });
+    services.seedHearth({ id: "g12", name: "Les copains" }, { members: [{ ...me }, { ...noor }], settings: { keep_background: false, disk_bytes: 1, outbox_pending: 2, outbox_failed: null, instance_name: "x" } });
     services.hearthLeave = async (gid, force) => {
       services.hearthCalls.push({ kind: "Leave", args: force ? [gid, true] : [gid] });
       throw new HearthLeaveError(force ? "unreachable" : "outbox_pending");
@@ -535,6 +535,13 @@ describe("Page du serveur", () => {
     // un seul « Quitter » sur la page : celui de ma ligne dans Membres, pas de doublon dans Réglages
     expect(screen.queryByRole("button", { name: /^Quitter/ })).toBeNull();
     expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it("Réglages : une partie refusée par les amis (#99) est expliquée au lieu du simple compteur", async () => {
+    page({ id: "g20" }, { id: "g20", name: "Les copains" }, { settings: { keep_background: false, disk_bytes: 1, outbox_pending: 1, outbox_failed: "Ta dernière partie (2,5 Go) n'a pas été envoyée : elle est beaucoup plus grosse que la précédente.", instance_name: "x" } });
+    fireEvent.click(await screen.findByRole("tab", { name: "Réglages" }));
+    expect(await screen.findByText(/Ta dernière partie \(2,5 Go\) n'a pas été envoyée/)).toBeTruthy();
+    expect(screen.queryByText(/attend d'être envoyée/)).toBeNull();
   });
 
   it("deux versions : choisir celle à garder résout la fourche", async () => {

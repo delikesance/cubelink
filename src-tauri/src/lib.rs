@@ -23,6 +23,7 @@ pub mod invites;
 pub mod hearth;
 pub mod hotkey;
 pub mod p2p_backend;
+pub mod shutdown;
 pub mod stage;
 pub mod stage_log;
 pub mod state;
@@ -304,6 +305,8 @@ pub fn run() {
                 background::try_setup_tray(app.handle(), st.clone());
             }
             background::apply_autostart(app.handle());
+            // Fin de session de l'OS, SIGTERM : arrêt propre des serveurs de groupe et du jeu (docs/hearth.md § 7.3).
+            shutdown::install(app.handle(), &st);
             // Sans icone de notification, une fenetre masquee serait introuvable : elle reste alors visible.
             if background::started_in_background(std::env::args()) && background::tray_ok() {
                 if let Some(w) = app.get_webview_window("main") {
@@ -383,8 +386,24 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(select_handler(test_mode, specta_builder().invoke_handler(), test_builder().invoke_handler()))
-        .run(context(test_mode))
-        .expect("erreur au lancement de Cubelink");
+        .build(context(test_mode))
+        .expect("erreur au lancement de Cubelink")
+        .run(move |app, event| on_run_event(app, &event, test_mode));
+}
+
+/// Événements de l'application. `ExitRequested` sans code : la dernière fenêtre a été détruite par le système (fin de
+/// session sans passer par `CloseRequested`, qui est intercepté et masque la fenêtre). Les serveurs de groupe et le jeu
+/// sont alors arrêtés avant de sortir, comme pour un arrêt de la machine. Avec un code (`app.exit` de « Quitter », de la
+/// routine d'arrêt ou d'une mise à jour), on laisse sortir : c'est la fin de ces routines, pas une demande à traiter.
+/// Mode test : rien n'est intercepté (les E2E ferment l'application par WM_CLOSE).
+fn on_run_event(app: &tauri::AppHandle, event: &tauri::RunEvent, test_mode: bool) {
+    let tauri::RunEvent::ExitRequested { code: None, api, .. } = event else { return };
+    if test_mode {
+        return;
+    }
+    let Some(st) = app.try_state::<Arc<state::AppState>>() else { return };
+    api.prevent_exit();
+    shutdown::begin_shutdown(app, &st);
 }
 
 /// Contexte Tauri. En mode test, les arguments de `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` (port CDP du harnais E2E) sont

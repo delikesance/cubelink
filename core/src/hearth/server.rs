@@ -1347,6 +1347,13 @@ impl DedicatedServer {
         }
     }
 
+    /// Annonce `text` à tous les joueurs (`tellraw @a`). Le texte passe par du JSON : aucun caractère ne peut sortir de la
+    /// commande (guillemets, retours à la ligne).
+    pub async fn say(&self, text: &str) -> Result<()> {
+        let json = serde_json::json!({ "text": text, "color": "yellow" });
+        self.send(&format!("tellraw @a {json}")).await
+    }
+
     /// Arrêt propre : `stop`, puis, si le serveur n'est pas parti après `grace`, arrêt forcé.
     pub async fn stop(&self, grace: Duration) -> StopOutcome {
         if let Some(code) = self.exit_code() {

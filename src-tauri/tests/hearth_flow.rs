@@ -16,7 +16,9 @@ use std::time::Duration;
 
 use common::{befriend, wait_for, world, Node};
 use core_lib::types::HearthStateKind;
-use cubelink_app::hearth::{BoxFut, ClientLauncher, LeaveError, RenewTick, RunningServer, ServerRunner, ServerSpec, Timings, EULA_REQUIRED};
+use cubelink_app::hearth::{
+    BoxFut, ClientLauncher, LeaveError, RenewTick, RunningServer, ServerRunner, ServerSpec, StopMode, Timings, EULA_REQUIRED,
+};
 use cubelink_app::state::{lock, AppState};
 use p2p_lib::hearth::lease::{Lease, ManualClock};
 use p2p_lib::hearth::model::{GroupId, GroupOp};
@@ -82,6 +84,10 @@ impl RunningServer for FakeServer {
     fn recent_lines(&self, n: usize) -> Vec<String> {
         let l = self.log.lock().unwrap();
         l[l.len().saturating_sub(n)..].to_vec()
+    }
+    fn say(&self, _text: &str) -> BoxFut<'_, ()> {
+        self.calls.lock().unwrap().push("say");
+        Box::pin(async {})
     }
 }
 
@@ -1551,6 +1557,58 @@ async fn alice_heberge_avec_bob(log: &[&str]) -> (Vec<Peer>, GroupId, String, p2
     assert_eq!(a.state_of(&g), HearthStateKind::Hosting);
     wait_for("Bob voit la partie d'Alice", 20, || b.state_of(&g) == HearthStateKind::Hosted).await;
     (peers, g, id, v1)
+}
+
+/// La machine s'éteint (fin de session, SIGTERM) pendant qu'un joueur est là : annonce aux joueurs, `stop`, aucune publication
+/// (la tête et la file d'envoi ne bougent pas), le marqueur de session reste, le bail est relâché (Bob ne voit plus la partie,
+/// sans plantage annoncé). Deux arrêts simultanés (deux signaux) n'arrêtent qu'une fois. Au « Jouer » suivant, le monde non
+/// publié est mis de côté au lieu d'être écrasé (ticket n° 109, docs/hearth.md § 7.3).
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn arret_de_la_machine_ne_publie_rien_garde_le_monde_et_relache_le_bail() {
+    let (peers, g, id, v1) = alice_heberge_avec_bob(&[]).await;
+    let (a, b) = (&peers[0], &peers[1]);
+    on_line_of(a)(JOINED);
+    std::fs::write(a.rt().server_dir(&g).join("world/region-jouee.mca"), SENTINELLE).unwrap();
+    let (heads_before, outbox_before) = (a.rt().heads_of(&g).unwrap().len(), a.rt().pending_outbox());
+
+    tokio::join!(a.node.st.hearth_stop_all_with(StopMode::Shutdown), a.node.st.hearth_stop_all_with(StopMode::Shutdown));
+
+    assert_eq!(a.runner.calls.lock().unwrap().clone(), ["start", "say", "stop"], "annonce puis un seul arrêt, pas de save-all");
+    assert!(a.rt().active(&g).is_none());
+    assert_eq!(a.rt().head(&g).unwrap().id(), v1.id(), "la tête n'a pas bougé");
+    assert_eq!((a.rt().heads_of(&g).unwrap().len(), a.rt().pending_outbox()), (heads_before, outbox_before), "rien n'est publié");
+    assert!(a.rt().has_session_marker(&g), "le marqueur reste : le monde n'est pas publié");
+    assert!(a.rt().card(&g).unwrap().crash.is_none());
+    assert_ne!(a.state_of(&g), HearthStateKind::Hosting);
+
+    wait_for("bail relâché chez Bob", 20, || b.rt().lease_of_holder(&g, &a.key()).is_none()).await;
+    wait_for("Bob ne voit plus la partie", 20, || b.state_of(&g) != HearthStateKind::Hosted).await;
+    assert!(b.rt().card(&g).unwrap().crash.is_none(), "un arrêt de la machine n'est pas un plantage");
+    assert_eq!(b.rt().head(&g).unwrap().id(), v1.id());
+
+    // Le monde n'est pas perdu : le prochain « Jouer » le met de côté (l'hôte choisit ensuite de le publier ou de le jeter).
+    a.rt().probe_all().await;
+    a.node.st.hearth_play(&id).await.unwrap();
+    assert_eq!(orphan_files(a, &g).len(), 1);
+    assert!(orphan_files(a, &g)[0].iter().any(|(n, c)| n == "region-jouee.mca" && c == SENTINELLE));
+    for p in &peers {
+        p.stop().await;
+    }
+}
+
+/// Arrêt de la machine alors que personne n'est jamais entré : rien à garder (marqueur effacé), pas d'annonce.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn arret_de_la_machine_sans_joueur_ne_garde_rien() {
+    let (peers, g, _id, v1) = alice_heberge_avec_bob(&[]).await;
+    let (a, b) = (&peers[0], &peers[1]);
+    a.node.st.hearth_stop_all_with(StopMode::Shutdown).await;
+    assert_eq!(a.runner.calls.lock().unwrap().clone(), ["start", "stop"]);
+    assert!(!a.rt().has_session_marker(&g));
+    assert_eq!(a.rt().head(&g).unwrap().id(), v1.id());
+    wait_for("bail relâché chez Bob", 20, || b.rt().lease_of_holder(&g, &a.key()).is_none()).await;
+    for p in &peers {
+        p.stop().await;
+    }
 }
 
 /// Le serveur meurt seul avec un code d'erreur : rien n'est publié (la tête et la file d'envoi ne bougent pas), le monde est

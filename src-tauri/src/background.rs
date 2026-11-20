@@ -21,6 +21,7 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::{AppHandle, Manager};
 use tauri_plugin_notification::NotificationExt;
 
+use crate::hearth::StopMode;
 use crate::state::AppState;
 
 /// Argument passé par le démarrage automatique : Cubelink démarre sans montrer sa fenêtre.
@@ -112,14 +113,60 @@ pub fn on_close_requested(app: &AppHandle, st: &Arc<AppState>) {
         CLOSING.store(false, Ordering::SeqCst);
         if EXIT_PENDING.load(Ordering::SeqCst) {
             // Un serveur de groupe encore actif est arrêté proprement (monde publié, bail relâché).
-            st.hearth_stop_all().await;
+            st.hearth_stop_all_with(stop_mode()).await;
             app.exit(0);
         }
     });
 }
 
+/// Pourquoi Cubelink se ferme.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExitCause {
+    /// Menu « Quitter » ou fermeture voulue : tout s'arrête sans hâte, le monde du groupe est publié.
+    Quit,
+    /// La machine ou la session s'arrête (fin de session, SIGTERM) : délais courts, rien n'est publié (§ 7.3).
+    Shutdown,
+}
+
+impl ExitCause {
+    /// Délai laissé au jeu intégré pour se fermer proprement.
+    fn game_grace(self) -> Duration {
+        match self {
+            ExitCause::Quit => Duration::from_secs(60),
+            ExitCause::Shutdown => Duration::from_secs(15),
+        }
+    }
+}
+
+/// Un arrêt de la machine a été demandé : même si la fermeture est déjà en cours pour une autre raison, la suite
+/// (arrêt des serveurs de groupe) se fait en mode court.
+static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+fn stop_mode() -> StopMode {
+    if SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
+        StopMode::Shutdown
+    } else {
+        StopMode::Normal
+    }
+}
+
+/// Une fermeture est-elle en cours (menu, signal ou fin de session) ?
+pub fn closing() -> bool {
+    CLOSING.load(Ordering::SeqCst)
+}
+
 /// Quitter vraiment (menu de l'icône) : arrête un jeu intégré comme avant, puis sort.
 pub fn quit_app(app: &AppHandle, st: &Arc<AppState>) {
+    graceful_exit(app, st, ExitCause::Quit);
+}
+
+/// Routine de sortie commune : menu « Quitter », mise à jour (`commands_update`), SIGTERM, fin de session. Arrête le jeu
+/// intégré, puis les serveurs de groupe, puis sort. Idempotente : un second appel (deuxième signal, menu après un signal)
+/// ne relance rien ; un arrêt de la machine demandé pendant une fermeture normale la fait passer en mode court.
+pub fn graceful_exit(app: &AppHandle, st: &Arc<AppState>, cause: ExitCause) {
+    if cause == ExitCause::Shutdown {
+        SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
+    }
     if CLOSING.swap(true, Ordering::SeqCst) {
         // Un masquage arrête déjà le jeu : sortir à sa fin.
         EXIT_PENDING.store(true, Ordering::SeqCst);
@@ -128,12 +175,13 @@ pub fn quit_app(app: &AppHandle, st: &Arc<AppState>) {
     let (st, app) = (st.clone(), app.clone());
     tauri::async_runtime::spawn(async move {
         if st.quit_requested() {
-            st.quit_game(Duration::from_secs(60)).await;
+            st.quit_game(cause.game_grace()).await;
         } else {
             st.stage.flush_log();
         }
-        // Un serveur de groupe encore actif est arrêté proprement (monde publié, bail relâché).
-        st.hearth_stop_all().await;
+        // Un serveur de groupe encore actif est arrêté proprement (monde publié, bail relâché ; arrêt de la machine : voir
+        // `StopMode::Shutdown`).
+        st.hearth_stop_all_with(stop_mode()).await;
         app.exit(0);
     });
 }

@@ -22,11 +22,15 @@ use serde::Serialize;
 use tauri::State;
 
 use crate::error::{sanitize, user_msg};
-use crate::hearth::{key_hex, parse_key, Begin, HearthRuntime, HostParams, LeaveError, Play, CONFIRM_HOST, EULA_REQUIRED, HOST_STEPS, JOIN_STEPS, LEAVE_FLUSH_WAIT};
+use crate::hearth::{
+    key_hex, parse_key, Begin, HearthRuntime, HostParams, LeaveError, Play, StopMode, CONFIRM_HOST, EULA_REQUIRED, HOST_STEPS, JOIN_STEPS, LEAVE_FLUSH_WAIT,
+};
 use crate::state::AppState;
 
 /// Longueur maximale du nom d'un groupe (caractères).
 const MAX_NAME: usize = 64;
+/// Budget global de l'arrêt des serveurs de groupe quand la machine s'éteint (tous les groupes ensemble).
+pub const SHUTDOWN_BUDGET: Duration = Duration::from_secs(25);
 
 /// Réponse de `hearth_eula`.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq, specta::Type)]
@@ -669,10 +673,31 @@ impl AppState {
     /// Arrête tous les serveurs de groupe de ce PC (fermeture de Cubelink) : publication, bail relâché, partage fermé. Le
     /// second appelant attend la fin du premier.
     pub async fn hearth_stop_all(self: &Arc<Self>) {
+        self.hearth_stop_all_with(StopMode::Normal).await;
+    }
+
+    /// [`Self::hearth_stop_all`] avec le mode d'arrêt. En [`StopMode::Shutdown`] (la machine s'éteint), tous les groupes sont
+    /// arrêtés ensemble sous un budget global court ([`SHUTDOWN_BUDGET`]) au lieu de 150 s chacun.
+    pub async fn hearth_stop_all_with(self: &Arc<Self>, mode: StopMode) {
         let _one_at_a_time = self.hearth.stop_all_guard().await;
-        for g in self.hearth.active_groups() {
-            if tokio::time::timeout(Duration::from_secs(150), self.hearth_stop_inner(g)).await.is_err() {
-                eprintln!("[cubelink] l'arrêt du serveur du groupe {g} a pris trop de temps à la fermeture");
+        match mode {
+            StopMode::Normal => {
+                for g in self.hearth.active_groups() {
+                    if tokio::time::timeout(Duration::from_secs(150), self.hearth_stop_inner(g)).await.is_err() {
+                        eprintln!("[cubelink] l'arrêt du serveur du groupe {g} a pris trop de temps à la fermeture");
+                    }
+                }
+            }
+            StopMode::Shutdown => {
+                let mut stops = tokio::task::JoinSet::new();
+                for g in self.hearth.active_groups() {
+                    let st = self.clone();
+                    stops.spawn(async move { st.hearth_stop_inner_with(g, StopMode::Shutdown).await });
+                }
+                let all = async { while stops.join_next().await.is_some() {} };
+                if tokio::time::timeout(SHUTDOWN_BUDGET, all).await.is_err() {
+                    eprintln!("[cubelink] l'arrêt des serveurs de groupe a dépassé {} s : la machine s'éteint", SHUTDOWN_BUDGET.as_secs());
+                }
             }
         }
     }
@@ -680,9 +705,13 @@ impl AppState {
     /// Arrête le serveur du groupe `g` et ferme tout ce qui s'y rattache (partage, accès, état de lancement). Appelé aussi
     /// quand le serveur s'arrête tout seul.
     pub(crate) async fn hearth_stop_inner(self: &Arc<Self>, g: GroupId) {
+        self.hearth_stop_inner_with(g, StopMode::Normal).await;
+    }
+
+    pub(crate) async fn hearth_stop_inner_with(self: &Arc<Self>, g: GroupId, mode: StopMode) {
         // Groupe oublié pendant la partie : le serveur est déjà arrêté, il ne reste que le partage et l'état à fermer.
         if self.hearth.active(&g).is_some() {
-            match self.hearth.finish_hosting(g).await {
+            match self.hearth.finish_hosting_with(g, mode).await {
                 Ok(_) => {}
                 Err(e) => eprintln!("[cubelink] arrêt du serveur du groupe {g} : {e}"),
             }

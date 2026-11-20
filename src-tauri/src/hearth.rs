@@ -134,6 +134,39 @@ const LEAVE_FLUSH_POLL: Duration = Duration::from_millis(250);
 const FORGET_STOP_GRACE: Duration = Duration::from_secs(20);
 /// Délai laissé au serveur pour s'arrêter proprement (sauvegarde du monde).
 const SERVER_STOP_GRACE: Duration = Duration::from_secs(90);
+/// Même délai quand la machine s'éteint : Windows laisse quelques secondes avant « Arrêter quand même », systemd 90 s pour
+/// tout Cubelink. Passé ce délai, le serveur est tué (le monde peut perdre les dernières minutes : le marqueur de session
+/// reste, le prochain « Jouer » met ce monde de côté).
+const SERVER_STOP_GRACE_SHUTDOWN: Duration = Duration::from_secs(20);
+/// Attente maximale de l'annonce de fin de partie aux autres membres quand la machine s'éteint (le réseau tombe vite).
+const RELEASE_BROADCAST_SHUTDOWN: Duration = Duration::from_secs(8);
+/// Annonce faite aux joueurs du serveur quand l'hôte éteint son PC (§ 7.3).
+pub const SHUTDOWN_ANNOUNCEMENT: &str = "L'hôte éteint son PC : la partie s'arrête, la progression est gardée.";
+
+/// Comment un serveur de groupe prend fin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopMode {
+    /// Fermeture de Cubelink ou fin de partie : le monde est publié (version `Session`), délais généreux.
+    Normal,
+    /// Arrêt de la machine ou du processus (fin de session, SIGTERM) : il n'y a pas le temps de hacher ni d'envoyer des
+    /// Go. Annonce aux joueurs, `stop` borné, bail relâché avec `Shutdown`, **rien n'est publié** et le marqueur de
+    /// session reste : le monde est mis de côté au prochain « Jouer » (§ 7.3, § 7.5).
+    Shutdown,
+}
+
+/// Raison annoncée aux autres membres. Pur. Un plantage et une perte de bail (`fenced`) gardent leur raison, car ils
+/// décrivent ce qui est arrivé au monde ; l'arrêt de la machine ne passe qu'avant la fin normale.
+fn release_reason(fenced: bool, crash: Option<&CrashInfo>, mode: StopMode) -> ReleaseReason {
+    if fenced {
+        ReleaseReason::Suspend
+    } else if let Some(c) = crash {
+        ReleaseReason::Crashed { mod_hint: c.mod_hint.clone() }
+    } else if mode == StopMode::Shutdown {
+        ReleaseReason::Shutdown
+    } else {
+        ReleaseReason::Stopped
+    }
+}
 /// Attente maximale du démarrage du serveur d'un autre membre (bail `Starting`).
 const START_WAIT_MAX: Duration = Duration::from_secs(15 * 60);
 /// Pas d'observation de ce démarrage.
@@ -216,6 +249,10 @@ pub trait RunningServer: Send + Sync {
     fn wait_exit(&self) -> BoxFut<'_, i32>;
     /// Les `n` dernières lignes de la sortie du serveur (pour chercher le mod en cause après un plantage).
     fn recent_lines(&self, n: usize) -> Vec<String>;
+    /// Annonce `text` aux joueurs connectés (`tellraw`). Sans effet par défaut : une annonce manquée ne bloque rien.
+    fn say(&self, _text: &str) -> BoxFut<'_, ()> {
+        Box::pin(async {})
+    }
 }
 
 pub trait ServerRunner: Send + Sync {
@@ -267,6 +304,12 @@ impl RunningServer for RealServer {
     }
     fn recent_lines(&self, n: usize) -> Vec<String> {
         self.0.recent_lines(n)
+    }
+    fn say(&self, text: &str) -> BoxFut<'_, ()> {
+        let (s, text) = (self.0.clone(), text.to_string());
+        run_local(move || async move {
+            let _ = s.say(&text).await;
+        })
     }
 }
 
@@ -3388,16 +3431,31 @@ impl HearthRuntime {
     /// qui fait planter le serveur (§ 7.5). Le monde est mis de côté comme une fin de partie non publiée (l'hôte le publie
     /// ou le jette), la tête reste le dernier point de reprise et le bail est relâché avec `Crashed`.
     pub async fn finish_hosting(self: &Arc<Self>, gid: GroupId) -> Result<Option<SignedVersion>, String> {
+        self.finish_hosting_with(gid, StopMode::Normal).await
+    }
+
+    /// [`Self::finish_hosting`] avec le mode d'arrêt. En [`StopMode::Shutdown`] : annonce aux joueurs, `stop` borné, aucune
+    /// publication (le marqueur de session reste, sauf si personne n'est jamais entré), `LeaseRelease { Shutdown }` portant
+    /// le dernier point de reprise, envoi borné, pas de ramasse-miettes. Un plantage garde la priorité (monde mis de côté,
+    /// raison `Crashed`).
+    pub async fn finish_hosting_with(self: &Arc<Self>, gid: GroupId, mode: StopMode) -> Result<Option<SignedVersion>, String> {
         let host = lock(&self.active).remove(&gid).ok_or("aucun serveur n'est lancé pour ce groupe")?;
         host.stopping.store(true, Ordering::SeqCst);
         for t in std::mem::take(&mut *lock(&host.tasks)) {
             t.abort();
         }
-        host.server.stop(SERVER_STOP_GRACE).await;
+        let shutdown = mode == StopMode::Shutdown;
+        if shutdown && host.players() > 0 {
+            host.server.say(SHUTDOWN_ANNOUNCEMENT).await;
+        }
+        host.server.stop(if shutdown { SERVER_STOP_GRACE_SHUTDOWN } else { SERVER_STOP_GRACE }).await;
         let dir = host.server.world_dir();
         let tip = *lock(&host.tip);
         let crash = lock(&host.crashed).take();
         let published = if crash.is_some() {
+            Ok(None)
+        } else if shutdown {
+            // Pas de publication : le monde reste sur le disque, le marqueur de session aussi (voir plus bas).
             Ok(None)
         } else if dir.is_dir() {
             self.publish_version(gid, &dir, VersionKind::Session, tip, host.started.elapsed().as_secs()).await.map(Some)
@@ -3416,31 +3474,38 @@ impl HearthRuntime {
                 self.set_materialized(&gid, Some(v.id()));
                 self.clear_session_marker(&gid);
             }
+            // Arrêt de la machine : le monde n'est pas publié, le marqueur reste pour que le prochain « Jouer » le mette de
+            // côté. Personne n'est jamais entré : rien à garder.
+            (Ok(None), None) if shutdown && host.ever_joined.load(Ordering::SeqCst) => {}
             // Pas de dossier de monde : rien à publier. Une publication en échec laisse le marqueur : le prochain « Jouer »
             // mettra le monde de côté au lieu de l'écraser.
             (Ok(None), None) => self.clear_session_marker(&gid),
             (Err(_), None) => {}
         }
-        // Après un plantage, la tête annoncée est le dernier point de reprise publié (la base de la partie sinon).
+        // Après un plantage ou un arrêt de la machine, la tête annoncée est le dernier point de reprise publié (la base de
+        // la partie sinon).
         let vid = match &crash {
             Some(_) => tip.map(|t| t.0),
+            None if shutdown => tip.map(|t| t.0),
             None => published.as_ref().ok().and_then(|v| v.as_ref().map(SignedVersion::id)),
         };
         let l = lock(&host.lease).clone();
-        let reason = if host.fenced.load(Ordering::SeqCst) {
-            ReleaseReason::Suspend
-        } else if let Some(c) = &crash {
-            ReleaseReason::Crashed { mod_hint: c.mod_hint.clone() }
-        } else {
-            ReleaseReason::Stopped
-        };
+        let reason = release_reason(host.fenced.load(Ordering::SeqCst), crash.as_ref(), mode);
         let visit: Visit = Arc::new(move |c| {
             let reason = reason.clone();
             Box::pin(async move { c.release_lease(&gid, l.lease_id, l.seq, reason, vid).await })
         });
-        self.broadcast(gid, true, visit).await;
+        if shutdown {
+            if tokio::time::timeout(RELEASE_BROADCAST_SHUTDOWN, self.broadcast(gid, true, visit)).await.is_err() {
+                eprintln!("[cubelink] groupe {gid} : la fin de partie n'a pas atteint tous les membres avant l'arrêt de la machine");
+            }
+        } else {
+            self.broadcast(gid, true, visit).await;
+        }
         self.access.close_group(&gid);
-        self.gc_versions(gid).await;
+        if !shutdown {
+            self.gc_versions(gid).await;
+        }
         self.emit_state();
         published
     }
@@ -3851,6 +3916,18 @@ fn dir_size(root: &Path) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn raison_de_fin_de_partie_plantage_et_suspend_gardent_la_priorite() {
+        let crash = CrashInfo { code: 1, mod_hint: Some("Sodium".into()) };
+        for mode in [StopMode::Normal, StopMode::Shutdown] {
+            assert_eq!(release_reason(true, None, mode), ReleaseReason::Suspend);
+            assert_eq!(release_reason(true, Some(&crash), mode), ReleaseReason::Suspend);
+            assert_eq!(release_reason(false, Some(&crash), mode), ReleaseReason::Crashed { mod_hint: Some("Sodium".into()) });
+        }
+        assert_eq!(release_reason(false, None, StopMode::Normal), ReleaseReason::Stopped);
+        assert_eq!(release_reason(false, None, StopMode::Shutdown), ReleaseReason::Shutdown);
+    }
 
     #[test]
     fn world_stats_compte_les_fichiers_et_ignore_un_dossier_vide() {

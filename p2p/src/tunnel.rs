@@ -819,7 +819,7 @@ mod tests {
         assert!(t.elapsed() < Duration::from_secs(12), "{:?}", t.elapsed());
         // Plus rien n'est servi sur le port local.
         if let Ok(mut s) = TcpStream::connect(("127.0.0.1", port)).await {
-            let _ = s.write_all(b"MCHS    ").await;
+            let _ = s.write_all(b"MCHS\0\0\0\0").await;
             let mut b = [0u8; 3];
             let r = timeout(Duration::from_secs(2), s.read(&mut b)).await;
             assert!(!matches!(r, Ok(Ok(n)) if n > 0));

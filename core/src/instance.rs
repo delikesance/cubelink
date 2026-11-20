@@ -636,7 +636,7 @@ mod tests {
 b"), None).is_err());
         assert!(s.update(&i.id, None, None, None, None, Some("prime-run\u{7}")).is_err());
         assert!(s.update(&i.id, None, None, None, Some(&"x".repeat(3000)), None).is_err());
-        assert!(s.update(&i.id, None, None, Some("a b"), None, None).is_err());
+        assert!(s.update(&i.id, None, None, Some("a\0b"), None, None).is_err());
         assert_eq!(s.get(&i.id).unwrap(), i);
         assert!(matches!(s.update("nope", Some("x"), None, None, None, None), Err(Error::NotFound(_))));
     }

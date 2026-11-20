@@ -4,7 +4,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 use core_lib::guest;
-use core_lib::types::{Error, Manifest, TransferPhase, TransferProgress};
+use core_lib::types::{Error, Manifest, Profile, TransferPhase, TransferProgress};
 use p2p_lib::transfer::plan::{compute_plan, to_join_summary, DiskCache, Plan};
 use serde::Serialize;
 use tauri::State;
@@ -33,6 +33,31 @@ pub struct JoinPlan {
     /// pas redemandés.
     #[serde(default)]
     pub unknown_trusted: Vec<String>,
+    /// Avertissements affichés avant « Rejoindre et jouer » (jamais bloquants : la mesure peut être fausse).
+    #[serde(default)]
+    pub warnings: Vec<JoinWarning>,
+}
+
+/// Ce qui risque de faire échouer la partie après un long transfert.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, specta::Type)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum JoinWarning {
+    /// Pas assez d'espace libre : `need` octets conseillés (reçu + marge), `free` octets libres.
+    Disk { need: u64, free: u64 },
+    /// Le compte actif est hors ligne : un hôte qui vérifie les comptes (online-mode) peut refuser la connexion.
+    OfflineAccount,
+}
+
+/// Avertissements du plan : disque d'abord, puis compte hors ligne. Pure (mesures et profil passés en paramètres).
+fn join_warnings(to_receive_bytes: u64, free: Option<u64>, profile: Option<&Profile>) -> Vec<JoinWarning> {
+    let mut out = Vec::new();
+    if let Some((need, free)) = core_lib::disk::disk_shortfall(to_receive_bytes, free) {
+        out.push(JoinWarning::Disk { need, free });
+    }
+    if matches!(profile, Some(Profile::Offline { .. })) {
+        out.push(JoinWarning::OfflineAccount);
+    }
+    out
 }
 
 /// Ce que le dernier `join_plan` a montré pour un ami : `join_start` ne part que sur ce manifeste-là, et seulement avec
@@ -165,6 +190,13 @@ impl AppState {
         let manifest_hash = core_lib::manifest::manifest_hash(&hm.manifest);
         lock(&self.pending_trust)
             .insert(friend_public_key.to_string(), PendingConsent { manifest_hash: manifest_hash.clone(), needs_consent });
+        // Espace libre du disque qui porte le magasin (les instances sont en général sur le même volume ; approximation
+        // assumée). Mesure impossible : pas d'avertissement.
+        let profile = self.active_profile_offline_read();
+        // `df` (hors Windows) est un processus : mesure sur un thread dédié pour ne pas bloquer le runtime async.
+        let store = self.paths.store.clone();
+        let free = tokio::task::spawn_blocking(move || core_lib::disk::free_space_near(&store)).await.ok().flatten();
+        let warnings = join_warnings(to_receive_bytes, free, profile.as_ref());
         Ok(JoinPlan {
             manifest: hm.manifest,
             manifest_hash,
@@ -175,6 +207,7 @@ impl AppState {
             unknown_unchecked,
             unknown_scripts,
             unknown_trusted,
+            warnings,
         })
     }
 
@@ -586,6 +619,49 @@ mod tests {
         let again = st.join_plan(&key).await.unwrap();
         assert!(again.unknown_unchecked.is_empty() && again.unknown_scripts.is_empty());
         assert_eq!(again.unknown_trusted.len(), 2);
+    }
+
+    /// Avertissements : disque (marge de 1 Gio) puis compte hors ligne, dans cet ordre ; jamais bloquants.
+    #[test]
+    fn avertissements_du_plan() {
+        use super::{join_warnings, JoinWarning};
+        use core_lib::types::Profile;
+        const GIB: u64 = 1 << 30;
+        let off = Profile::Offline { name: "Notch".into(), uuid: "u".into() };
+        let on = Profile::Online { name: "Notch".into(), uuid: "u".into() };
+        assert_eq!(
+            join_warnings(3 * GIB, Some(GIB), Some(&off)),
+            [JoinWarning::Disk { need: 4 * GIB, free: GIB }, JoinWarning::OfflineAccount]
+        );
+        assert!(join_warnings(3 * GIB, Some(10 * GIB), Some(&on)).is_empty());
+        assert!(join_warnings(3 * GIB, None, None).is_empty(), "mesure inconnue et aucun compte : aucun avertissement");
+        assert_eq!(join_warnings(0, Some(0), Some(&off)), [JoinWarning::OfflineAccount]);
+        // Format sur le fil : `kind` en snake_case.
+        assert_eq!(
+            serde_json::to_value(JoinWarning::Disk { need: 2, free: 1 }).unwrap(),
+            serde_json::json!({"kind": "disk", "need": 2, "free": 1})
+        );
+        assert_eq!(serde_json::to_value(JoinWarning::OfflineAccount).unwrap(), serde_json::json!({"kind": "offline_account"}));
+    }
+
+    /// `join_plan` avertit d'un compte hors ligne actif (lu depuis le fichier des comptes), pas d'un compte absent.
+    #[tokio::test]
+    async fn join_plan_avertit_du_compte_hors_ligne() {
+        let dir = tempfile::tempdir().unwrap();
+        let (st, _) = test_state(dir.path());
+        let key = "e".repeat(64);
+        st.friends
+            .add_friend(&Friend { public_key: key.clone(), name: "Bob".into(), trust: TrustLevel::Ask, added_at: 1 })
+            .unwrap();
+        st.set_backend(Arc::new(ConsentBackend(std::sync::Mutex::new(consent_manifest()))));
+        let plan = st.join_plan(&key).await.unwrap();
+        assert!(!plan.warnings.contains(&super::JoinWarning::OfflineAccount));
+        st.auth_offline_login("Notch").unwrap();
+        let plan = st.join_plan(&key).await.unwrap();
+        assert!(plan.warnings.contains(&super::JoinWarning::OfflineAccount), "{:?}", plan.warnings);
+        // Au redémarrage la mémoire est vide : le fichier des comptes fait foi.
+        *crate::state::lock(&st.profile) = None;
+        assert!(st.join_plan(&key).await.unwrap().warnings.contains(&super::JoinWarning::OfflineAccount));
     }
 
     struct TunnelBackend;

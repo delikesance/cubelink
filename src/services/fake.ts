@@ -3,7 +3,7 @@ import { HEARTH_EULA_REQUIRED, HEARTH_HEAD_UNAVAILABLE, HearthLeaveError } from 
 import type {
   AccountInfo, AccountsState, BrowseHit, BrowseInstallResult, BrowseKind, BrowseProgressEvent, BrowseSource, BrowseVersion, FixPlan, FixProgressEvent, FixResult, ModCheck, ModEntry, ModIssue,
   CreateInstanceInput, DeviceCode, HostState, Invite, JoinAnswer, JoinRequest, ImportWarningEvent, ImportProgressEvent, ImportDeferredEvent, LaunchLogEvent, FriendRequest, FriendWithPresence, Instance, InstanceArt,
-  JoinPlan, LaunchState, Manifest, PresenceEvent, UnknownModsEvent, Profile, Services, Settings,
+  JoinPlan, JoinWarning, LaunchState, Manifest, PresenceEvent, UnknownModsEvent, Profile, Services, Settings,
   StageFallback, StageState, TransferProgress, TunnelStateEvent, Unsubscribe, UpdateState,
   HearthCard, HearthDetail, HearthHandover, HearthHostPrompt, HearthInvite, HearthMember, HearthMemberLite,
 } from "./types";
@@ -21,6 +21,8 @@ export interface FakeOptions {
   accounts?: AccountInfo[];
   /** Réponse de `stageSupported` (zone de jeu intégrée). Faux par défaut : comme dans un navigateur. */
   stageSupported?: boolean;
+  /** Espace libre simulé (octets) pour l'avertissement disque de `joinPlan` ; absent = mesure impossible, pas d'avertissement. */
+  freeDiskBytes?: number;
 }
 
 /** Commandes de test exposées par le faux service. */
@@ -911,10 +913,17 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     },
     friendRefuseAll: async () => { const n = requests.length; requests = []; return n; },
 
-    joinPlan: async (): Promise<JoinPlan> => ({
-      manifest: makeManifest(), manifest_hash: FAKE_MANIFEST_HASH, cached: 91, to_receive: 3, to_receive_bytes: bytes_total,
-      unknown_mods: ["mods/mod-maison.jar"], unknown_unchecked: [], unknown_scripts: [], unknown_trusted: [],
-    }),
+    joinPlan: async (): Promise<JoinPlan> => {
+      // Comme le backend : disque d'abord (reçu + 1 Gio de marge), puis compte hors ligne actif.
+      const warnings: JoinWarning[] = [];
+      const need = bytes_total + 1_073_741_824;
+      if (opts.freeDiskBytes !== undefined && opts.freeDiskBytes < need) warnings.push({ kind: "disk", need, free: opts.freeDiskBytes });
+      if (accounts.find((a) => a.id === active)?.kind === "offline") warnings.push({ kind: "offline_account" });
+      return {
+        manifest: makeManifest(), manifest_hash: FAKE_MANIFEST_HASH, cached: 91, to_receive: 3, to_receive_bytes: bytes_total,
+        unknown_mods: ["mods/mod-maison.jar"], unknown_unchecked: [], unknown_scripts: [], unknown_trusted: [], warnings,
+      };
+    },
     joinPlay: async () => {},
     // Comme le backend : refuse un autre manifeste, et des mods inconnus sans la case de confiance.
     joinStart: async (_pk, manifestHash, acceptUnknown) => {

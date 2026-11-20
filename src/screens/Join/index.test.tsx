@@ -46,6 +46,35 @@ async function startJoin() {
 }
 
 describe("Join", () => {
+  it("avertit du disque et du compte hors ligne sans bloquer « Rejoindre et jouer »", async () => {
+    const accounts = [{ id: "off-notch", kind: "offline" as const, name: "Notch", uuid: "u" }];
+    const { navigate } = setup(createFakeServices({ tickMs: 0, accounts, freeDiskBytes: 500_000_000 }));
+    await screen.findByText("mods/mod-maison.jar");
+    const box = screen.getByTestId("join-warnings");
+    expect(box.getAttribute("role")).toBe("status");
+    expect(screen.getByTestId("warn-disk").textContent).toMatch(/Il te faut 1,1 Go libres, il en reste 500 Mo/);
+    expect(screen.getByTestId("warn-offline").textContent).toMatch(/compte hors ligne/);
+    fireEvent.click(screen.getByRole("checkbox", { name: /confiance/ }));
+    expect((screen.getByRole("button", { name: "Rejoindre et jouer" }) as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "Changer de compte" }));
+    expect(navigate).toHaveBeenCalledWith("settings", { tab: "compte" });
+  });
+
+  it("arrondit le besoin au-dessus et l'espace libre au-dessous (jamais « 2 Go libres, il en reste 2 Go »)", async () => {
+    // Libre juste sous le besoin (reçu + 1 Gio) : les deux tailles doivent différer à l'affichage.
+    setup(createFakeServices({ tickMs: 0, freeDiskBytes: 1_073_741_900 }));
+    await screen.findByText("mods/mod-maison.jar");
+    const txt = screen.getByTestId("warn-disk").textContent ?? "";
+    const [, need, free] = txt.match(/Il te faut ([\d,]+) Go libres, il en reste ([\d,]+) Go/) ?? [];
+    expect(Number(need.replace(",", "."))).toBeGreaterThan(Number(free.replace(",", ".")));
+  });
+
+  it("aucun bloc d'avertissement sans disque trop juste ni compte hors ligne", async () => {
+    setup(createFakeServices({ tickMs: 0, freeDiskBytes: 50_000_000_000 }));
+    await screen.findByText("mods/mod-maison.jar");
+    expect(screen.queryByTestId("join-warnings")).toBeNull();
+  });
+
   it("RAM : valeur des paramètres par défaut, ou valeur choisie transmise à joinStart", async () => {
     const start = vi.fn(async () => {});
     setup({ joinStart: start });

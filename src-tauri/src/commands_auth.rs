@@ -131,6 +131,12 @@ impl AppState {
         Ok((r, file))
     }
 
+    /// Profil du compte actif sans réseau ni renouvellement : la mémoire, sinon le fichier des comptes (la mémoire reste
+    /// vide tant que personne n'a demandé le statut après le démarrage).
+    pub(crate) fn active_profile_offline_read(&self) -> Option<Profile> {
+        lock(&self.profile).clone().or_else(|| self.read_accounts().active_entry().map(|e| e.profile.clone()))
+    }
+
     /// Met le compte actif en mémoire et prévient l'interface (`auth://accounts`, et `auth://state` si le compte actif change).
     fn publish(&self, file: &AccountsFile, active_changed: bool) {
         let p = file.active_profile();

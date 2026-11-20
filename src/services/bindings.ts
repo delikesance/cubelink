@@ -1027,6 +1027,8 @@ export type JoinPlan_Deserialize = {
 	 *  pas redemandés.
 	 */
 	unknown_trusted?: string[],
+	/**  Avertissements affichés avant « Rejoindre et jouer » (jamais bloquants : la mesure peut être fausse). */
+	warnings?: JoinWarning[],
 };
 
 export type JoinPlan_Serialize = {
@@ -1047,6 +1049,8 @@ export type JoinPlan_Serialize = {
 	 *  pas redemandés.
 	 */
 	unknown_trusted: string[],
+	/**  Avertissements affichés avant « Rejoindre et jouer » (jamais bloquants : la mesure peut être fausse). */
+	warnings: JoinWarning[],
 };
 
 /**  Demande à rejoindre reçue d'un ami, en attente de la décision de l'hôte (événement `friend://join_request`). */
@@ -1057,6 +1061,13 @@ export type JoinRequest = {
 	/**  Fin de la fenêtre de réponse : au-delà, le demandeur est prévenu que sa demande a expiré. */
 	expires_at: number,
 };
+
+/**  Ce qui risque de faire échouer la partie après un long transfert. */
+export type JoinWarning = 
+/**  Pas assez d'espace libre : `need` octets conseillés (reçu + marge), `free` octets libres. */
+{ kind: "disk"; need: number; free: number } | 
+/**  Le compte actif est hors ligne : un hôte qui vérifie les comptes (online-mode) peut refuser la connexion. */
+{ kind: "offline_account" };
 
 export type LaunchPhase = "preparing" | "running" | "exited" | "failed";
 

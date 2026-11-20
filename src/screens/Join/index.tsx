@@ -24,6 +24,12 @@ type PlanState =
   | { kind: "error"; message: string };
 
 const mo = (bytes: number) => `${(bytes / 1_000_000).toLocaleString("fr-FR", { maximumFractionDigits: 1 })} Mo`;
+/** Taille lisible pour l'espace disque : en Go dès 1 Go, sinon en Mo. */
+const go = (bytes: number, round: (n: number) => number) =>
+  `${(round(bytes / 100_000_000) / 10).toLocaleString("fr-FR", { maximumFractionDigits: 1 })} Go`;
+/** `need` arrondi au-dessus et `free` au-dessous : jamais « il te faut 2 Go, il en reste 2 Go » alors que l'un manque. */
+const taille = (bytes: number, round: (n: number) => number = Math.round) =>
+  bytes >= 1_000_000_000 ? go(bytes, round) : mo(bytes);
 const stagger = (i: number) => ({ "--i": i }) as React.CSSProperties;
 
 export default function Join() {
@@ -253,6 +259,7 @@ export default function Join() {
     const total = m.files.length;
     const pct = total > 0 ? Math.max(0, Math.min(100, (plan.to_receive / total) * 100)) : 0;
     sub = "Rien n'est téléchargé avant ton clic.";
+    const warnings = plan.warnings ?? [];
     card = (
       <Card as="div" className="join-card enter" style={stagger(1)}>
         <div className="join-who">
@@ -299,6 +306,26 @@ export default function Join() {
         <div className="join-ram">
           <RamPicker value={ram} onChange={setRam} defaultMb={defaultRam} systemMb={systemRam} disabled={starting} hint={ramHint(m.files)} />
         </div>
+        {warnings.length > 0 && (
+          <div className="join-warn join-heads-up" role="status" data-testid="join-warnings">
+            {warnings.map((w) =>
+              w.kind === "disk" ? (
+                <div key="disk" data-testid="warn-disk">
+                  <h2>Il risque de manquer de place</h2>
+                  <p>Il te faut {taille(w.need, Math.ceil)} libres, il en reste {taille(w.free, Math.floor)}. Libère de la place avant de rejoindre, sinon le transfert pourra échouer.</p>
+                </div>
+              ) : (
+                <div key="offline" data-testid="warn-offline">
+                  <h2>Tu joues avec un compte hors ligne</h2>
+                  <p>Le monde de {name} peut te refuser (« Failed to verify username »). Avec un compte Microsoft, la connexion passe.</p>
+                  <div>
+                    <Button variant="secondary" onClick={() => navigate("settings", { tab: "compte" })}>Changer de compte</Button>
+                  </div>
+                </div>
+              ),
+            )}
+          </div>
+        )}
         <div className="join-acts">
           <Button disabled={!canJoin} loading={starting} onClick={() => { void join(); }}>Rejoindre et jouer</Button>
           {cancelBtn}

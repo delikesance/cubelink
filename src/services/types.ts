@@ -190,6 +190,10 @@ export interface Services {
 
   /** Teste la connexion réseau entre amis (relais, UDP, routeur). */
   netTest(): Promise<NetTest>;
+  /** Octets que « Vider le cache » libérerait (mods du cache qu'aucune instance n'utilise). */
+  cacheSize(): Promise<number>;
+  /** Vide le cache de mods ; renvoie les octets libérés. Refusé pendant une installation, un transfert ou une partie. */
+  cacheClear(): Promise<number>;
   friendMyCode(): Promise<FriendCode>;
   friendRegenerateCode(): Promise<FriendCode>;
   friendList(): Promise<FriendWithPresence[]>;

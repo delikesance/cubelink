@@ -173,6 +173,16 @@ impl StoreIndex {
         Ok(refs.max(0) as u32)
     }
 
+    /// Tous les objets de l'index, du plus ancien au plus récent.
+    pub fn all(&self) -> Result<Vec<Entry>> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare(&format!("SELECT {COLS} FROM objects ORDER BY last_used, sha256"))
+            .map_err(db)?;
+        let rows = stmt.query_map([], row_to_entry).map_err(db)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db)
+    }
+
     /// Objets sans référence (candidats au GC), du plus ancien au plus récent.
     pub fn unreferenced(&self) -> Result<Vec<Entry>> {
         let conn = self.lock();

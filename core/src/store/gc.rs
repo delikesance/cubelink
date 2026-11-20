@@ -37,7 +37,7 @@ pub struct GcReport {
 }
 
 /// Joint `rel` à `root` en refusant tout ce qui n'est pas un composant normal (`..`, absolu, préfixe).
-fn safe_join(root: &Path, rel: &str) -> Result<PathBuf> {
+pub(crate) fn safe_join(root: &Path, rel: &str) -> Result<PathBuf> {
     let mut out = root.to_path_buf();
     let mut any = false;
     for c in Path::new(rel).components() {
@@ -133,6 +133,22 @@ pub fn collect(store_root: &Path, index: &StoreIndex, opts: &GcOptions) -> Resul
         }
     }
     Ok(rep)
+}
+
+/// Supprime les dossiers de préfixe `xx/yy/` devenus vides ; renvoie leur nombre. Ne touche à rien d'autre.
+pub(crate) fn prune_empty_dirs(store_root: &Path) -> usize {
+    let mut n = 0;
+    for (_, d1) in subdirs(store_root).into_iter().filter(|(name, _)| is_hex2(name)) {
+        for (_, d2) in subdirs(&d1).into_iter().filter(|(name, _)| is_hex2(name)) {
+            if fs::remove_dir(&d2).is_ok() {
+                n += 1;
+            }
+        }
+        if fs::remove_dir(&d1).is_ok() {
+            n += 1;
+        }
+    }
+    n
 }
 
 fn scan_leaf(dir: &Path, index: &StoreIndex, opts: &GcOptions, now: i64, min_age: i64, rep: &mut GcReport) {

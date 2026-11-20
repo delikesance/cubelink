@@ -52,6 +52,8 @@ Arguments : clés JSON envoyées à Tauri (snake_case) et leur type TypeScript. 
 | `join_play` | `friend_public_key: string`, `instance_id: string` | — | Ouvre le tunnel, lance l'instance invitée avec connexion automatique, referme le tunnel à la fin du jeu. `instance_id` vide : l'instance du dernier transfert. |
 | `settings_get` | — | `Settings_Serialize` | Réglages. |
 | `settings_set` | `settings: SettingsInput_Deserialize` | `Settings_Serialize` | Le front envoie les réglages dans `{ settings }`. |
+| `cache_size` | — | `number` | Taille du cache de mods que « Vider le cache » libérerait (octets) : fichiers du cache qu'aucune instance n'utilise, de plus de 15 min. |
+| `cache_clear` | — | `number` | Vide le cache de mods (fichiers qu'aucune instance n'utilise, de plus de 15 min) ; renvoie les octets libérés. Erreur lisible pendant un lancement, un transfert ou un autre vidage. |
 | `browse_search` | `query: BrowseQuery_Deserialize` | `BrowsePage_Serialize` | Recherche dans le catalogue (Modrinth ou CurseForge). |
 | `browse_versions` | `source: string`, `id: string`, `kind: string`, `minecraft: string \| null`, `loader: string \| null` | `BrowseVersion[]` | Versions d'un projet du catalogue, filtrées par version de Minecraft et loader. |
 | `browse_install` | `input: BrowseInstallInput_Deserialize` | `BrowseInstallResult_Serialize` | Installe un projet du catalogue (nouvelle instance pour un modpack). Progression par `browse://progress`. |

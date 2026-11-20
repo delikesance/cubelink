@@ -5,6 +5,7 @@ import { useBack } from "../../app/context";
 import { Button, Card, Field, Input } from "../../ui";
 import { UpdateSection } from "./UpdateSection";
 import { Logo } from "../Login/Logo";
+import { formatBytes } from "../Install/format";
 import { Accounts } from "./Accounts";
 import { useStageSupported } from "../../app/stage";
 import type { NetTest, Settings as BaseSettings } from "../../services/types";
@@ -169,11 +170,9 @@ function messageOf(e: unknown): string {
 export interface SettingsProps {
   /** Test de connexion réel (à brancher) ; renvoie une phrase de résultat. */
   testConnection?: () => Promise<string>;
-  /** Vidage du cache (à brancher) ; sans lui, l'écran indique que ce n'est pas disponible. */
-  clearCache?: () => Promise<void>;
 }
 
-export default function Settings({ testConnection, clearCache }: SettingsProps = {}) {
+export default function Settings({ testConnection }: SettingsProps = {}) {
   useScreenTitle(null);
   const services = useServices();
   const { params } = useShell();
@@ -195,6 +194,9 @@ export default function Settings({ testConnection, clearCache }: SettingsProps =
   const [netMsg, setNetMsg] = useState("");
   const [confirmClear, setConfirmClear] = useState(false);
   const [cacheMsg, setCacheMsg] = useState("");
+  // Octets que « Vider » libérerait ; `null` tant qu'ils ne sont pas connus (ou si le calcul échoue : le bouton reste utilisable).
+  const [cacheBytes, setCacheBytes] = useState<number | null>(null);
+  const [clearing, setClearing] = useState(false);
   const [javaPath, setJavaPath] = useState("");
   const [ram, setRam] = useState("");
   const [hotkey, setHotkey] = useState(DEFAULT_HOTKEY);
@@ -284,14 +286,30 @@ export default function Settings({ testConnection, clearCache }: SettingsProps =
     }
   };
 
+  // La taille du cache se calcule en ouvrant « Stockage » (parcours des instances : pas à chaque affichage de l'écran).
+  const refreshCache = useCallback(() => {
+    services.cacheSize().then(
+      (n) => { if (alive.current) setCacheBytes(n); },
+      () => { if (alive.current) setCacheBytes(null); },
+    );
+  }, [services]);
+  useEffect(() => { if (section === "stockage") refreshCache(); }, [section, refreshCache]);
+
   const doClear = async () => {
+    if (clearing) return;
+    setClearing(true);
+    setCacheMsg("Vidage en cours…");
     try {
-      if (!clearCache) setCacheMsg("Le vidage du cache n'est pas encore disponible.");
-      else { await clearCache(); setCacheMsg("Cache vidé."); }
+      const freed = await services.cacheClear();
+      if (!alive.current) return;
+      setCacheMsg(freed > 0 ? `Cache vidé : ${formatBytes(freed)} libérés.` : "Le cache était déjà vide.");
+      setCacheBytes(0);
     } catch (e) {
-      setCacheMsg(messageOf(e));
+      if (alive.current) setCacheMsg(messageOf(e));
+    } finally {
+      if (alive.current) { setClearing(false); setConfirmClear(false); }
     }
-    setConfirmClear(false);
+    if (alive.current) refreshCache();
   };
 
   // Réglages Java : enregistrés à la sortie du champ, seulement s'ils sont valides et modifiés.
@@ -476,8 +494,8 @@ export default function Settings({ testConnection, clearCache }: SettingsProps =
       <div {...panel("stockage")}>
         <Card className="set-list">
           <div className="set-row">
-            <div className="set-txt"><b>Cache de mods</b><span>Fichiers partagés entre tes instances.</span></div>
-            <Button variant="secondary" aria-expanded={confirmClear} onClick={() => setConfirmClear(true)}>Vider le cache…</Button>
+            <div className="set-txt"><b>Cache de mods</b><span>{cacheBytes === null ? "Fichiers partagés entre tes instances." : cacheBytes > 0 ? `Fichiers partagés entre tes instances. Libère ${formatBytes(cacheBytes)}.` : "Rien à libérer : tous les fichiers du cache servent à tes instances."}</span></div>
+            <Button variant="secondary" aria-expanded={confirmClear} disabled={cacheBytes === 0} onClick={() => setConfirmClear(true)}>Vider le cache…</Button>
           </div>
           <label className="set-row" style={{ cursor: "pointer" }}>
             <div className="set-txt"><b>Envoyer des mods à mes amis</b><span>Mods et réglages de ton instance, pour les amis que tu as acceptés.</span></div>
@@ -487,9 +505,9 @@ export default function Settings({ testConnection, clearCache }: SettingsProps =
         {confirmClear && (
           <div role="alertdialog" aria-labelledby={`${uid}-clr`} className="set-alert enter">
             <strong id={`${uid}-clr`}>Vider le cache de mods&nbsp;?</strong>
-            <span className="set-hint">Les mods dont tu auras besoin seront retéléchargés. En attendant, certaines instances ou certains profils invités peuvent ne pas se lancer.</span>
+            <span className="set-hint">{cacheBytes !== null && cacheBytes > 0 ? `Libère ${formatBytes(cacheBytes)}. ` : ""}Seuls les fichiers que plus aucune de tes instances n'utilise sont supprimés : tes instances, leurs mods et tes mondes ne sont pas touchés. Si tu en as de nouveau besoin, ils seront retéléchargés.</span>
             <div className="set-acts">
-              <Button variant="danger" onClick={() => void doClear()}>Vider le cache</Button>
+              <Button variant="danger" disabled={clearing} onClick={() => void doClear()}>Vider le cache</Button>
               <Button variant="secondary" ref={cancelClearRef} onClick={() => setConfirmClear(false)}>Annuler</Button>
             </div>
           </div>

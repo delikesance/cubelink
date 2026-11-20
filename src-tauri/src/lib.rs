@@ -81,6 +81,8 @@ macro_rules! commands {
             commands_join::join_play,
             commands_settings::settings_get,
             commands_settings::settings_set,
+            commands_settings::cache_size,
+            commands_settings::cache_clear,
             commands_browse::browse_search,
             commands_browse::browse_versions,
             commands_browse::browse_install,

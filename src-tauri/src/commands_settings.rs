@@ -245,4 +245,119 @@ mod tests {
         std::fs::write(dir.path().join("settings.json"), b"{pas du json").unwrap();
         assert_eq!(load_settings(&dir.path().join("settings.json")), default_settings());
     }
+
+    /// Cache réel sur disque : taille, vidage, instance et monde intacts, refus pendant une partie.
+    #[test]
+    fn cache_taille_puis_vidage_sans_toucher_instances_ni_mondes() {
+        use core_lib::store::index::object_rel_path;
+        use core_lib::store::link::link_into;
+        use std::time::Duration;
+        let dir = tempfile::tempdir().unwrap();
+        let (st, _) = test_state(dir.path());
+        let put = |n: u8, size: usize| {
+            let sha = format!("{:064x}", n);
+            let rel = object_rel_path(&sha).unwrap();
+            let p = st.paths.store.join(&rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, vec![n; size]).unwrap();
+            st.store.insert(&sha, &rel, size as u64).unwrap();
+            p
+        };
+        let (used, free1, free2) = (put(1, 100), put(2, 1000), put(3, 50));
+        let game = st.paths.instances.join("inst").join("minecraft");
+        std::fs::create_dir_all(game.join("saves/monde")).unwrap();
+        std::fs::write(game.join("saves/monde/level.dat"), b"monde").unwrap();
+        link_into(&game, "mods/utilise.jar", &used).unwrap();
+
+        // Les objets tout juste téléchargés sont protégés : rien à libérer pour le vrai délai.
+        assert_eq!(st.cache_size().unwrap(), 0);
+        assert_eq!(st.cache_clear().unwrap(), 0);
+        assert!(free1.exists());
+
+        // Avec des objets « anciens » : la taille annoncée est exactement ce qui est libéré.
+        let rep = st.cache_run(true, Duration::ZERO).unwrap();
+        assert_eq!(rep.bytes_freed, 1050);
+        assert!(free1.exists() && free2.exists(), "le calcul ne supprime rien");
+        assert_eq!(st.cache_clear_aged(Duration::ZERO).unwrap(), 1050);
+        assert!(!free1.exists() && !free2.exists());
+        assert!(used.exists(), "l'objet lié à une instance reste");
+        assert_eq!(std::fs::read(game.join("mods/utilise.jar")).unwrap(), vec![1u8; 100]);
+        assert_eq!(std::fs::read(game.join("saves/monde/level.dat")).unwrap(), b"monde");
+        assert_eq!(st.cache_run(true, Duration::ZERO).unwrap().bytes_freed, 0);
+
+        // Partie ou transfert en cours : refus lisible, rien n'est supprimé.
+        *lock(&st.game) = Some("inst".into());
+        let err = st.cache_clear_aged(Duration::ZERO).unwrap_err();
+        assert!(err.contains("en cours"), "{err}");
+        *lock(&st.game) = None;
+        assert!(!st.cache_busy.load(std::sync::atomic::Ordering::SeqCst), "le drapeau est relâché");
+    }
+}
+
+/// Un objet du cache plus récent que ça n'est jamais supprimé : entre son téléchargement et son placement dans une
+/// instance, il n'est pas encore lié et ne doit pas disparaître sous un téléchargement en cours.
+const CACHE_MIN_AGE: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// Remet `cache_busy` à faux quand le vidage se termine, quelle que soit la sortie.
+struct CacheBusy<'a>(&'a std::sync::atomic::AtomicBool);
+
+impl Drop for CacheBusy<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl AppState {
+    fn cache_run(&self, dry_run: bool, min_age: std::time::Duration) -> Result<core_lib::store::purge::PurgeReport, String> {
+        let roots = [self.paths.instances.clone()];
+        let opts = core_lib::store::purge::PurgeOptions { dry_run, min_age };
+        core_lib::store::purge::purge_unused(&self.paths.store, &self.store, &roots, &opts).map_err(|e| crate::error::user_msg(&e))
+    }
+
+    /// Octets que « Vider le cache » libérerait réellement (objets qu'aucune instance n'utilise). Ne supprime rien.
+    pub fn cache_size(&self) -> Result<u64, String> {
+        Ok(self.cache_run(true, CACHE_MIN_AGE)?.bytes_freed)
+    }
+
+    /// Vide le cache (objets qu'aucune instance n'utilise) ; renvoie les octets libérés.
+    pub fn cache_clear(&self) -> Result<u64, String> {
+        self.cache_clear_aged(CACHE_MIN_AGE)
+    }
+
+    fn cache_clear_aged(&self, min_age: std::time::Duration) -> Result<u64, String> {
+        use std::sync::atomic::Ordering;
+        if lock(&self.game).is_some() || lock(&self.join).is_some() {
+            return Err("Une installation, un transfert ou une partie est en cours. Réessaie quand c'est terminé.".into());
+        }
+        if self.cache_busy.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+            return Err("Le cache est déjà en train d'être vidé.".into());
+        }
+        let _busy = CacheBusy(&self.cache_busy);
+        let rep = self.cache_run(false, min_age)?;
+        if rep.bytes_freed == 0 && !rep.errors.is_empty() {
+            tracing::warn!("vidage du cache : {}", rep.errors.join(" ; "));
+            return Err("Impossible de vider le cache : certains fichiers sont utilisés. Ferme le jeu et réessaie.".into());
+        }
+        if !rep.errors.is_empty() {
+            tracing::warn!("vidage du cache : {}", rep.errors.join(" ; "));
+        }
+        tracing::info!("cache vidé : {} objets, {} octets", rep.removed.len(), rep.bytes_freed);
+        Ok(rep.bytes_freed)
+    }
+}
+
+/// Taille du cache de mods que « Vider le cache » libérerait (octets) : fichiers du cache qu'aucune instance n'utilise, de plus de 15 min.
+#[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
+pub async fn cache_size(state: State<'_, Arc<AppState>>) -> Result<u64, String> {
+    let st = state.inner().clone();
+    tokio::task::spawn_blocking(move || st.cache_size()).await.map_err(|_| "Le calcul de la taille du cache a échoué.".to_string())?
+}
+
+/// Vide le cache de mods (fichiers qu'aucune instance n'utilise, de plus de 15 min) ; renvoie les octets libérés. Erreur lisible pendant un lancement, un transfert ou un autre vidage.
+#[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
+pub async fn cache_clear(state: State<'_, Arc<AppState>>) -> Result<u64, String> {
+    let st = state.inner().clone();
+    tokio::task::spawn_blocking(move || st.cache_clear()).await.map_err(|_| "Le vidage du cache a échoué.".to_string())?
 }

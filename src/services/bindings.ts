@@ -98,6 +98,10 @@ export const commands = {
 	settingsGet: (options?: InvokeOptions) => __TAURI_INVOKE<Settings_Serialize>("settings_get", undefined, options),
 	/**  Le front envoie les réglages dans `{ settings }`. */
 	settingsSet: (settings: SettingsInput_Deserialize, options?: InvokeOptions) => __TAURI_INVOKE<Settings_Serialize>("settings_set", { settings }, options),
+	/**  Taille du cache de mods que « Vider le cache » libérerait (octets) : fichiers du cache qu'aucune instance n'utilise, de plus de 15 min. */
+	cacheSize: (options?: InvokeOptions) => __TAURI_INVOKE<number>("cache_size", undefined, options),
+	/**  Vide le cache de mods (fichiers qu'aucune instance n'utilise, de plus de 15 min) ; renvoie les octets libérés. Erreur lisible pendant un lancement, un transfert ou un autre vidage. */
+	cacheClear: (options?: InvokeOptions) => __TAURI_INVOKE<number>("cache_clear", undefined, options),
 	/**  Recherche dans le catalogue (Modrinth ou CurseForge). */
 	browseSearch: (query: BrowseQuery_Deserialize, options?: InvokeOptions) => __TAURI_INVOKE<BrowsePage_Serialize>("browse_search", { query }, options),
 	/**  Versions d'un projet du catalogue, filtrées par version de Minecraft et loader. */

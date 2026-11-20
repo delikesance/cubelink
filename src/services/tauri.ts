@@ -55,6 +55,8 @@ export function createTauriServices(): Services {
     minecraftVersions: () => commands.minecraftVersions(),
 
     netTest: () => commands.netTest(),
+    cacheSize: () => commands.cacheSize(),
+    cacheClear: () => commands.cacheClear(),
     friendMyCode: () => commands.friendMyCode(),
     friendRegenerateCode: () => commands.friendRegenerateCode(),
     friendList: () => commands.friendList(),

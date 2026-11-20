@@ -16,7 +16,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use futures_util::stream::{self, Stream};
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader, BufWriter};
 use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, watch};
 
@@ -29,6 +29,10 @@ const RESERVED_SLOTS: usize = 8;
 const EVENT_CAPACITY: usize = 1024;
 /// Longueur maximale d'une ligne conservée (le reste est tronqué).
 const MAX_LINE_BYTES: usize = 16 * 1024;
+/// Délai maximal entre l'écriture d'une ligne dans le journal et son arrivée sur le disque.
+const LOG_FLUSH_EVERY: Duration = Duration::from_millis(100);
+/// Tampon d'écriture du journal.
+const LOG_BUF_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LaunchEvent {
@@ -418,6 +422,7 @@ async fn start(plan: Plan) -> Result<RunningGame> {
     let (done_tx, done_rx) = watch::channel(false);
     let _ = ev_tx.try_send(LaunchEvent::Started { pid });
     sink.header(&plan.program, &plan.shown_args).await;
+    sink.flush().await; // la commande est visible tout de suite, même si le jeu plante au démarrage
 
     let cwd = plan.cwd.clone();
     let opts = plan.opts.clone();
@@ -432,25 +437,47 @@ async fn start(plan: Plan) -> Result<RunningGame> {
 async fn read_lines<R: AsyncRead + Unpin>(r: R, tx: mpsc::Sender<String>) {
     let mut reader = BufReader::new(r);
     let mut buf = Vec::new();
-    loop {
-        buf.clear();
-        match reader.read_until(b'\n', &mut buf).await {
-            Ok(0) | Err(_) => return,
-            Ok(_) => {
-                buf.truncate(MAX_LINE_BYTES);
-                let line = String::from_utf8_lossy(&buf).trim_end_matches(['\r', '\n']).to_string();
-                if tx.send(line).await.is_err() {
-                    return;
-                }
-            }
+    while let Ok(Some(line)) = next_line(&mut reader, &mut buf).await {
+        if tx.send(line).await.is_err() {
+            return;
         }
     }
+}
+
+/// Lit la ligne suivante (`None` en fin de flux). Au plus `MAX_LINE_BYTES` octets sont gardés : le surplus d'une ligne
+/// trop longue (ou sans `\n`) est jeté au fil de la lecture, sans jamais être accumulé en mémoire. Une dernière ligne sans
+/// `\n` est rendue.
+async fn next_line<R: AsyncBufRead + Unpin>(r: &mut R, buf: &mut Vec<u8>) -> std::io::Result<Option<String>> {
+    buf.clear();
+    let mut any = false;
+    loop {
+        let chunk = r.fill_buf().await?;
+        if chunk.is_empty() {
+            break;
+        }
+        any = true;
+        let nl = chunk.iter().position(|&b| b == b'\n');
+        let content = &chunk[..nl.unwrap_or(chunk.len())];
+        let room = MAX_LINE_BYTES - buf.len();
+        buf.extend_from_slice(&content[..content.len().min(room)]);
+        let used = nl.map_or(chunk.len(), |i| i + 1);
+        r.consume(used);
+        if nl.is_some() {
+            break;
+        }
+    }
+    if !any {
+        return Ok(None);
+    }
+    Ok(Some(String::from_utf8_lossy(buf).trim_end_matches(['\r', '\n']).to_string()))
 }
 
 /// Journal borné + filtre du jeton + limiteur de débit des événements.
 struct Sink {
     path: PathBuf,
-    file: Option<tokio::fs::File>,
+    file: Option<BufWriter<tokio::fs::File>>,
+    /// Des octets attendent dans le tampon d'écriture.
+    dirty: bool,
     written: u64,
     max: u64,
     secrets: Vec<String>,
@@ -469,7 +496,8 @@ impl Sink {
         secrets.sort_by_key(|s| std::cmp::Reverse(s.len()));
         Ok(Self {
             path,
-            file: Some(file),
+            file: Some(BufWriter::with_capacity(LOG_BUF_BYTES, file)),
+            dirty: false,
             written: 0,
             max: plan.opts.max_log_bytes.max(256),
             secrets,
@@ -499,9 +527,13 @@ impl Sink {
     async fn write(&mut self, line: &str) {
         let len = line.len() as u64 + 1;
         if self.written + len > self.max {
-            self.file = None; // ferme avant de renommer (Windows)
+            // Vide puis ferme avant de renommer (Windows) : rien ne se perd dans la rotation.
+            if let Some(mut f) = self.file.take() {
+                let _ = f.shutdown().await;
+            }
+            self.dirty = false;
             rotate(&self.path).await;
-            self.file = tokio::fs::File::create(&self.path).await.ok();
+            self.file = tokio::fs::File::create(&self.path).await.ok().map(|f| BufWriter::with_capacity(LOG_BUF_BYTES, f));
             self.written = 0;
         }
         if let Some(f) = self.file.as_mut() {
@@ -509,9 +541,19 @@ impl Sink {
             data.extend_from_slice(line.as_bytes());
             data.push(b'\n');
             if f.write_all(&data).await.is_ok() {
-                let _ = f.flush().await;
+                self.dirty = true;
                 self.written += len;
             }
+        }
+    }
+
+    /// Envoie le tampon sur le disque (rien à faire si rien n'a été écrit depuis le dernier appel).
+    async fn flush(&mut self) {
+        if self.dirty {
+            if let Some(f) = self.file.as_mut() {
+                let _ = f.flush().await;
+            }
+            self.dirty = false;
         }
     }
 
@@ -562,8 +604,11 @@ async fn supervise(
     let started = Instant::now();
     let mut killed = false;
     let mut lines_open = true;
+    let mut tick = tokio::time::interval(LOG_FLUSH_EVERY);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let status: std::io::Result<ExitStatus> = loop {
         tokio::select! {
+            _ = tick.tick() => sink.flush().await,
             line = lines.recv(), if lines_open => match line {
                 Some(l) => sink.push(&l).await,
                 None => lines_open = false,
@@ -580,6 +625,8 @@ async fn supervise(
     while let Ok(Some(l)) = tokio::time::timeout(Duration::from_millis(500), lines.recv()).await {
         sink.push(&l).await;
     }
+    // Le journal est complet sur le disque avant l'événement final (le message de plantage et l'interface le relisent).
+    sink.flush().await;
     let last = sink.last_line.clone();
     sink.tx = None;
 
@@ -1134,6 +1181,101 @@ mod tests {
                 assert!(!l.contains("SECRET-TOKEN-123"));
             }
         }
+    }
+
+    /// Flux de `total` octets `x` sans aucun `\n`, sans jamais les allouer d'un coup.
+    struct Endless {
+        left: usize,
+    }
+
+    impl AsyncRead for Endless {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            out: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            let n = self.left.min(out.remaining()).min(4096);
+            out.put_slice(&vec![b'x'; n]);
+            self.left -= n;
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn next_line_bounds_memory_on_endless_line() {
+        let mut r = BufReader::new(Endless { left: 10_000_000 });
+        let mut buf = Vec::new();
+        let l = next_line(&mut r, &mut buf).await.unwrap().unwrap();
+        assert_eq!(l.len(), MAX_LINE_BYTES);
+        assert!(buf.capacity() <= 2 * MAX_LINE_BYTES, "{}", buf.capacity());
+        assert_eq!(next_line(&mut r, &mut buf).await.unwrap(), None);
+        assert_eq!(r.buffer().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn next_line_keeps_normal_lines_and_drops_the_excess() {
+        let mut data = b"a\r\nb\n".to_vec();
+        data.extend(vec![b'z'; 40_000]);
+        data.extend(b"\nc\n\nd");
+        let mut r = BufReader::with_capacity(512, std::io::Cursor::new(data));
+        let mut buf = Vec::new();
+        let mut got = vec![];
+        while let Some(l) = next_line(&mut r, &mut buf).await.unwrap() {
+            got.push(l);
+        }
+        assert_eq!(got.len(), 6, "{:?}", got.iter().map(String::len).collect::<Vec<_>>());
+        assert_eq!((got[0].as_str(), got[1].as_str()), ("a", "b"));
+        assert_eq!(got[2], "z".repeat(MAX_LINE_BYTES));
+        assert_eq!((got[3].as_str(), got[4].as_str(), got[5].as_str()), ("c", "", "d"));
+    }
+
+    #[tokio::test]
+    async fn next_line_returns_last_line_without_newline() {
+        let mut r = BufReader::new(std::io::Cursor::new(b"un\ndernier".to_vec()));
+        let mut buf = Vec::new();
+        assert_eq!(next_line(&mut r, &mut buf).await.unwrap().as_deref(), Some("un"));
+        assert_eq!(next_line(&mut r, &mut buf).await.unwrap().as_deref(), Some("dernier"));
+        assert_eq!(next_line(&mut r, &mut buf).await.unwrap(), None);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn log_is_complete_after_burst_and_endless_line() {
+        let d = tempfile::tempdir().unwrap();
+        let mut g = start(plan(
+            &["i=0; while [ $i -lt 5000 ]; do echo ligne-$i; i=$((i+1)); done", "head -c 1000000 /dev/zero | tr '\\0' x", "echo", "echo fin"],
+            d.path(),
+            &[],
+            fast(),
+        ))
+        .await
+        .unwrap();
+        let evs = collect(&mut g).await;
+        assert_eq!(evs.last(), Some(&LaunchEvent::Exited { code: 0 }));
+        let log = std::fs::read_to_string(d.path().join("logs/latest.log")).unwrap();
+        let lines: Vec<&str> = log.lines().collect();
+        assert!(lines.contains(&"ligne-4999"), "ligne-4999 absente");
+        assert_eq!(lines.last(), Some(&"fin"));
+        let long = lines.iter().map(|l| l.len()).max().unwrap();
+        assert!(long <= MAX_LINE_BYTES + 4, "{long}");
+        assert!(log.len() < 100_000, "{}", log.len());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn log_reaches_disk_while_the_game_runs() {
+        let d = tempfile::tempdir().unwrap();
+        let g = start(plan(&["echo vivant", "exec sleep 5"], d.path(), &[], fast())).await.unwrap();
+        let log = d.path().join("logs/latest.log");
+        let t = Instant::now();
+        loop {
+            if std::fs::read_to_string(&log).unwrap_or_default().contains("vivant") {
+                break;
+            }
+            assert!(t.elapsed() < Duration::from_secs(2), "ligne toujours absente du journal");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        g.kill_now().await;
     }
 
     #[tokio::test]

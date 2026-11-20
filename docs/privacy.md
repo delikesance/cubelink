@@ -1,6 +1,6 @@
 # Cubelink Privacy Policy
 
-**Last updated:** November 11, 2026
+**Last updated:** November 19, 2026
 **Developer:** Delikesance
 **Contact:** open an issue at https://github.com/delikesance/cubelink/issues
 
@@ -24,14 +24,20 @@ To work, Cubelink connects to third-party services. These services receive your 
 - **Modrinth and CurseForge:** searching and downloading mods and modpacks.
 - **Adoptium:** downloading a Java runtime if one is needed.
 - **GitHub (github.com/delikesance/cubelink):** checking for updates, when the app was not installed from the Microsoft Store.
+- **Third-party image hosts:** the description of a mod or modpack (from Modrinth or CurseForge) can contain images. They are loaded directly from the host that serves them, which sees your IP address.
+
+Cubelink does not use any relay or discovery service to connect you with friends: no public relay server (n0, the Iroh project, or any other), no DNS or pkarr directory, no DHT. It does not publish your key or your IP address anywhere and does not query a directory to find your friends. Connections between friends are made directly (see "Playing with friends"). To open a port on your router, Cubelink talks to the router itself on your local network (UPnP, NAT-PMP, PCP), never to an internet service.
 
 ## Playing with friends
 Cubelink lets you share a modpack and a Minecraft world with friends, directly between devices (peer to peer). When you add a friend:
 - you exchange a short verification code and the device keys needed to recognise each other;
-- your friend can see whether you are online and, when you share, your instance name, mod list and the files needed to join;
-- connections are made directly between devices when possible, or through a relay server when a direct connection is not possible. A relay only forwards encrypted traffic; it cannot read its content. The relay operator sees technical metadata such as IP addresses.
+- your friend can see whether you are online and whether a game is running on your device (the "in game" status), and, when you share, your instance name, mod list and the files needed to join;
+- Cubelink can start with your computer session (option in Settings) so that your friends can reach you; while it runs, it answers your friends' presence checks;
+- connections are made directly between devices, with no relay in between: your friends' devices see your IP address, and nobody else does. This has a cost, stated plainly: until Cubelink offers discovery through the Mainline DHT and its own relays, two friends who are both behind a strict NAT or CGNAT, without IPv6 and without UPnP, may be unable to reach each other. One of the two must be reachable (IPv6, or a port opened on the router);
+- your friend code contains your public key and your IP addresses (up to 8: the public ones first, then those of your local network): share it only with people you trust. Your friends' devices remember your last known addresses to find you again; nothing is published for this. Older friend codes may contain the address of a relay that no longer exists: Cubelink ignores it;
+- with Hearth group worlds, copies of the world are kept on the devices of the other group members.
 
-Only people you accept as friends can connect to you. You can remove a friend at any time.
+Only people you accept as friends can ask to join your world. Members of one of your Hearth groups who are not your friends can open a game tunnel to the group's world, and the connection handshake (QUIC) is visible to anyone who knows your public key, without any data being exchanged. You can remove a friend at any time.
 
 ## What we do not do
 - We do not sell or share your data.

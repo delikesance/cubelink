@@ -54,6 +54,42 @@ async fn raisons_distinctes_cote_invite() {
     guest.be.shutdown().await;
 }
 
+/// Un ami qui n'est pas (ou plus) invité reçoit « pas invité » (il peut demander à rejoindre), jamais « pas dans ma liste
+/// d'amis » : manifeste et tunnel, refus initial comme révocation en cours de partie. Seul un vrai non-ami reste « pas ami ».
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ami_non_invite_ou_revoque_recoit_pas_invite_et_non_ami_pas_ami() {
+    let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let host = Node::start(da.path(), "Hote").await;
+    let guest = Node::start(db.path(), "Invite").await;
+    befriend(&guest, &host).await;
+    let hk = host.key();
+    let gk: [u8; 32] = hex::decode(guest.key()).unwrap().try_into().unwrap();
+
+    // Monde solo ouvert, l'invité est ami des deux côtés mais n'a aucun accès.
+    let id = world(&host);
+    host.be.host_start_sharing(id, 0).await.unwrap();
+    let e = guest.st.join_plan(&hk).await.unwrap_err();
+    assert_eq!(e, Reach::NotInvited.message(), "plan : {e}");
+    assert_ne!(e, Reach::NotFriend.message());
+    let e = guest.st.join_open_tunnel(&hk).await.unwrap_err();
+    assert_eq!(e, Reach::NotInvited.message(), "tunnel : {e}");
+
+    // Invité : le plan passe. Puis l'invitation est retirée : de nouveau « pas invité ».
+    assert!(host.st.access.allow_friend(&gk));
+    assert!(guest.st.join_plan(&hk).await.is_ok());
+    host.st.access.revoke(&gk);
+    let e = guest.st.join_plan(&hk).await.unwrap_err();
+    assert_eq!(e, Reach::NotInvited.message(), "après révocation : {e}");
+
+    // Retiré des amis : « pas ami ».
+    host.st.friends.remove_friend(&guest.key()).unwrap();
+    let e = guest.st.join_plan(&hk).await.unwrap_err();
+    assert_eq!(e, Reach::NotFriend.message(), "{e}");
+
+    host.be.shutdown().await;
+    guest.be.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn ami_hors_ligne_echoue_vite_avec_un_message_clair() {
     let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());

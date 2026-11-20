@@ -321,6 +321,11 @@ impl P2pBackend for PendingBackend {
             b.host_set_world_port(port);
         }
     }
+    fn host_cancel_join_requests(&self) {
+        if let Some(b) = self.current() {
+            b.host_cancel_join_requests();
+        }
+    }
     fn join_open_tunnel(&self, friend_public_key: String) -> BoxFuture<'_, Result<u16, String>> {
         Box::pin(async move { self.wait().await?.join_open_tunnel(friend_public_key).await })
     }
@@ -366,11 +371,8 @@ pub fn default_settings() -> Settings {
         default_ram_mb: 4096,
         java_path: None,
         trust_default: TrustLevel::Ask,
-        allow_relay: true,
         close_on_launch: false,
-        relay_only: false,
         share_mods: true,
-        discovery: true,
         lan_auto: true,
         overlay_enabled: true,
         overlay_hotkey: core_lib::types::DEFAULT_OVERLAY_HOTKEY.into(),
@@ -385,6 +387,12 @@ impl AppState {
         let paths = Paths::new(root);
         paths.create_all().map_err(|_| "impossible de créer le dossier de données".to_string())?;
         let store = StoreIndex::open(paths.store.join("index.sqlite")).map_err(|e| crate::error::user_msg(&e))?;
+        // Restauration d'identité déposée avant le redémarrage : avant toute ouverture de l'identité et de la base.
+        match p2p_lib::identity_backup::apply_pending_import(&paths.p2p, Some(&paths.root.join("hearth"))) {
+            Ok(true) => eprintln!("[Cubelink] identité restaurée depuis une sauvegarde"),
+            Ok(false) => {}
+            Err(e) => eprintln!("[Cubelink] restauration d'identité abandonnée, ancienne identité gardée : {e}"),
+        }
         let identity = Identity::load_or_create(&paths.p2p).map_err(|e| crate::error::user_msg_any(&e))?;
         let friends = FriendsDb::open(paths.p2p.join("friends.db")).map_err(|e| crate::error::user_msg(&e))?;
         let settings = crate::commands_settings::load_settings(&paths.settings_file);

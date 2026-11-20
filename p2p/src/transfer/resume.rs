@@ -416,7 +416,6 @@ impl<T: BlobTransport> ResumableReceive<T> {
             bytes_done: bytes,
             bytes_total: sh.bytes_total,
             speed_bps: if secs > 0.0 { (bytes as f64 / secs) as u64 } else { 0 },
-            via_relay: self.transport.via_relay(&self.peer),
             error,
         });
     }

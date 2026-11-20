@@ -7,6 +7,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { routeOf } from './routes';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const ROOT = path.resolve(HERE, '..', '..');
@@ -79,8 +80,8 @@ async function startServer(name: string, script: string): Promise<FakeServer> {
 export interface Servers { auth: FakeServer; mojang: FakeServer; modrinth: FakeServer }
 
 // ---------- application ----------
-/** `settings` : champs de Settings ecrits dans settings.json AVANT le demarrage (relay_only, discovery... sont lus au demarrage du backend). */
-export interface AppOptions { relayMode?: string; env?: Record<string, string>; settings?: Record<string, unknown> }
+/** `settings` : champs de Settings ecrits dans settings.json AVANT le demarrage. */
+export interface AppOptions { env?: Record<string, string>; settings?: Record<string, unknown> }
 
 export interface App {
   label: 'A' | 'B';
@@ -114,7 +115,7 @@ async function startApp(label: 'A' | 'B', bin: string, servers: Servers, tmpRoot
   fs.mkdirSync(dataDir, { recursive: true });
   fs.mkdirSync(userDataDir, { recursive: true });
   if (opts.settings) {
-    const base = { language: 'fr', default_ram_mb: 4096, java_path: null, trust_default: 'ask', allow_relay: true, close_on_launch: false, relay_only: false, share_mods: true, discovery: true };
+    const base = { language: 'fr', default_ram_mb: 4096, java_path: null, trust_default: 'ask', close_on_launch: false, share_mods: true };
     fs.writeFileSync(path.join(dataDir, 'settings.json'), JSON.stringify({ ...base, ...opts.settings }));
   }
   const cdpPort = await freePort();
@@ -134,7 +135,6 @@ async function startApp(label: 'A' | 'B', bin: string, servers: Servers, tmpRoot
     CUBELINK_MODRINTH_API_URL: servers.modrinth.base,
     CUBELINK_JAVA_PATH: FAKE_JAVA,
     CUBELINK_SKIP_JAVA_PROBE: '1',
-    CUBELINK_RELAY_MODE: opts.relayMode ?? 'disabled',
     ...opts.env,
   };
   const log: string[] = [];
@@ -194,7 +194,8 @@ export async function testState(page: Page): Promise<any> { return invoke(page, 
 
 /** Attend que le routeur (hash) affiche la route : `<main data-route=...>`. */
 export async function waitForRoute(page: Page, route: string, timeout = 15_000): Promise<void> {
-  await page.waitForSelector(`main[data-route="${route}"]`, { timeout });
+  // `friends` est un alias (Paramètres > Amis) : voir harness/routes.ts.
+  await page.waitForSelector(`main[data-route="${routeOf(route).route}"]`, { timeout });
 }
 
 /** Connexion hors ligne via la commande (le mode test l'autorise), puis navigue vers `main` si demande. */
@@ -266,15 +267,15 @@ async function dumpFailure(app: App, dir: string) {
   try { fs.cpSync(path.join(app.dataDir, 'logs'), path.join(dir, `${tag}-data-logs`), { recursive: true }); } catch { /* pas de logs */ }
 }
 
-/** Option par test : `test.use({ appOptions: { relayMode: 'default' } })`. */
+/** Option par test : `test.use({ appOptions: { settings: { … } } })`. */
 export const test = base.extend<{ appOptions: AppOptions; world: World; appA: App; appB: App; servers: Servers }, { binary: string }>({
   appOptions: [{}, { option: true }],
 
   binary: [async ({}, use) => {
     let bin = process.env.CUBELINK_E2E_BIN; // construit une seule fois par e2e/harness/global-setup.ts
     if (!bin) {
-      const { binaryPath, build } = await import(pathToFileURL(path.join(HERE, 'build.mjs')).href);
-      bin = process.env.CUBELINK_E2E_BUILD === '1' || !fs.existsSync(binaryPath({})) ? build({}) : binaryPath({});
+      const { resolveBinary } = await import(pathToFileURL(path.join(HERE, 'build.mjs')).href);
+      bin = resolveBinary({}) as string;
     }
     await use(bin);
   }, { scope: 'worker', timeout: 900_000 }],

@@ -5,6 +5,7 @@
 //! monde -> rapatriement et matérialisation (octets identiques) -> deuxième version où un seul fichier change et
 //! seul ce blob voyage -> bail annoncé, expiré, relâché -> file d'envoi (entrée gardée, puis livrée) -> invitation
 //! d'une longue chaîne (préfixe + rattrapage) -> rapatriement avec bascule de pair.
+//! Test à part : une branche basse (n° 31 à 33 sous le seuil de numéro) est rattrapée par le repli complet.
 //!
 //! `cargo test -p cubelink-p2p --test hearth_net`
 
@@ -670,4 +671,105 @@ async fn scenario() {
     a.world.release(&g1, &p1.collection).await.unwrap();
     let err = c.world.fetch(&c.ep, &g1, &[a.addr()], &p1.collection, p1.total_size, &wait).await.unwrap_err();
     assert!(matches!(err, SyncError::Net(_)), "{err}");
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// Une branche basse (#60) : la tête d'une branche de numéro inférieur au seuil de `GetVersions` est rattrapée
+// ---------------------------------------------------------------------------------------------------------
+
+/// Version `number` d'un signataire, datée de façon à ne pas toucher le quota horaire par auteur.
+fn spaced_version(signer: &Identity, group: GroupId, number: u64, parent: Option<VersionId>) -> SignedVersion {
+    let header = VersionHeader {
+        group_id: group,
+        number,
+        parent,
+        epoch: 0,
+        author: signer.peer_key(),
+        pack_hash: pack().manifest_hash,
+        created_at: 1_800_000_000 + number * 4_000 + u64::from(signer.peer_key()[0]),
+        played_secs: 600,
+        kind: VersionKind::Session,
+        collection: [number as u8; 32],
+        total_size: 1,
+    };
+    SignedVersion::sign(signer, header).unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn lower_branch_is_fetched() {
+    tokio::time::timeout(Duration::from_secs(60), lower_branch()).await.expect("le test ne doit pas dépasser 1 minute");
+}
+
+async fn lower_branch() {
+    let (a, b, c) = (node(false).await, node(false).await, node(false).await);
+    for (x, y) in [(&a, &b), (&a, &c), (&b, &c)] {
+        x.befriend(y);
+        y.befriend(x);
+    }
+    let g = GroupId::random();
+    let key = GroupKey::random();
+    let create = SignedOp::create(&*a.ident, g, "Les copains", pack(), &BTreeSet::from([b.key, c.key])).unwrap();
+    let group = a.delegate.store.create(&create, key.clone()).unwrap();
+    a.delegate.groups.lock().unwrap().insert(g, group);
+    for peer in [&b, &c] {
+        let conn = HearthConn::connect(&a.ep, peer.addr()).await.unwrap();
+        conn.send_invite(&a.with_group(&g, |g| g.ops().to_vec()), &key).await.unwrap();
+    }
+
+    // Tout le monde a les n° 1 à 30 (écrites par A).
+    let mut main: Vec<SignedVersion> = Vec::new();
+    for n in 1..=50 {
+        let parent = main.last().map(SignedVersion::id);
+        main.push(spaced_version(&a.ident, g, n, parent));
+    }
+    for node in [&a, &b, &c] {
+        for v in &main[..30] {
+            node.with_group(&g, |gr| gr.add_version(v.clone())).unwrap();
+        }
+    }
+    // B publie les n° 31 à 33 (parent n° 30) et C les reçoit ; A et C continuent jusqu'à la n° 50 de leur côté.
+    let mut low: Vec<SignedVersion> = Vec::new();
+    for n in 31..=33 {
+        let parent = low.last().map(SignedVersion::id).or(Some(main[29].id()));
+        low.push(spaced_version(&b.ident, g, n, parent));
+    }
+    for v in &low {
+        b.with_group(&g, |gr| gr.add_version(v.clone())).unwrap();
+        c.with_group(&g, |gr| gr.add_version(v.clone())).unwrap();
+    }
+    for v in &main[30..] {
+        a.with_group(&g, |gr| gr.add_version(v.clone())).unwrap();
+        c.with_group(&g, |gr| gr.add_version(v.clone())).unwrap();
+    }
+    let (head_main, head_low) = (main[49].id(), low[2].id());
+    let mut want = vec![head_main, head_low];
+    want.sort();
+    assert_eq!(c.with_group(&g, |gr| gr.heads()).len(), 2, "C voit la fourche");
+    assert_eq!(a.with_group(&g, |gr| gr.heads()), vec![head_main], "A ne voit que sa branche");
+
+    // A sonde C : C annonce [50, 33]. Le seuil de A (n° 49) ne ramène pas la n° 33.
+    let conn = HearthConn::connect(&a.ep, c.addr()).await.unwrap();
+    let (seq, heads) = a.with_group(&g, |gr| (gr.state().op_seq, gr.heads()));
+    let st = conn.hello(&g, seq, &heads).await.unwrap();
+    let mut announced = st.heads.clone();
+    announced.sort();
+    assert_eq!(announced, want);
+    let known = |id: &VersionId| a.with_group(&g, |gr| gr.graph().contains(id));
+    assert!(conn.fetch_versions(&g, 49).await.unwrap().iter().all(|v| v.id() != head_low), "le seuil seul ne la sert pas");
+    // Sans repli (déjà tenté), on ne rattrape rien de plus : pas de télécharge-tout à chaque tour.
+    let first = conn.fetch_versions_reaching(&g, 49, &st.heads, known, false).await.unwrap();
+    assert!(first.iter().all(|v| v.id() != head_low));
+
+    // Avec le repli, la lignée complète arrive d'un bloc et la fourche devient visible.
+    let vs = conn.fetch_versions_reaching(&g, 49, &st.heads, known, true).await.unwrap();
+    let report = a.with_group(&g, |gr| gr.add_versions(vs)).unwrap();
+    assert!(report.rejected.is_empty(), "{report:?}");
+    let mut now = a.with_group(&g, |gr| gr.heads());
+    now.sort();
+    assert_eq!(now, want, "A voit les deux têtes");
+    assert!(a.with_group(&g, |gr| low.iter().all(|v| gr.graph().contains(&v.id()))));
+
+    // Une fois la tête connue, plus rien à rattraper : pas de second téléchargement complet.
+    let again = conn.fetch_versions_reaching(&g, 49, &st.heads, known, true).await.unwrap();
+    assert!(again.iter().all(|v| v.header.number > 49));
 }

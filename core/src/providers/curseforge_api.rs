@@ -244,11 +244,7 @@ impl CfApi {
     pub fn with_base(base: impl Into<String>, key: impl Into<String>) -> Self {
         let key: String = key.into();
         Self {
-            http: reqwest::Client::builder()
-                .user_agent(concat!("cubelink/", env!("CARGO_PKG_VERSION")))
-                .connect_timeout(std::time::Duration::from_secs(15))
-                .build()
-                .unwrap_or_default(),
+            http: super::http::api_client(concat!("cubelink/", env!("CARGO_PKG_VERSION")), true),
             base: base.into().trim_end_matches('/').to_string(),
             key: Some(key).filter(|k| !k.is_empty()),
         }

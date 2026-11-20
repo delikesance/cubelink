@@ -137,9 +137,6 @@ export function TransferPanel({ t, failure, extraError, extra, status, onCancell
           {unknownMods.length > 1 ? `${unknownMods.length} mods reçus ne sont pas référencés` : "Un mod reçu n'est pas référencé"} dans les catalogues : {unknownMods.join(", ")}.
         </span>
       )}
-      {p?.via_relay && (
-        <span className="inst-note">Transfert via un relais (serveur intermédiaire), plus lent qu'une connexion directe. Les fichiers restent vérifiés par leur empreinte.</span>
-      )}
     </>
   );
 }

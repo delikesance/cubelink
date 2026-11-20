@@ -112,7 +112,7 @@ Décision du 2026-11-09 : pour ce projet, la limite globale de 3 coéquipiers es
 | T4 | `e2e/04-launch.spec.ts` | Lancement hors ligne et connexion par le tunnel |
 | T5 | `e2e/05-unknown-mod.spec.ts` | Mod maison transféré, signalé, lancé, hash identique |
 | T6 | `e2e/06-failures.spec.ts` | Hôte hors ligne, coupure, hash incorrect, disque plein, jeton expiré |
-| T7 | `e2e/07-relay.spec.ts` | Direct impossible → relais |
+| T7 | `e2e/07-reseau.spec.ts` | Réseau sans relais (n0 retiré, #55) : anciens réglages, test de connexion |
 | T8 | `e2e/08-a11y.spec.ts` | Clavier seul, focus, contrastes |
 | T9 | `e2e/09-sizes.spec.ts` | 960×600 et 1280×720, aucune action hors écran |
 | T10 | `e2e/10-full.spec.ts` | Scénario complet T1→T5 enchaîné, 10 fois de suite |

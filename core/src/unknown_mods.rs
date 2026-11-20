@@ -130,7 +130,13 @@ async fn query_curseforge(fps: &[CfCandidate], cf: &CfApi, report: &mut UnknownR
                     matched.entry(m.file.file_fingerprint as u32).or_default().push((m.id, m.file.id, sha1));
                 }
             }
-            Err(e) => tracing::warn!("reconnaissance CurseForge impossible : {e}"),
+            Err(e) => {
+                tracing::warn!("reconnaissance CurseForge impossible : {e}");
+                // Hors ligne : les lots suivants attendraient 30 s chacun pour rien.
+                if matches!(e, Error::Network(_)) {
+                    break;
+                }
+            }
         }
     }
     let mut found: HashSet<String> = HashSet::new();
@@ -184,8 +190,10 @@ pub async fn find_unknown_from_manifest(
 }
 
 async fn query_hashed(hashed: &[(String, String)], client: &ModrinthClient, report: &mut UnknownReport) {
+    // Après un échec réseau, les lots suivants échoueraient aussi (30 s chacun) : on les marque tous « non vérifiés ».
+    let mut offline = false;
     for (i, batch) in hashed.chunks(BATCH_SIZE).enumerate() {
-        if i >= MAX_BATCHES {
+        if i >= MAX_BATCHES || offline {
             report.unchecked.extend(batch.iter().map(|(p, _)| p.clone()));
             continue;
         }
@@ -196,7 +204,10 @@ async fn query_hashed(hashed: &[(String, String)], client: &ModrinthClient, repo
                 report.known.extend(k);
                 report.unknown.extend(u);
             }
-            Err(_) => report.unchecked.extend(batch.iter().map(|(p, _)| p.clone())),
+            Err(e) => {
+                offline = matches!(e, Error::Network(_));
+                report.unchecked.extend(batch.iter().map(|(p, _)| p.clone()));
+            }
         }
     }
 }

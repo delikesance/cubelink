@@ -1194,6 +1194,7 @@ dependencies = [
  "cubelink-p2p",
  "dotenvy",
  "hex",
+ "image",
  "iroh",
  "iroh-blobs",
  "raw-window-handle",

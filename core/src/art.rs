@@ -4,15 +4,17 @@
 //! La récupération en ligne est « au mieux » : rien ici ne doit jamais faire échouer une installation.
 //! Les noms de fichiers sont générés (`icon.<ext>`, `shot-N.<ext>`), jamais dérivés d'une URL.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use base64::Engine as _;
-use futures_util::StreamExt;
+use futures_util::{FutureExt, StreamExt};
+use tokio::time::{timeout_at, Instant};
 
 use crate::browse::{BrowseSource, Providers};
 use crate::instance::InstanceStore;
 use crate::providers::curseforge_api::{self as cfapi};
+use crate::providers::http;
 use crate::providers::modrinth_api::SearchFilters;
 use crate::types::{Error, Instance, InstanceArt, Result};
 
@@ -24,8 +26,13 @@ pub const MAX_IMAGE_BYTES: u64 = 12 * 1024 * 1024;
 /// Taille maximale d'une image choisie par l'utilisateur.
 pub const MAX_LOCAL_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
 pub const MAX_SCREENSHOTS: usize = 6;
-/// Durée maximale de toute la récupération d'art d'une installation.
+/// Durée maximale de toute la récupération d'art d'une installation. À l'échéance, on applique ce qui est
+/// arrivé (icône, captures déjà reçues) au lieu de tout jeter.
 const FETCH_BUDGET: Duration = Duration::from_secs(60);
+/// Nombre de captures téléchargées en même temps.
+const SHOT_PARALLELISM: usize = 3;
+/// Âge au-delà duquel un dossier `art.tmp*` est un reste d'un arrêt brutal (bien plus que `FETCH_BUDGET`).
+const STALE_STAGE: Duration = Duration::from_secs(3600);
 
 fn invalid(m: impl Into<String>) -> Error {
     Error::Invalid(m.into())
@@ -63,20 +70,17 @@ fn check_image_url(url: &str, allow_loopback: bool) -> Result<()> {
 
 fn client() -> &'static reqwest::Client {
     static C: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    // Pas de délai global par image : une capture lente mais vivante ne doit pas être coupée à 20 s. Le temps total
+    // est borné par l'échéance de `fetch_art` ; le délai de lecture coupe un flux muet.
     C.get_or_init(|| {
-        reqwest::Client::builder()
-            .user_agent(concat!("cubelink/", env!("CARGO_PKG_VERSION")))
-            .connect_timeout(Duration::from_secs(8))
-            .timeout(Duration::from_secs(20))
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .unwrap_or_default()
+        http::client_with(http::Timeouts::DOWNLOAD, Some(concat!("cubelink/", env!("CARGO_PKG_VERSION"))), false)
     })
 }
 
-/// Écriture atomique : fichier temporaire puis renommage.
+/// Écriture atomique : fichier temporaire puis renommage. Le temporaire est unique : deux écritures simultanées du
+/// même fichier (miniature demandée par deux composants à la fois) ne se marchent pas dessus.
 fn write_atomic(dir: &Path, name: &str, bytes: &[u8]) -> Result<()> {
-    let tmp = dir.join(format!("{name}.tmp"));
+    let tmp = dir.join(format!("{name}.{}.tmp", uuid::Uuid::new_v4().simple()));
     let res = std::fs::write(&tmp, bytes).and_then(|_| std::fs::rename(&tmp, dir.join(name)));
     if let Err(e) = res {
         let _ = std::fs::remove_file(&tmp);
@@ -117,7 +121,8 @@ struct Remote {
     summary: String,
     color: Option<String>,
     icon_url: Option<String>,
-    /// Par capture : l'URL à essayer d'abord (pleine résolution), puis celle de secours.
+    /// Chaque capture, dans l'ordre d'affichage : l'URL à télécharger d'abord et, au besoin, un repli (version réduite
+    /// de Modrinth, environ 350 px : trop petite pour la visionneuse et la bannière, d'où le plein format d'abord).
     shot_urls: Vec<(String, Option<String>)>,
     page_url: Option<String>,
 }
@@ -153,9 +158,9 @@ async fn remote_modrinth(p: &Providers, id: &str) -> Result<Remote> {
         icon_url: proj.icon_url.filter(|u| !u.is_empty()),
         shot_urls: gallery
             .into_iter()
-            .map(|g| match g.raw_url.filter(|r| !r.is_empty() && *r != g.url) {
-                Some(raw) => (raw, Some(g.url)),
-                None => (g.url, None),
+            .filter_map(|g| match g.raw_url.filter(|r| !r.is_empty() && *r != g.url) {
+                Some(raw) => Some((raw, Some(g.url).filter(|u| !u.is_empty()))),
+                None => Some(g.url).filter(|u| !u.is_empty()).map(|u| (u, None)),
             })
             .collect(),
         page_url: Some(format!("https://modrinth.com/modpack/{slug}")),
@@ -176,39 +181,33 @@ async fn remote_curseforge(p: &Providers, id: &str) -> Result<Remote> {
     })
 }
 
-/// Récupère l'art d'un projet et écrit les images dans `stage` (dossier vide, créé par l'appelant).
-/// Seul l'échec des métadonnées est une erreur : une image refusée ou inaccessible est ignorée.
-pub async fn fetch_art(p: &Providers, source: BrowseSource, project_id: &str, stage: &Path) -> Result<InstanceArt> {
-    let r = match source {
-        BrowseSource::Modrinth => remote_modrinth(p, project_id).await?,
-        BrowseSource::Curseforge => remote_curseforge(p, project_id).await?,
+/// Récupère l'art d'un projet et écrit les images dans `stage` (dossier vide, créé par l'appelant), sans dépasser
+/// `deadline`. Seul l'échec des métadonnées (y compris leur dépassement) est une erreur : une image refusée,
+/// inaccessible ou trop lente est ignorée, et à l'échéance on garde ce qui est déjà arrivé.
+pub async fn fetch_art(p: &Providers, source: BrowseSource, project_id: &str, stage: &Path, deadline: Instant) -> Result<InstanceArt> {
+    let meta = async {
+        match source {
+            BrowseSource::Modrinth => remote_modrinth(p, project_id).await,
+            BrowseSource::Curseforge => remote_curseforge(p, project_id).await,
+        }
     };
+    let r = timeout_at(deadline, meta).await.map_err(|_| Error::Network("délai dépassé pour les métadonnées".into()))??;
+    // L'icône d'abord : c'est l'image la plus utile, elle ne doit pas attendre les captures.
     let icon = match &r.icon_url {
-        Some(u) => match download_image(u, p.allow_loopback, stage, "icon").await {
-            Ok(n) => Some(n),
-            Err(e) => {
+        Some(u) => match timeout_at(deadline, download_image(u, p.allow_loopback, stage, "icon")).await {
+            Ok(Ok(n)) => Some(n),
+            Ok(Err(e)) => {
                 tracing::warn!("art : icône ignorée : {e}");
+                None
+            }
+            Err(_) => {
+                tracing::warn!("art : icône ignorée : délai dépassé");
                 None
             }
         },
         None => None,
     };
-    let mut screenshots = Vec::new();
-    for (url, fallback) in &r.shot_urls {
-        if screenshots.len() >= MAX_SCREENSHOTS {
-            break;
-        }
-        let stem = format!("shot-{}", screenshots.len() + 1);
-        let mut got = download_image(url, p.allow_loopback, stage, &stem).await;
-        if let (Err(e), Some(small)) = (&got, fallback) {
-            tracing::warn!("art : capture pleine résolution ignorée ({e}), version réduite à la place");
-            got = download_image(small, p.allow_loopback, stage, &stem).await;
-        }
-        match got {
-            Ok(n) => screenshots.push(n),
-            Err(e) => tracing::warn!("art : capture ignorée : {e}"),
-        }
-    }
+    let screenshots = download_screenshots(&r.shot_urls, p.allow_loopback, stage, deadline).await;
     Ok(InstanceArt {
         source: source.as_str().to_string(),
         project_id: project_id.to_string(),
@@ -222,40 +221,157 @@ pub async fn fetch_art(p: &Providers, source: BrowseSource, project_id: &str, st
     })
 }
 
+/// Télécharge les captures (`SHOT_PARALLELISM` à la fois, on s'arrête à `MAX_SCREENSHOTS` réussies) et renvoie les
+/// noms de fichiers dans l'ordre d'affichage, numérotés sans trou (`shot-1`, `shot-2`…). Une capture introuvable
+/// est remplacée par la suivante de la galerie (au plus `2 * MAX_SCREENSHOTS` tentatives). À l'échéance, les
+/// téléchargements en cours sont abandonnés et seules les captures complètes sont gardées.
+async fn download_screenshots(urls: &[(String, Option<String>)], allow_loopback: bool, stage: &Path, deadline: Instant) -> Vec<String> {
+    // Le nom (`shot-<rang>`) est fixé d'avance : pas de collision entre téléchargements parallèles.
+    let mut stream = futures_util::stream::iter(urls.iter().take(2 * MAX_SCREENSHOTS).cloned().enumerate())
+        // URL possédées : un `&String` dans le future le rendait non `Send` pour le compilateur (commande Tauri async).
+        .map(|(i, (url, fallback))| async move {
+            let stem = format!("shot-{}", i + 1);
+            let mut res = download_image(&url, allow_loopback, stage, &stem).await;
+            if let (Err(e), Some(small)) = (&res, fallback) {
+                tracing::debug!("art : original refusé ({e}), repli sur la version réduite");
+                res = download_image(&small, allow_loopback, stage, &stem).await;
+            }
+            (i, res)
+        })
+        .buffer_unordered(SHOT_PARALLELISM);
+    let mut got: Vec<(usize, String)> = Vec::new();
+    let mut take = |(i, res): (usize, Result<String>)| {
+        match res {
+            Ok(n) => got.push((i, n)),
+            Err(e) => tracing::warn!("art : capture ignorée : {e}"),
+        }
+        got.len()
+    };
+    loop {
+        match timeout_at(deadline, stream.next()).await {
+            Ok(Some(item)) => {
+                if take(item) >= MAX_SCREENSHOTS {
+                    break;
+                }
+            }
+            Ok(None) => break,
+            Err(_) => {
+                tracing::warn!("art : délai dépassé, captures restantes abandonnées");
+                // Ce qui est déjà terminé mais pas encore récupéré est gardé.
+                while let Some(Some(item)) = stream.next().now_or_never() {
+                    take(item);
+                }
+                break;
+            }
+        }
+    }
+    drop(stream); // abandonne les téléchargements en cours (l'écriture sur disque n'a lieu qu'une fois l'image reçue en entier)
+    got.sort_by_key(|(i, _)| *i);
+    // Au plus `MAX_SCREENSHOTS` : les images arrivées en plus (téléchargements parallèles) sont supprimées.
+    for (_, name) in got.split_off(got.len().min(MAX_SCREENSHOTS)) {
+        let _ = std::fs::remove_file(stage.join(name));
+    }
+    // Pas de trous dans la numérotation : on renomme vers le rang réel.
+    let mut names = Vec::with_capacity(got.len());
+    for (rank, (i, name)) in got.into_iter().enumerate() {
+        if i == rank {
+            names.push(name);
+            continue;
+        }
+        let ext = name.rsplit_once('.').map_or("", |(_, e)| e);
+        let new_name = format!("shot-{}.{ext}", rank + 1);
+        match std::fs::rename(stage.join(&name), stage.join(&new_name)) {
+            Ok(()) => names.push(new_name),
+            Err(e) => {
+                tracing::warn!("art : capture {name} non renumérotée : {e}");
+                let _ = std::fs::remove_file(stage.join(&name));
+            }
+        }
+    }
+    names
+}
+
+/// Supprime le dossier de préparation à la sortie, quelle qu'elle soit : erreur, panique ou abandon du future
+/// (délai de l'appelant, fermeture de l'app). Après un renommage réussi, il n'existe plus : ne fait alors rien.
+struct StageGuard(PathBuf);
+
+impl Drop for StageGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Supprime les dossiers de préparation (`art.tmp*`) laissés par un arrêt brutal. Les récents sont épargnés : ils
+/// appartiennent peut-être à un `apply_art` en cours sur la même instance.
+fn clean_stale_stages(art_dir: &Path) {
+    clean_stages_older_than(art_dir, STALE_STAGE);
+}
+
+fn clean_stages_older_than(art_dir: &Path, max_age: Duration) {
+    let Some(parent) = art_dir.parent() else { return };
+    let Ok(rd) = std::fs::read_dir(parent) else { return };
+    for e in rd.flatten() {
+        if !e.file_name().to_string_lossy().starts_with("art.tmp") {
+            continue;
+        }
+        let stale = e.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age > max_age);
+        if stale {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
+    }
+}
+
 /// Récupère l'art et remplace entièrement le dossier `art/` de l'instance, puis met à jour `instance.json`.
 pub async fn apply_art(p: &Providers, store: &InstanceStore, instance_id: &str, source: BrowseSource, project_id: &str) -> Result<Instance> {
+    apply_art_within(p, store, instance_id, source, project_id, FETCH_BUDGET).await
+}
+
+async fn apply_art_within(
+    p: &Providers,
+    store: &InstanceStore,
+    instance_id: &str,
+    source: BrowseSource,
+    project_id: &str,
+    budget: Duration,
+) -> Result<Instance> {
+    let deadline = Instant::now() + budget;
     let art_dir = store.art_dir(instance_id)?;
     store.get(instance_id)?;
-    let stage = art_dir.with_file_name("art.tmp");
-    let _ = std::fs::remove_dir_all(&stage);
+    clean_stale_stages(&art_dir);
+    // Nom unique : deux `apply_art` simultanés sur la même instance ne partagent jamais de dossier.
+    let stage = art_dir.with_file_name(format!("art.tmp-{}", uuid::Uuid::new_v4().simple()));
     std::fs::create_dir_all(&stage)?;
-    let art = match fetch_art(p, source, project_id, &stage).await {
-        Ok(a) => a,
-        Err(e) => {
-            let _ = std::fs::remove_dir_all(&stage);
-            return Err(e);
-        }
-    };
+    let _guard = StageGuard(stage.clone());
+    let art = fetch_art(p, source, project_id, &stage, deadline).await?;
     let _ = std::fs::remove_dir_all(&art_dir);
     if let Err(e) = std::fs::rename(&stage, &art_dir) {
-        let _ = std::fs::remove_dir_all(&stage);
-        return Err(e.into());
+        // Un `apply_art` concurrent vient de recréer `art/` entre-temps : le dernier arrivé gagne.
+        tracing::warn!("art : remplacement de art/ en conflit ({e}), nouvel essai");
+        let _ = std::fs::remove_dir_all(&art_dir);
+        std::fs::rename(&stage, &art_dir)?;
     }
     store.set_art(instance_id, Some(art))
 }
 
 /// Meilleur effort (installation d'un modpack) : ne renvoie jamais d'erreur, journalise l'échec et
-/// rend l'instance inchangée. Borné dans le temps.
+/// rend l'instance inchangée. Borné dans le temps par `FETCH_BUDGET` ; au dépassement, l'art déjà reçu est appliqué.
 pub async fn try_apply_art(p: &Providers, store: &InstanceStore, instance: Instance, source: BrowseSource, project_id: &str) -> Instance {
+    try_apply_art_within(p, store, instance, source, project_id, FETCH_BUDGET).await
+}
+
+async fn try_apply_art_within(
+    p: &Providers,
+    store: &InstanceStore,
+    instance: Instance,
+    source: BrowseSource,
+    project_id: &str,
+    budget: Duration,
+) -> Instance {
     let id = instance.id.clone();
-    match tokio::time::timeout(FETCH_BUDGET, apply_art(p, store, &id, source, project_id)).await {
-        Ok(Ok(updated)) => updated,
-        Ok(Err(e)) => {
+    match apply_art_within(p, store, &id, source, project_id, budget).await {
+        Ok(updated) => updated,
+        Err(e) => {
             tracing::warn!("art : récupération impossible pour {id} : {e}");
-            instance
-        }
-        Err(_) => {
-            tracing::warn!("art : délai dépassé pour {id}");
             instance
         }
     }
@@ -448,7 +564,11 @@ pub fn image_data_url_sized(store: &InstanceStore, instance_id: &str, file: &str
             if let Ok(rd) = std::fs::read_dir(&thumbs) {
                 for e in rd.flatten() {
                     let n = e.file_name().to_string_lossy().into_owned();
-                    if n.starts_with(&prefix) && n != format!("{cached}.jpg") && n != format!("{cached}.png") {
+                    // Un `.tmp` récent est l'écriture en cours d'un appel concurrent : on n'y touche pas ; un vieux est
+                    // le reste d'un arrêt brutal.
+                    let tmp_in_progress = n.ends_with(".tmp")
+                        && !e.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age > STALE_STAGE);
+                    if n.starts_with(&prefix) && !tmp_in_progress && n != format!("{cached}.jpg") && n != format!("{cached}.png") {
                         let _ = std::fs::remove_file(e.path());
                     }
                 }
@@ -693,6 +813,26 @@ mod tests {
         (t, s, i)
     }
 
+    /// Aucun dossier de préparation `art.tmp*` à côté de `art/`.
+    fn no_stage_left(art_dir: &Path) -> bool {
+        std::fs::read_dir(art_dir.parent().unwrap()).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().starts_with("art.tmp"))
+    }
+
+    /// Sert `body` sur `p` après `delay_ms` millisecondes.
+    async fn serve_slow(s: &MockServer, p: &str, body: &[u8], delay_ms: u64) {
+        Mock::given(method("GET"))
+            .and(path(p.to_string()))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(body.to_vec()).set_delay(Duration::from_millis(delay_ms)))
+            .mount(s)
+            .await;
+    }
+
+    /// Projet Modrinth `id` avec une icône (`/img/icon`) et `n` captures `/img/0`…
+    async fn project_with_shots(mr: &MockServer, id: &str, n: usize) {
+        let gallery: Vec<_> = (0..n).map(|k| json!({"url": format!("{}/img/{k}", mr.uri()), "featured": false, "ordering": k})).collect();
+        modrinth_project(mr, id, json!({"id": id, "title": "T", "icon_url": format!("{}/img/icon", mr.uri()), "gallery": gallery})).await;
+    }
+
     async fn serve(s: &MockServer, p: &str, body: &[u8]) {
         Mock::given(method("GET")).and(path(p.to_string())).respond_with(ResponseTemplate::new(200).set_body_bytes(body.to_vec())).mount(s).await;
     }
@@ -759,7 +899,7 @@ mod tests {
         assert_eq!(a.page_url.as_deref(), Some("https://modrinth.com/modpack/mon-pack"));
         let dir = s.art_dir(&i.id).unwrap();
         assert!(dir.join("icon.png").is_file() && dir.join("shot-1.jpg").is_file());
-        assert!(!dir.with_file_name("art.tmp").exists());
+        assert!(no_stage_left(&dir));
         assert_eq!(s.get(&i.id).unwrap().art.unwrap().title, "Mon Pack");
         // Le data URL est lisible et le type vient des octets.
         assert!(image_data_url(&s, &i.id, "shot-1.jpg").unwrap().starts_with("data:image/jpeg;base64,"));
@@ -871,6 +1011,146 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn failed_screenshots_are_replaced_by_the_next_ones() {
+        let (mr, cf) = (MockServer::start().await, MockServer::start().await);
+        project_with_shots(&mr, "P12", 8).await;
+        serve(&mr, "/img/icon", PNG).await;
+        // Les 2e et 5e sont absentes (404) : on en garde quand même 6, sur les 8 de la galerie.
+        for k in [0, 2, 3, 5, 6, 7] {
+            serve(&mr, &format!("/img/{k}"), PNG).await;
+        }
+        let (_t, s, i) = store();
+        let a = apply_art(&providers(&mr, &cf, true), &s, &i.id, BrowseSource::Modrinth, "P12").await.unwrap().art.unwrap();
+        assert_eq!(a.screenshots.len(), MAX_SCREENSHOTS);
+        let on_disk = std::fs::read_dir(s.art_dir(&i.id).unwrap()).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with("shot-")).count();
+        assert_eq!(on_disk, MAX_SCREENSHOTS);
+    }
+
+    #[tokio::test]
+    async fn slow_screenshots_are_kept_partially_at_the_deadline() {
+        let (mr, cf) = (MockServer::start().await, MockServer::start().await);
+        project_with_shots(&mr, "P6", 6).await;
+        serve(&mr, "/img/icon", PNG).await;
+        // 0 et 1 rapides ; 2, 3 et 4 lentes (au-delà de l'échéance) ; 5 rapide mais derrière dans la file.
+        for k in [0, 1, 5] {
+            serve(&mr, &format!("/img/{k}"), if k == 1 { JPG } else { PNG }).await;
+        }
+        for k in [2, 3, 4] {
+            serve_slow(&mr, &format!("/img/{k}"), PNG, 5_000).await;
+        }
+        let (_t, s, i) = store();
+        let p = providers(&mr, &cf, true);
+        let t0 = std::time::Instant::now();
+        let u = apply_art_within(&p, &s, &i.id, BrowseSource::Modrinth, "P6", Duration::from_millis(800)).await.unwrap();
+        assert!(t0.elapsed() < Duration::from_secs(3), "l'échéance coupe les captures lentes");
+        let a = u.art.unwrap();
+        assert_eq!(a.icon.as_deref(), Some("icon.png"));
+        // Les captures arrivées sont appliquées, dans l'ordre, numérotées sans trou.
+        assert_eq!(a.screenshots, vec!["shot-1.png", "shot-2.jpg"]);
+        let dir = s.art_dir(&i.id).unwrap();
+        let mut names: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        names.sort();
+        assert_eq!(names, vec!["icon.png", "shot-1.png", "shot-2.jpg"], "aucun résidu");
+        assert!(no_stage_left(&dir));
+        assert_eq!(s.get(&i.id).unwrap().art.unwrap().icon.as_deref(), Some("icon.png"));
+    }
+
+    #[tokio::test]
+    async fn try_apply_keeps_icon_when_screenshots_never_answer() {
+        let (mr, cf) = (MockServer::start().await, MockServer::start().await);
+        project_with_shots(&mr, "P7", 3).await;
+        serve(&mr, "/img/icon", PNG).await;
+        for k in 0..3 {
+            serve_slow(&mr, &format!("/img/{k}"), PNG, 30_000).await;
+        }
+        let (_t, s, i) = store();
+        let out = try_apply_art_within(&providers(&mr, &cf, true), &s, i.clone(), BrowseSource::Modrinth, "P7", Duration::from_millis(600)).await;
+        let a = out.art.expect("l'art partiel est appliqué, l'instance n'est pas rendue inchangée");
+        assert_eq!(a.icon.as_deref(), Some("icon.png"));
+        assert!(a.screenshots.is_empty());
+        assert!(no_stage_left(&s.art_dir(&i.id).unwrap()));
+    }
+
+    #[tokio::test]
+    async fn screenshots_download_in_parallel() {
+        let (mr, cf) = (MockServer::start().await, MockServer::start().await);
+        project_with_shots(&mr, "P8", 6).await;
+        for k in 0..6 {
+            serve_slow(&mr, &format!("/img/{k}"), PNG, 300).await;
+        }
+        let (_t, s, i) = store();
+        let t0 = std::time::Instant::now();
+        let a = apply_art(&providers(&mr, &cf, true), &s, &i.id, BrowseSource::Modrinth, "P8").await.unwrap().art.unwrap();
+        let took = t0.elapsed();
+        assert_eq!(a.screenshots.len(), 6);
+        // 6 × 300 ms en série = 1,8 s ; par paquets de 3 : environ 600 ms.
+        assert!(took < Duration::from_millis(1500), "téléchargements en série ? {took:?}");
+    }
+
+    #[tokio::test]
+    async fn metadata_timeout_is_an_error_without_leftovers() {
+        let (mr, cf) = (MockServer::start().await, MockServer::start().await);
+        Mock::given(method("GET")).respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(10))).mount(&mr).await;
+        let (_t, s, i) = store();
+        let p = providers(&mr, &cf, true);
+        assert!(apply_art_within(&p, &s, &i.id, BrowseSource::Modrinth, "P9", Duration::from_millis(300)).await.is_err());
+        assert!(!s.art_dir(&i.id).unwrap().exists() && no_stage_left(&s.art_dir(&i.id).unwrap()));
+    }
+
+    #[tokio::test]
+    async fn dropped_future_leaves_no_stage() {
+        let (mr, cf) = (MockServer::start().await, MockServer::start().await);
+        project_with_shots(&mr, "P10", 2).await;
+        serve(&mr, "/img/icon", PNG).await;
+        serve_slow(&mr, "/img/0", PNG, 30_000).await;
+        serve_slow(&mr, "/img/1", PNG, 30_000).await;
+        let (_t, s, i) = store();
+        let p = providers(&mr, &cf, true);
+        let dir = s.art_dir(&i.id).unwrap();
+        // L'appelant abandonne le future en plein téléchargement : le garde nettoie.
+        let r = tokio::time::timeout(Duration::from_millis(500), apply_art(&p, &s, &i.id, BrowseSource::Modrinth, "P10")).await;
+        assert!(r.is_err());
+        assert!(no_stage_left(&dir) && !dir.exists());
+        assert_eq!(s.get(&i.id).unwrap().art, None);
+    }
+
+    #[tokio::test]
+    async fn concurrent_applies_do_not_collide() {
+        let (mr, cf) = (MockServer::start().await, MockServer::start().await);
+        project_with_shots(&mr, "P11", 4).await;
+        serve(&mr, "/img/icon", PNG).await;
+        for k in 0..4 {
+            serve_slow(&mr, &format!("/img/{k}"), PNG, 100).await;
+        }
+        let (_t, s, i) = store();
+        let p = providers(&mr, &cf, true);
+        let (a, b) = tokio::join!(
+            apply_art(&p, &s, &i.id, BrowseSource::Modrinth, "P11"),
+            apply_art(&p, &s, &i.id, BrowseSource::Modrinth, "P11")
+        );
+        assert!(a.is_ok() && b.is_ok(), "{a:?} / {b:?}");
+        let dir = s.art_dir(&i.id).unwrap();
+        assert!(no_stage_left(&dir));
+        let mut names: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        names.sort();
+        assert_eq!(names, vec!["icon.png", "shot-1.png", "shot-2.png", "shot-3.png", "shot-4.png"]);
+        assert_eq!(s.get(&i.id).unwrap().art.unwrap().screenshots.len(), 4);
+    }
+
+    #[test]
+    fn stale_stages_are_cleaned_but_recent_ones_kept() {
+        let (_t, s, i) = store();
+        let art_dir = s.art_dir(&i.id).unwrap();
+        let (old, recent) = (art_dir.with_file_name("art.tmp-vieux"), art_dir.with_file_name("art.tmp-recent"));
+        std::fs::create_dir_all(&old).unwrap();
+        // Pas de `set_modified` sur un dossier (impossible sous Windows) : le seuil d'âge est un paramètre.
+        std::thread::sleep(Duration::from_millis(400));
+        std::fs::create_dir_all(&recent).unwrap();
+        clean_stages_older_than(&art_dir, Duration::from_millis(200));
+        assert!(!old.exists() && recent.exists());
+    }
+
+    #[tokio::test]
     async fn network_failure_never_fails_install() {
         let (mr, cf) = (MockServer::start().await, MockServer::start().await);
         Mock::given(method("GET")).respond_with(ResponseTemplate::new(500)).mount(&mr).await;
@@ -879,7 +1159,7 @@ mod tests {
         assert!(apply_art(&p, &s, &i.id, BrowseSource::Modrinth, "P").await.is_err());
         let out = try_apply_art(&p, &s, i.clone(), BrowseSource::Modrinth, "P").await;
         assert_eq!(out, i);
-        assert!(!s.art_dir(&i.id).unwrap().exists() && !s.art_dir(&i.id).unwrap().with_file_name("art.tmp").exists());
+        assert!(!s.art_dir(&i.id).unwrap().exists() && no_stage_left(&s.art_dir(&i.id).unwrap()));
         assert_eq!(s.get(&i.id).unwrap().art, None);
         // Projet invalide côté CurseForge : même chose.
         let out = try_apply_art(&p, &s, i.clone(), BrowseSource::Curseforge, "pas-un-nombre").await;
@@ -1027,6 +1307,26 @@ mod tests {
         let p = dir.join(name);
         std::fs::write(&p, bytes).unwrap();
         set_custom_image(s, id, &p.display().to_string(), role).unwrap();
+    }
+
+    /// Les commandes tournent en parallèle (`spawn_blocking`) : la même miniature demandée par plusieurs threads à la
+    /// fois doit réussir partout, ne laisser qu'un fichier et aucun `.tmp`.
+    #[test]
+    fn thumbnail_concurrent_requests_leave_one_file() {
+        let (t, s, i) = store();
+        custom(&s, &i.id, t.path(), "big.jpg", &encode_img(1600, 900, false, image::ImageFormat::Jpeg), "icon");
+        let urls: Vec<String> = std::thread::scope(|sc| {
+            let hs: Vec<_> = (0..8).map(|_| sc.spawn(|| image_data_url(&s, &i.id, "icon.jpg").unwrap())).collect();
+            hs.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        assert!(urls.iter().all(|u| u.starts_with("data:image/jpeg;base64,")));
+        let names: Vec<String> = std::fs::read_dir(s.art_dir(&i.id).unwrap().join(".thumbs"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names.len(), 1, "une seule miniature, aucun .tmp : {names:?}");
+        assert!(!names[0].ends_with(".tmp"));
     }
 
     #[test]

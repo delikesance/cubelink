@@ -28,6 +28,19 @@ describe("Mon code ami", () => {
     expect(screen.getByLabelText(`Mon code ami : ${expected}`)).toBeTruthy();
   });
 
+  it("redemande le code quand mes adresses changent (port ouvert sur la box après le démarrage)", async () => {
+    const svc = fake();
+    let notify = () => {};
+    let code = "mcl1-aaaa";
+    const services: Services = { ...svc, friendMyCode: async () => code, onFriendCodeChanged: (cb) => { notify = cb; return () => { notify = () => {}; }; } };
+    mount(services);
+    expect(await screen.findByText("mcl1-aaaa")).toBeTruthy();
+    code = "mcl1-bbbb";
+    act(() => notify());
+    expect(await screen.findByText("mcl1-bbbb")).toBeTruthy();
+    expect(screen.queryByText("Chargement de ton code…")).toBeNull();
+  });
+
   it("copie dans le presse-papiers puis le message disparaît", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });

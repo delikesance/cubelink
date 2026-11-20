@@ -1,7 +1,8 @@
 // T8 : accessibilite au CLAVIER de tous les ecrans, sur la VRAIE application (CDP).
 // Controles manuels via le DOM et l'arbre d'accessibilite du navigateur (@axe-core/playwright n'est pas installe).
-// Refonte 2 : Parametres / Mentions sont des ecrans (plus des dialogues), Creer = choix puis formulaire,
-// Mods / Parametres d'instance / Logs / Amis sont des tiroirs (<Drawer>) de l'accueil.
+// Refonte 2 : Parametres / Mentions sont des ecrans (plus des dialogues), Creer = choix puis formulaire.
+// Refonte de l'accueil : Amis = colonne de l'accueil + onglet Amis des Parametres (plus d'ecran ni de tiroir) ; Mods et Logs
+// = onglets de la page du modpack ; les dialogues modaux restants sont des confirmations (<Modal>).
 import { test, expect, waitForRoute } from './harness/fixtures';
 import { SCREENS, prepare, gotoScreen, tabThrough, smallTargets, contrastIssues, unnamedControls, type Screen } from './helpers/e2e4-lib';
 
@@ -35,14 +36,14 @@ test.describe('T8 accessibilite clavier', () => {
     }
   });
 
-  test('onglets Amis : fleches gauche/droite changent d\'onglet', async ({ appA }) => {
+  test('Amis : #/friends ouvre Parametres > Amis (onglet selectionne, demandes, ajout et code presents)', async ({ appA }) => {
     const page = appA.page;
     await prepare(appA);
-    await gotoScreen(page, byId('friends-requests'));
-    await page.getByRole('tab', { name: /Demandes/ }).focus();
-    await page.keyboard.press('ArrowRight');
-    await expect(page.getByRole('tab', { name: 'Tes amis' })).toHaveAttribute('aria-selected', 'true');
-    await expect(page.getByRole('tab', { name: 'Tes amis' })).toBeFocused();
+    await gotoScreen(page, byId('friends-list'));
+    await expect(page.getByRole('tab', { name: 'Amis', exact: true })).toHaveAttribute('aria-selected', 'true');
+    await expect(page.getByRole('heading', { name: /Demandes reçues/ })).toBeVisible();
+    await expect(page.getByLabel('Code ami de ton ami')).toBeVisible();
+    await expect(page.getByLabel(/^Mon code ami : /)).toBeVisible();
   });
 
   test('onglets Reglages : fleches, Home, End, roving tabindex', async ({ appA }) => {
@@ -64,14 +65,16 @@ test.describe('T8 accessibilite clavier', () => {
     expect(await page.locator('[role=tab][tabindex="0"]').count()).toBe(1);
   });
 
-  test('Mentions legales : navigation par liens vers les sections des Reglages', async ({ appA }) => {
+  test('Mentions legales : toutes les sections a la suite, sans navigation par sections, Retour atteignable au clavier', async ({ appA }) => {
     const page = appA.page;
     await prepare(appA);
     await gotoScreen(page, byId('legal'));
-    const links = page.getByRole('navigation', { name: 'Sections des réglages' }).getByRole('link');
-    expect(await links.count()).toBeGreaterThan(1);
-    await links.first().focus();
-    await expect(links.first()).toBeFocused();
+    // pas de navigation « Sections des reglages » ici (src/screens/Legal/index.test.tsx le verifie aussi)
+    await expect(page.getByRole('navigation', { name: 'Sections des réglages' })).toHaveCount(0);
+    expect(await page.locator('article h3').count()).toBeGreaterThan(1);
+    const back = page.getByRole('button', { name: 'Retour' });
+    await back.focus();
+    await expect(back).toBeFocused();
   });
 
   test('Echap quitte Creer (choix puis formulaire) ; focus dans la vue a l\'ouverture', async ({ appA }) => {
@@ -117,35 +120,26 @@ test.describe('T8 accessibilite clavier', () => {
     await waitForRoute(page, 'main', 3000);
   });
 
-  test('tiroirs de l\'accueil (Mods, Parametres, Logs, Amis) : dialogue modal, focus piege, Echap, focus rendu', async ({ appA }) => {
+  test('dialogue modal de l\'accueil (Supprimer l\'instance) : alertdialog, focus piege, Echap ferme', async ({ appA }) => {
     const page = appA.page;
     await prepare(appA);
     await gotoScreen(page, byId('main'));
-    const openers: [string, RegExp][] = [
-      ['Mods', /^Mods$/],
-      ['Paramètres', /^Paramètres$/],
-      ['Logs', /^Logs$/],
-      ['Amis', /^Amis/],
-    ];
-    for (const [name, re] of openers) {
-      const opener = page.getByRole('button', { name: re }).first();
-      await opener.focus();
-      await page.keyboard.press('Enter');
-      const dlg = page.getByRole('dialog').first();
-      await expect(dlg, `[${name}] tiroir ouvert`).toBeVisible();
-      await expect(dlg).toHaveAttribute('aria-modal', 'true');
-      expect(await dlg.getAttribute('aria-labelledby'), `[${name}] dialogue nomme`).toBeTruthy();
-      await expect.poll(() => page.evaluate(() => !!document.activeElement?.closest('[role=dialog]')), `[${name}] focus dans le tiroir`).toBe(true);
-      // Tab ne sort jamais du tiroir (focus piege)
-      for (let i = 0; i < 25; i++) {
-        await page.keyboard.press('Tab');
-        expect(await page.evaluate(() => !!document.activeElement?.closest('[role=dialog]')), `[${name}] focus piege (Tab ${i})`).toBe(true);
-      }
-      await page.keyboard.press('Escape');
-      await expect(page.getByRole('dialog'), `[${name}] ferme par Echap`).toHaveCount(0, { timeout: 3000 });
-      await expect.poll(() => page.evaluate(() => document.activeElement?.tagName), `[${name}] focus rendu`).not.toBe('BODY');
-      await waitForRoute(page, 'main', 1000);
+    await page.locator('.home-tile').first().click({ button: 'right' });
+    await page.getByRole('menuitem', { name: 'Supprimer' }).click();
+    const dlg = page.getByRole('alertdialog');
+    await expect(dlg).toBeVisible();
+    await expect(dlg).toHaveAttribute('aria-modal', 'true');
+    expect(await dlg.getAttribute('aria-labelledby'), 'dialogue nomme').toBeTruthy();
+    await expect.poll(() => page.evaluate(() => !!document.activeElement?.closest('[role=alertdialog]')), 'focus dans le dialogue').toBe(true);
+    // Tab ne sort jamais du dialogue (focus piege)
+    for (let i = 0; i < 25; i++) {
+      await page.keyboard.press('Tab');
+      expect(await page.evaluate(() => !!document.activeElement?.closest('[role=alertdialog]')), `focus piege (Tab ${i})`).toBe(true);
     }
+    await page.keyboard.press('Escape');
+    await expect(page.getByRole('alertdialog'), 'ferme par Echap').toHaveCount(0, { timeout: 3000 });
+    await waitForRoute(page, 'main', 1000); // Echap n'a ferme que le dialogue, l'instance est toujours la
+    await expect(page.locator('.home-tile').first()).toBeVisible();
   });
 
   test('focus place sur le titre h1 a l\'ouverture : Join, Error, Reglages', async ({ appA }) => {
@@ -186,14 +180,14 @@ test.describe('T8 accessibilite clavier', () => {
     await prepare(appA);
     const need: Record<string, string[]> = {
       login: ['section[aria-labelledby]', 'main h1'],
-      main: ['nav[aria-label]', 'section[aria-label],[role=region][aria-label]', 'button[aria-label^="Amis"]'],
+      main: ['aside[aria-label="Amis"]', 'section[aria-label],[role=region][aria-label]', '[role=tablist][aria-label]'],
       create: ['main h1', '[aria-live]'],
       'friends-list': ['[role=tablist]', '[role=tab][aria-selected]', '[role=tabpanel][aria-labelledby]'],
       'friends-requests': ['[role=tablist]', '[role=tab][aria-selected]', '[role=tabpanel][aria-labelledby]', '[aria-live]'],
       join: ['main h1', '[role=alert],[role=status]'],
       settings: ['main h1', '[role=tablist]', '[role=tabpanel]:not([hidden])', '[role=status][aria-live=polite]'],
       error: ['main h1', '[role=alert],[role=status]'],
-      legal: ['main h1', 'nav[aria-label]', 'article[aria-labelledby]'],
+      legal: ['main h1', 'article[aria-labelledby]'],
     };
     for (const s of SCREENS) {
       const sels = need[s.id];

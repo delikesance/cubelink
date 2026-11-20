@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { navigate } from "../../app/router";
 import type { BrowseHit, BrowseInstallResult, BrowseVersion, ContentCheck, Instance, Services } from "../../services/types";
-import { BackButton, Select, RAM_DEFAULT, RamPicker, useDefaultRam } from "../../ui";
+import { BackButton, Select, RAM_DEFAULT, RamPicker, useDefaultRam, useSystemRam } from "../../ui";
 
 export const SOURCE_LABEL = { curseforge: "CurseForge", modrinth: "Modrinth" } as const;
 
@@ -63,6 +63,7 @@ export function Detail({ hit, services, minecraft, loader, instance, installed, 
   const modpack = hit.kind === "modpack";
   const [ram, setRam] = useState(RAM_DEFAULT);
   const defaultRam = useDefaultRam(services);
+  const systemRam = useSystemRam(services);
   useEffect(() => {
     let cancelled = false;
     setVersions(null);
@@ -81,11 +82,13 @@ export function Detail({ hit, services, minecraft, loader, instance, installed, 
   useEffect(() => services.onBrowseProgress((e) => { if (alive.current) setProgress(e); }), [services]);
 
   // Une fois les versions connues : déjà installé ? quelle version va avec les autres mods ? (simulation côté Rust)
+  // `checkable` : simulation de compatibilité (mods seulement). `trackable` : état « déjà installé » (mods, packs de ressources, shaders).
   const checkable = hit.kind === "mod" && !!instance;
+  const trackable = !modpack && !!instance;
   const instanceId = instance?.id;
   const haveVersions = !!versions && versions.length > 0;
   useEffect(() => {
-    if (!checkable || !instanceId || !haveVersions) { setCheck(null); return; }
+    if (!trackable || !instanceId || !haveVersions) { setCheck(null); return; }
     let cancelled = false;
     setChecking(true);
     setCheckErr(null);
@@ -99,12 +102,12 @@ export function Detail({ hit, services, minecraft, loader, instance, installed, 
       (e) => { if (!cancelled) { setCheck(null); setChecking(false); setCheckErr(messageOf(e)); } },
     );
     return () => { cancelled = true; };
-  }, [services, checkable, instanceId, haveVersions, hit.source, hit.id, hit.kind, checkNonce]);
+  }, [services, trackable, instanceId, haveVersions, hit.source, hit.id, hit.kind, checkNonce]);
 
   // Version choisie à la main et pas encore jugée : on la vérifie à son tour.
   const judged = check?.verdicts.some((v) => v.version_id === versionId) ?? false;
   useEffect(() => {
-    if (!check || !instanceId || !versionId || judged) return;
+    if (!checkable || !check || !instanceId || !versionId || judged) return;
     let cancelled = false;
     setChecking(true);
     services.browseCheck(hit.source, hit.id, hit.kind, instanceId, versionId).then(
@@ -122,7 +125,7 @@ export function Detail({ hit, services, minecraft, loader, instance, installed, 
       () => { if (!cancelled) setChecking(false); },
     );
     return () => { cancelled = true; };
-  }, [services, check, judged, instanceId, versionId, hit.source, hit.id, hit.kind]);
+  }, [services, checkable, check, judged, instanceId, versionId, hit.source, hit.id, hit.kind]);
 
   const chosen = versions?.find((v) => v.id === versionId);
   const downloadable = hit.downloadable && (chosen ? chosen.downloadable : true);
@@ -232,7 +235,7 @@ export function Detail({ hit, services, minecraft, loader, instance, installed, 
         {modpack && <p className="br-muted">Une nouvelle instance sera créée à partir de ce modpack.</p>}
         {modpack && !openTarget && (
           <div className="br-field">
-            <RamPicker value={ram} onChange={setRam} defaultMb={defaultRam} disabled={busy}
+            <RamPicker value={ram} onChange={setRam} defaultMb={defaultRam} systemMb={systemRam} disabled={busy}
               hint="Les gros modpacks (plus de 200 mods) demandent souvent 8 Go ou plus." />
           </div>
         )}
@@ -291,6 +294,11 @@ export function Detail({ hit, services, minecraft, loader, instance, installed, 
               {result ? "Ouvrir le modpack" : "Ouvrir"}
             </button>
           </>
+        ) : installedFiles.length > 0 && !checkable ? (
+          // Pack de ressources / shader : « Désinstaller » ne sait retirer que des mods (.jar). On propose de mettre à jour.
+          <button type="button" className="cl-btn cl-btn-secondary" disabled={busy || !downloadable} onClick={() => { void install(); }}>
+            {busy ? "Installation…" : "Réinstaller"}
+          </button>
         ) : installedFiles.length > 0 ? (
           <button type="button" className="cl-btn cl-btn-secondary" disabled={removing || busy} onClick={() => { void uninstall(); }}>
             {removing ? "Désinstallation…" : "Désinstaller"}

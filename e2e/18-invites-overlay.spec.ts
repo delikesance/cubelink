@@ -5,8 +5,9 @@ import path from 'node:path';
 import { test, expect, invoke, makeHostInstance } from './harness/fixtures';
 import {
   setupPair, openWorld, invokeErr, record, recorded, until, sleep, emitEvent, stageState,
-  TEST_HOTKEY, WORLD_NAME, type Invite,
+  TEST_HOTKEY, PACK_NAME, WORLD_NAME, type Invite,
 } from './helpers/e2e18-invites';
+import { gotoRoute } from './helpers/e2e1-common';
 
 test.setTimeout(180_000);
 
@@ -26,7 +27,9 @@ test('invitation : A ouvre son monde et invite B ; B la recoit (evenement, file,
     throw new Error(`${e.message} ; file : ${JSON.stringify(await invitesOf(appB.page))} ; listes : ${JSON.stringify(await recorded(appB.page, 'friend://invites'))}`);
   });
   expect(ev.public_key).toBe(keyA);
+  // Le monde annonce est celui de `session.lock` (invites.rs), le nom de l'instance part dans `pack`.
   expect(ev.world_name).toBe(WORLD_NAME);
+  expect(ev.pack).toBe(PACK_NAME);
   expect(ev.minecraft).toBe('1.21.1-test');
   expect(ev.name).toBeTruthy();
   expect(ev.expires_at).toBeGreaterThan(ev.received_at);
@@ -41,19 +44,20 @@ test('invitation : A ouvre son monde et invite B ; B la recoit (evenement, file,
   expect(await invitesOf(appA.page)).toEqual([]);
   expect(await invokeErr(appA.page, 'friend_invite', { public_key: keyB })).toMatch(/patientez/);
 
-  // UI de B : ecran Amis -> bloc Invitations + badge « Heberge » sur l'ami
-  await appB.page.evaluate(() => { window.location.hash = '#/friends'; });
-  await expect(appB.page.getByRole('heading', { name: /Invitations/ })).toBeVisible({ timeout: 15_000 });
-  await expect(appB.page.getByText(/t'invite/)).toBeVisible();
-  await expect(appB.page.getByRole('button', { name: /Ignorer l'invitation de/ })).toBeVisible();
-  await expect(appB.page.getByText('Héberge', { exact: true })).toBeVisible();
+  // UI de B : l'Accueil montre la partie en cours (monde + « Rejoindre ») et « Joue à <modpack> » sur l'ami.
+  // Le bloc « Invitations » et « Ignorer » n'existent que dans le panneau en jeu (Scene), absent en mode test.
+  await gotoRoute(appB, 'main');
+  const sessions = appB.page.getByRole('list', { name: 'Parties en cours' });
+  await expect(sessions.getByRole('button', { name: /^Rejoindre / })).toBeVisible({ timeout: 15_000 });
+  await expect(sessions.getByText(WORLD_NAME, { exact: true })).toBeVisible();
+  await expect(appB.page.getByText(`Joue à ${PACK_NAME}`, { exact: true })).toBeVisible();
 
   // A arrete le partage : l'invitation est annulee chez B (message `revoke`)
   await invoke(appA.page, 'host_stop_sharing');
   await until('invitation retiree chez B', async () => (await invitesOf(appB.page)).length === 0);
   expect((await recorded<Invite[]>(appB.page, 'friend://invites')).at(-1)).toEqual([]);
-  await expect(appB.page.getByRole('heading', { name: /Invitations/ })).toHaveCount(0, { timeout: 10_000 });
-  await expect(appB.page.getByText('Héberge', { exact: true })).toHaveCount(0);
+  await expect(sessions).toHaveCount(0, { timeout: 10_000 });
+  await expect(appB.page.getByText(/^Joue à /)).toHaveCount(0);
 });
 
 test('invitation : refusee sans monde ouvert (francais) ; ignorer supprime l\'invitation de la file et de l\'UI', async ({ appA, appB }) => {
@@ -82,13 +86,15 @@ test('invitation : refusee sans monde ouvert (francais) ; ignorer supprime l\'in
   // ignorer : retire de la file, y compris pour un id inconnu sans erreur
   expect(await invokeErr(appB.page, 'friend_invite_dismiss', { id: 'inv-inexistante' })).toBeNull();
   expect(await invitesOf(appB.page)).toHaveLength(1);
-  await appB.page.evaluate(() => { window.location.hash = '#/friends'; });
-  const ignore = appB.page.getByRole('button', { name: /Ignorer l'invitation de/ });
-  await expect(ignore).toBeVisible({ timeout: 15_000 });
-  await ignore.click();
-  await expect(ignore).toHaveCount(0, { timeout: 10_000 });
-  expect(await invitesOf(appB.page)).toEqual([]);
+  // Le bouton « Ignorer l'invitation de » n'est que dans le panneau en jeu (Scene, absent en mode test ; couvert par
+  // src/screens/Overlay/index.test.tsx) : ici on ignore par la commande et l'Accueil doit suivre.
+  await gotoRoute(appB, 'main');
+  const party = appB.page.getByRole('list', { name: 'Parties en cours' }).getByRole('button', { name: /^Rejoindre / });
+  await expect(party).toBeVisible({ timeout: 15_000 });
   expect(inv.id).toBeTruthy();
+  await invoke(appB.page, 'friend_invite_dismiss', { id: inv.id });
+  await expect(party).toHaveCount(0, { timeout: 10_000 });
+  expect(await invitesOf(appB.page)).toEqual([]);
 
   // par la commande
   await sleep(10_500); // limite de debit : 10 s entre deux invitations au meme ami
@@ -107,8 +113,7 @@ test('regle de jonction : un ami non invite est refuse ; sa demande refusee est 
   // Ami non invite : ni plan, ni (donc) tunnel ; l'UI de B propose « Demander » et non « Rejoindre ». « Demander » n'apparaît que
   // quand A annonce « en jeu » (partage en cours) : B le sait à sa sonde de présence suivante (~30 s).
   expect(await invokeErr(appB.page, 'join_plan', { friend_public_key: keyA }), 'plan refuse sans invitation').not.toBeNull();
-  await appB.page.evaluate(() => { window.location.hash = '#/friends'; });
-  await appB.page.waitForSelector('main[data-route="main"]');
+  await gotoRoute(appB, 'main');
   await expect(appB.page.getByRole('button', { name: /^Demander à rejoindre / })).toBeVisible({ timeout: 45_000 });
   await expect(appB.page.getByRole('button', { name: /^Rejoindre / })).toHaveCount(0);
 
@@ -147,14 +152,14 @@ test('regle de jonction : un ami non invite est refuse ; sa demande refusee est 
 test('regle de jonction : demande acceptee (monde ouvert) ouvre l\'acces de la partie en cours seulement', async ({ appA, appB }) => {
   const { host, keyA, keyB } = await setupPair({ appA, appB });
   await openWorld(appA, host.id);
-  const asked = invoke<string>(appB.page, 'friend_join_request', { public_key: keyA });
+  // La demande part du bouton « Demander » de l'Accueil de B : c'est lui qui retient la reponse et propose ensuite « Rejoindre »
+  // (une demande envoyee par la commande ne change pas l'Accueil). « Demander » n'apparait qu'une fois A vu « en jeu ».
+  await gotoRoute(appB, 'main');
+  await appB.page.getByRole('button', { name: /^Demander à rejoindre / }).click({ timeout: 45_000 });
   await until('demande chez A', async () => (await invoke<unknown[]>(appA.page, 'friend_join_requests')).length === 1);
   expect(await invokeErr(appB.page, 'join_plan', { friend_public_key: keyA }), 'pas d\'acces avant la reponse').not.toBeNull();
   await invoke(appA.page, 'friend_join_request_answer', { public_key: keyB, accept: true });
-  expect(await asked).toBe('accepted');
   expect(await invokeErr(appB.page, 'join_plan', { friend_public_key: keyA }), 'plan accorde apres acceptation').toBeNull();
-  await appB.page.evaluate(() => { window.location.hash = '#/friends'; });
-  await appB.page.waitForSelector('main[data-route="main"]');
   await expect(appB.page.getByRole('button', { name: /^Rejoindre / })).toBeVisible({ timeout: 15_000 });
   // Fin de partie : l'acces tombe ; la partie suivante repart de zero.
   await invoke(appA.page, 'host_stop_sharing');

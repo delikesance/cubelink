@@ -1,10 +1,12 @@
 //! Cubelink core. Chaque module est la propriété d'une seule tâche (voir docs/taches-agents.md).
 pub mod types;
 pub mod disk;
+pub mod http;
 pub mod java;
 pub mod lan_map;
 pub mod java_install;
 pub mod instance;
+pub mod sysmem;
 pub mod launch_args;
 pub mod launch_run;
 #[cfg(windows)]

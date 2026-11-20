@@ -1,7 +1,10 @@
-# Canary : chaque push sur la branche `canary` publie une pré-version Linux (AppImage + paquet .rpm pour Fedora) pour tester.
+# Canary : chaque push sur la branche `canary` publie une pré-version pour tester : Windows (.msi) et Linux (AppImage, .rpm pour Fedora, .deb pour Ubuntu/Debian).
 # Appelé par ci.yml (job `canary`) seulement quand toutes les vérifications ont réussi : jamais de pré-version cassée.
 # Pré-version (jamais « Latest »), sans latest.json : les launchers installés ne la reçoivent pas en mise à jour.
 # Version `<majeur>.<mineur>.<patch suivant>-canary.<run>` : la vraie release suivante la remplacera normalement.
+# Quatre jobs : `version` (calculée une fois, partagée), `linux` et `windows` (en parallèle, construisent et vérifient),
+# `publish` (seul à écrire sur GitHub, seulement si les DEUX builds ont réussi : pas de pré-version à moitié vide).
+# Le .msi canary n'est pas signé (SmartScreen avertit) et il n'y a pas de .msix (réservé au Store, voir release.yml).
 name: canary
 
 on:
@@ -16,8 +19,9 @@ concurrency:
   group: canary
   cancel-in-progress: true
 
+# Les builds ne font que lire ; seul `publish` écrit (créer la pré-version).
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_INCREMENTAL: 0
@@ -30,9 +34,36 @@ env:
   # Les secrets ne sont PAS ici : seule l'étape `tauri build` les reçoit (ni npm ni les autres étapes ne les voient).
 
 jobs:
+  # Versions calculées UNE fois : Linux et Windows ne peuvent pas diverger. Les tests du script tournent ici, avant tout build.
+  version:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      base: ${{ steps.v.outputs.base }}
+      msi: ${{ steps.v.outputs.msi }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with: { node-version: 22 }
+      - run: node --test scripts/canary-version.test.mjs
+      - name: Version
+        id: v
+        run: |
+          set -euo pipefail
+          last=$(gh release list --exclude-pre-releases --limit 1 --json tagName -q '.[0].tagName')
+          # Numéro du run `ci` appelant ; une relance du même run ajoute son numéro d'essai (sinon le tag existerait déjà).
+          node scripts/canary-version.mjs "$last" "$GITHUB_RUN_NUMBER" "$GITHUB_RUN_ATTEMPT" | tee -a "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
   linux:
+    needs: version
     runs-on: ubuntu-22.04
     timeout-minutes: 40
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      BASE: ${{ needs.version.outputs.base }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -49,18 +80,7 @@ jobs:
       # --ignore-scripts : aucun script d'installation d'un paquet npm ne s'exécute sur la machine de build.
       - run: npm ci --ignore-scripts
       - name: Version
-        id: v
-        run: |
-          set -euo pipefail
-          last=$(gh release list --exclude-pre-releases --limit 1 --json tagName -q '.[0].tagName' | sed 's/^v//')
-          next=$(echo "$last" | awk -F. '{print $1"."$2"."$3+1}')
-          # Numéro du run `ci` appelant ; une relance du même run ajoute son numéro d'essai (sinon le tag existerait déjà).
-          version="$next-canary.$GITHUB_RUN_NUMBER"
-          if [ "$GITHUB_RUN_ATTEMPT" != 1 ]; then version="$version.$GITHUB_RUN_ATTEMPT"; fi
-          sed -i -E "s/(\"version\"[[:space:]]*:[[:space:]]*\")[^\"]+(\")/\1$version\2/" src-tauri/tauri.conf.json
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-        env:
-          GH_TOKEN: ${{ github.token }}
+        run: sed -i -E "s/(\"version\"[[:space:]]*:[[:space:]]*\")[^\"]+(\")/\1$VERSION\2/" src-tauri/tauri.conf.json
       - name: Agent LAN (jar Java)
         run: JAVA_HOME="$JAVA_HOME_17_X64" bash core/resources/lan-agent/build.sh
       - name: AppImage
@@ -73,22 +93,139 @@ jobs:
       - name: RPM (Fedora)
         run: |
           set -euo pipefail
-          v="${{ steps.v.outputs.version }}"
-          npx tauri bundle --bundles rpm --config "{\"version\":\"${v%%-*}\",\"bundle\":{\"createUpdaterArtifacts\":false,\"linux\":{\"rpm\":{\"release\":\"0.${v#*-}\"}}}}"
+          npx tauri bundle --bundles rpm --config "{\"version\":\"$BASE\",\"bundle\":{\"createUpdaterArtifacts\":false,\"linux\":{\"rpm\":{\"release\":\"0.${VERSION#*-}\"}}}}"
       # Le .rpm s'installe avec dnf sur un vrai Fedora et le launcher démarre.
       - name: RPM sur Fedora (dnf install + démarrage)
         run: bash scripts/rpm-smoke.sh target/release/bundle/rpm fedora:latest
+      # .deb : même binaire réempaqueté. La version du paquet est x.y.z nu (Tauri exige du semver pur) : elle passe après la
+      # vraie release précédente et avant la suivante. Le suffixe canary n'est que dans le nom du fichier (deux canary
+      # du même x.y.z auraient sinon le même nom).
+      - name: .deb (Ubuntu, Debian)
+        run: |
+          set -euo pipefail
+          npx tauri bundle --bundles deb --config "{\"version\":\"$BASE\",\"bundle\":{\"createUpdaterArtifacts\":false}}"
+          cd target/release/bundle/deb
+          test "$(dpkg-deb -f ./*.deb Version)" = "$BASE"
+          mv ./*.deb "Cubelink_${VERSION}_amd64.deb"
+      - name: .deb sur Ubuntu (apt install + démarrage)
+        run: bash scripts/deb-smoke.sh target/release/bundle/deb ubuntu:22.04
       - name: AppImage autonome
         run: |
           cd "$(mktemp -d)"
           "$GITHUB_WORKSPACE"/target/release/bundle/appimage/*.AppImage --appimage-extract >/dev/null
           test -f squashfs-root/usr/lib/libgpg-error.so.0
+      # Un artefact par format : avec plusieurs chemins, upload-artifact garde l'arborescence (appimage/, rpm/, deb/) et les
+      # globs `artifacts/*.rpm` du job `publish` ne trouveraient rien.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: canary-appimage
+          path: target/release/bundle/appimage/*.AppImage
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: canary-rpm
+          path: target/release/bundle/rpm/*.rpm
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: canary-deb
+          path: target/release/bundle/deb/*.deb
+          if-no-files-found: error
+          retention-days: 7
+
+  windows:
+    needs: version
+    runs-on: windows-latest
+    timeout-minutes: 40
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      MSI_VERSION: ${{ needs.version.outputs.msi }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with: { node-version: 22, cache: npm }
+      - name: Rust (rust-toolchain.toml)
+        shell: bash
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: canary-${{ runner.os }}
+      - run: npm ci --ignore-scripts
+      - name: Version
+        shell: bash
+        run: sed -i -E "s/(\"version\"[[:space:]]*:[[:space:]]*\")[^\"]+(\")/\1$VERSION\2/" src-tauri/tauri.conf.json
+      - name: Agent LAN (jar Java)
+        shell: bash
+        run: JAVA_HOME="$JAVA_HOME_17_X64" bash core/resources/lan-agent/build.sh
+      # WiX n'accepte pas `-canary.12` : `bundle.windows.wix.version` impose le ProductVersion (x.y.z.<run>, 4 composants
+      # numériques) ; l'app, elle, garde la version canary complète. Pas de signature des mises à jour (pas de latest.json en
+      # canary) : ni clé ni secret dans ce job. `--config` fusionne avec tauri.conf.json (la langue fr-FR est conservée).
+      - name: Installeur MSI
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "{\"bundle\":{\"createUpdaterArtifacts\":false,\"windows\":{\"wix\":{\"version\":\"$MSI_VERSION\"}}}}" > canary-msi.conf.json
+          npx tauri build --bundles msi --config canary-msi.conf.json
+          cd target/release/bundle/msi
+          # Le nom porte la version canary (deux pré-versions ne doivent pas se confondre).
+          target="Cubelink_${VERSION}_x64_fr-FR.msi"
+          for f in ./*.msi; do [ "$f" = "./$target" ] || mv "$f" "$target"; done
+          ls -l
+      # La régression de packaging ne doit pas n'apparaître qu'à la release : le .msi s'installe (machine, silencieux),
+      # porte le bon ProductVersion, contient le launcher et l'agent LAN, puis se désinstalle.
+      - name: MSI (installation silencieuse, version, désinstallation)
+        shell: pwsh
+        run: |
+          $msi = (Get-ChildItem target/release/bundle/msi/*.msi).FullName
+          $log = Join-Path $env:RUNNER_TEMP 'msi.log'
+          function Msiexec($args1) {
+            $p = Start-Process msiexec.exe -ArgumentList $args1 -Wait -PassThru
+            if ($p.ExitCode -ne 0) { Get-Content $log -Tail 80; throw "msiexec $($args1[0]) : code $($p.ExitCode)" }
+          }
+          Msiexec @('/i', "`"$msi`"", '/qn', '/l*v', "`"$log`"")
+          $dir = Join-Path $env:ProgramFiles 'Cubelink'
+          if (-not (Test-Path (Join-Path $dir 'cubelink.exe'))) { throw "cubelink.exe absent de $dir" }
+          if (-not (Get-ChildItem $dir -Recurse -Filter cubelink-lan-agent.jar)) { throw "cubelink-lan-agent.jar absent de $dir" }
+          $app = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*' | Where-Object { $_.DisplayName -eq 'Cubelink' }
+          if ($app.DisplayVersion -ne $env:MSI_VERSION) { throw "ProductVersion $($app.DisplayVersion), attendu $env:MSI_VERSION" }
+          Msiexec @('/x', "`"$msi`"", '/qn', '/l*v', "`"$log`"")
+          if (Test-Path (Join-Path $dir 'cubelink.exe')) { throw 'cubelink.exe toujours présent après la désinstallation' }
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: canary-windows
+          path: target/release/bundle/msi/*.msi
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: [version, linux, windows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      # Un clone un peu profond : les notes reprennent les derniers commits.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { fetch-depth: 10 }
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: canary-*
+          merge-multiple: true
+          path: artifacts
       - name: Pré-version GitHub
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          v="${{ steps.v.outputs.version }}"
+          ls -l artifacts
+          # Un format manquant doit faire échouer ici, clairement (sinon le glob littéral part tel quel vers gh).
+          for ext in msi AppImage rpm deb; do
+            ls artifacts/*."$ext" >/dev/null 2>&1 || { echo "::error::aucun fichier .$ext dans les artefacts canary"; exit 1; }
+          done
           git log -10 --pretty='- %s' > notes.md
-          gh release create "v$v" --target "$GITHUB_SHA" --prerelease --latest=false --title "Cubelink $v (canary, Linux)" --notes-file notes.md \
-            target/release/bundle/appimage/*.AppImage target/release/bundle/rpm/*.rpm
+          gh release create "v$VERSION" --target "$GITHUB_SHA" --prerelease --latest=false --title "Cubelink $VERSION (canary)" --notes-file notes.md \
+            artifacts/*.msi artifacts/*.AppImage artifacts/*.rpm artifacts/*.deb

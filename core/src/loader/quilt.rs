@@ -51,7 +51,7 @@ impl QuiltClient {
 
     /// `meta_url` : base sans `/v3` (ex. `https://meta.quiltmc.org`).
     pub fn with_meta_url(url: impl Into<String>) -> Self {
-        Self { http: reqwest::Client::new(), meta_url: url.into().trim_end_matches('/').to_string() }
+        Self { http: crate::http::client(), meta_url: url.into().trim_end_matches('/').to_string() }
     }
 
     async fn get_bytes(&self, url: &str) -> Result<Vec<u8>> {

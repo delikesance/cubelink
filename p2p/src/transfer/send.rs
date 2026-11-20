@@ -145,6 +145,11 @@ impl Host {
         }
     }
 
+    /// Vrai si ce contenu figure dans le manifeste servi (sans réserver de créneau).
+    pub(crate) fn serves(&self, sha256: &str) -> bool {
+        self.index.get(sha256).is_some()
+    }
+
     /// Contrôle d'accès seul (utilisé aussi à l'ouverture d'une connexion).
     pub fn check_peer(&self, peer: &str) -> Result<()> {
         if self.authorizer.is_allowed(peer) {
@@ -254,11 +259,6 @@ pub trait BlobTransport: Send + Sync {
         on_bytes: &(dyn Fn(u64) + Send + Sync),
         cancel: &AtomicBool,
     ) -> impl Future<Output = Result<()>> + Send;
-
-    /// Vrai si le chemin vers `peer` passe par un relais (inconnu : faux).
-    fn via_relay(&self, _peer: &str) -> bool {
-        false
-    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -414,7 +414,8 @@ mod iroh_impl {
     const STATUS_CHANGED: u8 = 2;
 
     /// Fréquence du ramasse-miettes du magasin de blobs : les blobs reçus (déjà exportés vers le cache) et ceux qui ne
-    /// sont plus servis sont supprimés, pour que le magasin ne double pas l'espace occupé par les mods.
+    /// sont plus servis (partage arrêté, autre instance) sont supprimés au plus tard à la passe suivante, pour que le
+    /// magasin ne double pas l'espace occupé par les mods.
     const GC_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5 * 60);
     /// Délai maximal pour lire la requête d'un invité (64 octets) sur le canal de contrôle.
     const CONTROL_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -430,11 +431,26 @@ mod iroh_impl {
     struct Protected {
         known: KnownMap,
         inflight: Mutex<HashMap<Hash, usize>>,
+        /// Fournisseur de l'hôte courant (posé par `handlers_dynamic`) : sert à ne protéger que ce qui est encore servi.
+        host: Mutex<Option<HostProvider>>,
     }
 
     impl Protected {
+        /// Les entrées de `known` ne sont protégées que si l'hôte courant sert encore leur sha256 : rien de partagé
+        /// (`None`) vide la map, un autre manifeste en retire les fichiers qui n'en font plus partie. Les copies
+        /// correspondantes du magasin sont alors ramassées. Un nouveau `Host` du même contenu (recalcul du manifeste)
+        /// garde ses entrées : pas de réimport. Le fournisseur est appelé AVANT de prendre le verrou de `known`.
         fn snapshot(&self) -> Vec<Hash> {
-            let mut v: Vec<Hash> = lock(&self.known).values().map(|(h, _)| *h).collect();
+            let provider = lock(&self.host).clone();
+            let host = provider.and_then(|p| p());
+            let mut v: Vec<Hash> = {
+                let mut known = lock(&self.known);
+                match &host {
+                    Some(h) => known.retain(|sha, _| h.serves(sha)),
+                    None => known.clear(),
+                }
+                known.values().map(|(h, _)| *h).collect()
+            };
             v.extend(lock(&self.inflight).keys().copied());
             v
         }
@@ -477,7 +493,6 @@ mod iroh_impl {
         store: FsStore,
         protected: Arc<Protected>,
         peers: Mutex<HashMap<PeerId, EndpointAddr>>,
-        relayed: Mutex<HashMap<PeerId, bool>>,
         router: Mutex<Option<Router>>,
         /// Connexions QUIC réutilisées d'un fichier à l'autre, par pair et par ALPN (contrôle, blobs) : une
         /// poignée de main par transfert au lieu de deux par fichier, et UN contrôle de congestion partagé par
@@ -509,12 +524,15 @@ mod iroh_impl {
             let mut opts = FsOptions::new(root);
             opts.gc = Some(GcConfig { interval: gc_interval, add_protected: Some(add_protected) });
             let store = FsStore::load_with_opts(root.join("blobs.db"), opts).await.map_err(net)?;
+            // Migration (#90) : les versions précédentes posaient une étiquette persistante « auto-… » sur chaque copie
+            // servie, qui la gardait indéfiniment (même après redémarrage). Rien ici ne s'appuie sur une étiquette
+            // persistante : on les retire pour que le ramasse-miettes récupère ces copies. Échec sans gravité.
+            let _ = store.tags().delete_prefix("auto-").await;
             Ok(Self {
                 endpoint,
                 store,
                 protected,
                 peers: Mutex::new(HashMap::new()),
-                relayed: Mutex::new(HashMap::new()),
                 router: Mutex::new(None),
                 conns: Mutex::new(HashMap::new()),
                 connecting: tokio::sync::Mutex::new(()),
@@ -583,8 +601,6 @@ mod iroh_impl {
             // export vers `dest`. Le flux de contrôle `send` reste ouvert jusqu'à la fin : l'hôte tient le créneau
             // de concurrence de ce fichier jusque-là (lâché sur erreur, le flux se termine tout seul).
             let conn = self.conn(peer, addr, iroh_blobs::ALPN).await?;
-            let relayed = conn.paths().iter().any(|p| p.is_selected() && p.is_relay());
-            lock(&self.relayed).insert(peer.to_string(), relayed);
             // Protégé du ramasse-miettes jusqu'à la fin de l'export ; supprimé du magasin au passage suivant.
             let _keep = InflightGuard::new(&self.protected, hash);
             let r = self.get_blob(&conn, hash, req, on_bytes, cancel).await;
@@ -708,6 +724,7 @@ mod iroh_impl {
         /// Comme [`Self::handlers`], mais l'hôte est demandé à chaque connexion/requête : `None`
         /// refuse tout (rien de partagé). Permet de changer d'instance partagée à chaud.
         pub fn handlers_dynamic(&self, host: HostProvider) -> (ControlHandler, GatedBlobsHandler) {
+            *lock(&self.protected.host) = Some(host.clone());
             let control = ControlHandler { host: host.clone(), store: self.store.clone(), known: self.protected.known.clone() };
             let blobs = GatedBlobsHandler { host, inner: BlobsProtocol::new(&self.store, None) };
             (control, blobs)
@@ -734,7 +751,8 @@ mod iroh_impl {
         store: FsStore,
         /// sha256 -> (BLAKE3, empreinte du fichier au moment de l'import), rempli paresseusement.
         /// L'entrée n'est valable que si le fichier vivant n'a pas changé (taille + date de modification) :
-        /// sinon un fichier altéré puis réparé resterait servi sous son ancien BLAKE3.
+        /// sinon un fichier altéré puis réparé resterait servi sous son ancien BLAKE3. Purgée par le ramasse-miettes
+        /// (voir `Protected::snapshot`) dès que l'hôte courant ne sert plus le fichier.
         known: KnownMap,
     }
 
@@ -787,6 +805,8 @@ mod iroh_impl {
                         host.drift();
                         return Err(AnswerErr::Changed);
                     }
+                    // Étiquette TEMPORAIRE : un `.await` direct poserait une étiquette persistante (nom « auto-… ») qui
+                    // protège la copie du ramasse-miettes pour toujours, même une fois `known` purgé (#90).
                     let tag = self
                         .store
                         .blobs()
@@ -795,13 +815,16 @@ mod iroh_impl {
                             format: BlobFormat::Raw,
                             mode: ImportMode::Copy,
                         })
+                        .temp_tag()
                         .await
                         .map_err(net)?;
-                    let mut known = lock(&self.known);
-                    // Toujours inscrit (le blob reste protégé du ramasse-miettes jusqu'au fetch de l'invité). Sans
+                    let hash = tag.hash();
+                    // Toujours inscrit (le blob reste protégé du ramasse-miettes tant que l'hôte le sert). Sans
                     // empreinte lisible, l'entrée ne sera jamais réutilisée (`now` absent) : nouvel import au prochain appel.
-                    known.insert(sha.to_string(), (tag.hash, now.unwrap_or((u64::MAX, None))));
-                    tag.hash
+                    // L'étiquette temporaire n'est lâchée qu'après l'inscription : pas de fenêtre sans protection.
+                    lock(&self.known).insert(sha.to_string(), (hash, now.unwrap_or((u64::MAX, None))));
+                    drop(tag);
+                    hash
                 }
             };
             Ok((permit, hash))
@@ -910,10 +933,6 @@ mod iroh_impl {
             }
             r
         }
-
-        fn via_relay(&self, peer: &str) -> bool {
-            lock(&self.relayed).get(peer).copied().unwrap_or(false)
-        }
     }
 
     #[cfg(test)]
@@ -1016,6 +1035,93 @@ mod iroh_impl {
             }
             assert!(gone, "le blob reçu reste dans le magasin de l'invité");
             assert!(a.store.blobs().has(hash).await.unwrap(), "le blob servi par l'hôte est protégé");
+            a.shutdown().await;
+        }
+
+        /// Hôte courant pilotable (comme `ShareState` côté application) : `set(None)` = partage arrêté.
+        type Slot = Arc<Mutex<Option<Arc<Host>>>>;
+
+        fn serve_dynamic(a: &IrohTransport, slot: &Slot) {
+            let slot = slot.clone();
+            let (control, blobs) = a.handlers_dynamic(Arc::new(move || lock(&slot).clone()));
+            let router = Router::builder(a.endpoint.clone()).accept(CONTROL_ALPN, control).accept(iroh_blobs::ALPN, blobs).spawn();
+            *lock(&a.router) = Some(router);
+        }
+
+        async fn gone_within(a: &IrohTransport, hash: Hash, secs: u64) -> bool {
+            for _ in 0..secs * 10 {
+                if !a.store.blobs().has(hash).await.unwrap() {
+                    return true;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            false
+        }
+
+        /// #90 : la copie d'un fichier servi reste protégée tant que l'hôte le sert (y compris après un recalcul du
+        /// manifeste qui crée un nouveau `Host`), puis le ramasse-miettes la supprime quand le partage s'arrête, et
+        /// quand une autre instance partagée ne contient plus le fichier. Vrai disque (`FsStore`), vrai QUIC en boucle locale.
+        #[tokio::test]
+        async fn served_copy_is_collected_when_no_longer_shared() {
+            let dir = tempfile::tempdir().unwrap();
+            let data: Vec<u8> = (0..200_000u32).map(|i| (i % 241) as u8).collect();
+            let (idx, req) = one_file(dir.path(), &data);
+            let (ea, eb) = (ep(true).await, ep(false).await);
+            let guest_id = eb.id().to_string();
+            let gc = Duration::from_millis(100);
+            let a = IrohTransport::with_gc(ea, dir.path().join("a"), gc).await.unwrap();
+            let b = IrohTransport::with_gc(eb, dir.path().join("b"), gc).await.unwrap();
+            let allow = Arc::new(AllowList(vec![guest_id]));
+            let slot: Slot = Arc::new(Mutex::new(Some(Host::new(idx.clone(), allow.clone(), ServeLimits::default()))));
+            serve_dynamic(&a, &slot);
+            let peer = b.add_peer(a.addr());
+            b.fetch(&peer, &req, &|_| {}, &AtomicBool::new(false)).await.unwrap();
+            assert_eq!(std::fs::read(&req.dest).unwrap(), data);
+            let hash = Hash::new(&data);
+            assert!(a.store.blobs().has(hash).await.unwrap());
+            assert_eq!(lock(&a.protected.known).len(), 1);
+
+            // Plusieurs passes du GC avec le même hôte, puis avec un nouvel hôte du même contenu : la copie reste.
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            *lock(&slot) = Some(Host::new(idx, allow.clone(), ServeLimits::default()));
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            assert!(a.store.blobs().has(hash).await.unwrap(), "copie encore servie : doit rester protégée");
+            assert_eq!(lock(&a.protected.known).len(), 1, "nouvel hôte, même contenu : pas de réimport");
+
+            // Autre instance partagée sans ce fichier : la copie est ramassée.
+            let other_dir = tempfile::tempdir().unwrap();
+            let (other, _) = one_file(other_dir.path(), b"un autre contenu");
+            *lock(&slot) = Some(Host::new(other, allow.clone(), ServeLimits::default()));
+            assert!(gone_within(&a, hash, 5).await, "la copie d'une autre instance reste dans le magasin");
+            assert!(lock(&a.protected.known).is_empty());
+
+            // Re-partage de la première instance : le fichier est de nouveau importé à la demande, puis partage arrêté.
+            let (idx, req2) = one_file(dir.path(), &data);
+            *lock(&slot) = Some(Host::new(idx, allow, ServeLimits::default()));
+            b.fetch(&peer, &req2, &|_| {}, &AtomicBool::new(false)).await.unwrap();
+            assert!(a.store.blobs().has(hash).await.unwrap());
+            *lock(&slot) = None;
+            assert!(gone_within(&a, hash, 5).await, "partage arrêté : la copie reste dans le magasin");
+            assert!(lock(&a.protected.known).is_empty());
+            a.shutdown().await;
+        }
+
+        /// #90 (migration) : une copie gardée par une étiquette persistante « auto-… » (posée par les versions
+        /// précédentes) est libérée au démarrage suivant, et ramassée par le ramasse-miettes.
+        #[tokio::test]
+        async fn legacy_auto_tags_are_dropped_at_startup() {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().join("a");
+            let data = b"copie heritee d'une ancienne version".to_vec();
+            {
+                let mut opts = FsOptions::new(&root);
+                opts.gc = None;
+                let store = FsStore::load_with_opts(root.join("blobs.db"), opts).await.unwrap();
+                store.blobs().add_bytes(data.clone()).await.unwrap(); // étiquette persistante automatique
+                store.shutdown().await.unwrap();
+            }
+            let a = IrohTransport::with_gc(ep(true).await, &root, Duration::from_millis(100)).await.unwrap();
+            assert!(gone_within(&a, Hash::new(&data), 5).await, "la copie héritée reste dans le magasin");
             a.shutdown().await;
         }
 

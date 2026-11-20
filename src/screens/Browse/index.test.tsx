@@ -292,6 +292,22 @@ describe("Parcourir : fiche et installation", () => {
     expect(await screen.findByRole("button", { name: "Installer" })).toBeTruthy();
   });
 
+  it("shader déjà installé : état affiché, Réinstaller (pas de Désinstaller), aucune simulation de compatibilité", async () => {
+    const svc = setup({
+      browseSearch: vi.fn(async () => ({ hits: [hit({ kind: "shader", name: "Complementary" })], total: 1 })),
+      browseCheck: vi.fn(async () => ({ installed: ["complementary-r5.1.zip"], recommended: null, verdicts: [], blockers: [] })),
+    }, { kind: "shader", instance: "i1" });
+    await waitFor(() => expect(screen.getByLabelText("Instance").textContent).toBe("Mon monde"));
+    fireEvent.click(await screen.findByRole("button", { name: /Complementary/ }));
+    expect(await screen.findByText(/Déjà installé dans « Mon monde » : complementary-r5\.1\.zip/)).toBeTruthy();
+    expect(svc.browseCheck).toHaveBeenCalledWith("modrinth", "p1", "shader", "i1");
+    expect(svc.browseCheck).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("button", { name: "Désinstaller" })).toBeNull();
+    expect(screen.queryByText(/compatibilité/)).toBeNull();
+    fireEvent.click(await screen.findByRole("button", { name: "Réinstaller" }));
+    await waitFor(() => expect(svc.browseInstall).toHaveBeenCalledWith(expect.objectContaining({ kind: "shader", instance_id: "i1" })));
+  });
+
   it("non téléchargeable : Installer désactivé, message et lien Ouvrir sur CurseForge", async () => {
     setup({
       browseSearch: vi.fn(async () => ({ hits: [hit({ source: "curseforge", downloadable: false, page_url: "https://www.curseforge.com/x" })], total: 1 })),

@@ -143,6 +143,16 @@ impl StoreIndex {
             .map_err(db)
     }
 
+    /// Rafraîchit `last_used` sans toucher aux références : un objet réutilisé depuis le cache reste protégé du
+    /// balayage (par son âge) le temps que l'installation le lie. Sans effet si l'objet est absent.
+    pub fn touch(&self, sha256: &str) -> Result<()> {
+        check_hash(sha256)?;
+        self.lock()
+            .execute("UPDATE objects SET last_used = ?2 WHERE sha256 = ?1", params![sha256, now()])
+            .map_err(db)?;
+        Ok(())
+    }
+
     /// Incrémente le compteur de références ; renvoie la nouvelle valeur. `NotFound` si absent.
     pub fn add_ref(&self, sha256: &str) -> Result<u32> {
         self.bump(sha256, "refs + 1")
@@ -193,6 +203,41 @@ impl StoreIndex {
             .execute("DELETE FROM objects WHERE sha256 = ?1", params![sha256])
             .map_err(db)?;
         Ok(n > 0)
+    }
+
+    /// Toutes les entrées de l'index, triées par hash.
+    pub fn all(&self) -> Result<Vec<Entry>> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare(&format!("SELECT {COLS} FROM objects ORDER BY sha256"))
+            .map_err(db)?;
+        let rows = stmt.query_map([], row_to_entry).map_err(db)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db)
+    }
+
+    /// Remplace les compteurs de références par ceux de `live` (hash -> nombre de liens trouvés sur disque) ;
+    /// toute entrée absente de `live` passe à 0. Une seule transaction. `last_used` n'est pas touché : l'âge
+    /// d'un objet délié continue de compter depuis sa dernière activité. Renvoie le nombre de compteurs modifiés.
+    pub fn reconcile_refs(&self, live: &std::collections::HashMap<String, u32>) -> Result<usize> {
+        let mut conn = self.lock();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(db)?;
+        let mut changed = 0;
+        {
+            let shas: Vec<String> = {
+                let mut stmt = tx.prepare("SELECT sha256 FROM objects").map_err(db)?;
+                let rows = stmt.query_map([], |r| r.get::<_, String>(0)).map_err(db)?;
+                rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db)?
+            };
+            let mut upd = tx
+                .prepare("UPDATE objects SET refs = ?2 WHERE sha256 = ?1 AND refs <> ?2")
+                .map_err(db)?;
+            for sha in shas {
+                let n = i64::from(live.get(&sha).copied().unwrap_or(0));
+                changed += upd.execute(params![sha, n]).map_err(db)?;
+            }
+        }
+        tx.commit().map_err(db)?;
+        Ok(changed)
     }
 
     /// Somme des tailles de tous les objets indexés.
@@ -317,6 +362,43 @@ mod tests {
         assert_eq!(idx.unreferenced().unwrap().len(), 2);
         assert!(matches!(idx.add_ref(&h(9)), Err(Error::NotFound(_))));
         assert!(matches!(idx.release_ref(&h(9)), Err(Error::NotFound(_))));
+    }
+
+    #[test]
+    fn all_and_reconcile_refs() {
+        let (_d, _p, idx) = open_tmp();
+        let (a, b, c) = (h(1), h(2), h(3));
+        for x in [&a, &b, &c] {
+            idx.insert(x, "p", 1).unwrap();
+        }
+        // a gonflé (3 add_ref sans lien), b trop bas, c correct.
+        for _ in 0..3 {
+            idx.add_ref(&a).unwrap();
+        }
+        idx.add_ref(&c).unwrap();
+        let before = idx.get(&a).unwrap().unwrap().last_used;
+        let live = std::collections::HashMap::from([(b.clone(), 2u32), (c.clone(), 1u32)]);
+        assert_eq!(idx.reconcile_refs(&live).unwrap(), 2);
+        assert_eq!(idx.get(&a).unwrap().unwrap().refs, 0);
+        assert_eq!(idx.get(&b).unwrap().unwrap().refs, 2);
+        assert_eq!(idx.get(&c).unwrap().unwrap().refs, 1);
+        assert_eq!(idx.get(&a).unwrap().unwrap().last_used, before, "last_used inchangé");
+        assert_eq!(idx.all().unwrap().len(), 3);
+        assert_eq!(idx.reconcile_refs(&live).unwrap(), 0, "idempotent");
+    }
+
+    #[test]
+    fn touch_refreshes_age_without_touching_refs() {
+        let (_d, _p, idx) = open_tmp();
+        let a = h(1);
+        idx.insert(&a, "p", 1).unwrap();
+        idx.add_ref(&a).unwrap();
+        idx.lock().execute("UPDATE objects SET last_used = 0 WHERE sha256 = ?1", params![a]).unwrap();
+        idx.touch(&a).unwrap();
+        let e = idx.get(&a).unwrap().unwrap();
+        assert!(e.last_used > 0);
+        assert_eq!(e.refs, 1);
+        idx.touch(&h(2)).unwrap();
     }
 
     #[test]

@@ -39,7 +39,7 @@ env:
   CARGO_TERM_COLOR: always
   # Les secrets ne sont PAS dans l'environnement global : seules les étapes `tauri build` les reçoivent,
   # pour que ni npm ni les autres étapes ne les voient.
-  # - TAURI_SIGNING_PRIVATE_KEY(_PASSWORD) : signature des mises à jour (`tauri signer generate`).
+  # - TAURI_SIGNING_PRIVATE_KEY(_PASSWORD) : signature des mises à jour (`tauri signer generate`). Obligatoire pour publier (vérifié dès le job `version`).
   # - CUBELINK_CF_API_KEY : clé de développeur CurseForge, embarquée à la compilation (`option_env!`).
   #   Extractible de l'installeur : choix assumé, comme les autres launchers.
   # - CUBELINK_MS_CLIENT_ID : identifiant Azure (facultatif, l'app a une valeur par défaut).
@@ -73,7 +73,11 @@ jobs:
           if [ "$publish" = "true" ] && git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
             echo "Le tag v$version existe déjà" >&2; exit 1
           fi
-          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then echo "::warning::secret TAURI_SIGNING_PRIVATE_KEY absent : les mises à jour ne seront pas signées"; fi
+          # Sans clé de signature, make-latest-json.mjs et `gh release create` échoueraient (pas de .sig) : on le dit tout de suite, pas après 40 min de build.
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            if [ "$publish" = "true" ]; then echo "::error::secret TAURI_SIGNING_PRIVATE_KEY absent : publication impossible sans signature des mises à jour"; exit 1; fi
+            echo "::warning::secret TAURI_SIGNING_PRIVATE_KEY absent : les mises à jour ne seront pas signées, rien ne sera publié"
+          fi
           # Sans clé CurseForge, l'app publiée retomberait sur Modrinth seul (mods CurseForge « hors catalogue ») : on refuse de publier.
           if [ -z "$CUBELINK_CF_API_KEY" ]; then
             if [ "$publish" = "true" ]; then echo "::error::secret CUBELINK_CF_API_KEY absent : publication refusée (mods CurseForge non reconnus)"; exit 1; fi

@@ -17,7 +17,7 @@ Majeur/mineur : champ `version` de `src-tauri/tauri.conf.json` (changer à la ma
 ## Secrets / variables GitHub
 | Nom | Type | Rôle |
 |---|---|---|
-| `TAURI_SIGNING_PRIVATE_KEY` | secret | clé privée de signature des mises à jour (`~/.tauri/cubelink-updater.key` en local ; **à sauvegarder**, la perdre casse les mises à jour des versions déjà installées) |
+| `TAURI_SIGNING_PRIVATE_KEY` | secret (**obligatoire pour publier**, vérifié dès le job `version`) | clé privée de signature des mises à jour (`~/.tauri/cubelink-updater.key` en local ; **à sauvegarder**, la perdre casse les mises à jour des versions déjà installées) |
 | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | secret (optionnel) | mot de passe de la clé (vide aujourd'hui) |
 | `CUBELINK_CF_API_KEY` | secret (**obligatoire pour publier**) | clé de développeur CurseForge embarquée dans l'app (reconnaissance des mods au « Rejoindre », import et parcours CurseForge). Sans elle, la release refuse de publier |
 | `CUBELINK_MS_CLIENT_ID` | secret (optionnel) | identifiant d'application Azure embarqué ; à défaut, la valeur par défaut de l'app |

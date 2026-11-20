@@ -142,10 +142,10 @@ test.describe('T8 accessibilite clavier', () => {
     await expect(page.locator('.home-tile').first()).toBeVisible();
   });
 
-  test('focus place sur le titre h1 a l\'ouverture : Join, Install, Error, Reglages', async ({ appA }) => {
+  test('focus place sur le titre h1 a l\'ouverture : Join, Error, Reglages', async ({ appA }) => {
     const page = appA.page;
     await prepare(appA);
-    for (const id of ['join', 'install', 'error', 'settings']) {
+    for (const id of ['join', 'error', 'settings']) {
       await gotoScreen(page, byId(id));
       await expect.poll(() => page.evaluate(() => document.activeElement?.tagName), `[${id}] focus sur le titre`).toBe('H1');
     }
@@ -158,10 +158,10 @@ test.describe('T8 accessibilite clavier', () => {
     await expect.poll(() => page.evaluate(() => /^H[12]$/.test(document.activeElement?.tagName ?? ''))).toBe(true);
   });
 
-  test('un seul repere <main> dans Install', async ({ appA }) => {
+  test('un seul repere <main> dans Rejoindre', async ({ appA }) => {
     const page = appA.page;
     await prepare(appA);
-    await gotoScreen(page, byId('install'));
+    await gotoScreen(page, byId('join'));
     expect(await page.locator('main').count()).toBe(1);
   });
 
@@ -185,7 +185,6 @@ test.describe('T8 accessibilite clavier', () => {
       'friends-list': ['[role=tablist]', '[role=tab][aria-selected]', '[role=tabpanel][aria-labelledby]'],
       'friends-requests': ['[role=tablist]', '[role=tab][aria-selected]', '[role=tabpanel][aria-labelledby]', '[aria-live]'],
       join: ['main h1', '[role=alert],[role=status]'],
-      install: ['main h1', '[role=progressbar][aria-valuenow][aria-valuemin][aria-valuemax]', '[role=status][aria-live=polite]'],
       settings: ['main h1', '[role=tablist]', '[role=tabpanel]:not([hidden])', '[role=status][aria-live=polite]'],
       error: ['main h1', '[role=alert],[role=status]'],
       legal: ['main h1', 'article[aria-labelledby]'],

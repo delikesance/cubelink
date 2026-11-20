@@ -31,9 +31,20 @@ export function useDeviceLogin(services: Services, onFailure?: (message: string)
   const failure = useRef(onFailure);
   failure.current = onFailure;
 
+  /** Un flux de connexion est ouvert côté Rust (code demandé, validation pas encore reçue). */
+  const open = useRef(false);
+  const svc = useRef(services);
+  svc.current = services;
+
+  // Quitter l'écran en plein flux (sans Annuler ni Échap) coupe aussi la connexion côté Rust : une validation tardive
+  // n'ajoute aucun compte.
   useEffect(() => () => {
     run.current += 1;
     if (copyTimer.current) clearTimeout(copyTimer.current);
+    if (open.current) {
+      open.current = false;
+      svc.current.authCancelLogin().catch(() => { /* rien à annuler côté Rust */ });
+    }
   }, []);
 
   const start = useCallback(async () => {
@@ -41,6 +52,7 @@ export function useDeviceLogin(services: Services, onFailure?: (message: string)
     const id = ++run.current;
     beginning.current = id;
     setState({ step: "starting" });
+    open.current = true;
     try {
       const code = await services.authBeginLogin();
       if (beginning.current === id) beginning.current = 0;
@@ -50,10 +62,12 @@ export function useDeviceLogin(services: Services, onFailure?: (message: string)
       setState({ step: "code", code });
       const profile = await services.authPollLogin();
       if (id !== run.current) return;
+      open.current = false;
       setState({ step: "connected", profile });
     } catch (e) {
       if (beginning.current === id) beginning.current = 0;
       if (id !== run.current) return;
+      open.current = false;
       const message = messageOf(e);
       if (failure.current?.(message)) return;
       setState({ step: "error", message });
@@ -64,6 +78,7 @@ export function useDeviceLogin(services: Services, onFailure?: (message: string)
   const cancel = useCallback(() => {
     run.current += 1;
     beginning.current = 0;
+    open.current = false;
     setState({ step: "idle" });
     services.authCancelLogin().catch(() => { /* rien à annuler côté Rust */ });
   }, [services]);

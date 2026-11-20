@@ -5,27 +5,22 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { Page } from '@playwright/test';
-import { test, expect, ARTIFACTS, makeHostInstance, invoke, waitForRoute } from './harness/fixtures';
+import { test, expect, ARTIFACTS, makeHostInstance, waitForRoute } from './harness/fixtures';
 import { SCREENS, prepare, gotoScreen, setWindowSize, type Screen } from './helpers/e2e4-lib';
 
 const SIZES: [number, number][] = [[960, 600], [1280, 720]];
 const OUT = path.join(ARTIFACTS, 'sizes');
 const byId = (id: string) => SCREENS.find((s) => s.id === id)!;
-const progress = (p: Record<string, unknown>) => ({ phase: 'receiving', files_done: 12, files_total: 40, bytes_done: 340e6, bytes_total: 1.2e9, speed_bps: 800_000, ...p });
 
 interface Variant { id: string; screen: Screen; setup?: (page: Page) => Promise<void> }
 const VARIANTS: Variant[] = [
   ...SCREENS.map((screen) => ({ id: screen.id, screen })),
   { id: 'create-advanced', screen: byId('create'), setup: async (p) => { await p.getByRole('button', { name: /Créer une instance vide/ }).click(); await p.getByRole('button', { name: 'Options avancées' }).click(); } },
   { id: 'friends-code-confirm', screen: byId('friends-requests'), setup: async (p) => { await p.getByRole('button', { name: /Générer un nouveau code/ }).click(); } },
-  { id: 'install-relay', screen: byId('install'), setup: async (p) => { await invoke(p, 'plugin:event|emit', { event: 'transfer://progress', payload: progress({}) }); await p.locator('.inst-note').waitFor(); } },
-  { id: 'install-done', screen: byId('install'), setup: async (p) => { await invoke(p, 'plugin:event|emit', { event: 'transfer://progress', payload: progress({ phase: 'done', files_done: 40, bytes_done: 1.2e9 }) }); await p.getByRole('button', { name: 'Jouer' }).or(p.getByRole('button', { name: 'Réessayer' })).first().waitFor(); } },
-  { id: 'install-cancel-confirm', screen: byId('install'), setup: async (p) => { await p.getByRole('button', { name: 'Annuler' }).click(); await p.getByRole('group', { name: /Confirmer/ }).waitFor(); } },
   { id: 'settings-network', screen: byId('settings'), setup: async (p) => { await p.getByRole('tab', { name: 'Réseau' }).click(); } },
   { id: 'settings-java', screen: byId('settings'), setup: async (p) => { await p.getByRole('tab', { name: 'Java' }).click(); } },
   { id: 'settings-storage-confirm', screen: byId('settings'), setup: async (p) => { await p.getByRole('tab', { name: 'Stockage' }).click(); await p.getByRole('button', { name: /Vider le cache/ }).click(); } },
   { id: 'settings-about', screen: byId('settings'), setup: async (p) => { await p.getByRole('tab', { name: 'À propos' }).click(); } },
-  { id: 'error-waiting', screen: { ...byId('error'), hash: '#/error?state=waiting' } },
   { id: 'error-no-license', screen: { ...byId('error'), hash: '#/error?state=no-license' } },
   { id: 'legal-last-section', screen: byId('legal'), setup: async (p) => { await p.locator('article section, main section').last().scrollIntoViewIfNeeded(); } },
 ];
@@ -105,6 +100,26 @@ test.describe('T9 tailles de fenetre', () => {
       }
     }
     expect(fs.readdirSync(OUT).length).toBe(VARIANTS.length * SIZES.length);
+  });
+
+  test('Accueil a 960x600 et 1280x720 : noms de modpacks longs lisibles (une colonne a 960, deux a 1280)', async ({ appA }) => {
+    const page = appA.page;
+    await prepare(appA);
+    const names = ['Create: Astral Odyssey', 'All the Mods 10', 'Prominence II Hasturian Era'];
+    for (const [n, name] of names.entries()) await makeHostInstance(appA, { id: `long-${n}`, name, minecraft: '1.21.1' });
+    await page.reload();
+    for (const [w, h, cols] of [[960, 600, 1], [1280, 720, 2]] as const) {
+      await setWindowSize(page, w, h);
+      await page.evaluate(() => { window.location.hash = '#/main'; });
+      await waitForRoute(page, 'main');
+      await page.locator('.home-tile-txt .n').first().waitFor();
+      const r = await page.evaluate(() => ({
+        cols: getComputedStyle(document.querySelector('.home-grid')!).gridTemplateColumns.split(' ').length,
+        cut: [...document.querySelectorAll('.home-tile-txt .n, .home-tile-txt .m')].filter((e) => e.scrollWidth > e.clientWidth).map((e) => e.textContent),
+      }));
+      expect(r.cols, `${w}x${h} colonnes de la grille de modpacks`).toBe(cols);
+      expect(r.cut, `${w}x${h} textes de tuile coupes`).toEqual([]);
+    }
   });
 
   test('Amis a 960x600 : les cartes Ajouter / Mon code restent dans la fenetre, la page defile verticalement sans defilement horizontal', async ({ appA }) => {

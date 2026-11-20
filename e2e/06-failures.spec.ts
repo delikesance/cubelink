@@ -251,7 +251,6 @@ const ERR = [
   { state: 'bad-hash', kicker: 'Installation · échec', title: "Un fichier reçu ne correspond pas à ce que ton ami avait annoncé", actions: { 'Réessayer': 'main', 'Annuler': 'main' } },
   { state: 'friend-left', kicker: 'Installation · en pause', title: "Ton ami s'est déconnecté", actions: { 'Réessayer': 'main', 'Annuler': 'main' } },
   { state: 'disk-full', kicker: 'Installation · échec', title: 'Espace disque insuffisant', actions: { 'Réessayer': 'main', 'Annuler': 'main' } },
-  { state: 'java-missing', kicker: 'Installation · échec', title: 'Java 21 est introuvable sur cet ordinateur', actions: { 'Installer Java 21': 'install', 'Annuler': 'main' } },
 ] as const;
 
 test('T6 ecrans Erreur : textes francais et actions de chaque etat', async ({ appA }) => {
@@ -268,11 +267,6 @@ test('T6 ecrans Erreur : textes francais et actions de chaque etat', async ({ ap
       await page.waitForSelector(`main[data-route="${route}"]`, { timeout: 15_000 });
     }
   }
-  // Etat « waiting » : Annuler -> connexion ; Rouvrir la fenetre relance auth_begin_login.
-  await gotoHash(appA, '#/error?state=waiting', 'error');
-  await expect(page.getByRole('status').getByRole('heading', { name: 'Ouverture de Microsoft dans ton navigateur…' })).toBeVisible();
-  await page.getByRole('button', { name: 'Annuler' }).click();
-  await page.waitForSelector('main[data-route="login"]', { timeout: 30_000 });
   // Etat inconnu : retombe sur « cancelled » (non alarmant).
   await gotoHash(appA, '#/error?state=n-importe-quoi', 'error');
   await expect(page.getByRole('heading', { name: 'La connexion a été annulée' })).toBeVisible();

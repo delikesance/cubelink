@@ -89,6 +89,11 @@ export type FriendRequestsPage = B.RequestsPage;
 // Événements
 export type LaunchStateName = B.LaunchPhase;
 export type LaunchState = B.LaunchStateEvent_Serialize;
+
+/** Liaison du tunnel invité : `closed` = le tunnel vient d'être fermé (fin de partie, remplacement) ; `lost` est terminal. */
+export type TunnelLink = "ok" | "reconnecting" | "lost" | "closed";
+/** Charge utile de tunnel://state (construite en JSON côté Rust) ; `friend_public_key` : l'hôte, absent pour `closed`. */
+export interface TunnelStateEvent { state: TunnelLink; friend_public_key?: string }
 /** `in_game` : un jeu tourne chez l'ami (faux hors ligne et pour un ami d'une ancienne version). */
 export interface PresenceEvent { public_key: string; presence: Presence; in_game: boolean }
 
@@ -378,6 +383,8 @@ export interface Services {
   /** Redémarre et installe la mise à jour téléchargée (rejette si une partie est en cours). */
   updateInstall(): Promise<void>;
   onUpdateState(cb: (s: UpdateState) => void): Unsubscribe;
+  /** Invité : liaison du tunnel vers l'hôte (tunnel://state). Émis seulement pendant un tunnel ouvert. */
+  onTunnelState(cb: (e: TunnelStateEvent) => void): Unsubscribe;
 
   /** Zone de jeu intégrée (Windows, Linux X11) : elle existe sur ce système. */
   stageSupported(): Promise<boolean>;

@@ -17,7 +17,6 @@ export const SCREENS: Screen[] = [
   { id: 'friends-requests', ...ROUTE_ALIASES.friends },
   { id: 'friends-add', ...ROUTE_ALIASES.friends },
   { id: 'join', hash: `#/join?friend=${NO_FRIEND}`, route: 'join', ready: 'main h1' },
-  { id: 'install', hash: '#/install?friend=abcd', route: 'install', ready: '.inst-card' },
   { id: 'settings', hash: '#/settings', route: 'settings', ready: '[role=tablist]' },
   { id: 'error', hash: '#/error?state=disk-full', route: 'error', ready: 'main h1' },
   { id: 'legal', hash: '#/legal', route: 'legal', ready: 'article' },

@@ -39,6 +39,12 @@ describe("format", () => {
     expect(classifyFailure("hash mismatch")).toBe("bad-hash");
     expect(classifyFailure("l'ami s'est déconnecté")).toBe("friend-left");
     expect(classifyFailure("boom")).toBeNull();
+    // Plus d'écran Install ni d'écran Erreur « Java » ou « Microsoft » pour un échec de transfert.
+    expect(classifyFailure("Java 21 introuvable")).toBeNull();
+    expect(classifyFailure("java : l'ami n'a pas répondu")).toBeNull();
+    expect(classifyFailure("erreur réseau")).toBeNull();
+    expect(classifyFailure("network unreachable, peer left")).toBeNull();
+    expect(classifyFailure("hors ligne")).toBeNull();
     expect(classifyFailure(undefined)).toBeNull();
   });
 });

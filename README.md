@@ -54,6 +54,8 @@ Pas de compte Cubelink, pas de serveur à louer, pas de téléchargement manuel.
 
 Cubelink fonctionne **sous Windows et Linux seulement**. Sous Linux, la Scène passe par X11 : avec « Jeu intégré » actif, Cubelink s'ouvre en XWayland ; coupe ce réglage pour garder le Wayland natif (le jeu s'ouvre alors dans sa propre fenêtre).
 
+Les pré-versions de test (« pre-release » des [releases](https://github.com/delikesance/cubelink/releases), une par fusion dans `canary`) proposent aussi un `.msi` non signé (Windows) et un `.deb` (`sudo apt install ./Cubelink_*.deb`).
+
 Détails du flux de release : [`docs/release.md`](docs/release.md).
 
 ## Comment ça marche

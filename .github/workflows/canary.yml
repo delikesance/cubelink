@@ -15,9 +15,13 @@ on:
       TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
         required: false
 
+# Jamais d'annulation d'une publication en cours (même règle que ci.yml et release.yml) : un second merge attend la fin
+# du run en cours. GitHub ne garde qu'UN run en attente par groupe : avec trois merges rapprochés, le run du milieu
+# est remplacé par le dernier (qui contient ses changements) et sa pré-version n'est pas publiée. Le groupe `canary`
+# est distinct de `ci-<ref>` de l'appelant : ne pas les aligner (interblocage).
 concurrency:
   group: canary
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 # Les builds ne font que lire ; seul `publish` écrit (créer la pré-version).
 permissions:

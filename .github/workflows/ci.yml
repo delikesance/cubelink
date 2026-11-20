@@ -17,7 +17,8 @@ permissions:
   contents: read
 
 # Une PR mise à jour annule son run précédent. Un push sur canary/main n'est jamais annulé : sinon deux merges
-# rapprochés couperaient la publication canary du premier en plein build.
+# rapprochés couperaient la publication canary du premier en plein build. Le second attend dans la file de
+# canary.yml (un seul run en attente : un run intermédiaire peut être remplacé par le suivant, qui le contient).
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}

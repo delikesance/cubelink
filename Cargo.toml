@@ -32,6 +32,12 @@ blake3 = "1.8"
 tracing = "0.1"
 # Types et liaisons TypeScript générés depuis Rust (src/services/bindings.ts).
 specta = { version = "=2.0.0-rc.28", features = ["derive"] }
+# Réseau P2P : une seule déclaration pour p2p et l'app, donc une seule montée de version.
+iroh = "=1.4.1"
+iroh-blobs = "=0.105.0"
+# Doit rester à la version d'iroh (même entrée dans Cargo.lock) : mappage de port quand le relais est coupé.
+portmapper = "=0.19.3"
+base64 = "0.23"
 # dev
 tempfile = "3"
 wiremock = "0.6"

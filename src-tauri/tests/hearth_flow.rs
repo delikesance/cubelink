@@ -1622,6 +1622,7 @@ async fn plantage_du_serveur_ne_publie_rien_et_previent_les_autres() {
     ])
     .await;
     let (a, b) = (&peers[0], &peers[1]);
+    on_line_of(a)(JOINED);
     std::fs::write(a.rt().server_dir(&g).join("world/region-jouee.mca"), SENTINELLE).unwrap();
     let (heads_before, outbox_before) = (a.rt().heads_of(&g).unwrap().len(), a.rt().pending_outbox());
 
@@ -1670,6 +1671,9 @@ async fn plantage_sans_mod_connu_puis_nouvelle_partie_publiee() {
     a.runner.die(-1);
     wait_for("serveur d'Alice arrêté", 30, || a.state_of(&g) != HearthStateKind::Hosting).await;
     wait_for("plantage chez Bob", 20, || b.rt().card(&g).unwrap().crash.is_some()).await;
+    // Personne n'est jamais entré : pas de « fin de partie non publiée » à gérer chez l'hôte.
+    wait_for("marqueur retiré", 30, || !a.rt().has_session_marker(&g)).await;
+    assert_eq!(a.rt().card(&g).unwrap().orphans, 0);
     assert_eq!(b.rt().card(&g).unwrap().crash.unwrap().mod_hint, None);
     assert_eq!(a.rt().head(&g).unwrap().id(), v1.id());
 

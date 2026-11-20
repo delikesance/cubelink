@@ -141,7 +141,10 @@ const SERVER_STOP_GRACE_SHUTDOWN: Duration = Duration::from_secs(20);
 /// Attente maximale de l'annonce de fin de partie aux autres membres quand la machine s'éteint (le réseau tombe vite).
 const RELEASE_BROADCAST_SHUTDOWN: Duration = Duration::from_secs(8);
 /// Annonce faite aux joueurs du serveur quand l'hôte éteint son PC (§ 7.3).
-pub const SHUTDOWN_ANNOUNCEMENT: &str = "L'hôte éteint son PC : la partie s'arrête, la progression est gardée.";
+/// Intervalle minimal entre deux mesures de la place prise par un groupe, hors libération et rapatriement.
+const GROUP_BYTES_EVERY: Duration = Duration::from_secs(60);
+
+pub const SHUTDOWN_ANNOUNCEMENT: &str = "L'hôte éteint son PC : la partie s'arrête. Les derniers instants peuvent ne pas être gardés.";
 
 /// Comment un serveur de groupe prend fin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -634,9 +637,14 @@ pub struct HearthRuntime {
     active: Mutex<HashMap<GroupId, Arc<ActiveHost>>>,
     /// Collections dont on a tout le contenu (répond à `HaveVersion`, qui est synchrone).
     complete: Mutex<HashSet<[u8; 32]>>,
+    /// Le premier inventaire de `complete` (démarrage) est fini : avant, un « pas complet » est peut-être seulement « pas
+    /// encore compté ».
+    complete_scanned: AtomicBool,
     /// Octets des blobs de chaque groupe dans le magasin (« place prise sur ce disque »), recalculés en tâche de fond :
     /// après un rapatriement, une libération et au démarrage. La page du serveur (synchrone) ne fait que les lire.
     group_bytes: Mutex<HashMap<GroupId, u64>>,
+    /// Date de la dernière mesure de chaque groupe : le ramasse-miettes, appelé à chaque synchro, ne remesure pas à chaque fois.
+    group_bytes_at: Mutex<HashMap<GroupId, Instant>>,
     /// Collections qu'une restauration ou une résolution de fourche vient de rapatrier et qui n'ont pas encore leur
     /// version : le ramasse-miettes des versions n'y touche pas.
     gc_hold: Mutex<HashMap<[u8; 32], usize>>,
@@ -826,7 +834,9 @@ impl HearthRuntime {
             play: Mutex::new(HashMap::new()),
             active: Mutex::new(HashMap::new()),
             complete: Mutex::new(HashSet::new()),
+            complete_scanned: AtomicBool::new(false),
             group_bytes: Mutex::new(HashMap::new()),
+            group_bytes_at: Mutex::new(HashMap::new()),
             gc_hold: Mutex::new(HashMap::new()),
             fetching: Mutex::new(HashMap::new()),
             probing: Mutex::new(HashSet::new()),
@@ -1130,6 +1140,12 @@ impl HearthRuntime {
         }
         self.emit_state();
         true
+    }
+
+    /// Un lancement est en cours (installation du serveur, bail `Starting` déjà annoncé aux amis, ouverture du jeu) : ni
+    /// serveur actif ni jeu pour l'instant, mais l'arrêt de l'application le laisserait orphelin.
+    pub fn any_launching(&self) -> bool {
+        lock(&self.play).values().any(|p| matches!(p, Play::Launching { .. }))
     }
 
     pub fn play_of(&self, gid: &GroupId) -> Option<Play> {
@@ -1593,7 +1609,17 @@ impl HearthRuntime {
             // prise est mesurée une première fois.
             self.gc_versions(gid).await;
         }
+        self.complete_scanned.store(true, Ordering::SeqCst);
         self.emit_state();
+    }
+
+    /// Comme [`Self::world_complete`], mais tant que l'inventaire du démarrage n'est pas fini, regarde aussi le magasin :
+    /// l'export proposé juste après le lancement ne doit pas échouer sur un monde qui est bien là.
+    async fn world_complete_now(&self, v: &SignedVersion) -> bool {
+        if self.world_complete(v) {
+            return true;
+        }
+        !self.complete_scanned.load(Ordering::SeqCst) && self.world_on_disk_complete(v).await
     }
 
     fn start_background(self: &Arc<Self>) {
@@ -1612,6 +1638,13 @@ impl HearthRuntime {
         let weak = Arc::downgrade(self);
         self.outbox.set_others(Arc::new(move |gid| {
             weak.upgrade().and_then(|rt| rt.state(gid).map(|st| rt.others(&st).len())).unwrap_or(1)
+        }));
+        // Un accusé d'un membre qui a quitté le groupe depuis ne compte plus pour le quorum.
+        let weak = Arc::downgrade(self);
+        self.outbox.set_members(Arc::new(move |gid, key| {
+            weak.upgrade()
+                .and_then(|rt| rt.state(gid).map(|st| rt.others(&st).iter().any(|k| key_hex(k) == key)))
+                .unwrap_or(true)
         }));
         // Les versions abandonnées ou refusées sont rejouées une fois par démarrage : un ami a pu confirmer entre-temps.
         self.outbox.retry_failed();
@@ -1861,7 +1894,12 @@ impl HearthRuntime {
                 let _ = world.release(&gid, &c).await;
             }
         }
-        self.refresh_group_bytes(gid).await;
+        // La mesure recharge toutes les collections du groupe : refaite après une libération, ou si elle date de plus d'une
+        // minute (ce passage a lieu à chaque synchro). Un rapatriement remesure de son côté.
+        let stale = lock(&self.group_bytes_at).get(&gid).is_none_or(|t| t.elapsed() >= GROUP_BYTES_EVERY);
+        if !released.is_empty() || stale {
+            self.refresh_group_bytes(gid).await;
+        }
         if !released.is_empty() {
             self.emit_state();
         }
@@ -1872,6 +1910,7 @@ impl HearthRuntime {
         let Ok(world) = self.world() else { return };
         let bytes = world.group_bytes(&gid).await;
         lock(&self.group_bytes).insert(gid, bytes);
+        lock(&self.group_bytes_at).insert(gid, Instant::now());
     }
 
     /// Place prise par le groupe : ses blobs (mesurés en tâche de fond) plus ses petits fichiers (en-têtes, opérations,
@@ -2246,10 +2285,12 @@ impl HearthRuntime {
         let Some(st) = self.state(gid) else { return false };
         let others = self.others(&st);
         let need = others.len().clamp(1, 2);
+        let others_hex: BTreeSet<String> = others.iter().map(key_hex).collect();
         let online: Vec<String> = others.iter().filter(|k| self.is_online(gid, k)).map(key_hex).collect();
         self.outbox.pending().iter().filter(|e| e.group_id() == *gid).any(|e| {
+            let live = e.stored.iter().filter(|k| others_hex.contains(*k)).count();
             let more = online.iter().filter(|k| !e.stored.contains(*k) && !e.refused.contains_key(*k)).count();
-            e.stored.len() + more < need
+            live + more < need
         })
     }
 
@@ -2284,12 +2325,16 @@ impl HearthRuntime {
                 last = now.len();
                 self.emit_state();
             }
-            // Une tentative de plus sur une version encore en file : le dernier passage a échoué chez tous les membres.
             base.retain(|(id, ..)| now.iter().any(|(n, ..)| n == id));
-            // Une version refusée pour de bon (`failed`) n'arrivera pas en attendant : sortie tout de suite.
-            let failed = now
-                .iter()
-                .any(|(id, a, dead)| *dead || base.iter().find(|(b, ..)| b == id).is_some_and(|(_, a0, _)| a > a0));
+            // Une version refusée pour de bon (`failed`) n'arrivera pas en attendant : sortie tout de suite. Sinon, il faut
+            // qu'autant d'échecs de remise que de membres en ligne se soient ajoutés : un seul échec chez un seul membre
+            // (un faux « en ligne ») ne suffit pas, les autres peuvent encore confirmer le quorum.
+            let online = self
+                .state(gid)
+                .map_or(1, |st| self.others(&st).iter().filter(|k| self.is_online(gid, k)).count().max(1) as u32);
+            let failed = now.iter().any(|(id, a, dead)| {
+                *dead || base.iter().find(|(b, ..)| b == id).is_some_and(|(_, a0, _)| a.saturating_sub(*a0) >= online)
+            });
             if failed || Instant::now() >= deadline {
                 return false;
             }
@@ -2827,7 +2872,7 @@ impl HearthRuntime {
         let (v, fallback) = match version {
             Some(id) => {
                 let v = self.version(&gid, &id).ok_or("cette version n'existe plus")?;
-                if !self.world_complete(&v) {
+                if !self.world_complete_now(&v).await {
                     return Err(format!("Le contenu de la version {} n'est plus sur ce PC : elle ne peut pas être exportée.", v.header.number));
                 }
                 (v, false)
@@ -2837,7 +2882,7 @@ impl HearthRuntime {
                     return Err("Deux versions du monde existent : choisis laquelle exporter depuis l'historique, ou garde l'une d'elles.".into());
                 }
                 let head = self.head(&gid).ok_or("ce groupe n'a pas encore de monde à exporter")?;
-                if self.world_complete(&head) {
+                if self.world_complete_now(&head).await {
                     (head, false)
                 } else {
                     let prev = self.complete_head(&gid).ok_or("aucune version de ce monde n'est complète sur ce PC : il faut d'abord la recevoir")?;
@@ -3440,8 +3485,11 @@ impl HearthRuntime {
     /// si quelqu'un est entré, bail relâché, partage fermé par `end_hook`). Si personne n'est jamais entré, il n'y a rien à
     /// publier : le serveur est seulement arrêté.
     async fn idle_stop(self: &Arc<Self>, gid: GroupId) {
-        // Le vide vient d'être constaté par la surveillance (aucune suspension depuis) : pas de nouvelle vérification.
         let Some(host) = self.active(&gid) else { return };
+        // Un joueur a pu entrer depuis que la surveillance a constaté le vide (la tâche est détachée) : le serveur reste.
+        if host.players() > 0 {
+            return;
+        }
         if !host.ever_joined.load(Ordering::SeqCst) {
             self.abort_hosting(gid).await;
         }
@@ -3547,7 +3595,10 @@ impl HearthRuntime {
             // Plantage : le marqueur reste jusqu'à la mise de côté ; si elle échoue, le prochain « Jouer » la refait.
             (_, Some(c)) => {
                 self.note_crash(gid, self.me, c.mod_hint.clone());
-                if let Err(e) = self.shelve_unpublished_world(gid).await {
+                if !host.ever_joined.load(Ordering::SeqCst) {
+                    // Personne n'est jamais entré : rien à garder, pas de « fin de partie non publiée » à gérer.
+                    self.clear_session_marker(&gid);
+                } else if let Err(e) = self.shelve_unpublished_world(gid).await {
                     eprintln!("[cubelink] groupe {gid} : le monde du serveur planté n'a pas pu être mis de côté : {e}");
                 }
             }

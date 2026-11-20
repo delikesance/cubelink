@@ -316,6 +316,9 @@ impl AppState {
         if lock(&self.game).is_some() {
             return Some("Une partie est en cours : ferme Minecraft avant d'installer la mise à jour.");
         }
+        if self.hearth.any_launching() {
+            return Some("Une partie est en cours de lancement : attends qu'elle soit ouverte, puis ferme-la avant d'installer la mise à jour.");
+        }
         if lock(&self.join).is_some() {
             return Some("Un téléchargement de monde est en cours : attends sa fin ou annule-le avant d'installer la mise à jour.");
         }

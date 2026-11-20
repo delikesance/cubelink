@@ -174,14 +174,23 @@ pub fn graceful_exit(app: &AppHandle, st: &Arc<AppState>, cause: ExitCause) {
     }
     let (st, app) = (st.clone(), app.clone());
     tauri::async_runtime::spawn(async move {
-        if st.quit_requested() {
-            st.quit_game(cause.game_grace()).await;
+        let stop_game = async {
+            if st.quit_requested() {
+                st.quit_game(cause.game_grace()).await;
+            } else {
+                st.stage.flush_log();
+            }
+        };
+        if cause == ExitCause::Shutdown {
+            // Le système ne laisse que quelques secondes : le jeu et les serveurs s'arrêtent en même temps, sinon un jeu
+            // lent à fermer mangerait le délai du serveur (tué avant d'avoir enregistré).
+            tokio::join!(stop_game, st.hearth_stop_all_with(StopMode::Shutdown));
         } else {
-            st.stage.flush_log();
+            stop_game.await;
+            // Un serveur de groupe encore actif est arrêté proprement (monde publié, bail relâché ; arrêt de la machine
+            // demandé entre-temps : voir `StopMode::Shutdown`).
+            st.hearth_stop_all_with(stop_mode()).await;
         }
-        // Un serveur de groupe encore actif est arrêté proprement (monde publié, bail relâché ; arrêt de la machine : voir
-        // `StopMode::Shutdown`).
-        st.hearth_stop_all_with(stop_mode()).await;
         app.exit(0);
     });
 }

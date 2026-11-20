@@ -4,8 +4,10 @@
 //! nécessaire pour un serveur de groupe (annonce aux joueurs, `stop`, bail relâché avec `Shutdown`, rien de publié : voir
 //! `hearth::StopMode::Shutdown`) et pour le jeu intégré, par la même routine que « Quitter » (`background::graceful_exit`).
 //!
-//! * Linux et autres Unix : `SIGTERM`, `SIGINT` et `SIGHUP`. Un second signal pendant l'arrêt force la sortie (un Ctrl-C
-//!   ne doit jamais rendre l'application insensible).
+//! * Linux et autres Unix : `SIGTERM` (envoyé par le système à l'arrêt de la machine) lance l'arrêt court, sans publication.
+//!   `SIGINT` et `SIGHUP` (Ctrl-C, terminal fermé : l'utilisateur ferme volontairement l'application) lancent une
+//!   fermeture normale, comme « Quitter ». Un second signal pendant l'arrêt force la sortie (un Ctrl-C ne doit jamais
+//!   rendre l'application insensible).
 //! * Windows : une fenêtre cachée de premier niveau (pas `HWND_MESSAGE`, qui ne reçoit pas les diffusions) traite
 //!   `WM_QUERYENDSESSION` et `WM_ENDSESSION` (`shutdown_win.rs`).
 //! * Dernier filet : la dernière fenêtre détruite par le système (`RunEvent::ExitRequested` sans code, voir `lib.rs`).
@@ -95,9 +97,12 @@ pub fn install(app: &AppHandle, st: &Arc<AppState>) {
                 Err(e) => return eprintln!("[Cubelink] signaux d'arrêt non écoutés : {e}"),
             };
             signals
-                .run(move |n| {
+                .run(move |n, sig| {
                     if n == 1 {
-                        begin_shutdown(&app, &st);
+                        match sig {
+                            unix::Sig::Term => begin_shutdown(&app, &st),
+                            unix::Sig::Int | unix::Sig::Hup => background::quit_app(&app, &st),
+                        }
                     } else {
                         eprintln!("[Cubelink] second signal d'arrêt : sortie immédiate");
                         std::process::exit(130);
@@ -116,6 +121,14 @@ pub fn install(app: &AppHandle, st: &Arc<AppState>) {
 pub mod unix {
     use tokio::signal::unix::{signal, Signal, SignalKind};
 
+    /// Quel signal a été reçu.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Sig {
+        Term,
+        Int,
+        Hup,
+    }
+
     /// `SIGTERM`, `SIGINT` et `SIGHUP`. Les signaux doivent être enregistrés dans un runtime tokio.
     pub struct Signals {
         term: Signal,
@@ -128,17 +141,18 @@ pub mod unix {
             Ok(Signals { term: signal(SignalKind::terminate())?, int: signal(SignalKind::interrupt())?, hup: signal(SignalKind::hangup())? })
         }
 
-        /// Appelle `on_signal(n)` à chaque signal reçu, `n` valant 1 au premier, 2 au suivant, etc. Ne rend jamais la main.
-        pub async fn run(mut self, mut on_signal: impl FnMut(u32)) {
+        /// Appelle `on_signal(n, signal)` à chaque signal reçu, `n` valant 1 au premier, 2 au suivant, etc. Ne rend jamais la
+        /// main.
+        pub async fn run(mut self, mut on_signal: impl FnMut(u32, Sig)) {
             let mut n = 0u32;
             loop {
-                tokio::select! {
-                    _ = self.term.recv() => {}
-                    _ = self.int.recv() => {}
-                    _ = self.hup.recv() => {}
-                }
+                let sig = tokio::select! {
+                    _ = self.term.recv() => Sig::Term,
+                    _ = self.int.recv() => Sig::Int,
+                    _ = self.hup.recv() => Sig::Hup,
+                };
                 n += 1;
-                on_signal(n);
+                on_signal(n, sig);
             }
         }
     }
@@ -165,7 +179,8 @@ mod tests {
     async fn sigterm_declenche_l_arret_une_fois_puis_signale_le_second() {
         let signals = unix::Signals::register().unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let task = tokio::spawn(signals.run(move |n| {
+        let task = tokio::spawn(signals.run(move |n, sig| {
+            assert_eq!(sig, unix::Sig::Term);
             let _ = tx.send(n);
         }));
         let me = std::process::id().to_string();

@@ -171,6 +171,9 @@ pub struct DrainReport {
 /// Donne le nombre d'**autres** membres d'un groupe (le quorum en découle).
 pub type OthersFn = Arc<dyn Fn(&GroupId) -> usize + Send + Sync>;
 
+/// Dit si une clé (hex) est encore un autre membre du groupe : un accusé d'un membre parti ne compte plus.
+pub type MemberFn = Arc<dyn Fn(&GroupId, &str) -> bool + Send + Sync>;
+
 /// Ce qu'un passage a fait d'une entrée.
 #[derive(Default)]
 struct EntryOutcome {
@@ -183,6 +186,7 @@ pub struct Outbox {
     dir: PathBuf,
     entries: Mutex<BTreeMap<VersionId, OutboxEntry>>,
     others: Mutex<Option<OthersFn>>,
+    members: Mutex<Option<MemberFn>>,
     drain_lock: tokio::sync::Mutex<()>,
     wake: Notify,
     skipped: Vec<String>,
@@ -241,7 +245,7 @@ impl Outbox {
                 Err(why) => skipped.push(format!("{name} : {why}")),
             }
         }
-        Ok(Self { dir, entries: Mutex::new(entries), others: Mutex::new(None), drain_lock: tokio::sync::Mutex::new(()), wake: Notify::new(), skipped })
+        Ok(Self { dir, entries: Mutex::new(entries), others: Mutex::new(None), members: Mutex::new(None), drain_lock: tokio::sync::Mutex::new(()), wake: Notify::new(), skipped })
     }
 
     fn read_entry(path: &Path) -> Result<OutboxEntry, String> {
@@ -365,6 +369,21 @@ impl Outbox {
         *lock(&self.others) = Some(f);
     }
 
+    /// Donne à la file le moyen de savoir si un accusé vient d'un membre encore dans le groupe.
+    pub fn set_members(&self, f: MemberFn) {
+        *lock(&self.members) = Some(f);
+    }
+
+    /// Accusés `Stored` de membres encore dans le groupe (sans la fonction de [`Self::set_members`], tous comptent).
+    fn live_stored(&self, entry: &OutboxEntry) -> usize {
+        let f = lock(&self.members).clone();
+        let group = entry.group_id();
+        match f {
+            Some(f) => entry.stored.iter().filter(|k| f(&group, k)).count(),
+            None => entry.stored.len(),
+        }
+    }
+
     /// `(autres membres, accusés `Stored` requis)` : `min(2, autres)`, au moins 1. Sans fonction donnée par
     /// [`Self::set_others`], un seul autre membre est supposé.
     fn counts(&self, group: &GroupId) -> (usize, usize) {
@@ -422,7 +441,7 @@ impl Outbox {
         let (id, group) = (entry.id(), entry.group_id());
         let (others, quorum) = self.counts(&group);
         let mut out = EntryOutcome::default();
-        if entry.stored.len() >= quorum {
+        if self.live_stored(&entry) >= quorum {
             // Le groupe a rétréci depuis les accusés : ils suffisent maintenant.
             out.delivered = self.remove(&id).is_ok();
             return out;
@@ -465,7 +484,8 @@ impl Outbox {
                         cur.last_error = Some(format!("refusée : {text}"));
                         cur.refused.insert(rid.clone(), text.clone());
                         // Même avec tous les autres membres, le quorum n'est plus atteignable.
-                        let possible = cur.stored.len() + others.saturating_sub(cur.stored.len() + cur.refused.len());
+                        let stored = self.live_stored(cur);
+                        let possible = stored + others.saturating_sub(stored + cur.refused.len());
                         if possible < quorum {
                             cur.failed = Some(text.clone());
                         }
@@ -475,7 +495,7 @@ impl Outbox {
                     out.failures.push((id, rid, text));
                 }
             }
-            if cur.stored.len() >= quorum {
+            if self.live_stored(cur) >= quorum {
                 drop(map);
                 out.delivered = self.remove(&id).is_ok();
                 // Les remises encore en cours sont abandonnées : le membre lent rattrape de son côté.
@@ -948,6 +968,29 @@ mod tests {
         assert_eq!(r.delivered, vec![v.id()]);
         assert!(ob.is_empty());
         assert!(!tmp.path().join(format!("{}.json", v.id())).exists());
+    }
+
+    #[tokio::test]
+    async fn an_ack_from_a_member_who_left_does_not_count() {
+        let tmp = tempfile::tempdir().unwrap();
+        let g = GroupId([1; 16]);
+        let ob = Outbox::open(tmp.path()).unwrap();
+        ob.set_others(Arc::new(|_| 2));
+        let left = Arc::new(Mutex::new(false));
+        let l = left.clone();
+        ob.set_members(Arc::new(move |_, k| !(k == "b" && *lock(&l))));
+        let v = version(g, 1, 1);
+        ob.enqueue(v.clone()).unwrap();
+        let (a, b) = (Scripted::new("a", g, Behavior::Fail), Scripted::new("b", g, Behavior::Ok));
+        let r = quick(&ob, &[a.dynr(), b.dynr()]).await;
+        assert_eq!(r.delivered.len(), 0, "un seul accusé ne suffit pas");
+        // `b` quitte le groupe (il reste 2 autres membres : `a` et un nouveau) : son accusé ne compte plus.
+        *lock(&left) = true;
+        let r = quick(&ob, &[a.dynr()]).await;
+        assert_eq!((r.delivered.len(), r.pending), (0, 1), "l'accusé du membre parti ne suffit pas");
+        *lock(&a.behavior) = Behavior::Ok;
+        let r = quick(&ob, &[a.dynr()]).await;
+        assert_eq!(r.delivered.len(), 0, "a seul : encore un accusé de moins que le quorum");
     }
 
     #[tokio::test]

@@ -8,6 +8,7 @@ import { canInviteFrom, hostingKeys, useHostState, useInvites } from "../../app/
 import { ASK_LABEL, useJoinAsk, useJoinRequests } from "../../app/useJoinRequests";
 import { Badge, Button } from "../../ui";
 import { Avatar } from "../Friends/Avatar";
+import { JoinRequestRow } from "../../app/JoinRequestRow";
 import type { FriendWithPresence, Instance, Invite, JoinRequest } from "../../services/types";
 
 type Confirm =
@@ -165,17 +166,7 @@ export default function InGamePanel({ open = true }: { open?: boolean }) {
             <h2 id="ov-req">Demandes à rejoindre · {joinRequests.length}</h2>
             <ul className="ov-list" aria-label="Demandes à rejoindre">
               {joinRequests.map((r) => (
-                <li key={r.public_key} className="ov-row ov-row-inv">
-                  <Avatar name={r.name} size={36} services={services} />
-                  <div className="ov-who">
-                    <span className="ov-name"><span>{r.name}</span></span>
-                    <span className="ov-sub">Veut rejoindre ta partie</span>
-                  </div>
-                  <div className="ov-actions">
-                    <Button aria-label={`Accepter la demande de ${r.name}`} loading={busy === `req-${r.public_key}`} onClick={() => { void decide(r, true); }}>Accepter</Button>
-                    <Button variant="secondary" aria-label={`Refuser la demande de ${r.name}`} disabled={busy === `req-${r.public_key}`} onClick={() => { void decide(r, false); }}>Refuser</Button>
-                  </div>
-                </li>
+                <JoinRequestRow key={r.public_key} request={r} services={services} busy={busy === `req-${r.public_key}`} onAnswer={(q, ok) => { void decide(q, ok); }} />
               ))}
             </ul>
           </section>

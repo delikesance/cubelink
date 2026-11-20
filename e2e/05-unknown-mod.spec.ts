@@ -48,6 +48,10 @@ test('T5 : mod inconnu signale avant telechargement, confiance requise, sha256 i
   // Le transfert se deroule sur place (ecran Rejoindre), puis le jeu se lance : on suit les evenements.
   await expect.poll(async () => (await events(appB, 'transfer://unknown_mods')).length, { timeout: 90_000 }).toBeGreaterThan(0);
   await expect.poll(async () => ((await events(appB, 'transfer://progress')) as any[]).some((p) => p.phase === 'done'), { timeout: 90_000 }).toBe(true);
+  // Transfert fini : l'ecran Rejoindre lance le jeu puis rentre a l'accueil (joinAndPlay -> navigate("main"), apres le
+  // lancement, donc en differe). On attend ce retour : sinon ce navigate tardif ramene l'app sur l'accueil pendant
+  // qu'on rouvre « Rejoindre » plus bas (c'etait l'echec de la ligne « gotoHash join »).
+  await appB.page.waitForSelector('main[data-route="main"]', { timeout: 60_000 });
 
   // Re-verification locale : evenement transfer://unknown_mods.
   const ev = (await events(appB, 'transfer://unknown_mods')) as { instance_id: string; unknown_mods: string[] }[];

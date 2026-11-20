@@ -96,7 +96,7 @@ pub struct Version {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct GalleryImage {
-    /// Version réduite (environ 350 px de large) : seulement en secours de `raw_url`.
+    /// Version réduite (environ 350 px de large) : seulement en secours de `raw_url` (trop petite pour la visionneuse).
     pub url: String,
     /// Image d'origine, en pleine résolution.
     #[serde(default)]
@@ -156,11 +156,15 @@ impl ModrinthClient {
     }
 
     pub fn with_base_url(base_url: impl Into<String>, user_agent: impl Into<String>) -> Self {
-        Self {
-            http: reqwest::Client::new(),
-            base_url: base_url.into().trim_end_matches('/').to_string(),
-            user_agent: user_agent.into(),
-        }
+        let user_agent: String = user_agent.into();
+        Self { http: super::http::api_client(&user_agent, true), base_url: base_url.into().trim_end_matches('/').to_string(), user_agent }
+    }
+
+    /// Délais personnalisés (tests : un serveur muet doit échouer vite).
+    #[cfg(test)]
+    fn with_timeouts(base_url: impl Into<String>, user_agent: impl Into<String>, t: super::http::Timeouts) -> Self {
+        let user_agent: String = user_agent.into();
+        Self { http: super::http::client_with(t, Some(&user_agent), true), base_url: base_url.into().trim_end_matches('/').to_string(), user_agent }
     }
 
     fn url(&self, path: &str) -> String {
@@ -335,6 +339,28 @@ mod tests {
                        "hashes":{"sha1":"aa","sha512":"bb"}}],
             "dependencies": [{"project_id":"p2","version_id":null,"dependency_type":"required"}]
         })
+    }
+
+    #[tokio::test]
+    async fn silent_api_server_fails_with_network_error_instead_of_hanging() {
+        use tokio::io::AsyncReadExt;
+        use super::super::http::Timeouts;
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((mut sock, _)) = l.accept().await {
+                let mut b = [0u8; 2048];
+                let _ = sock.read(&mut b).await;
+                held.push(sock);
+            }
+        });
+        let t = Timeouts { connect: std::time::Duration::from_secs(2), read: std::time::Duration::from_millis(300), total: Some(std::time::Duration::from_millis(500)) };
+        let c = ModrinthClient::with_timeouts(format!("http://{addr}"), UA, t);
+        let start = std::time::Instant::now();
+        let r = tokio::time::timeout(std::time::Duration::from_secs(5), c.versions_from_hashes(&["aa".to_string()])).await;
+        assert!(matches!(r, Ok(Err(Error::Network(_)))), "{r:?}");
+        assert!(start.elapsed() < std::time::Duration::from_secs(3));
     }
 
     #[tokio::test]

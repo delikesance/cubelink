@@ -85,7 +85,7 @@ impl FabricClient {
 
     /// `meta_url` : base sans `/v2` (ex. `https://meta.fabricmc.net`).
     pub fn with_meta_url(url: impl Into<String>) -> Self {
-        Self { http: reqwest::Client::new(), meta_url: url.into().trim_end_matches('/').to_string() }
+        Self { http: crate::http::client(), meta_url: url.into().trim_end_matches('/').to_string() }
     }
 
     async fn get_bytes(&self, url: &str) -> Result<Vec<u8>> {
@@ -477,5 +477,20 @@ mod tests {
         assert_eq!(m.libraries.len(), 2);
         assert_eq!(m.jvm_args, vec![json!("-Xss1M")]);
         assert_eq!(m.inherits_from, "1.21.1");
+    }
+
+    #[tokio::test]
+    async fn serveur_qui_ne_repond_pas_echoue_en_network() {
+        let s = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("[]").set_delay(std::time::Duration::from_secs(5)))
+            .mount(&s)
+            .await;
+        let mut c = FabricClient::with_meta_url(s.uri());
+        c.http = crate::http::builder_with(std::time::Duration::from_secs(5), std::time::Duration::from_millis(200)).build().unwrap();
+        let t = std::time::Instant::now();
+        let err = c.list_loader_versions("1.21.1").await.unwrap_err();
+        assert!(t.elapsed() < std::time::Duration::from_secs(3), "{:?}", t.elapsed());
+        assert!(matches!(&err, Error::Network(m) if m.contains("délai dépassé")), "{err:?}");
     }
 }

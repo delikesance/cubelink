@@ -253,8 +253,14 @@ impl InstanceStore {
             check_ram(mb)?;
         }
         let java_path = java_path.map(validate_java_path).transpose()?;
-        let jvm_args = jvm_args.map(validate_jvm_args).transpose()?;
-        let wrapper = wrapper.map(validate_wrapper).transpose()?;
+        // Une valeur déjà enregistrée et renvoyée telle quelle (le tiroir renvoie toujours tous les champs) n'est pas
+        // revalidée : un ancien guillemet mal fermé ne doit pas empêcher de changer le nom ou la mémoire.
+        let jvm_args = jvm_args
+            .map(|a| if a.trim() == stored.instance.jvm_args { Ok(stored.instance.jvm_args.clone()) } else { validate_jvm_args(a) })
+            .transpose()?;
+        let wrapper = wrapper
+            .map(|w| if w.trim() == stored.instance.wrapper { Ok(stored.instance.wrapper.clone()) } else { validate_wrapper(w) })
+            .transpose()?;
         if let Some(n) = name {
             stored.instance.name = n;
         }
@@ -369,6 +375,9 @@ fn validate_jvm_args(a: &str) -> Result<String> {
     if a.chars().any(|c| c.is_control()) {
         return Err(Error::Invalid("arguments JVM : caractères de contrôle interdits".into()));
     }
+    if split_args_shell(a, BACKSLASH_ESCAPES).is_err() {
+        return Err(Error::Invalid("arguments JVM : guillemet non fermé".into()));
+    }
     Ok(a.to_string())
 }
 
@@ -380,12 +389,70 @@ fn validate_wrapper(w: &str) -> Result<String> {
     if w.chars().any(|c| c.is_control()) {
         return Err(Error::Invalid("commande d'enrobage : caractères de contrôle interdits".into()));
     }
+    if split_args_shell(w, BACKSLASH_ESCAPES).is_err() {
+        return Err(Error::Invalid("commande d'enrobage : guillemet non fermé".into()));
+    }
     Ok(w.to_string())
 }
 
-/// Découpe la chaîne d'arguments JVM d'une instance (séparateur : espaces).
+/// Découpe façon shell : espaces hors guillemets = séparateurs, `'...'` littéral, `"..."` littéral
+/// (sauf `\"` et `\\` si `backslash_escapes`), `\x` = `x` hors guillemets si `backslash_escapes`.
+/// Les guillemets se collent au texte voisin (`-Dk="a b"` donne `-Dk=a b`) et `""` donne un argument vide.
+/// Guillemet ou antislash final non fermé : erreur. Aucun shell n'est lancé : on fabrique seulement la liste.
+pub fn split_args_shell(s: &str, backslash_escapes: bool) -> std::result::Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut has_token = false;
+    let mut quote: Option<char> = None;
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some('"') if c == '\\' && backslash_escapes => match chars.next() {
+                Some(n @ ('"' | '\\')) => cur.push(n),
+                Some(n) => {
+                    cur.push('\\');
+                    cur.push(n);
+                }
+                None => return Err("guillemet non fermé".into()),
+            },
+            Some(_) => cur.push(c),
+            None if c == '"' || c == '\'' => {
+                quote = Some(c);
+                has_token = true;
+            }
+            None if c == '\\' && backslash_escapes => {
+                cur.push(chars.next().ok_or("antislash final")?);
+                has_token = true;
+            }
+            None if c.is_whitespace() => {
+                if has_token {
+                    out.push(std::mem::take(&mut cur));
+                    has_token = false;
+                }
+            }
+            None => {
+                cur.push(c);
+                has_token = true;
+            }
+        }
+    }
+    if quote.is_some() {
+        return Err("guillemet non fermé".into());
+    }
+    if has_token {
+        out.push(cur);
+    }
+    Ok(out)
+}
+
+/// Les antislashs sont des échappements hors Windows ; sous Windows ils restent littéraux (`C:\Users\...`).
+const BACKSLASH_ESCAPES: bool = !cfg!(windows);
+
+/// Découpe la chaîne d'arguments JVM (ou la commande d'enrobage) d'une instance, façon shell.
+/// Une ancienne valeur mal fermée (impossible à enregistrer maintenant) retombe sur le découpage aux espaces.
 pub fn split_jvm_args(args: &str) -> Vec<String> {
-    args.split_whitespace().map(str::to_string).collect()
+    split_args_shell(args, BACKSLASH_ESCAPES).unwrap_or_else(|_| args.split_whitespace().map(str::to_string).collect())
 }
 
 fn count_jars(mods: &Path) -> u32 {
@@ -699,6 +766,95 @@ b"), None).is_err());
         assert_eq!(v["kind"], "own");
         assert!(v["created_at"].as_i64().unwrap() > 0);
         assert_eq!(v["loader"]["loader"], "neoforge");
+    }
+
+    fn sp(s: &str, esc: bool) -> Vec<String> {
+        split_args_shell(s, esc).unwrap()
+    }
+
+    #[test]
+    fn split_args_basics() {
+        assert!(sp("", true).is_empty());
+        assert!(sp("   ", true).is_empty());
+        assert_eq!(sp("-Xmx2G  -XX:+UseG1GC", true), vec!["-Xmx2G", "-XX:+UseG1GC"]);
+        assert_eq!(sp("-Dk=\"a b\"", true), vec!["-Dk=a b"]);
+        assert_eq!(sp("'a b' c", true), vec!["a b", "c"]);
+        assert_eq!(sp("\"\"", true), vec![""]);
+        assert_eq!(sp("-Dk=''", true), vec!["-Dk="]);
+        assert_eq!(sp("a\"b c\"d", true), vec!["ab cd"]);
+        assert_eq!(sp("'say \"hi\"'", true), vec!["say \"hi\""]);
+    }
+
+    #[test]
+    fn split_args_windows_path_with_spaces() {
+        let v = sp("-javaagent:\"C:\\Users\\Jean Dupont\\agent.jar\" -Xss1M", false);
+        assert_eq!(v, vec!["-javaagent:C:\\Users\\Jean Dupont\\agent.jar", "-Xss1M"]);
+    }
+
+    #[test]
+    fn split_args_backslashes() {
+        assert_eq!(sp("a\\ b", true), vec!["a b"]);
+        assert_eq!(sp("a\\ b", false), vec!["a\\", "b"]);
+        assert_eq!(sp("\"a\\\"b\"", true), vec!["a\"b"]);
+        assert_eq!(sp("\"a\\nb\"", true), vec!["a\\nb"]);
+        assert!(split_args_shell("a\\", true).is_err());
+    }
+
+    #[test]
+    fn split_args_unclosed_is_error_and_split_jvm_args_falls_back() {
+        assert!(split_args_shell("-Dx=\"abc", true).is_err());
+        assert!(split_args_shell("'abc", false).is_err());
+        assert_eq!(split_jvm_args("-Dx=\"abc def"), vec!["-Dx=\"abc", "def"]);
+    }
+
+    #[test]
+    fn split_wrapper_with_quoted_path() {
+        assert_eq!(sp("gamemoderun \"/opt/my tools/x\"", true), vec!["gamemoderun", "/opt/my tools/x"]);
+    }
+
+    #[test]
+    fn validate_rejects_unclosed_quote() {
+        assert!(validate_jvm_args("-Dk=\"a b").is_err());
+        assert!(validate_wrapper("gamemoderun \"x").is_err());
+        assert_eq!(validate_jvm_args(" -javaagent:\"/tmp/a b/x.jar\" ").unwrap(), "-javaagent:\"/tmp/a b/x.jar\"");
+        assert!(validate_wrapper("gamemoderun 'my tool'").is_ok());
+        let (_t, s) = store();
+        let i = s.create("A", "1.21.1", spec(), 2048).unwrap();
+        let e = s.update(&i.id, None, None, None, Some("-Dk=\"a"), None).unwrap_err();
+        assert!(e.to_string().contains("guillemet non fermé"), "{e}");
+    }
+
+    #[test]
+    fn ancienne_valeur_mal_fermee_renvoyee_telle_quelle_ne_bloque_pas_l_enregistrement() {
+        let (_t, s) = store();
+        let i = s.create("A", "1.21.1", spec(), 2048).unwrap();
+        let mut stored = s.read_meta(&i.id).unwrap();
+        stored.instance.jvm_args = "-Dname=O'Brien".into();
+        stored.instance.wrapper = "gamemoderun \"x".into();
+        s.write_meta(&i.id, &stored).unwrap();
+        // Même valeur renvoyée avec un autre champ : accepté, la valeur est conservée.
+        let u = s.update(&i.id, Some("B"), None, None, Some("-Dname=O'Brien"), Some("gamemoderun \"x")).unwrap();
+        assert_eq!((u.name.as_str(), u.jvm_args.as_str(), u.wrapper.as_str()), ("B", "-Dname=O'Brien", "gamemoderun \"x"));
+        // Une autre valeur mal fermée reste refusée.
+        assert!(s.update(&i.id, None, None, None, Some("-Dk=\"a"), None).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn real_process_receives_quoted_args_as_single_argument() {
+        // Faux `java` : écrit un argument par ligne, puis on vérifie ce que le processus a réellement reçu.
+        let t = tempfile::tempdir().unwrap();
+        let out = t.path().join("args.txt");
+        let args = split_jvm_args("-javaagent:\"/tmp/a b/agent.jar\" -Dk='x y'");
+        let st = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("for a in \"$@\"; do printf '%s\\n' \"$a\"; done > '{}'", out.display()))
+            .arg("fake-java")
+            .args(&args)
+            .status()
+            .unwrap();
+        assert!(st.success());
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "-javaagent:/tmp/a b/agent.jar\n-Dk=x y\n");
     }
 }
 

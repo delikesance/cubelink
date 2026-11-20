@@ -9,3 +9,14 @@ export function setImportWarning(missing: string[] | null): void {
 export function peekImportWarning(): string[] | null {
   return pending;
 }
+
+// Même principe pour l'échec de préparation du jeu (réseau, Java) : l'instance existe, le jeu viendra au premier lancement.
+let deferred: string | null = null;
+
+export function setPrepareDeferred(message: string | null): void {
+  deferred = message;
+}
+
+export function peekPrepareDeferred(): string | null {
+  return deferred;
+}

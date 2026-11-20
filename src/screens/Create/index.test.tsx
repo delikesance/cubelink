@@ -56,6 +56,16 @@ describe("écran Créer : choix (B3)", () => {
     expect(imp).toHaveBeenCalledWith("C:\\p\\a.mrpack", expect.objectContaining({ loader: expect.anything() }));
   });
 
+  it("import dont la préparation du jeu échoue : instance gardée, retour à l'accueil avec l'avis", async () => {
+    const base = createFakeServices({ tickMs: 0 });
+    await chooser({ ...base, pickFiles: async () => ["C:\\p\\pack-differe.mrpack"] });
+    fireEvent.click(screen.getByRole("button", { name: /Importer un fichier/ }));
+    await waitFor(() => expect(window.location.hash).toBe("#/main"));
+    expect(await screen.findByText(/le jeu n'a pas pu être préparé \(réseau indisponible\)/)).toBeTruthy();
+    expect(screen.getByText(/premier lancement/)).toBeTruthy();
+    expect((await base.instancesList()).some((i) => i.name === "Pack importé")).toBe(true);
+  });
+
   it("import : si le sélecteur échoue, saisie du chemin à la main", async () => {
     const base = createFakeServices({ tickMs: 0 });
     const imp = vi.fn(base.instancesImportMrpack);

@@ -587,10 +587,12 @@ async fn supervise(
         Err(e) => LaunchEvent::Failed { message: format!("Impossible de suivre le processus Java : {e}") },
         Ok(st) => {
             let code = st.code().unwrap_or(-1);
+            let signal = exit_signal(&st);
             if code == 0 || killed {
                 LaunchEvent::Exited { code }
             } else {
-                LaunchEvent::Failed { message: crash_message(code, started.elapsed() < opts.startup_grace, &cwd, started_at, last).await }
+                let early = started.elapsed() < opts.startup_grace;
+                LaunchEvent::Failed { message: crash_message(code, signal, early, &cwd, started_at, pid, last).await }
             }
         }
     };
@@ -671,27 +673,109 @@ async fn force_kill_tree(game: &Game, pid: u32) {
     }
 }
 
-async fn recent_crash_report(cwd: &Path, since: SystemTime) -> Option<PathBuf> {
+/// Signal ayant terminé le processus (Unix seulement ; `None` sous Windows ou pour une sortie normale).
+#[cfg(unix)]
+fn exit_signal(st: &ExitStatus) -> Option<i32> {
+    std::os::unix::process::ExitStatusExt::signal(st)
+}
+
+#[cfg(not(unix))]
+fn exit_signal(_st: &ExitStatus) -> Option<i32> {
+    None
+}
+
+fn signal_name(n: i32) -> Option<&'static str> {
+    Some(match n {
+        4 => "SIGILL",
+        6 => "SIGABRT",
+        7 => "SIGBUS",
+        9 => "SIGKILL",
+        11 => "SIGSEGV",
+        15 => "SIGTERM",
+        _ => return None,
+    })
+}
+
+/// La cause entre parenthèses : « code N » ou « signal N, NOM » (sans code de sortie, le processus a été tué).
+fn cause(code: i32, signal: Option<i32>) -> String {
+    match signal {
+        Some(n) => match signal_name(n) {
+            Some(name) => format!("signal {n}, {name}"),
+            None => format!("signal {n}"),
+        },
+        None => format!("code {code}"),
+    }
+}
+
+/// Explication à ajouter pour un signal connu.
+fn signal_hint(signal: Option<i32>) -> Option<&'static str> {
+    match signal? {
+        9 => Some("Le système a probablement arrêté le jeu faute de mémoire : réduis la mémoire allouée à l'instance."),
+        4 | 6 | 7 | 11 => Some("Plantage natif de la JVM ou du pilote graphique."),
+        _ => None,
+    }
+}
+
+/// Rapport de plantage le plus récent depuis `since` : `crash-reports/` (Minecraft) ou `hs_err_pid*.log` dans `cwd` (JVM).
+/// Pour la JVM, `hs_err_pid<pid>.log` est préféré ; à défaut (commande d'enrobage, le PID suivi n'est pas celui de la JVM),
+/// n'importe quel `hs_err_pid*.log` récent convient.
+async fn recent_crash_report(cwd: &Path, since: SystemTime, pid: u32) -> Option<PathBuf> {
     let since = since.checked_sub(Duration::from_secs(2)).unwrap_or(since);
-    let mut rd = tokio::fs::read_dir(cwd.join("crash-reports")).await.ok()?;
     let mut best: Option<(SystemTime, PathBuf)> = None;
-    while let Ok(Some(e)) = rd.next_entry().await {
-        let Ok(modified) = e.metadata().await.and_then(|m| m.modified()) else { continue };
+    let mut keep = |modified: SystemTime, path: PathBuf| {
         if modified >= since && best.as_ref().is_none_or(|(t, _)| modified > *t) {
-            best = Some((modified, e.path()));
+            best = Some((modified, path));
         }
+    };
+    if let Ok(mut rd) = tokio::fs::read_dir(cwd.join("crash-reports")).await {
+        while let Ok(Some(e)) = rd.next_entry().await {
+            if let Ok(m) = e.metadata().await.and_then(|m| m.modified()) {
+                keep(m, e.path());
+            }
+        }
+    }
+    let exact = format!("hs_err_pid{pid}.log");
+    let mut hs_exact: Option<(SystemTime, PathBuf)> = None;
+    let mut hs_any: Option<(SystemTime, PathBuf)> = None;
+    if let Ok(mut rd) = tokio::fs::read_dir(cwd).await {
+        while let Ok(Some(e)) = rd.next_entry().await {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            if !(name.starts_with("hs_err_pid") && name.ends_with(".log")) {
+                continue;
+            }
+            let Ok(m) = e.metadata().await.and_then(|m| m.modified()) else { continue };
+            if m < since {
+                continue;
+            }
+            let slot = if name == exact { &mut hs_exact } else { &mut hs_any };
+            if slot.as_ref().is_none_or(|(t, _)| m > *t) {
+                *slot = Some((m, e.path()));
+            }
+        }
+    }
+    // Le rapport de la JVM supervisée l'emporte sur un fichier plus récent mais d'un autre processus.
+    if let Some((m, p)) = hs_exact.or(hs_any) {
+        keep(m, p);
     }
     best.map(|(_, p)| p)
 }
 
-async fn crash_message(code: i32, early: bool, cwd: &Path, since: SystemTime, last: Option<String>) -> String {
-    let mut msg = if let Some(report) = recent_crash_report(cwd, since).await {
-        format!("Le jeu a planté (code {code}). Rapport de plantage : {}", report.display())
+async fn crash_message(code: i32, signal: Option<i32>, early: bool, cwd: &Path, since: SystemTime, pid: u32, last: Option<String>) -> String {
+    let cause = cause(code, signal);
+    let mut msg = if let Some(report) = recent_crash_report(cwd, since, pid).await {
+        format!("Le jeu a planté ({cause}). Rapport de plantage : {}", report.display())
+    } else if signal.is_some() {
+        format!("Le jeu a été interrompu ({cause}).")
     } else if early {
-        format!("Le jeu s'est arrêté dès le démarrage (code {code}). Vérifiez la version de Java et les arguments JVM.")
+        format!("Le jeu s'est arrêté dès le démarrage ({cause}). Vérifiez la version de Java et les arguments JVM.")
     } else {
-        format!("Le jeu s'est fermé de façon inattendue (code {code}).")
+        format!("Le jeu s'est fermé de façon inattendue ({cause}).")
     };
+    if let Some(hint) = signal_hint(signal) {
+        msg.push(' ');
+        msg.push_str(hint);
+    }
     if let Some(l) = last.filter(|l| !l.trim().is_empty()) {
         msg.push_str(&format!(" Dernier message : {l}"));
     }
@@ -820,6 +904,105 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[cfg(unix)]
+    async fn failed_message(lines: &[&str], setup: impl FnOnce(&Path)) -> (String, tempfile::TempDir) {
+        let d = tempfile::tempdir().unwrap();
+        let p = plan(lines, d.path(), &[], fast());
+        setup(&p.cwd);
+        let mut g = start(p).await.unwrap();
+        match collect(&mut g).await.last() {
+            Some(LaunchEvent::Failed { message }) => (message.clone(), d),
+            other => panic!("attendu Failed, obtenu {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sigkill_is_explained_as_memory() {
+        let (m, _d) = failed_message(&["kill -9 $$"], |_| {}).await;
+        assert!(m.contains("signal 9, SIGKILL") && m.contains("mémoire"), "{m}");
+        assert!(!m.contains("code -1"), "{m}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sigsegv_is_a_native_crash() {
+        let (m, _d) = failed_message(&["kill -SEGV $$"], |_| {}).await;
+        assert!(m.contains("SIGSEGV") && m.contains("Plantage natif"), "{m}");
+        assert!(!m.contains("code -1"), "{m}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn other_signal_is_named_by_number() {
+        let (m, _d) = failed_message(&["kill -USR1 $$"], |_| {}).await;
+        assert!(m.contains("signal 10") && !m.contains("code -1"), "{m}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hs_err_of_another_pid_is_mentioned_with_signal() {
+        let (m, _d) = failed_message(&["kill -SEGV $$"], |cwd| std::fs::write(cwd.join("hs_err_pid424242.log"), "x").unwrap()).await;
+        assert!(m.contains("a planté") && m.contains("hs_err_pid424242.log") && m.contains("SIGSEGV"), "{m}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hs_err_is_mentioned_for_exit_code_too() {
+        let (m, _d) = failed_message(&["exit 134"], |cwd| std::fs::write(cwd.join("hs_err_pid1.log"), "x").unwrap()).await;
+        assert!(m.contains("code 134") && m.contains("hs_err_pid1.log"), "{m}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn old_hs_err_is_ignored() {
+        let (m, _d) = failed_message(&["kill -9 $$"], |cwd| {
+            let f = std::fs::File::create(cwd.join("hs_err_pid7.log")).unwrap();
+            f.set_modified(SystemTime::now() - Duration::from_secs(3600)).unwrap();
+        })
+        .await;
+        assert!(!m.contains("hs_err_pid"), "{m}");
+    }
+
+    #[tokio::test]
+    async fn recent_crash_report_prefers_the_supervised_pid() {
+        let d = tempfile::tempdir().unwrap();
+        let since = SystemTime::now() - Duration::from_secs(10);
+        std::fs::write(d.path().join("hs_err_pid5.log"), "x").unwrap();
+        std::thread::sleep(Duration::from_millis(30));
+        std::fs::write(d.path().join("hs_err_pid9.log"), "x").unwrap();
+        let r = recent_crash_report(d.path(), since, 5).await.unwrap();
+        assert!(r.ends_with("hs_err_pid5.log"), "{r:?}");
+        let r = recent_crash_report(d.path(), since, 77).await.unwrap();
+        assert!(r.ends_with("hs_err_pid9.log"), "{r:?}");
+        assert!(recent_crash_report(&d.path().join("absent"), since, 5).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn crash_message_without_signal_keeps_code() {
+        let d = tempfile::tempdir().unwrap();
+        let m = crash_message(3, None, false, d.path(), SystemTime::now(), 1, None).await;
+        assert!(m.contains("(code 3)") && !m.contains("signal"), "{m}");
+        let m = crash_message(-1, Some(6), true, d.path(), SystemTime::now(), 1, None).await;
+        assert!(m.contains("signal 6, SIGABRT") && m.contains("Plantage natif") && !m.contains("dès le démarrage"), "{m}");
+        let m = crash_message(-1, Some(99), false, d.path(), SystemTime::now(), 1, None).await;
+        assert!(m.contains("signal 99)"), "{m}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn requested_kill_stays_exited() {
+        let d = tempfile::tempdir().unwrap();
+        let mut g = start(plan(&["sleep 30"], d.path(), &[], fast())).await.unwrap();
+        let mut rx = g.events().unwrap();
+        g.kill().await.unwrap();
+        let mut last = None;
+        while let Some(e) = rx.recv().await {
+            last = Some(e);
+        }
+        assert!(matches!(last, Some(LaunchEvent::Exited { .. })), "{last:?}");
     }
 
     #[tokio::test]

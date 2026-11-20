@@ -30,7 +30,6 @@ use crate::state::{lock, EventSink};
 
 pub mod commands;
 #[cfg(test)]
-#[allow(dead_code)] // sous Linux seuls les tests du recalage s'en servent ; les scenarios du lancement sont ceux de Windows
 pub(crate) mod fake;
 mod platform;
 #[cfg(test)]

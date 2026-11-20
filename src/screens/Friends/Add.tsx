@@ -28,7 +28,8 @@ function messageOf(e: unknown): string {
 type Status =
   | { step: "idle" }
   | { step: "sending" }
-  | { step: "sent"; verify: string }
+  | { step: "sent"; verify: string; code: string }
+  | { step: "answered"; kind: "accepted" | "refused" | "expired"; name?: string }
   | { step: "error"; message: string };
 
 export default function Add() {
@@ -43,6 +44,20 @@ export default function Add() {
     alive.current = true;
     return () => { alive.current = false; };
   }, []);
+
+  // Réponse à la demande envoyée : tant qu'elle est affichée, on écoute les événements du demandeur. La clé publique
+  // n'est pas connue de l'interface (seulement le code) : une seule demande est suivie à l'écran à la fois.
+  const waiting = status.step === "sent";
+  useEffect(() => {
+    if (!waiting) return;
+    const answer = (s: Status) => { if (alive.current) setStatus(s); };
+    const offs = [
+      services.onFriendAccepted(({ name }) => answer({ step: "answered", kind: "accepted", name })),
+      services.onFriendRefused(() => answer({ step: "answered", kind: "refused" })),
+      services.onFriendRequestExpired(() => answer({ step: "answered", kind: "expired" })),
+    ];
+    return () => offs.forEach((off) => off());
+  }, [waiting, services]);
 
   const empty = value.trim() === "";
   const fieldError = touched && !empty ? validateFriendCode(value) : null;
@@ -74,20 +89,34 @@ export default function Add() {
     if (validateFriendCode(value)) return;
     setStatus({ step: "sending" });
     try {
-      const verify = await services.friendSendRequest(value.trim());
+      const sentCode = value.trim();
+      const verify = await services.friendSendRequest(sentCode);
       if (!alive.current) return;
       setValue("");
       setTouched(false);
-      setStatus({ step: "sent", verify });
+      setStatus({ step: "sent", verify, code: sentCode });
     } catch (e) {
       if (alive.current) setStatus({ step: "error", message: messageOf(e) });
     }
   };
 
+  const cancel = async (code: string) => {
+    try { await services.friendCancelRequest(code); } catch { /* idempotent : rien de plus à faire */ }
+    if (!alive.current) return;
+    setStatus({ step: "idle" });
+    inputRef.current?.focus();
+  };
+
+  const answeredText = (s: Extract<Status, { step: "answered" }>) =>
+    s.kind === "accepted" ? `${s.name || "Ton ami"} a accepté ta demande. Vous êtes amis.`
+      : s.kind === "refused" ? "Ta demande n'a pas été acceptée."
+        : "Ta demande est restée sans réponse. Vérifie que ton ami est connecté, puis redemande-lui son code.";
+
   const live =
     status.step === "sending" ? "Envoi de la demande…"
       : status.step === "sent" ? "Demande envoyée. Compare ce code avec celui de ton ami."
-        : "";
+        : status.step === "answered" ? answeredText(status)
+          : "";
 
   return (
     <section className="add" aria-labelledby="add-title">
@@ -124,7 +153,15 @@ export default function Add() {
         <div className="add-sent">
           <p className="add-ok">Demande envoyée. Compare ce code avec celui de ton ami.</p>
           <code className="add-verify" aria-label={`Code de vérification : ${status.verify}`}>{status.verify}</code>
-          <p className="add-help">Les deux codes doivent être identiques. Sinon, annule et redemande un nouveau code.</p>
+          <p className="add-help">Les deux codes doivent être identiques. Sinon, annule la demande puis redemande-la.</p>
+          <div className="add-sent-actions">
+            <Button variant="secondary" onClick={() => { void cancel(status.code); }}>Annuler la demande</Button>
+          </div>
+        </div>
+      )}
+      {status.step === "answered" && (
+        <div className={`add-sent${status.kind === "accepted" ? "" : " add-sent-neutral"}`}>
+          <p className={status.kind === "accepted" ? "add-ok" : "add-help"}>{answeredText(status)}</p>
         </div>
       )}
 

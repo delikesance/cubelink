@@ -65,6 +65,8 @@ const K_DECISION: u8 = 4;
 /// Code de fermeture applicatif : le jeton du code ami est absent ou périmé.
 pub const TOKEN_REFUSED: u32 = 2;
 const TOKEN_REFUSED_REASON: &[u8] = b"code ami perime";
+/// Code de fermeture applicatif : le demandeur a annulé sa demande (distinct de `TOKEN_REFUSED`).
+const CANCELLED: u32 = 3;
 /// Message montré à l'utilisateur quand l'hôte refuse notre jeton.
 pub const STALE_CODE_MSG: &str = "Ce code ami n'est plus valide : demande à ton ami de te renvoyer son code actuel.";
 
@@ -80,6 +82,9 @@ pub enum FriendEvent {
     /// Une demande reçue a été retirée sans décision de l'utilisateur (l'ami a fermé son flux ou le délai
     /// de décision est écoulé) : clé publique hex du demandeur. L'interface retire la carte.
     RequestRemoved(String),
+    /// Notre demande envoyée est restée sans réponse (délai écoulé, ou l'autre côté a coupé) : clé publique hex
+    /// du pair. Jamais émis après une annulation volontaire.
+    Expired(String),
 }
 
 pub type EventSink = Arc<dyn Fn(FriendEvent) + Send + Sync>;
@@ -354,7 +359,15 @@ struct State {
     pending: HashMap<String, oneshot::Sender<Decision>>,
     attempts: HashMap<String, VecDeque<Instant>>,
     seen: HashMap<[u8; 32], Instant>,
-    outgoing: HashSet<String>,
+    outgoing: HashMap<String, Outgoing>,
+    /// Compteur des demandes sortantes : distingue une demande de sa remplaçante au même pair.
+    next_out: u64,
+}
+
+/// Demande sortante en cours : sa génération, et de quoi l'annuler quand elle attend la décision.
+struct Outgoing {
+    id: u64,
+    cancel: Option<oneshot::Sender<()>>,
 }
 
 struct Shared {
@@ -389,11 +402,16 @@ impl Drop for Admission {
 struct OutGuard {
     shared: Arc<Shared>,
     peer: String,
+    id: u64,
 }
 
 impl Drop for OutGuard {
     fn drop(&mut self) {
-        lock(&self.shared.state).outgoing.remove(&self.peer);
+        // Ne retire que sa propre demande : après une annulation, le pair peut déjà avoir une remplaçante.
+        let mut st = lock(&self.shared.state);
+        if st.outgoing.get(&self.peer).is_some_and(|o| o.id == self.id) {
+            st.outgoing.remove(&self.peer);
+        }
     }
 }
 
@@ -698,13 +716,17 @@ impl FriendService {
         if sh.db.is_friend(&peer)? {
             return Err(Error::Invalid("déjà ami".into()));
         }
-        {
+        let out_id = {
             let mut st = lock(&sh.state);
-            if !st.outgoing.insert(peer.clone()) {
+            if st.outgoing.contains_key(&peer) {
                 return Err(Error::Invalid("une demande est déjà en cours pour ce pair".into()));
             }
-        }
-        let guard = OutGuard { shared: sh.clone(), peer: peer.clone() };
+            st.next_out += 1;
+            let id = st.next_out;
+            st.outgoing.insert(peer.clone(), Outgoing { id, cancel: None });
+            id
+        };
+        let guard = OutGuard { shared: sh.clone(), peer: peer.clone(), id: out_id };
 
         let id = EndpointId::from_bytes(&peer_bytes).map_err(|_| Error::Invalid("clé publique invalide".into()))?;
         let mut addr = EndpointAddr::new(id);
@@ -763,12 +785,30 @@ impl FriendService {
         }
         let code = verify_code(&sh.me, &peer_bytes, &nonce_a, &nonce_b);
 
+        // L'attente de la décision peut être annulée (`cancel_request`). Si la demande a déjà été remplacée ou
+        // annulée entre-temps, on s'arrête là.
+        let (cancel_tx, mut cancel_rx) = oneshot::channel::<()>();
+        {
+            let mut st = lock(&sh.state);
+            match st.outgoing.get_mut(&peer) {
+                Some(o) if o.id == out_id => o.cancel = Some(cancel_tx),
+                _ => return Err(Error::Other("Demande annulée.".into())),
+            }
+        }
         let shared = sh.clone();
         tokio::spawn(async move {
             let _guard = guard;
             let wait = shared.cfg.decision_ttl + shared.cfg.io_timeout;
+            let mut cancelled = false;
             let result: Result<()> = async {
-                let m = decode(&read_frame(&mut recv, wait).await?)?;
+                let frame = tokio::select! {
+                    r = read_frame(&mut recv, wait) => r?,
+                    _ = &mut cancel_rx => {
+                        cancelled = true;
+                        return Ok(());
+                    }
+                };
+                let m = decode(&frame)?;
                 check_header(&m, Some(&peer_bytes), &shared.me)?;
                 let Body::Decision { session: s3, accept, name } = m.body else {
                     return Err(Error::Invalid("DECISION attendue".into()));
@@ -788,11 +828,33 @@ impl FriendService {
             .await;
             if let Err(e) = result {
                 tracing::debug!("décision d'ami non appliquée : {e}");
+                (shared.sink)(FriendEvent::Expired(hex::encode(peer_bytes)));
             }
-            let _ = send.finish();
-            conn.close(0u32.into(), b"ok");
+            if cancelled {
+                // Flux et connexion fermés sans décision : chez l'ami, la demande disparaît (`RequestRemoved`).
+                conn.close(CANCELLED.into(), b"annulee");
+            } else {
+                let _ = send.finish();
+                conn.close(0u32.into(), b"ok");
+            }
         });
         Ok(code)
+    }
+
+    /// Annule la demande envoyée à ce pair (clé publique hex). Le pair est libéré tout de suite (une nouvelle
+    /// demande est possible) et la demande disparaît chez lui. `false` : rien en cours (pas une erreur).
+    /// Aucun événement n'est émis. Si l'ami décide au même instant, il peut avoir accepté sans que nous le
+    /// sachions : il suffit alors de le redemander.
+    pub fn cancel_request(&self, public_key: &str) -> bool {
+        match lock(&self.shared.state).outgoing.remove(public_key) {
+            Some(o) => {
+                if let Some(tx) = o.cancel {
+                    let _ = tx.send(());
+                }
+                true
+            }
+            None => false,
+        }
     }
 
     /// Accepte une demande reçue : envoie l'acceptation signée puis crée l'ami.
@@ -1044,6 +1106,79 @@ mod tests {
         assert!(!err.to_string().contains(&pk));
         assert_eq!(b.db.request_count().unwrap(), 0);
         assert!(b.db.list_friends().unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancel_request_removes_it_at_peer_and_frees_the_slot() {
+        let a = Node::new("Alice").await;
+        let b = Node::new("Bob").await;
+        a.svc.send_request(&b.code).await.unwrap();
+        b.wait_event(|e| matches!(e, FriendEvent::IncomingRequest(_))).await;
+        // Sans annulation, le pair est tenu.
+        assert!(a.svc.send_request(&b.code).await.unwrap_err().to_string().contains("déjà en cours"));
+
+        assert!(a.svc.cancel_request(&b.hex()));
+        // La demande disparaît chez B, sans événement chez A.
+        b.wait_event(|e| matches!(e, FriendEvent::RequestRemoved(k) if *k == a.hex())).await;
+        assert_eq!(b.db.request_count().unwrap(), 0);
+        // Le pair est libre tout de suite : nouvelle demande acceptée, puis acceptée par B.
+        a.svc.send_request(&b.code).await.unwrap();
+        b.wait_event(|e| matches!(e, FriendEvent::IncomingRequest(_))).await;
+        b.svc.accept(&a.hex()).await.unwrap();
+        a.wait_event(|e| matches!(e, FriendEvent::Accepted(_))).await;
+        assert!(a.db.is_friend(&b.hex()).unwrap());
+        let evs = a.events();
+        assert!(!evs.iter().any(|e| matches!(e, FriendEvent::Refused(_) | FriendEvent::Expired(_))), "{evs:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancel_request_without_pending_is_a_noop() {
+        let a = Node::new("Alice").await;
+        assert!(!a.svc.cancel_request(&"b".repeat(64)));
+        assert!(!a.svc.cancel_request("pas une clé"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn late_guard_of_cancelled_request_keeps_the_new_one() {
+        let a = Node::new("Alice").await;
+        let b = Node::new("Bob").await;
+        a.svc.send_request(&b.code).await.unwrap();
+        b.wait_event(|e| matches!(e, FriendEvent::IncomingRequest(_))).await;
+        assert!(a.svc.cancel_request(&b.hex()));
+        a.svc.send_request(&b.code).await.unwrap();
+        // Laisse la tâche de l'ancienne demande finir (son OutGuard se libère) : la nouvelle reste tenue.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(a.svc.send_request(&b.code).await.unwrap_err().to_string().contains("déjà en cours"));
+        assert!(a.svc.cancel_request(&b.hex()));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn refusal_is_reported_and_frees_the_slot() {
+        let a = Node::new("Alice").await;
+        let b = Node::new("Bob").await;
+        a.svc.send_request(&b.code).await.unwrap();
+        b.wait_event(|e| matches!(e, FriendEvent::IncomingRequest(_))).await;
+        b.svc.refuse(&a.hex()).await.unwrap();
+        a.wait_event(|e| matches!(e, FriendEvent::Refused(k) if *k == b.hex())).await;
+        for _ in 0..40 {
+            if !a.svc.cancel_request(&b.hex()) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        a.svc.send_request(&b.code).await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unanswered_request_expires_on_requester_side() {
+        let a = Node::new("Alice").await;
+        let b = Node::with_config(
+            "Bob",
+            FriendConfig { io_timeout: Duration::from_secs(5), decision_ttl: Duration::from_millis(400), ..FriendConfig::default() },
+        )
+        .await;
+        a.svc.send_request(&b.code).await.unwrap();
+        a.wait_event(|e| matches!(e, FriendEvent::Expired(k) if *k == b.hex())).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

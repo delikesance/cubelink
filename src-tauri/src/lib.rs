@@ -66,6 +66,7 @@ macro_rules! commands {
             commands_friends::friend_regenerate_code,
             commands_friends::friend_list,
             commands_friends::friend_send_request,
+            commands_friends::friend_cancel_request,
             commands_friends::friend_requests,
             commands_friends::friend_accept,
             commands_friends::friend_refuse,

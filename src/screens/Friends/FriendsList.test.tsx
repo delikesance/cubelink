@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ShellContext } from "../../app/context";
 import { navigate } from "../../app/router";
@@ -18,6 +18,16 @@ function mount(services: Services) {
 const fake = () => createFakeServices({ tickMs: 0, requestCount: 0 });
 
 describe("Mes amis", () => {
+  it("une demande envoyée acceptée ajoute le nouvel ami sans recharger l'écran", async () => {
+    const services = fake();
+    const code = "mcl1-0123456789abcdef0123";
+    mount(services);
+    await screen.findByRole("list");
+    await services.friendSendRequest(code);
+    act(() => services.answerSentRequest(code, "accepted", "Camille"));
+    expect(await screen.findByText("Camille")).toBeTruthy();
+  });
+
   it("liste les amis, Retirer demande confirmation puis appelle friendRemove et vide la ligne", async () => {
     const services = fake();
     const friendRemove = vi.spyOn(services, "friendRemove");

@@ -26,7 +26,11 @@ export default function FriendsList({ refreshKey = 0 }: { refreshKey?: number } 
       const now = Math.floor(Date.now() / 1000);
       setFriends((l) => l && l.map((f) => (f.friend.public_key === e.public_key ? { ...f, presence: e.presence, in_game: e.in_game, last_seen: now } : f)));
     });
-    return () => { alive = false; off(); };
+    // Ma demande envoyée vient d'être acceptée : le nouvel ami apparaît sans changer d'écran.
+    const offAccepted = services.onFriendAccepted(() => {
+      services.friendList().then((l) => { if (alive) setFriends(l); }, () => {});
+    });
+    return () => { alive = false; off(); offAccepted(); };
   }, [services, refreshKey]);
 
   const nowSec = Math.floor(Date.now() / 1000);

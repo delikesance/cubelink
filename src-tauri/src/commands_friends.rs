@@ -170,6 +170,16 @@ impl AppState {
         Ok(())
     }
 
+    /// Annule la demande d'ami envoyée avec ce code : le pair est libéré tout de suite et la demande disparaît chez
+    /// lui. Idempotent (rien en cours, ou déjà décidée : `Ok`). Pas de vérification « déjà ami » ici : on peut annuler
+    /// juste après une acceptation.
+    pub fn friend_cancel_request(&self, code: &str) -> Result<(), String> {
+        let payload = friend_code::parse(code).map_err(|_| "code ami invalide : vérifiez qu'il commence par mcl1-".to_string())?;
+        let key = hex::encode(payload.public_key);
+        self.backend().cancel_request(&key);
+        Ok(())
+    }
+
     pub async fn friend_refuse(&self, public_key: &str) -> Result<(), String> {
         valid_key(public_key)?;
         if self.backend().refuse_request(public_key.to_string()).await.map_err(|e| crate::error::sanitize(&e))? {
@@ -248,6 +258,13 @@ pub async fn friend_send_request(state: State<'_, Arc<AppState>>, code: String) 
     state.friend_send_request(&code).await
 }
 
+/// Annule la demande d'ami envoyée avec ce code (celui passé à `friend_send_request`) : le pair est libéré tout de suite (une nouvelle demande est possible) et la demande disparaît chez lui. Idempotent : rien en cours n'est pas une erreur. Aucun événement `friend://accepted` / `friend://refused` n'est émis pour une demande annulée.
+#[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
+pub fn friend_cancel_request(state: State<'_, Arc<AppState>>, code: String) -> Result<(), String> {
+    state.friend_cancel_request(&code)
+}
+
 /// Demandes d'amis reçues, par page, filtrées par nom.
 #[tauri::command(rename_all = "snake_case")]
 #[specta::specta(rename_all = "snake_case")]
@@ -318,6 +335,21 @@ mod tests {
         let (other, _) = test_state(other_dir.path());
         let e = st.friend_send_request(&other.friend_my_code().0).await.unwrap_err();
         assert!(e.contains("pas encore disponible"), "{e}");
+    }
+
+    #[test]
+    fn annuler_une_demande_est_idempotent_et_rejette_un_code_invalide() {
+        let dir = tempfile::tempdir().unwrap();
+        let (st, _) = test_state(dir.path());
+        let other_dir = tempfile::tempdir().unwrap();
+        let (other, _) = test_state(other_dir.path());
+        let code = other.friend_my_code().0;
+        // Rien en cours : pas une erreur, et aussi quand on recommence.
+        st.friend_cancel_request(&code).unwrap();
+        st.friend_cancel_request(&code).unwrap();
+        for bad in ["", "abc", "mcl1-zzzz"] {
+            assert!(st.friend_cancel_request(bad).unwrap_err().contains("code ami invalide"), "{bad}");
+        }
     }
 
     #[test]

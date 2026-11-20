@@ -70,6 +70,8 @@ export const commands = {
 	friendList: (options?: InvokeOptions) => __TAURI_INVOKE<FriendWithPresence_Serialize[]>("friend_list", undefined, options),
 	/**  Envoie une demande d'ami à partir de son code ; renvoie le code de vérification à comparer. Erreurs propres au jeton : code d'une ancienne version (sans jeton, refusé sans connexion : « Ce code ami vient d'une ancienne version de Cubelink… »), code d'une version plus récente, code révoqué par l'hôte (« Ce code ami n'est plus valide : demande à ton ami de te renvoyer son code actuel. »). */
 	friendSendRequest: (code: string, options?: InvokeOptions) => __TAURI_INVOKE<VerifyCode>("friend_send_request", { code }, options),
+	/**  Annule la demande d'ami envoyée avec ce code (celui passé à `friend_send_request`) : le pair est libéré tout de suite (une nouvelle demande est possible) et la demande disparaît chez lui. Idempotent : rien en cours n'est pas une erreur. Aucun événement `friend://accepted` / `friend://refused` n'est émis pour une demande annulée. */
+	friendCancelRequest: (code: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("friend_cancel_request", { code }, options),
 	/**  Demandes d'amis reçues, par page, filtrées par nom. */
 	friendRequests: (offset: number, limit: number, query: string | null, options?: InvokeOptions) => __TAURI_INVOKE<RequestsPage>("friend_requests", { offset, limit, query }, options),
 	/**  Accepte une demande d'ami. Si la demande n'est plus décidable (expirée, redémarrage), la ligne est retirée et l'erreur est « Cette demande a expiré : demande à ton ami de la renvoyer. » */

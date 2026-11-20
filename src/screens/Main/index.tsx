@@ -98,6 +98,9 @@ export default function Main() {
     const off = services.onHostState((h) => setHost(h));
     return () => { alive = false; off(); };
   }, [services]);
+  useEffect(() => services.onFriendAccepted(() => {
+    services.friendList().then((l) => setFriends(l), () => {});
+  }), [services]);
   useEffect(() => services.onFriendRequest(() => setRequests((n) => (n ?? 0) + 1)), [services]);
   // Demande expirée ou annulée : on relit le total plutôt que de décrémenter à l'aveugle.
   useEffect(() => services.onFriendRequestRemoved(() => {

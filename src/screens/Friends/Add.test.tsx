@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ShellContext } from "../../app/context";
 import { createFakeServices } from "../../services/fake";
@@ -8,9 +8,11 @@ import Add, { validateFriendCode } from "./Add";
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 const VALID = "mcl1-0123456789abcdef0123";
+let fake: ReturnType<typeof createFakeServices>;
 
 function setup(over: Partial<Services> = {}) {
   const base = createFakeServices({ tickMs: 0 });
+  fake = base;
   const send = vi.fn(over.friendSendRequest ?? base.friendSendRequest);
   const services = { ...base, ...over, friendSendRequest: send } as Services;
   render(
@@ -87,5 +89,63 @@ describe("onglet Ajouter un ami", () => {
     fireEvent.click(screen.getByRole("button", { name: "Coller" }));
     await waitFor(() => expect(document.activeElement).toBe(input()));
     expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  async function sendValid() {
+    fireEvent.change(input(), { target: { value: VALID } });
+    fireEvent.click(sendBtn());
+    await screen.findByLabelText(/Code de vérification/);
+  }
+
+  it("Annuler la demande : le service est appelé, retour au formulaire, renvoi immédiat possible", async () => {
+    setup();
+    await sendValid();
+    fireEvent.click(screen.getByRole("button", { name: "Annuler la demande" }));
+    await waitFor(() => expect(screen.queryByLabelText(/Code de vérification/)).toBeNull());
+    expect(input().disabled).toBe(false);
+    // Le pair est libéré : pas de « déjà en cours ».
+    fireEvent.change(input(), { target: { value: VALID } });
+    fireEvent.click(sendBtn());
+    await screen.findByLabelText(/Code de vérification/);
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("sans annulation, un renvoi au même pair est refusé « déjà en cours »", async () => {
+    setup();
+    await sendValid();
+    fireEvent.change(input(), { target: { value: VALID } });
+    fireEvent.click(sendBtn());
+    expect((await screen.findByRole("alert")).textContent).toMatch(/déjà en cours/);
+  });
+
+  it("acceptée : le nom de l'ami est annoncé", async () => {
+    setup();
+    await sendValid();
+    act(() => fake.answerSentRequest(VALID, "accepted", "Camille"));
+    expect((await screen.findAllByText("Camille a accepté ta demande. Vous êtes amis.")).length).toBeGreaterThan(0);
+    expect(screen.queryByRole("button", { name: "Annuler la demande" })).toBeNull();
+  });
+
+  it("refusée : message neutre, sans reproche", async () => {
+    setup();
+    await sendValid();
+    act(() => fake.answerSentRequest(VALID, "refused"));
+    expect((await screen.findAllByText("Ta demande n'a pas été acceptée.")).length).toBeGreaterThan(0);
+  });
+
+  it("sans réponse : le dire et proposer de redemander", async () => {
+    setup();
+    await sendValid();
+    act(() => fake.answerSentRequest(VALID, "expired"));
+    expect((await screen.findAllByText(/restée sans réponse/)).length).toBeGreaterThan(0);
+  });
+
+  it("une demande annulée ne reçoit plus de réponse", async () => {
+    setup();
+    await sendValid();
+    fireEvent.click(screen.getByRole("button", { name: "Annuler la demande" }));
+    await waitFor(() => expect(screen.queryByLabelText(/Code de vérification/)).toBeNull());
+    act(() => fake.answerSentRequest(VALID, "refused"));
+    expect(screen.queryByText("Ta demande n'a pas été acceptée.")).toBeNull();
   });
 });

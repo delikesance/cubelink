@@ -86,12 +86,32 @@ test('T1 negatif : code invalide, soi-meme, refus', async ({ world }) => {
   await appA.page.getByRole('button', { name: `Refuser ${NAME_B}` }).click({ timeout: 30_000 });
   await expect(appA.page.getByText(`Demande de ${NAME_B} refusée.`)).toBeVisible();
   await expect(appA.page.getByText('Aucune demande en attente.')).toBeVisible();
+  // Le demandeur apprend le refus (formulation neutre), sans changer d'écran.
+  await expect(appB.page.getByText("Ta demande n'a pas été acceptée.").first()).toBeVisible({ timeout: 30_000 });
   await new Promise((r) => setTimeout(r, 1500));
   expect((await invoke<unknown[]>(appA.page, 'friend_list')).length).toBe(0);
   expect((await invoke<unknown[]>(appB.page, 'friend_list')).length).toBe(0);
   await gotoRoute(appA, 'main');
   await appA.page.getByRole('button', { name: /^Amis/ }).click();
   await expect(appA.page.getByRole('dialog', { name: 'Amis · 0' })).toBeVisible();
+});
+
+test('T1 annulation : B annule sa demande, elle disparait chez A et B peut redemander tout de suite', async ({ world }) => {
+  const { appA, appB } = world;
+  await loginBoth(world);
+  const codeA = await readMyCode(appA);
+  await sendRequest(appB, codeA);
+  await expect(appB.page.getByLabel(/^Code de vérification : /)).toBeVisible({ timeout: 30_000 });
+  await expect.poll(async () => (await invoke<{ total: number }>(appA.page, 'friend_requests', { offset: 0, limit: 5, query: null })).total, { timeout: 30_000 }).toBe(1);
+
+  await appB.page.getByRole('button', { name: 'Annuler la demande' }).click();
+  await expect(appB.page.getByLabel(/^Code de vérification : /)).toHaveCount(0);
+  await expect.poll(async () => (await invoke<{ total: number }>(appA.page, 'friend_requests', { offset: 0, limit: 5, query: null })).total, { timeout: 30_000 }).toBe(0);
+
+  // Pas de « déjà en cours » : la nouvelle demande part tout de suite.
+  await sendRequest(appB, codeA);
+  await expect(appB.page.getByLabel(/^Code de vérification : /)).toBeVisible({ timeout: 30_000 });
+  await expect.poll(async () => (await invoke<{ total: number }>(appA.page, 'friend_requests', { offset: 0, limit: 5, query: null })).total, { timeout: 30_000 }).toBe(1);
 });
 
 test('T1 retrait : A retire B, B n\'obtient plus de PONG et A n\'a plus d\'ami', async ({ world }) => {

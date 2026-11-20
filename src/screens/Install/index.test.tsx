@@ -10,7 +10,7 @@ afterEach(cleanup);
 
 const P = (o: Partial<TransferProgress> & { error?: string } = {}): TransferProgress => ({
   phase: "receiving", files_done: 12, files_total: 40, bytes_done: 340_000_000, bytes_total: 1_200_000_000,
-  speed_bps: 8_000_000, via_relay: false, ...o,
+  speed_bps: 8_000_000, ...o,
 });
 
 function setup(over: Partial<Services> = {}, params: Record<string, string> = { instance: "i1" }) {
@@ -56,14 +56,6 @@ describe("Install", () => {
     emit(P({ phase: "launching" }));
     expect(screen.getByRole("status").textContent).toBe("Lancement du jeu");
     expect(screen.queryByRole("button", { name: "Pause" })).toBeNull();
-  });
-
-  it("via un relais", () => {
-    const { emit } = setup();
-    emit(P());
-    expect(screen.queryByText(/via un relais/)).toBeNull();
-    emit(P({ via_relay: true }));
-    expect(screen.getByText(/via un relais/)).toBeTruthy();
   });
 
   it("pause puis reprise", async () => {

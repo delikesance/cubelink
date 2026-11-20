@@ -1,5 +1,7 @@
-// T11 : illustrations propres au modpack (accueil) : recherche automatique, installation depuis Parcourir,
+// T11 : illustrations propres au modpack (accueil, page du modpack) : recherche automatique, installation depuis Parcourir,
 // image locale, galerie/visionneuse, captures a toutes les tailles. Faux serveur : tests-fixtures/browse/server.mjs.
+// Navigation actuelle : une tuile de l'accueil ouvre la page du modpack (menu « Actions de … », captures, À propos) ;
+// « Source : … » et le lien vers la page du projet sont sur la fiche de Parcourir (Browse/Detail.tsx), plus sur l'accueil.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -27,7 +29,7 @@ const test = base.extend<{ appOptions: AppOptions }>({
 
 const shot = (page: import('@playwright/test').Page, name: string) => page.screenshot({ path: path.join(OUT, `${name}.png`) });
 
-interface Inst { id: string; name: string; pack?: { source: string; project_id: string; version_id: string } | null; art?: { color: string | null; icon: string | null; screenshots: string[]; author: string; source: string } | null }
+interface Inst { id: string; name: string; pack?: { source: string; project_id: string; version_id: string } | null; art?: { color: string | null; icon: string | null; screenshots: string[]; author: string; source: string; project_id: string } | null }
 
 test('Illustrations : recherche auto, image locale, installation Parcourir, galerie, captures', async ({ appA }) => {
   const page = appA.page;
@@ -54,10 +56,13 @@ test('Illustrations : recherche auto, image locale, installation Parcourir, gale
   expect(fs.readdirSync(path.join(host.dir, 'art')).sort()).toEqual(expect.arrayContaining(['icon.png', 'shot-1.png']));
   // l'art n'est PAS dans le dossier de jeu (donc pas partage comme des mods)
   expect(fs.existsSync(path.join(host.gameDir, 'art'))).toBe(false);
-  await expect(page.getByText(/Source : Modrinth/)).toBeVisible();
-  await expect(page.getByRole('link', { name: 'Page du modpack' })).toHaveAttribute('rel', /noopener/);
   await page.waitForTimeout(500);
   await shot(page, 'home-with-art');
+  // Fiche Parcourir du modpack deja installe : source et lien vers la page du projet.
+  await page.evaluate((d) => { window.location.hash = `#/browse?kind=modpack&detail=${d}`; }, `modrinth:${me.art!.project_id}`);
+  await waitForRoute(page, 'browse');
+  await expect(page.getByText(/Source : Modrinth/)).toBeVisible();
+  await expect(page.getByRole('link', { name: /Ouvrir la page sur Modrinth/ })).toHaveAttribute('rel', /noopener/);
 
   // --- sans correspondance : pas d'erreur, degrade genere, instance jouable ---
   const other = await makeHostInstance(appA, { id: 'zz-unknown', name: 'Zzqx introuvable', minecraft: '1.21.1-test' });
@@ -65,18 +70,19 @@ test('Illustrations : recherche auto, image locale, installation Parcourir, gale
   await waitForRoute(page, 'main');
   await page.waitForTimeout(1500);
   expect((await invoke<Inst[]>(page, 'instances_list')).find((i) => i.id === other.id)?.art ?? null).toBeNull();
-  const rail = page.getByRole('navigation', { name: 'Instances' });
-  await rail.getByRole('button', { name: /Zzqx introuvable/ }).click();
-  await expect(page.locator('svg[data-default-art]').first()).toBeAttached();
-  await rail.getByRole('button', { name: /Zzqx introuvable/ }).click({ button: 'right' });
+  // la tuile sans illustration garde l'avatar par defaut (pas de .has-img) ; sa page propose la recherche automatique
+  await expect(page.locator('.home-tile', { hasText: 'Zzqx introuvable' }).locator('.has-img')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Zzqx introuvable', exact: true }).click();
+  await waitForRoute(page, 'instance');
+  await page.getByRole('button', { name: 'Actions de Zzqx introuvable' }).click();
   await expect(page.getByRole('menuitem', { name: 'Chercher automatiquement' })).toBeVisible();
   await page.keyboard.press('Escape');
   await shot(page, 'home-no-art');
-  await rail.getByRole('button', { name: /Sodium modpack/ }).click();
 
-  // --- visionneuse (menu « Voir les captures ») : ouverture, fleches, Echap ---
-  await rail.getByRole('button', { name: /Sodium modpack/ }).click({ button: 'right' });
-  await page.getByRole('menuitem', { name: /^Voir les captures/ }).click();
+  // --- visionneuse (miniature « Capture 1 » de la page du modpack) : ouverture, fleches, Echap ---
+  await page.evaluate(() => { window.location.hash = '#/instance?id=host-world'; });
+  await waitForRoute(page, 'instance');
+  await page.getByRole('group', { name: "Captures d'écran" }).getByRole('button', { name: 'Capture 1' }).click();
   const viewer = page.getByRole('dialog');
   await expect(viewer).toBeVisible();
   await shot(page, 'viewer');
@@ -104,10 +110,12 @@ test('Illustrations : recherche auto, image locale, installation Parcourir, gale
   await waitForRoute(page, 'browse');
   await page.getByRole('searchbox').fill('Lithium');
   await page.locator('.br-card-btn', { hasText: 'Lithium modpack' }).first().click();
-  await page.getByRole('dialog').getByRole('button', { name: /^Installer/ }).click();
-  await waitForRoute(page, 'main', 60_000);
+  await page.getByRole('button', { name: /^Installer/ }).click();
+  await expect(page.getByRole('button', { name: 'Ouvrir le modpack' })).toBeVisible({ timeout: 60_000 }); // la fiche reste affichee
   await expect.poll(async () => (await invoke<Inst[]>(page, 'instances_list')).find((i) => /Lithium/.test(i.name))?.art?.screenshots.length ?? 0, { timeout: 30_000 }).toBeGreaterThan(0);
   await page.waitForTimeout(800);
+  await page.evaluate(() => { window.location.hash = '#/main'; });
+  await waitForRoute(page, 'main');
   await shot(page, 'home-installed-modpack');
   // l'origine du modpack est enregistree dans instance.json (projet exact et version telechargee)
   const lith = (await invoke<Inst[]>(page, 'instances_list')).find((i) => /Lithium/.test(i.name))!;

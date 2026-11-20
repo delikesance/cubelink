@@ -3,11 +3,14 @@
 import { useCallback, useSyncExternalStore } from "react";
 import type { LaunchState, Services } from "../services/types";
 
+/** Échec de l'appel de lancement, avec l'instance concernée pour ne l'afficher que sur sa page. */
+export interface LaunchError { id: string; message: string }
+
 export interface LaunchSnapshot {
   /** Dernier état connu (préparation, en jeu, échec, fermé), null avant tout lancement. */
   launch: LaunchState | null;
   /** Échec de l'appel de lancement lui-même (instance introuvable…), effacé au prochain événement. */
-  error: string | null;
+  error: LaunchError | null;
   /** Début de la session en cours (ms), par instance en jeu. */
   since: Record<string, number>;
 }
@@ -58,7 +61,7 @@ export function useLaunch(services: Services) {
     try {
       await services.instancesLaunch(id);
     } catch (e) {
-      set(store, { ...store.snap, launch: null, error: errMsg(e) });
+      set(store, { ...store.snap, launch: null, error: { id, message: errMsg(e) } });
     }
   }, [services, store]);
 
@@ -69,7 +72,10 @@ export function useLaunch(services: Services) {
 
   /** Oublie l'état d'une instance supprimée. */
   const forget = useCallback((id: string) => {
-    if (store.snap.launch?.id === id) set(store, { ...store.snap, launch: null, error: null });
+    const { launch, error } = store.snap;
+    if (launch?.id === id || error?.id === id) {
+      set(store, { ...store.snap, launch: launch?.id === id ? null : launch, error: error?.id === id ? null : error });
+    }
   }, [store]);
 
   const clearError = useCallback(() => { if (store.snap.error) set(store, { ...store.snap, error: null }); }, [store]);

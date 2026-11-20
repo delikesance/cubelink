@@ -12,38 +12,8 @@ use common_x11::*;
 use cubelink_host::GameHost;
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::*;
-use x11rb::wrapper::ConnectionExt as _;
 
 const T: Duration = Duration::from_secs(15);
-
-/// Pose `_NET_SUPPORTING_WM_CHECK` sur la racine et la retire a la fin, meme en cas d'echec.
-struct FakeWmMark;
-
-impl FakeWmMark {
-    fn set(check_window: u32) -> FakeWmMark {
-        let (c, root) = x();
-        let a = c.intern_atom(false, b"_NET_SUPPORTING_WM_CHECK").unwrap().reply().unwrap().atom;
-        c.change_property32(PropMode::REPLACE, *root, a, AtomEnum::WINDOW, &[check_window]).unwrap();
-        c.flush().unwrap();
-        FakeWmMark
-    }
-}
-
-impl Drop for FakeWmMark {
-    fn drop(&mut self) {
-        let (c, root) = x();
-        if let Ok(a) = c.intern_atom(false, b"_NET_SUPPORTING_WM_CHECK").unwrap().reply() {
-            let _ = c.delete_property(*root, a.atom);
-        }
-        let _ = c.flush();
-    }
-}
-
-fn give_focus(w: u32) {
-    let (c, _) = x();
-    c.set_input_focus(InputFocus::PARENT, w, x11rb::CURRENT_TIME).unwrap();
-    c.flush().unwrap();
-}
 
 #[test]
 fn le_rideau_ne_bloque_jamais() {

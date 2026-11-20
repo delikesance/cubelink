@@ -50,7 +50,7 @@ fn is_script(path: &str) -> bool {
 }
 
 fn progress(phase: TransferPhase) -> TransferProgress {
-    TransferProgress { phase, files_done: 0, files_total: 0, bytes_done: 0, bytes_total: 0, speed_bps: 0, via_relay: false, error: None }
+    TransferProgress { phase, files_done: 0, files_total: 0, bytes_done: 0, bytes_total: 0, speed_bps: 0, error: None }
 }
 
 /// Étape où une erreur survient (change le sens d'une erreur réseau).
@@ -328,7 +328,7 @@ impl AppState {
         }
         if !self.skip_game_install.load(Ordering::SeqCst) {
             phase(TransferPhase::Launching);
-            let java = lock(&self.settings).java_path.clone();
+            let java = crate::install::JavaSetting::global(lock(&self.settings).java_path.clone());
             let prog: crate::install::Progress = Arc::new(|_| {});
             if let Err(e) = crate::install::ensure_game(&self.paths, &inst, java, prog).await {
                 let _ = guest::remove_guest_instance(&self.instances, &inst.id, &self.store);

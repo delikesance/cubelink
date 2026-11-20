@@ -48,6 +48,7 @@ Une feature n'est jamais déclarée faite sur la seule foi des tests unitaires, 
 
 ## Boucle de vérification (de la moins chère à la plus chère)
 - Logique pure : `cargo test -p <crate> --lib`. Front : `npx tsc --noEmit`, `npx vitest run <fichier>`.
+- `npm run e2e` reconstruit front et binaire à chaque lancement (incrémental) ; `CUBELINK_E2E_SKIP_BUILD=1` pour réutiliser le binaire existant. Le chemin et la date du binaire utilisé s'affichent (`[e2e] binaire : …`).
 - Scénario Win32 de `host/tests/` (ouvre de vraies fenêtres) : `cargo test -p cubelink-host --test <nom>`, un seul à la fois. Pas besoin de prévenir : c'est normal et c'est autorisé.
 - Une seule fois, avant la PR : la suite complète listée dans « Définition de terminé ».
 - Dossier de build : `target/` par défaut. Un seul dossier à part (`target/lead`) au besoin, à supprimer à la fin (7 à 28 Go chacun).

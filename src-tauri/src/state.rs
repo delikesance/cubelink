@@ -113,6 +113,9 @@ pub struct AppState {
     pub game: Mutex<Option<String>>,
     /// Processus de jeu en cours (id de l'instance + poignée d'arrêt) ; vide pendant la préparation.
     pub game_handle: Mutex<Option<(String, Arc<RunningGame>)>>,
+    /// Drapeau d'annulation de la préparation en cours (id de l'instance + drapeau). Posé avec `game` au clic sur « Jouer »,
+    /// levé par `instances_kill` tant que le jeu n'est pas démarré, remis à vide par `GameGuard`.
+    pub launch_cancel: Mutex<Option<(String, Arc<AtomicBool>)>>,
     /// Zone de jeu integree a la fenetre du launcher (Windows) : rideau et adoption de la fenetre du jeu.
     pub stage: crate::stage::Stage,
     pub join: Mutex<Option<JoinSession>>,
@@ -320,6 +323,11 @@ impl P2pBackend for PendingBackend {
             b.host_set_world_port(port);
         }
     }
+    fn host_cancel_join_requests(&self) {
+        if let Some(b) = self.current() {
+            b.host_cancel_join_requests();
+        }
+    }
     fn join_open_tunnel(&self, friend_public_key: String) -> BoxFuture<'_, Result<u16, String>> {
         Box::pin(async move { self.wait().await?.join_open_tunnel(friend_public_key).await })
     }
@@ -362,20 +370,18 @@ pub fn now_secs() -> i64 {
 pub fn default_settings() -> Settings {
     Settings {
         language: "fr".into(),
-        default_ram_mb: 4096,
+        default_ram_mb: core_lib::instance::RAM_AUTO,
         java_path: None,
         trust_default: TrustLevel::Ask,
-        allow_relay: true,
         close_on_launch: false,
-        relay_only: false,
         share_mods: true,
-        discovery: true,
         lan_auto: true,
         overlay_enabled: true,
         overlay_hotkey: core_lib::types::DEFAULT_OVERLAY_HOTKEY.into(),
         embedded_game: true,
         open_to_all_friends: false,
         start_with_os: true,
+        ram_auto_migrated: true,
     }
 }
 
@@ -390,6 +396,12 @@ impl AppState {
         let paths = Paths::new(root);
         paths.create_all().map_err(|_| "impossible de créer le dossier de données".to_string())?;
         let store = StoreIndex::open(paths.store.join("index.sqlite")).map_err(|e| crate::error::user_msg(&e))?;
+        // Restauration d'identité déposée avant le redémarrage : avant toute ouverture de l'identité et de la base.
+        match p2p_lib::identity_backup::apply_pending_import(&paths.p2p, Some(&paths.root.join("hearth"))) {
+            Ok(true) => eprintln!("[Cubelink] identité restaurée depuis une sauvegarde"),
+            Ok(false) => {}
+            Err(e) => eprintln!("[Cubelink] restauration d'identité abandonnée, ancienne identité gardée : {e}"),
+        }
         let identity = Identity::load_or_create(&paths.p2p).map_err(|e| crate::error::user_msg_any(&e))?;
         let friends = FriendsDb::open(paths.p2p.join("friends.db")).map_err(|e| crate::error::user_msg(&e))?;
         let settings = crate::commands_settings::load_settings(&paths.settings_file);
@@ -415,6 +427,7 @@ impl AppState {
             pending_login: Mutex::new(None),
             game: Mutex::new(None),
             game_handle: Mutex::new(None),
+            launch_cancel: Mutex::new(None),
             stage,
             join: Mutex::new(None),
             lan_agent: Mutex::new(None),

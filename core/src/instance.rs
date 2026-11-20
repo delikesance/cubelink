@@ -22,9 +22,55 @@ pub const MAX_RAM_MB: u32 = 65536;
 /// RAM d'une instance « Par défaut » : la valeur globale des paramètres, lue au lancement.
 pub const RAM_DEFAULT: u32 = 0;
 
-/// RAM réellement donnée au jeu : celle de l'instance, ou la valeur globale si l'instance suit le défaut.
-pub fn effective_ram_mb(instance_mb: u32, global_mb: u32) -> u32 {
-    if instance_mb == RAM_DEFAULT { global_mb } else { instance_mb }
+/// Valeur globale « Automatique » : la mémoire se calcule au lancement (`auto_ram_mb`) selon le PC et le nombre de mods.
+pub const RAM_AUTO: u32 = 0;
+/// RAM physique laissée à Windows et aux autres programmes dans le calcul automatique.
+const AUTO_RESERVE_MB: u64 = 4096;
+/// Plancher du calcul automatique, même sur un PC très juste.
+const AUTO_FLOOR_MB: u32 = 1024;
+
+/// Mémoire « Automatique » (Mo) : 2 Go sans mod, 4 Go sous 100 mods, 6 Go sous 250, 8 Go au-delà ; plafonnée à la RAM
+/// physique moins 4 Go (plancher 1 Go : un petit PC garde de quoi lancer le jeu), arrondie à 256 Mo. RAM inconnue :
+/// pas de plafond. Rien n'est enregistré : le calcul suit le PC et le modpack à chaque lancement.
+pub fn auto_ram_mb(mod_count: u32, physical_mb: Option<u64>) -> u32 {
+    let tier: u32 = match mod_count {
+        0 => 2048,
+        1..=99 => 4096,
+        100..=249 => 6144,
+        _ => 8192,
+    };
+    let capped = match physical_mb {
+        Some(p) => u64::from(tier).min(p.saturating_sub(AUTO_RESERVE_MB)) as u32,
+        None => tier,
+    };
+    (capped.max(AUTO_FLOOR_MB) / 256 * 256).clamp(MIN_RAM_MB, MAX_RAM_MB)
+}
+
+/// RAM réellement donnée au jeu : celle de l'instance si elle en a une ; sinon la valeur globale des paramètres ; sinon
+/// (global « Automatique », `RAM_AUTO`) le calcul `auto_ram_mb` sur le nombre de mods et la RAM physique.
+pub fn effective_ram_mb(instance_mb: u32, global_mb: u32, mod_count: u32, physical_mb: Option<u64>) -> u32 {
+    if instance_mb != RAM_DEFAULT {
+        instance_mb
+    } else if global_mb != RAM_AUTO {
+        global_mb
+    } else {
+        auto_ram_mb(mod_count, physical_mb)
+    }
+}
+
+/// Réserve laissée au système quand l'hôte Hearth fait tourner le serveur ET le client sur le même PC.
+const HOST_RESERVE_MB: u64 = 3072;
+
+/// Mémoire du serveur Hearth (Mo) : la valeur voulue bornée de 1 à 8 Go, puis réduite pour que serveur + client tiennent
+/// dans la RAM physique moins 3 Go (docs/hearth.md § 6.6). Le client garde sa part ; plancher 1 Go, arrondi à 256 Mo.
+/// RAM illisible : pas de réduction.
+pub fn hearth_server_ram_mb(wanted_mb: u32, client_mb: u32, physical_mb: Option<u64>) -> u32 {
+    let wanted = wanted_mb.clamp(1024, 8192);
+    let capped = match physical_mb {
+        Some(p) => u64::from(wanted).min(p.saturating_sub(u64::from(client_mb) + HOST_RESERVE_MB)) as u32,
+        None => wanted,
+    };
+    capped.max(1024) / 256 * 256
 }
 
 /// Avant de rejoindre un ami : désactive l'écran d'accueil « accessibilité » de Minecraft (1.19.4+).
@@ -254,8 +300,14 @@ impl InstanceStore {
             check_ram(mb)?;
         }
         let java_path = java_path.map(validate_java_path).transpose()?;
-        let jvm_args = jvm_args.map(validate_jvm_args).transpose()?;
-        let wrapper = wrapper.map(validate_wrapper).transpose()?;
+        // Une valeur déjà enregistrée et renvoyée telle quelle (le tiroir renvoie toujours tous les champs) n'est pas
+        // revalidée : un ancien guillemet mal fermé ne doit pas empêcher de changer le nom ou la mémoire.
+        let jvm_args = jvm_args
+            .map(|a| if a.trim() == stored.instance.jvm_args { Ok(stored.instance.jvm_args.clone()) } else { validate_jvm_args(a) })
+            .transpose()?;
+        let wrapper = wrapper
+            .map(|w| if w.trim() == stored.instance.wrapper { Ok(stored.instance.wrapper.clone()) } else { validate_wrapper(w) })
+            .transpose()?;
         if let Some(n) = name {
             stored.instance.name = n;
         }
@@ -378,6 +430,9 @@ fn validate_jvm_args(a: &str) -> Result<String> {
     if a.chars().any(|c| c.is_control()) {
         return Err(Error::Invalid("arguments JVM : caractères de contrôle interdits".into()));
     }
+    if split_args_shell(a, BACKSLASH_ESCAPES).is_err() {
+        return Err(Error::Invalid("arguments JVM : guillemet non fermé".into()));
+    }
     Ok(a.to_string())
 }
 
@@ -389,12 +444,70 @@ fn validate_wrapper(w: &str) -> Result<String> {
     if w.chars().any(|c| c.is_control()) {
         return Err(Error::Invalid("commande d'enrobage : caractères de contrôle interdits".into()));
     }
+    if split_args_shell(w, BACKSLASH_ESCAPES).is_err() {
+        return Err(Error::Invalid("commande d'enrobage : guillemet non fermé".into()));
+    }
     Ok(w.to_string())
 }
 
-/// Découpe la chaîne d'arguments JVM d'une instance (séparateur : espaces).
+/// Découpe façon shell : espaces hors guillemets = séparateurs, `'...'` littéral, `"..."` littéral
+/// (sauf `\"` et `\\` si `backslash_escapes`), `\x` = `x` hors guillemets si `backslash_escapes`.
+/// Les guillemets se collent au texte voisin (`-Dk="a b"` donne `-Dk=a b`) et `""` donne un argument vide.
+/// Guillemet ou antislash final non fermé : erreur. Aucun shell n'est lancé : on fabrique seulement la liste.
+pub fn split_args_shell(s: &str, backslash_escapes: bool) -> std::result::Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut has_token = false;
+    let mut quote: Option<char> = None;
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some('"') if c == '\\' && backslash_escapes => match chars.next() {
+                Some(n @ ('"' | '\\')) => cur.push(n),
+                Some(n) => {
+                    cur.push('\\');
+                    cur.push(n);
+                }
+                None => return Err("guillemet non fermé".into()),
+            },
+            Some(_) => cur.push(c),
+            None if c == '"' || c == '\'' => {
+                quote = Some(c);
+                has_token = true;
+            }
+            None if c == '\\' && backslash_escapes => {
+                cur.push(chars.next().ok_or("antislash final")?);
+                has_token = true;
+            }
+            None if c.is_whitespace() => {
+                if has_token {
+                    out.push(std::mem::take(&mut cur));
+                    has_token = false;
+                }
+            }
+            None => {
+                cur.push(c);
+                has_token = true;
+            }
+        }
+    }
+    if quote.is_some() {
+        return Err("guillemet non fermé".into());
+    }
+    if has_token {
+        out.push(cur);
+    }
+    Ok(out)
+}
+
+/// Les antislashs sont des échappements hors Windows ; sous Windows ils restent littéraux (`C:\Users\...`).
+const BACKSLASH_ESCAPES: bool = !cfg!(windows);
+
+/// Découpe la chaîne d'arguments JVM (ou la commande d'enrobage) d'une instance, façon shell.
+/// Une ancienne valeur mal fermée (impossible à enregistrer maintenant) retombe sur le découpage aux espaces.
 pub fn split_jvm_args(args: &str) -> Vec<String> {
-    args.split_whitespace().map(str::to_string).collect()
+    split_args_shell(args, BACKSLASH_ESCAPES).unwrap_or_else(|_| args.split_whitespace().map(str::to_string).collect())
 }
 
 fn count_jars(mods: &Path) -> u32 {
@@ -607,11 +720,80 @@ mod tests {
         let s = InstanceStore::new(d.path().to_path_buf());
         let i = s.create("Défaut", "1.21.1", LoaderSpec { loader: Loader::Vanilla, version: String::new() }, RAM_DEFAULT).unwrap();
         assert_eq!(i.ram_mb, RAM_DEFAULT);
-        assert_eq!(effective_ram_mb(i.ram_mb, 10240), 10240);
+        assert_eq!(effective_ram_mb(i.ram_mb, 10240, 0, Some(32768)), 10240);
         // Valeur propre à l'instance, puis retour au défaut.
-        assert_eq!(effective_ram_mb(s.update_ram(&i.id, 6144).unwrap().ram_mb, 10240), 6144);
+        assert_eq!(effective_ram_mb(s.update_ram(&i.id, 6144).unwrap().ram_mb, 10240, 0, Some(32768)), 6144);
         assert_eq!(s.update(&i.id, None, Some(RAM_DEFAULT), None, None, None).unwrap().ram_mb, RAM_DEFAULT);
         assert!(s.update_ram(&i.id, 100).is_err());
+    }
+
+    #[test]
+    fn ram_auto_paliers_selon_les_mods() {
+        let big = Some(64 * 1024);
+        assert_eq!(auto_ram_mb(0, big), 2048);
+        assert_eq!(auto_ram_mb(1, big), 4096);
+        assert_eq!(auto_ram_mb(50, big), 4096);
+        assert_eq!(auto_ram_mb(99, big), 4096);
+        assert_eq!(auto_ram_mb(100, big), 6144);
+        assert_eq!(auto_ram_mb(150, big), 6144);
+        assert_eq!(auto_ram_mb(249, big), 6144);
+        assert_eq!(auto_ram_mb(250, big), 8192);
+        assert_eq!(auto_ram_mb(400, big), 8192);
+    }
+
+    #[test]
+    fn ram_auto_plafonnee_par_le_pc() {
+        // RAM physique moins 4 Go.
+        assert_eq!(auto_ram_mb(400, Some(8 * 1024)), 4096);
+        assert_eq!(auto_ram_mb(400, Some(12 * 1024)), 8192);
+        assert_eq!(auto_ram_mb(150, Some(16 * 1024)), 6144);
+        assert_eq!(auto_ram_mb(50, Some(6 * 1024)), 2048);
+        // Plancher 1 Go : un PC de 4 Go ou moins ne descend pas plus bas, même sans aucun mod.
+        assert_eq!(auto_ram_mb(0, Some(4 * 1024)), 1024);
+        assert_eq!(auto_ram_mb(400, Some(5 * 1024)), 1024);
+        assert_eq!(auto_ram_mb(400, Some(2 * 1024)), 1024);
+        assert_eq!(auto_ram_mb(400, Some(0)), 1024);
+        // RAM inconnue : pas de plafond.
+        assert_eq!(auto_ram_mb(400, None), 8192);
+        assert_eq!(auto_ram_mb(0, None), 2048);
+    }
+
+    #[test]
+    fn ram_auto_arrondie_a_256_mo() {
+        // 7,3 Go physiques : 3,3 Go de plafond, arrondis au multiple de 256 inférieur.
+        let v = auto_ram_mb(400, Some(7 * 1024 + 300));
+        assert_eq!(v % 256, 0);
+        assert_eq!(v, 3328);
+        for p in (0..40_000u64).step_by(137) {
+            for m in [0, 1, 120, 300] {
+                let v = auto_ram_mb(m, Some(p));
+                assert!(v.is_multiple_of(256) && (1024..=8192).contains(&v), "{m} mods, {p} Mo : {v}");
+            }
+        }
+    }
+
+    #[test]
+    fn serveur_hearth_cede_de_la_ram_au_client_de_l_hote() {
+        // 16 Go, client 8 Go : le serveur ne garde que 16 - 8 - 3 = 5 Go (jamais 8 + 8 sur 16).
+        assert_eq!(hearth_server_ram_mb(8192, 8192, Some(16384)), 5120);
+        // Gros PC : borné à 8 Go.
+        assert_eq!(hearth_server_ram_mb(12288, 8192, Some(65536)), 8192);
+        // Petit PC : plancher 1 Go ; RAM illisible : pas de réduction, mais borné 1 à 8 Go.
+        assert_eq!(hearth_server_ram_mb(4096, 4096, Some(8192)), 1024);
+        assert_eq!(hearth_server_ram_mb(16384, 16384, None), 8192);
+        assert_eq!(hearth_server_ram_mb(512, 512, None), 1024);
+    }
+
+    #[test]
+    fn ram_effective_instance_puis_global_puis_auto() {
+        let p = Some(32 * 1024);
+        // L'instance gagne, puis le réglage global manuel ; global « Automatique » : calcul sur les mods.
+        assert_eq!(effective_ram_mb(3072, 10240, 300, p), 3072);
+        assert_eq!(effective_ram_mb(RAM_DEFAULT, 10240, 300, p), 10240);
+        assert_eq!(effective_ram_mb(RAM_DEFAULT, RAM_AUTO, 300, p), 8192);
+        assert_eq!(effective_ram_mb(RAM_DEFAULT, RAM_AUTO, 0, p), 2048);
+        assert_eq!(effective_ram_mb(RAM_DEFAULT, RAM_AUTO, 300, Some(8 * 1024)), 4096);
+        assert_eq!(effective_ram_mb(2048, RAM_AUTO, 300, p), 2048);
     }
 
     #[test]
@@ -740,6 +922,95 @@ b"), None).is_err());
         assert_eq!(v["kind"], "own");
         assert!(v["created_at"].as_i64().unwrap() > 0);
         assert_eq!(v["loader"]["loader"], "neoforge");
+    }
+
+    fn sp(s: &str, esc: bool) -> Vec<String> {
+        split_args_shell(s, esc).unwrap()
+    }
+
+    #[test]
+    fn split_args_basics() {
+        assert!(sp("", true).is_empty());
+        assert!(sp("   ", true).is_empty());
+        assert_eq!(sp("-Xmx2G  -XX:+UseG1GC", true), vec!["-Xmx2G", "-XX:+UseG1GC"]);
+        assert_eq!(sp("-Dk=\"a b\"", true), vec!["-Dk=a b"]);
+        assert_eq!(sp("'a b' c", true), vec!["a b", "c"]);
+        assert_eq!(sp("\"\"", true), vec![""]);
+        assert_eq!(sp("-Dk=''", true), vec!["-Dk="]);
+        assert_eq!(sp("a\"b c\"d", true), vec!["ab cd"]);
+        assert_eq!(sp("'say \"hi\"'", true), vec!["say \"hi\""]);
+    }
+
+    #[test]
+    fn split_args_windows_path_with_spaces() {
+        let v = sp("-javaagent:\"C:\\Users\\Jean Dupont\\agent.jar\" -Xss1M", false);
+        assert_eq!(v, vec!["-javaagent:C:\\Users\\Jean Dupont\\agent.jar", "-Xss1M"]);
+    }
+
+    #[test]
+    fn split_args_backslashes() {
+        assert_eq!(sp("a\\ b", true), vec!["a b"]);
+        assert_eq!(sp("a\\ b", false), vec!["a\\", "b"]);
+        assert_eq!(sp("\"a\\\"b\"", true), vec!["a\"b"]);
+        assert_eq!(sp("\"a\\nb\"", true), vec!["a\\nb"]);
+        assert!(split_args_shell("a\\", true).is_err());
+    }
+
+    #[test]
+    fn split_args_unclosed_is_error_and_split_jvm_args_falls_back() {
+        assert!(split_args_shell("-Dx=\"abc", true).is_err());
+        assert!(split_args_shell("'abc", false).is_err());
+        assert_eq!(split_jvm_args("-Dx=\"abc def"), vec!["-Dx=\"abc", "def"]);
+    }
+
+    #[test]
+    fn split_wrapper_with_quoted_path() {
+        assert_eq!(sp("gamemoderun \"/opt/my tools/x\"", true), vec!["gamemoderun", "/opt/my tools/x"]);
+    }
+
+    #[test]
+    fn validate_rejects_unclosed_quote() {
+        assert!(validate_jvm_args("-Dk=\"a b").is_err());
+        assert!(validate_wrapper("gamemoderun \"x").is_err());
+        assert_eq!(validate_jvm_args(" -javaagent:\"/tmp/a b/x.jar\" ").unwrap(), "-javaagent:\"/tmp/a b/x.jar\"");
+        assert!(validate_wrapper("gamemoderun 'my tool'").is_ok());
+        let (_t, s) = store();
+        let i = s.create("A", "1.21.1", spec(), 2048).unwrap();
+        let e = s.update(&i.id, None, None, None, Some("-Dk=\"a"), None).unwrap_err();
+        assert!(e.to_string().contains("guillemet non fermé"), "{e}");
+    }
+
+    #[test]
+    fn ancienne_valeur_mal_fermee_renvoyee_telle_quelle_ne_bloque_pas_l_enregistrement() {
+        let (_t, s) = store();
+        let i = s.create("A", "1.21.1", spec(), 2048).unwrap();
+        let mut stored = s.read_meta(&i.id).unwrap();
+        stored.instance.jvm_args = "-Dname=O'Brien".into();
+        stored.instance.wrapper = "gamemoderun \"x".into();
+        s.write_meta(&i.id, &stored).unwrap();
+        // Même valeur renvoyée avec un autre champ : accepté, la valeur est conservée.
+        let u = s.update(&i.id, Some("B"), None, None, Some("-Dname=O'Brien"), Some("gamemoderun \"x")).unwrap();
+        assert_eq!((u.name.as_str(), u.jvm_args.as_str(), u.wrapper.as_str()), ("B", "-Dname=O'Brien", "gamemoderun \"x"));
+        // Une autre valeur mal fermée reste refusée.
+        assert!(s.update(&i.id, None, None, None, Some("-Dk=\"a"), None).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn real_process_receives_quoted_args_as_single_argument() {
+        // Faux `java` : écrit un argument par ligne, puis on vérifie ce que le processus a réellement reçu.
+        let t = tempfile::tempdir().unwrap();
+        let out = t.path().join("args.txt");
+        let args = split_jvm_args("-javaagent:\"/tmp/a b/agent.jar\" -Dk='x y'");
+        let st = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("for a in \"$@\"; do printf '%s\\n' \"$a\"; done > '{}'", out.display()))
+            .arg("fake-java")
+            .args(&args)
+            .status()
+            .unwrap();
+        assert!(st.success());
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "-javaagent:/tmp/a b/agent.jar\n-Dk=x y\n");
     }
 }
 

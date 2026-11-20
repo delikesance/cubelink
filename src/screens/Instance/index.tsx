@@ -1,5 +1,5 @@
 // Page d'un modpack (route `instance?id=…&tab=…`) : en-tête (jouer, amis sur le pack), onglets Aperçu · Mods · Réglages · Logs.
-import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import "./instance.css";
 import { useScreenTitle, useShell } from "../../app/context";
 import { errMsg, useLaunch } from "../../app/useLaunch";
@@ -105,6 +105,8 @@ export default function InstancePage() {
   const [now, setNow] = useState(() => Date.now());
   const tabRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   const h1 = useRef<HTMLHeadingElement>(null);
+  const modsFlush = useRef<(() => Promise<string | null>) | null>(null);
+  const registerModsFlush = useCallback((fn: (() => Promise<string | null>) | null) => { modsFlush.current = fn; }, []);
 
   const inst = instances?.find((i) => i.id === id) ?? null;
   useScreenTitle(inst?.name ?? null);
@@ -187,8 +189,11 @@ export default function InstancePage() {
     });
   };
 
-  const guardedPlay = () => {
+  const guardedPlay = async () => {
     setActionError(null);
+    // Les retraits de mod encore annulables partent avant le lancement ; s'ils échouent, on ne joue pas.
+    const flushed = await modsFlush.current?.();
+    if (flushed) { setActionError(flushed); return; }
     if (inst) gate.guard(inst, () => { void play(id); }, () => goTab("mods"), () => { goTab("mods"); setAutoFix(true); });
   };
   const goTab = (t: TabId, focus = false) => {
@@ -244,7 +249,7 @@ export default function InstancePage() {
         onContextMenu={ctx.bind(`Actions de ${inst.name}`, () => [
           running || preparing
             ? { key: "stop", label: preparing ? "Annuler le lancement" : "Arrêter", icon: <Icon d={ICONS.stop} />, onSelect: () => { void kill(id); } }
-            : { key: "play", label: "Jouer", icon: <Icon d={ICONS.play} />, disabled: otherBusy || gate.checking, onSelect: guardedPlay },
+            : { key: "play", label: "Jouer", icon: <Icon d={ICONS.play} />, disabled: otherBusy || gate.checking, onSelect: () => { void guardedPlay(); } },
           ...menuItems.map((m, k) => (k === 0 ? { ...m, separator: true } : m)),
         ])}
       >
@@ -265,7 +270,7 @@ export default function InstancePage() {
           ) : running ? (
             <Button variant="danger" size="lg" icon={<Icon d={ICONS.stop} size={20} fill />} onClick={() => { void kill(id).then((m) => { if (m) setActionError(m); }); }}>Arrêter</Button>
           ) : (
-            <Button size="lg" disabled={otherBusy || gate.checking} icon={<Icon d={ICONS.play} size={20} fill />} onClick={guardedPlay}>Jouer</Button>
+            <Button size="lg" disabled={otherBusy || gate.checking} icon={<Icon d={ICONS.play} size={20} fill />} onClick={() => { void guardedPlay(); }}>Jouer</Button>
           )}
           <IconButton
             variant="secondary" aria-label={`Actions de ${inst.name}`} aria-haspopup="menu" aria-expanded={menu !== null}
@@ -361,6 +366,7 @@ export default function InstancePage() {
             onCount={(n) => setInstances((l) => (l ?? []).map((i) => (i.id === inst.id && i.mod_count !== n ? { ...i, mod_count: n } : i)))}
             onBrowse={() => navigate("browse", { kind: "mod", instance: inst.id })}
             autoFix={autoFix} onAutoFixed={() => setAutoFix(false)}
+            registerFlush={registerModsFlush} onFlushError={setActionError}
           />
         )}
         {tab === "reglages" && (

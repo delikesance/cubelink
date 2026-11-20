@@ -311,6 +311,50 @@ describe("Page modpack : onglet Mods", () => {
     expect(await services.modsList("inst-aeronautics")).toHaveLength(8);
   });
 
+  it("Jouer applique d'abord les retraits en attente (modsRemove avant le lancement)", async () => {
+    const order: string[] = [];
+    const base = createFakeServices({ tickMs: 0, requestCount: 0 });
+    const { panel } = await (async () => {
+      setup({
+        modsRemove: async (i: string, f: string) => { order.push(`remove:${f}`); await base.modsRemove(i, f); },
+        instancesLaunch: async () => { order.push("launch"); },
+      }, { id: "inst-aeronautics", tab: "mods" });
+      await ready();
+      await screen.findByRole("list", { name: "Mods installés" });
+      return { panel: screen.getByRole("tabpanel") };
+    })();
+    fireEvent.click(within(panel).getByRole("button", { name: "Supprimer mod-maison.jar" }));
+    fireEvent.click(screen.getByRole("button", { name: "Jouer" }));
+    await waitFor(() => expect(order).toEqual(["remove:mod-maison.jar", "launch"]));
+  });
+
+  it("Jouer : si un retrait en attente échoue, le jeu ne démarre pas et l'erreur est affichée", async () => {
+    const launch = vi.fn(async () => {});
+    setup({
+      modsRemove: async () => { throw new Error("fichier verrouillé"); },
+      instancesLaunch: launch,
+    }, { id: "inst-aeronautics", tab: "mods" });
+    await ready();
+    const panel = screen.getByRole("tabpanel");
+    await screen.findByRole("list", { name: "Mods installés" });
+    fireEvent.click(within(panel).getByRole("button", { name: "Supprimer mod-maison.jar" }));
+    fireEvent.click(screen.getByRole("button", { name: "Jouer" }));
+    await waitFor(() => expect(screen.getAllByRole("alert").some((a) => /mod-maison\.jar.*fichier verrouillé/.test(a.textContent ?? ""))).toBe(true));
+    expect(launch).not.toHaveBeenCalled();
+    // Le mod reste listé : il est toujours sur le disque.
+    expect(within(panel).getByText("mod-maison.jar")).toBeTruthy();
+  });
+
+  it("quitter l'onglet Mods avec un retrait qui échoue affiche l'erreur dans le bandeau de la page", async () => {
+    setup({ modsRemove: async () => { throw new Error("fichier verrouillé"); } }, { id: "inst-aeronautics", tab: "mods" });
+    await ready();
+    await screen.findByRole("list", { name: "Mods installés" });
+    fireEvent.click(within(screen.getByRole("tabpanel")).getByRole("button", { name: "Supprimer mod-maison.jar" }));
+    fireEvent.click(tab("Aperçu"));
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toMatch(/mod-maison\.jar.*fichier verrouillé/);
+  });
+
   it("ajoute des mods (bouton) et les .jar déposés, refuse les autres fichiers", async () => {
     const { panel, services } = await openMods();
     services.setPickedFiles(["C:\\x\\nouveau.jar"]);

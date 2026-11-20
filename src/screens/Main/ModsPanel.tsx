@@ -21,6 +21,13 @@ export interface ModsPanelProps {
   autoFix?: boolean;
   /** Appelé quand `autoFix` a été pris en compte (le parent le remet à false). */
   onAutoFixed?: () => void;
+  /**
+   * Donne au parent une fonction qui applique tout de suite les retraits encore annulables et renvoie
+   * un message d'erreur (ou null). Remise à null au démontage. Sert à vider la file avant de lancer le jeu.
+   */
+  registerFlush?: (flush: (() => Promise<string | null>) | null) => void;
+  /** Appelé quand l'application des retraits au démontage (changement d'onglet) a échoué. */
+  onFlushError?: (message: string) => void;
 }
 
 // Retire le préfixe technique du backend (« introuvable : », « entrée invalide : »…).
@@ -100,7 +107,7 @@ function IssueBadge({ issues }: { issues: ModIssue[] }) {
 }
 
 /** Panneau « Mods » (A4) : recherche, liste, activation, suppression annulable 5 s, ajout (bouton ou glisser-déposer). */
-export function ModsPanel({ services, instanceId, onClose, onCount, onBrowse, onTotal, autoFix, onAutoFixed }: ModsPanelProps) {
+export function ModsPanel({ services, instanceId, onClose, onCount, onBrowse, onTotal, autoFix, onAutoFixed, registerFlush, onFlushError }: ModsPanelProps) {
   const [mods, setMods] = useState<ModEntry[] | null>(null);
   const [filter, setFilter] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -112,6 +119,11 @@ export function ModsPanel({ services, instanceId, onClose, onCount, onBrowse, on
   const totalRef = useRef(onTotal);
   totalRef.current = onTotal;
   const timers = useRef(new Map<string, number>());
+  /** Retraits déjà envoyés au backend et pas encore terminés (un flush les attend). */
+  const inflight = useRef(new Set<Promise<string | null>>());
+  const mounted = useRef(true);
+  const onFlushErrorRef = useRef(onFlushError);
+  onFlushErrorRef.current = onFlushError;
   const ctx = useContextMenu();
   const [issues, setIssues] = useState<ModIssue[]>([]);
   const [issuesOpen, setIssuesOpen] = useState(false);
@@ -163,14 +175,52 @@ export function ModsPanel({ services, instanceId, onClose, onCount, onBrowse, on
     return () => { alive = false; totalRef.current?.(null); };
   }, [services, instanceId, apply]);
 
-  // À la fermeture du tiroir, les suppressions encore annulables sont appliquées sans attendre.
+  /** Retire le mod maintenant (annule son délai) ; renvoie un message d'erreur nommant le fichier, ou null. */
+  const removeNow = useCallback((file: string): Promise<string | null> => {
+    const t = timers.current.get(file);
+    if (t !== undefined) window.clearTimeout(t);
+    timers.current.delete(file);
+    const p = (async () => {
+      try {
+        await services.modsRemove(instanceId, file);
+        if (mounted.current) {
+          setRemoving((r) => r.filter((f) => f !== file));
+          setMods((cur) => (cur ?? []).filter((x) => x.file !== file));
+          recheck();
+        }
+        return null;
+      } catch (e) {
+        // Le mod reste dans la liste (il est toujours sur le disque) : pas de disparition silencieuse.
+        if (mounted.current) setRemoving((r) => r.filter((f) => f !== file));
+        return `Impossible de retirer « ${file} » : ${errMsg(e)}`;
+      }
+    })();
+    inflight.current.add(p);
+    void p.finally(() => inflight.current.delete(p));
+    return p;
+  }, [services, instanceId, recheck]);
+
+  /** Applique tous les retraits en attente et attend ceux déjà partis ; premier message d'erreur, ou null. */
+  const flush = useCallback(async (): Promise<string | null> => {
+    for (const file of Array.from(timers.current.keys())) void removeNow(file);
+    const results = await Promise.all(Array.from(inflight.current));
+    return results.find((m) => m !== null) ?? null;
+  }, [removeNow]);
+
   useEffect(() => {
-    const map = timers.current;
+    registerFlush?.(flush);
+    return () => registerFlush?.(null);
+  }, [registerFlush, flush]);
+
+  // À la fermeture du panneau (changement d'onglet, navigation), les retraits encore annulables sont appliqués
+  // sans attendre ; un échec (jar verrouillé…) est remonté au parent au lieu d'être avalé.
+  useEffect(() => {
+    mounted.current = true;
     return () => {
-      map.forEach((t, file) => { window.clearTimeout(t); void services.modsRemove(instanceId, file).catch(() => {}); });
-      map.clear();
+      mounted.current = false;
+      void flush().then((m) => { if (m) onFlushErrorRef.current?.(m); });
     };
-  }, [services, instanceId]);
+  }, [flush]);
 
   const addPaths = useCallback(async (paths: string[]) => {
     setError(null);
@@ -214,13 +264,8 @@ export function ModsPanel({ services, instanceId, onClose, onCount, onBrowse, on
   };
 
   const commit = async (file: string) => {
-    timers.current.delete(file);
-    setRemoving((r) => r.filter((f) => f !== file));
-    try {
-      await services.modsRemove(instanceId, file);
-      setMods((cur) => (cur ?? []).filter((x) => x.file !== file));
-      recheck();
-    } catch (e) { setError(errMsg(e)); }
+    const msg = await removeNow(file);
+    if (msg && mounted.current) setError(msg);
   };
   const startRemove = (m: ModEntry) => {
     setError(null);

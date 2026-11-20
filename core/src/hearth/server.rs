@@ -27,7 +27,7 @@ use tokio::process::{ChildStdin, Command};
 use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
 
-use crate::java::{default_search_dirs, find_installed, required_java_major, select_for};
+use crate::java::{check_configured, default_search_dirs, find_installed, required_java_major, select_for, ConfiguredJava};
 use crate::java_install;
 use crate::loader::fabric::FabricClient;
 use crate::loader::forge::ForgeClient;
@@ -402,10 +402,24 @@ pub fn sync_server_mods(
 // ---------------------------------------------------------------------------------------------------------------
 
 /// Trouve un Java de version majeure `major` (ou compatible), l'installe au besoin dans `java_root`. `configured`
-/// (réglage de l'utilisateur) est utilisé tel quel s'il existe.
+/// (réglage global de l'utilisateur) n'est qu'un candidat : il est utilisé s'il existe et que sa version convient (ou ne
+/// se lit pas), sinon il est ignoré (journal) et on choisit ou installe le bon Java.
 pub async fn resolve_java(java_root: &Path, major: u32, configured: Option<&Path>) -> Result<PathBuf> {
     if let Some(p) = configured {
-        return if p.is_file() { Ok(p.to_path_buf()) } else { Err(Error::NotFound("l'exécutable Java configuré est introuvable".into())) };
+        if p.is_file() {
+            let probe = p.to_path_buf();
+            let verdict = tokio::task::spawn_blocking(move || check_configured(&probe, major))
+                .await
+                .map_err(|_| Error::Other("vérification de Java interrompue".into()))?;
+            match verdict {
+                ConfiguredJava::Fits | ConfiguredJava::Unprobeable => return Ok(p.to_path_buf()),
+                ConfiguredJava::Mismatch { found } => {
+                    tracing::warn!("Java {found} des Paramètres ignoré : le serveur demande Java {major}");
+                }
+            }
+        } else {
+            tracing::warn!("Java des Paramètres introuvable, ignoré : le serveur demande Java {major}");
+        }
     }
     let dirs = default_search_dirs(java_root);
     let installs = tokio::task::spawn_blocking(move || find_installed(&dirs))
@@ -1357,6 +1371,35 @@ async fn read_lines<R: tokio::io::AsyncRead + Unpin>(r: R, shared: Arc<Shared>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    fn fake_java(dir: &Path, name: &str, version: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(dir).unwrap();
+        let p = dir.join(name);
+        std::fs::write(&p, format!("#!/bin/sh\necho 'openjdk version \"{version}\" 2024-01-16' >&2\n")).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p
+    }
+
+    /// #71 : le Java des Paramètres n'est qu'un candidat. Un Java 17 pour un serveur qui veut Java 21 est ignoré au profit
+    /// du Java 21 déjà installé ; un Java qui convient est gardé.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resolve_java_ignore_le_reglage_dont_la_version_ne_convient_pas() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("java");
+        let jre21 = root.join("temurin-21");
+        let exe21 = fake_java(&jre21.join("bin"), "java", "21.0.2");
+        std::fs::write(jre21.join("release"), "JAVA_VERSION=\"21.0.2\"\n").unwrap();
+        let j17 = fake_java(dir.path(), "j17", "17.0.9");
+
+        assert_eq!(resolve_java(&root, 21, Some(&j17)).await.unwrap(), exe21);
+        assert_eq!(resolve_java(&root, 17, Some(&j17)).await.unwrap(), j17);
+        // Réglage introuvable : même repli que pour une version inadaptée.
+        assert_eq!(resolve_java(&root, 21, Some(&dir.path().join("absent"))).await.unwrap(), exe21);
+    }
+
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 

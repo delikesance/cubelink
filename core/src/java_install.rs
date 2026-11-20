@@ -81,8 +81,8 @@ pub fn host_arch() -> &'static str {
     }
 }
 
-fn net(e: impl std::fmt::Display) -> Error {
-    Error::Network(e.to_string())
+fn net(e: reqwest::Error) -> Error {
+    crate::http::net_error(e)
 }
 
 fn java_exe_rel() -> &'static str {
@@ -115,8 +115,20 @@ pub async fn resolve_package(major: u32, os: &str, arch: &str) -> Result<JrePack
     resolve_package_from(DEFAULT_ADOPTIUM_URL, major, os, arch).await
 }
 
-/// Variante à URL de base injectable (tests).
+/// Version majeure réellement installable pour une exigence donnée. Mojang demande Java 16
+/// pour Minecraft 1.17.x, mais Adoptium ne publie pas de JRE 16 : le JRE 17 lance 1.17 sans souci.
+pub fn installable_major(required: u32) -> u32 {
+    if required == 16 {
+        17
+    } else {
+        required
+    }
+}
+
+/// Variante à URL de base injectable (tests). Une exigence de Java 16 est servie par le JRE 17
+/// (voir `installable_major`) : le `JrePackage` rendu porte alors `major == 17`.
 pub async fn resolve_package_from(base_url: &str, major: u32, os: &str, arch: &str) -> Result<JrePackage> {
+    let major = installable_major(major);
     if !SUPPORTED_MAJORS.contains(&major) {
         return Err(Error::Invalid(format!("version Java {major} non supportée (8, 17, 21, 25)")));
     }
@@ -124,7 +136,7 @@ pub async fn resolve_package_from(base_url: &str, major: u32, os: &str, arch: &s
         return Err(Error::Invalid(format!("plateforme {os}/{arch} non supportée")));
     }
     let url = format!("{}/v3/assets/latest/{major}/hotspot", base_url.trim_end_matches('/'));
-    let resp = reqwest::Client::new()
+    let resp = crate::http::client()
         .get(&url)
         .query(&[("architecture", arch), ("image_type", "jre"), ("os", os)])
         .send()
@@ -227,7 +239,7 @@ where
     let _guard = Cleanup(vec![part.clone(), staging.clone()]);
     let _ = tokio::fs::remove_dir_all(&staging).await;
 
-    download(package, &part, &progress, &cancel).await?;
+    download(&crate::http::client(), package, &part, &progress, &cancel).await?;
 
     let (zip_path, stage, c2) = (part.clone(), staging.clone(), cancel.clone());
     let home_in_stage = tokio::task::spawn_blocking(move || if targz { extract_tar_gz(&zip_path, &stage, &c2) } else { extract_zip(&zip_path, &stage, &c2) })
@@ -256,14 +268,26 @@ where
     Ok(InstalledJava { home: final_dir, java_exe: final_exe, major })
 }
 
-async fn download<F>(package: &JrePackage, part: &Path, progress: &F, cancel: &AtomicBool) -> Result<()>
+/// Attend `fut`, mais rend `Error::Cancelled` dès que `cancel` est levé (le futur est abandonné : la connexion se ferme).
+async fn abortable<T>(cancel: &AtomicBool, fut: impl std::future::Future<Output = T>) -> Result<T> {
+    check(cancel)?;
+    tokio::pin!(fut);
+    loop {
+        tokio::select! {
+            r = &mut fut => return Ok(r),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => check(cancel)?,
+        }
+    }
+}
+
+async fn download<F>(client: &reqwest::Client, package: &JrePackage, part: &Path, progress: &F, cancel: &AtomicBool) -> Result<()>
 where
     F: Fn(u64, u64) + Send + Sync,
 {
     if package.size > MAX_DOWNLOAD_BYTES {
         return Err(Error::Invalid(format!("taille annoncée excessive : {}", package.size)));
     }
-    let resp = reqwest::Client::new().get(&package.url).send().await.map_err(net)?;
+    let resp = abortable(cancel, client.get(&package.url).send()).await?.map_err(net)?;
     let status = resp.status();
     if status == reqwest::StatusCode::NOT_FOUND {
         return Err(Error::NotFound(package.url.clone()));
@@ -275,7 +299,8 @@ where
     let mut hasher = Sha256::new();
     let mut done: u64 = 0;
     let mut stream = resp.bytes_stream();
-    while let Some(chunk) = stream.next().await {
+    // Un corps qui ne vient plus ne retient pas l'annulation : on la surveille aussi pendant l'attente du morceau.
+    while let Some(chunk) = abortable(cancel, stream.next()).await? {
         check(cancel)?;
         let chunk = chunk.map_err(net)?;
         done += chunk.len() as u64;
@@ -466,6 +491,88 @@ mod tests {
         assert!(matches!(resolve_package_from(&server.uri(), 11, "windows", "x64").await, Err(Error::Invalid(_))));
     }
 
+    #[test]
+    fn java_16_se_installe_en_17() {
+        assert_eq!(installable_major(16), 17);
+        for m in [8, 11, 17, 21, 25] {
+            assert_eq!(installable_major(m), m);
+        }
+    }
+
+    /// Non-régression #47 : Minecraft 1.17.x exige Java 16, absent d'Adoptium. Sur une machine
+    /// sans Java 17, on demande le JRE 17 (jamais /latest/16/), on l'installe dans `jre-17`,
+    /// et `select_for(16, ..)` le retrouve ensuite.
+    #[tokio::test]
+    async fn java_16_requis_installe_le_jre_17() {
+        let server = MockServer::start().await;
+        let exe = format!("jdk-17.0.13+11-jre/{}", java_exe_rel());
+        let data = fake_zip(&[(&exe, b"fake java"), ("jdk-17.0.13+11-jre/release", b"JAVA_VERSION=\"17.0.13\"")]);
+        let body = serde_json::json!([{ "binary": { "package": {
+            "link": format!("{}/dl/jre.zip", server.uri()), "size": data.len(),
+            "checksum": hex::encode(Sha256::digest(&data)), "name": "jre.zip" } } }]);
+        Mock::given(method("GET"))
+            .and(path("/v3/assets/latest/17/hotspot"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET")).and(path("/v3/assets/latest/16/hotspot")).respond_with(ResponseTemplate::new(200)).expect(0).mount(&server).await;
+        serve(&server, data).await;
+
+        let p = resolve_package_from(&server.uri(), 16, "linux", "x64").await.unwrap();
+        assert_eq!(p.major, 17);
+        let root = tempfile::tempdir().unwrap();
+        let inst = install_with(&p, root.path(), |_, _| {}, Arc::new(AtomicBool::new(false)), Arc::new(FakeProbe(Some(17)))).await.unwrap();
+        assert_eq!(inst.major, 17);
+        assert_eq!(inst.home, root.path().join("jre-17"));
+        assert!(inst.java_exe.is_file());
+
+        let found = crate::java::find_installed(&[root.path().to_path_buf()]);
+        let sel = crate::java::select_for(16, &found).expect("le JRE 17 installé doit servir pour 16");
+        assert_eq!(sel.major, 17);
+    }
+
+    /// Non-régression #76 : un Java 8 32 bits seul (ex. `Program Files (x86)\\Java`) n'est pas
+    /// sélectionné sur un hôte 64 bits ; l'appelant installe alors le JRE 8 Adoptium 64 bits,
+    /// que `select_for` retrouve ensuite (à côté du 32 bits, quel que soit l'ordre).
+    #[cfg(target_pointer_width = "64")]
+    #[tokio::test]
+    async fn java_32_bits_seul_declenche_l_installation_64_bits() {
+        let server = MockServer::start().await;
+        let exe = format!("jdk8u402-b06-jre/{}", java_exe_rel());
+        let data = fake_zip(&[
+            (&exe, b"fake java"),
+            ("jdk8u402-b06-jre/release", b"JAVA_VERSION=\"1.8.0_402\"\nOS_ARCH=\"amd64\"\n"),
+        ]);
+        let body = serde_json::json!([{ "binary": { "package": {
+            "link": format!("{}/dl/jre.zip", server.uri()), "size": data.len(),
+            "checksum": hex::encode(Sha256::digest(&data)), "name": "jre.zip" } } }]);
+        Mock::given(method("GET")).and(path("/v3/assets/latest/8/hotspot")).respond_with(ResponseTemplate::new(200).set_body_json(body)).expect(1).mount(&server).await;
+        serve(&server, data).await;
+
+        let root = tempfile::tempdir().unwrap();
+        let x86 = root.path().join("x86").join("jre1.8.0_401");
+        std::fs::create_dir_all(x86.join("bin")).unwrap();
+        std::fs::write(x86.join("bin").join("java"), b"").unwrap();
+        std::fs::write(x86.join("release"), "JAVA_VERSION=\"1.8.0_401\"\nOS_ARCH=\"i586\"\n").unwrap();
+        let dirs = vec![root.path().join("x86")];
+        let found = crate::java::find_installed(&dirs);
+        assert!(crate::java::select_for(8, &found).is_none(), "le Java 32 bits ne doit pas être choisi");
+
+        let p = resolve_package_from(&server.uri(), 8, "linux", "x64").await.unwrap();
+        let managed = root.path().join("managed");
+        let inst = install_with(&p, &managed, |_, _| {}, Arc::new(AtomicBool::new(false)), Arc::new(FakeProbe(Some(8)))).await.unwrap();
+        assert_eq!(inst.major, 8);
+
+        let mut found = crate::java::find_installed(&[root.path().join("x86"), managed]);
+        assert_eq!(found.len(), 2);
+        for _ in 0..2 {
+            let sel = crate::java::select_for(8, &found).expect("le JRE 64 bits installé doit servir");
+            assert_eq!(sel.path, inst.java_exe);
+            found.reverse();
+        }
+    }
+
     #[tokio::test]
     async fn installation_nominale_puis_idempotente() {
         let server = MockServer::start().await;
@@ -551,6 +658,32 @@ mod tests {
         let c = cancel.clone();
         let r = install_with(&p, root.path(), move |_, _| c.store(true, Ordering::SeqCst), cancel, Arc::new(FakeProbe(Some(21)))).await;
         assert!(matches!(r, Err(Error::Cancelled)));
+        assert!(leftovers(root.path()).is_empty());
+    }
+
+    /// Un CDN qui accepte la connexion puis ne répond plus : l'annulation ne doit pas attendre les délais réseau.
+    #[tokio::test]
+    async fn annulation_pendant_reponse_muette() {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        let _mute = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((s, _)) = l.accept().await {
+                held.push(s);
+            }
+        });
+        let root = tempfile::tempdir().unwrap();
+        let p = JrePackage { url: format!("http://{addr}/dl/jre.zip"), size: 10, sha256: "0".repeat(64), filename: "jre.zip".into(), major: 21 };
+        let cancel = Arc::new(AtomicBool::new(false));
+        let c = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            c.store(true, Ordering::SeqCst);
+        });
+        let t = std::time::Instant::now();
+        let r = install_with(&p, root.path(), |_, _| {}, cancel, Arc::new(FakeProbe(Some(21)))).await;
+        assert!(matches!(r, Err(Error::Cancelled)), "{r:?}");
+        assert!(t.elapsed() < std::time::Duration::from_secs(3), "annulation trop lente : {:?}", t.elapsed());
         assert!(leftovers(root.path()).is_empty());
     }
 
@@ -654,5 +787,24 @@ mod tests {
         let r = install_with(&p, root.path(), |_, _| {}, Arc::new(AtomicBool::new(false)), Arc::new(FakeProbe(None))).await;
         assert!(matches!(r, Err(Error::Invalid(_))));
         assert!(leftovers(root.path()).is_empty());
+    }
+
+    #[tokio::test]
+    async fn telechargement_du_jre_bloque_echoue_en_network() {
+        let server = MockServer::start().await;
+        let data = jre_zip();
+        Mock::given(method("GET"))
+            .and(path("/dl/jre.zip"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(data.clone()).set_delay(Duration::from_secs(5)))
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let part = dir.path().join("jre.part");
+        let client = crate::http::builder_with(Duration::from_secs(5), Duration::from_millis(200)).build().unwrap();
+        let t = std::time::Instant::now();
+        let err = download(&client, &pkg(&server, &data), &part, &|_, _| {}, &AtomicBool::new(false)).await.unwrap_err();
+        assert!(t.elapsed() < Duration::from_secs(3), "{:?}", t.elapsed());
+        assert!(matches!(&err, Error::Network(m) if m.contains("délai dépassé")), "{err:?}");
+        assert!(!part.exists(), "pas de .part laissé par un téléchargement qui n'a rien reçu");
     }
 }

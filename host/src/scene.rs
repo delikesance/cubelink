@@ -160,6 +160,9 @@ pub trait Backend: Send + Sync + 'static {
     fn run(&self, todo: &Self::Todo);
     /// Recale la zone du jeu et le rideau sur `view`.
     fn sync(&self);
+    /// Echelle d'affichage du launcher (1.0 = 100 %), pour le rendu du rideau. Par defaut sans effet : Windows relit le DPI de sa
+    /// fenetre a chaque rendu.
+    fn set_scale(&self, _scale: f32) {}
     /// Remise a zero de la part propre au systeme pour un nouveau jeu surveille (sous le verrou).
     fn reset_for_watch(st: &mut Self::State);
     /// Commence a guetter les fenetres du jeu `pid` (verrou relache), et relance le minuteur du rideau.
@@ -398,6 +401,12 @@ impl<B: Backend> GameHost<B> {
     /// Installe l'observateur des evenements de sante (remplace le precedent).
     pub fn set_observer(&self, observer: Observer) {
         self.s.set_observer(observer);
+    }
+
+    /// Echelle d'affichage du launcher (facteur d'echelle de sa fenetre), a transmettre a chaque recalage : le rideau (logo, titre,
+    /// barre) est dessine a cette echelle et redessine tout de suite si elle change. Valeur non finie ou < 1 : ramenee a 1.
+    pub fn set_scale(&self, scale: f32) {
+        self.s.set_scale(scale);
     }
 
     /// Mouvement reduit (preference systeme) : le rideau ne s'anime plus (panneaux poses / retires sans glissement, logo fige).

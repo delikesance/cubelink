@@ -2,7 +2,7 @@ import { friendlyJoinError, classifyJoinError, joinErrorAdvice } from "./message
 import { useCallback, useEffect, useRef, useState } from "react";
 import "./join.css";
 import { useBack, useShell } from "../../app/context";
-import { Button, Card, RAM_DEFAULT, RamPicker, useDefaultRam } from "../../ui";
+import { Button, Card, RAM_DEFAULT, RamPicker, useDefaultRam, useSystemRam } from "../../ui";
 import { buildStates } from "../Error/states";
 import { Avatar } from "../Friends/Avatar";
 import { classifyFailure } from "../Install/format";
@@ -10,11 +10,11 @@ import { TransferPanel, type TransferFailure } from "../Install/TransferPanel";
 import { useTransfer } from "../Install/useTransfer";
 import type { JoinPlan, ManifestFile, Presence } from "../../services/types";
 
-/** Conseil RAM selon la taille du pack (nombre de mods reçus). */
+/** Conseil RAM selon la taille du pack (nombre de mods reçus) ; mêmes seuils que la mémoire « Automatique » (`auto_ram_mb`). */
 export function ramHint(files: ManifestFile[]): string | undefined {
   const mods = files.filter((f) => f.path.startsWith("mods/") && f.path.endsWith(".jar")).length;
-  if (mods >= 200) return `Ce modpack compte ${mods} mods : prévois 8 Go ou plus.`;
-  if (mods >= 80) return `Ce modpack compte ${mods} mods : 6 Go ou plus conseillés.`;
+  if (mods >= 250) return `Ce modpack compte ${mods} mods : prévois 8 Go ou plus.`;
+  if (mods >= 100) return `Ce modpack compte ${mods} mods : 6 Go ou plus conseillés.`;
   return undefined;
 }
 
@@ -38,6 +38,7 @@ export default function Join() {
   const [startError, setStartError] = useState<string | null>(null);
   const [ram, setRam] = useState(RAM_DEFAULT);
   const defaultRam = useDefaultRam(services);
+  const systemRam = useSystemRam(services);
   // « plan » : ce qui sera reçu ; « transfer » : réception, installation, lancement et erreurs, sur place.
   const [stage, setStage] = useState<"plan" | "transfer">("plan");
   const stageRef = useRef(stage);
@@ -296,7 +297,7 @@ export default function Join() {
           <div className="join-meter" aria-hidden="true"><span style={{ width: `${pct}%` }} /></div>
         </div>
         <div className="join-ram">
-          <RamPicker value={ram} onChange={setRam} defaultMb={defaultRam} disabled={starting} hint={ramHint(m.files)} />
+          <RamPicker value={ram} onChange={setRam} defaultMb={defaultRam} systemMb={systemRam} disabled={starting} hint={ramHint(m.files)} />
         </div>
         <div className="join-acts">
           <Button disabled={!canJoin} loading={starting} onClick={() => { void join(); }}>Rejoindre et jouer</Button>

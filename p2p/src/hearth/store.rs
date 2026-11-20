@@ -601,7 +601,7 @@ impl Group {
     /// Comme [`Group::put_proposal`], à l'heure locale `now` (secondes Unix).
     pub fn put_proposal_at(&mut self, p: Proposal, proposer: &PeerKey, now: u64) -> Result<ProposalStatus, StoreError> {
         p.validate(&self.state)?;
-        self.check_continue_base(&p.op, false)?;
+        self.check_continue_base(&p.op, false, None)?;
         self.purge_expired_proposals(now);
         let id = p.id();
         let mut merged = self.proposals.get(&id).cloned();
@@ -675,9 +675,19 @@ impl Group {
     }
 
     /// Contrôle la base d'un `ContinueWithout` contre notre graphe : si nous la connaissons, elle doit être de l'époque
-    /// courante et n'avoir aucun enfant dans cette époque (une feuille). `require_known` : refuse aussi une base que nous
-    /// n'avons pas (avant de signer un vote, jamais à la réception d'une proposition). Sans effet pour les autres opérations.
-    pub fn check_continue_base(&self, op: &GroupOp, require_known: bool) -> Result<(), StoreError> {
+    /// courante. Elle n'a pas à être une feuille : quand la tête est celle de l'absent et que son contenu manque, on
+    /// repart d'un de ses ancêtres.
+    ///
+    /// `require_known` : refuse aussi une base que nous n'avons pas. `complete` (avant de signer un vote ou d'émettre
+    /// une proposition, jamais à la réception) dit si le monde d'une version est en entier sur ce PC : la base doit
+    /// l'être, et aucune version plus récente qui en descend (même période) ne doit l'être non plus, sinon on la
+    /// perdrait alors que le groupe peut en repartir. Sans effet pour les autres opérations.
+    pub fn check_continue_base(
+        &self,
+        op: &GroupOp,
+        require_known: bool,
+        complete: Option<&dyn Fn(&SignedVersion) -> bool>,
+    ) -> Result<(), StoreError> {
         let GroupOp::ContinueWithout { base_version, .. } = op else { return Ok(()) };
         let Some(base) = self.graph.get(base_version) else {
             return if require_known { Err(StoreError::BadContinueBase("elle n'est pas connue de ce PC")) } else { Ok(()) };
@@ -685,9 +695,16 @@ impl Group {
         if base.header.epoch != self.state.epoch {
             return Err(StoreError::BadContinueBase("elle ne fait pas partie de la période en cours"));
         }
-        let has_child = self.graph.iter().any(|(_, v)| v.header.parent.as_ref() == Some(base_version) && v.header.epoch == self.state.epoch);
-        if has_child {
-            return Err(StoreError::BadContinueBase("une version plus récente en descend déjà"));
+        let Some(complete) = complete else { return Ok(()) };
+        if !complete(base) {
+            return Err(StoreError::BadContinueBase("son contenu n'est pas complet sur ce PC"));
+        }
+        let newer_complete = self
+            .graph
+            .iter()
+            .any(|(id, v)| id != base_version && v.header.epoch == self.state.epoch && self.graph.is_ancestor(base_version, id) && complete(v));
+        if newer_complete {
+            return Err(StoreError::BadContinueBase("une version plus récente et complète en descend : repartez de celle-là"));
         }
         Ok(())
     }
@@ -1167,6 +1184,50 @@ mod tests {
         assert_eq!(op.op_seq, g.state().op_seq);
         assert_eq!(g.proposals().count(), 0, "la proposition aboutie est retirée du disque");
         assert_eq!(store.open_group(&g.id()).unwrap().proposals().count(), 0);
+    }
+
+    /// Base d'un `ContinueWithout` : en réception on n'exige qu'une base de l'époque courante (une base ancêtre est
+    /// légitime) ; avant de signer, elle doit être complète ici et sans descendant complet.
+    #[test]
+    fn la_base_du_continue_without_doit_etre_complete_et_sans_descendant_complet() {
+        let tmp = dir();
+        let store = GroupStore::open(tmp.path()).unwrap();
+        let (a, b, c) = (testutil::key(1), testutil::key(2), testutil::key(3));
+        let mut g = store.create(&create_op(&a, &[b.peer_key(), c.peer_key()]), GroupKey::random()).unwrap();
+        let id = g.id();
+        // n° 1 et 2 de Bob, n° 3 de Chloé (l'absente) dont personne n'a le contenu.
+        let v1 = version(&b, id, 1, None, 0, 1);
+        let v2 = version(&b, id, 2, Some(v1.id()), 0, 2);
+        let v3 = version(&c, id, 3, Some(v2.id()), 0, 3);
+        g.add_versions(vec![v1.clone(), v2.clone(), v3.clone()]).unwrap();
+        let op = |base: &SignedVersion| GroupOp::ContinueWithout { absent: c.peer_key(), base_version: base.id(), absent_since: 0, at: 0 };
+        let has = |ok: &'static [u8]| move |v: &SignedVersion| ok.contains(&v.header.collection[0]);
+
+        // Réception (pas de prédicat) : une base ancêtre, qui a des enfants, passe ; une base inconnue aussi.
+        g.check_continue_base(&op(&v2), false, None).unwrap();
+        g.check_continue_base(&op(&v3), false, None).unwrap();
+        let unknown = GroupOp::ContinueWithout { absent: c.peer_key(), base_version: VersionId([9; 32]), absent_since: 0, at: 0 };
+        g.check_continue_base(&unknown, false, None).unwrap();
+        assert!(g.check_continue_base(&unknown, true, None).is_err(), "avant de signer, la base doit être connue");
+
+        // Avant de signer : la tête n° 3 est incomplète, la n° 2 complète et sans descendant complet : elle passe.
+        let have = has(&[1, 2]);
+        g.check_continue_base(&op(&v2), true, Some(&have)).unwrap();
+        // La n° 3 (contenu absent) est refusée : repartir d'elle ne débloquerait rien.
+        let err = g.check_continue_base(&op(&v3), true, Some(&have)).unwrap_err().to_string();
+        assert!(err.contains("pas complet"), "{err}");
+        // La n° 1 est complète mais la n° 2, complète aussi, en descend : on repart de celle-là.
+        let err = g.check_continue_base(&op(&v1), true, Some(&have)).unwrap_err().to_string();
+        assert!(err.contains("plus récente et complète"), "{err}");
+        // Un votant qui n'a que la n° 1 la signe : il n'a pas de descendant complet.
+        let only_first = has(&[1]);
+        g.check_continue_base(&op(&v1), true, Some(&only_first)).unwrap();
+        // Un votant qui a tout refuse une base antérieure.
+        let all = has(&[1, 2, 3]);
+        assert!(g.check_continue_base(&op(&v2), true, Some(&all)).is_err());
+        g.check_continue_base(&op(&v3), true, Some(&all)).unwrap();
+        // Les autres opérations ne sont pas concernées.
+        g.check_continue_base(&GroupOp::Leave, true, Some(&has(&[]))).unwrap();
     }
 
     #[test]

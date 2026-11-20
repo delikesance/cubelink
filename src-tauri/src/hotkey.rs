@@ -217,6 +217,21 @@ pub fn invite_notification(payload: &Value, hotkey: Option<&str>) -> Option<(Str
     Some((format!("{name}{INVITE_TITLE_SUFFIX}"), body))
 }
 
+/// Pur : le raccourci est-il (ou sera-t-il) enregistré ? Source unique pour l'enregistrement réel et pour le texte de la
+/// notification d'invitation, afin qu'ils ne divergent plus. `staged` = le jeu en cours est dans la Scène (jamais « le
+/// prochain jeu irait dans la Scène », qui reste vrai après un repli).
+pub fn hotkey_available(enabled: bool, staged: bool, game_running: bool) -> bool {
+    enabled && staged && game_running
+}
+
+/// Le raccourci à annoncer maintenant : `Some` seulement si `apply_settings` l'enregistre (ou va le faire).
+fn hotkey_now(app: &AppHandle) -> Option<String> {
+    let ctl = app.try_state::<Arc<HotkeyCtl>>()?;
+    let (enabled, hotkey) = settings_of(app);
+    let staged = app.try_state::<Arc<AppState>>().is_some_and(|s| s.stage.staged());
+    hotkey_available(enabled, staged, ctl.game_running.load(Ordering::SeqCst)).then_some(hotkey)
+}
+
 /// Pur : titre et corps de la notification d'une demande à rejoindre reçue (`None` si la charge utile est inutilisable).
 /// `hotkey` : comme pour l'invitation. Avec la Scene, le jeu recouvre le bandeau du launcher tant que le panneau est fermé :
 /// le texte indique alors le raccourci qui l'ouvre.
@@ -230,14 +245,6 @@ pub fn join_request_notification(payload: &Value, hotkey: Option<&str>) -> Optio
         None => "Ouvre Cubelink pour répondre.".to_string(),
     };
     Some((JOIN_REQUEST_TITLE.into(), format!("{name} veut rejoindre ta partie. {reply}")))
-}
-
-/// Raccourci du panneau « en jeu » à citer dans une notification, `None` s'il n'existera pas. Linux : il n'existe que si
-/// le prochain jeu ira dans la Scene (X11) ; sinon la notification n'en parle pas.
-fn hotkey_hint(app: &AppHandle) -> Option<String> {
-    let (_, hotkey) = settings_of(app);
-    let scene = app.try_state::<Arc<AppState>>().is_some_and(|s| s.stage.available());
-    (!cfg!(target_os = "linux") || scene).then_some(hotkey)
 }
 
 fn settings_of(app: &AppHandle) -> (bool, String) {
@@ -262,7 +269,7 @@ pub fn apply_settings(app: &AppHandle) {
     let Some(ctl) = app.try_state::<Arc<HotkeyCtl>>() else { return };
     let (enabled, hotkey) = settings_of(app);
     let staged = app.try_state::<Arc<AppState>>().is_some_and(|s| s.stage.staged());
-    let available = enabled && staged && ctl.game_running.load(Ordering::SeqCst);
+    let available = hotkey_available(enabled, staged, ctl.game_running.load(Ordering::SeqCst));
     let gs = app.global_shortcut();
     let mut reg = lock(&ctl.registered);
     if let Some(old) = reg.take() {
@@ -333,7 +340,7 @@ pub fn setup(app: &AppHandle, test_mode: bool) {
         let limiter = limiter.clone();
         app.listen(kind.event(), move |ev| {
             let Ok(v) = serde_json::from_str::<Value>(ev.payload()) else { return };
-            let Some((title, body)) = plan_notification(&limiter, kind, &v, hotkey_hint(&h).as_deref(), Instant::now()) else {
+            let Some((title, body)) = plan_notification(&limiter, kind, &v, hotkey_now(&h).as_deref(), Instant::now()) else {
                 return;
             };
             if let Err(e) = h.notification().builder().title(title).body(body).show() {
@@ -364,6 +371,27 @@ mod tests {
             let e = validate_hotkey(bad).unwrap_err();
             assert!(e.contains("raccourci"), "{bad}: {e}");
         }
+    }
+
+    #[test]
+    fn hotkey_available_exige_les_trois_conditions() {
+        for bits in 0..8u8 {
+            let (e, s, r) = (bits & 1 != 0, bits & 2 != 0, bits & 4 != 0);
+            assert_eq!(hotkey_available(e, s, r), bits == 7, "enabled={e} staged={s} running={r}");
+        }
+    }
+
+    #[test]
+    fn notification_sans_raccourci_quand_il_n_est_pas_enregistre() {
+        let v = serde_json::json!({"name": "Alex"});
+        // (panneau désactivé), (hors Scène / repli), (jeu non lancé) : le texte ne cite pas le raccourci.
+        for (e, s, r) in [(false, true, true), (true, false, true), (true, true, false)] {
+            let hk = hotkey_available(e, s, r).then_some("Ctrl+Shift+C");
+            let (_, b) = invite_notification(&v, hk).unwrap();
+            assert!(b.contains("Ouvre Cubelink") && !b.contains("Ctrl+Shift+C"), "{e} {s} {r}: {b}");
+        }
+        let hk = hotkey_available(true, true, true).then_some("Ctrl+Shift+C");
+        assert!(invite_notification(&v, hk).unwrap().1.contains("Ctrl+Shift+C"));
     }
 
     #[test]

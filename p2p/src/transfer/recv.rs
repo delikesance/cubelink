@@ -69,7 +69,6 @@ struct Shared<'a> {
     files: AtomicU64,
     files_total: u32,
     bytes_total: u64,
-    via_relay: bool,
     progress: &'a (dyn Fn(TransferProgress) + Send + Sync),
 }
 
@@ -85,7 +84,6 @@ impl Shared<'_> {
             bytes_done: bytes,
             bytes_total: self.bytes_total,
             speed_bps: speed,
-            via_relay: self.via_relay,
             error,
         });
     }
@@ -122,7 +120,6 @@ pub async fn receive_plan<T: BlobTransport>(
         files: AtomicU64::new(0),
         files_total: todo.len() as u32,
         bytes_total,
-        via_relay: false,
         progress,
     };
     let result = run(&todo, peer, transport, store_root, index, opts, &shared, cancel).await;
@@ -654,7 +651,6 @@ mod tests {
         .expect("délai dépassé")
         .unwrap();
         assert_eq!(s.files, 5);
-        assert!(!b.via_relay(&peer));
         a.shutdown().await;
     }
 }

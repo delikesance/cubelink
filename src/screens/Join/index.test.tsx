@@ -5,9 +5,19 @@ import { createFakeServices, FAKE_MANIFEST_HASH } from "../../services/fake";
 import type { Services } from "../../services";
 import type { TransferProgress } from "../../services/types";
 import { goBack as routerGoBack, resetHistory } from "../../app/router";
-import Join from "./index";
+import Join, { ramHint } from "./index";
 
 afterEach(() => { cleanup(); resetHistory(); });
+
+describe("ramHint", () => {
+  const pack = (n: number) => Array.from({ length: n }, (_, i) => ({ path: `mods/m${i}.jar` })) as unknown as Parameters<typeof ramHint>[0];
+  it("suit les seuils de la mémoire Automatique (100 et 250 mods)", () => {
+    expect(ramHint(pack(99))).toBeUndefined();
+    expect(ramHint(pack(100))).toMatch(/6 Go/);
+    expect(ramHint(pack(249))).toMatch(/6 Go/);
+    expect(ramHint(pack(250))).toMatch(/8 Go/);
+  });
+});
 
 function setup(over: Partial<Services> = {}, params: Record<string, string> = { friend: "pk-alex" }) {
   const services = { ...createFakeServices({ tickMs: 0 }), ...over };
@@ -25,7 +35,7 @@ function setup(over: Partial<Services> = {}, params: Record<string, string> = { 
 
 const P = (o: Partial<TransferProgress> & { error?: string } = {}): TransferProgress => ({
   phase: "receiving", files_done: 12, files_total: 40, bytes_done: 340_000_000, bytes_total: 1_200_000_000,
-  speed_bps: 8_000_000, via_relay: false, ...o,
+  speed_bps: 8_000_000, ...o,
 });
 
 async function startJoin() {
@@ -209,15 +219,6 @@ describe("Join", () => {
     emit(P({ phase: "launching" }));
     expect(live.textContent).toBe("Lancement du jeu");
     expect(screen.queryByRole("button", { name: "Pause" })).toBeNull();
-  });
-
-  it("via un relais : la note apparaît seulement quand le transfert passe par un relais", async () => {
-    const { emit } = setup();
-    await startJoin();
-    emit(P());
-    expect(screen.queryByText(/via un relais/)).toBeNull();
-    emit(P({ via_relay: true }));
-    expect(screen.getByText(/via un relais/)).toBeTruthy();
   });
 
   it("pause puis reprise : joinPause / joinResume, l'étape en cours reste la réception", async () => {

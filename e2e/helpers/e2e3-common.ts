@@ -22,7 +22,7 @@ export async function gotoHash(app: App, hash: string, route: string): Promise<v
 /** Amitie A <-> B par commandes (B demande, A accepte). Renvoie les cles publiques. */
 export async function befriend(world: Pick<World, 'appA' | 'appB' | 'servers' | 'binary'>): Promise<{ keyA: string; keyB: string }> {
   const { appA: a, appB: b } = world;
-  await Promise.all([a.page.waitForSelector('main[data-route="login"]'), b.page.waitForSelector('main[data-route="login"]')]);
+  await Promise.all([a.page.waitForSelector('main[data-route="login"]', { timeout: 30_000 }), b.page.waitForSelector('main[data-route="login"]', { timeout: 30_000 })]);
   await loginOffline(a.page, NAME_A);
   await loginOffline(b.page, NAME_B);
   // Le code ne porte les adresses directes qu'une fois le point d'acces lie : on reessaie un court instant.
@@ -85,7 +85,7 @@ export function killApp(app: App): void {
  * Relance l'application avec le MEME dossier de donnees (meme identite), profil WebView2 et port CDP.
  * Met a jour app.proc / app.page ; le nettoyage de la fixture tue le nouveau processus.
  */
-export async function restartApp(world: Pick<World, 'servers' | 'binary'>, app: App, relayMode = 'disabled'): Promise<void> {
+export async function restartApp(world: Pick<World, 'servers' | 'binary'>, app: App): Promise<void> {
   const { servers, binary } = world;
   killApp(app);
   await sleep(1500);
@@ -104,7 +104,7 @@ export async function restartApp(world: Pick<World, 'servers' | 'binary'>, app: 
     CUBELINK_MOJANG_META_URL: servers.mojang.base, CUBELINK_FABRIC_META_URL: servers.mojang.base, CUBELINK_ADOPTIUM_URL: servers.mojang.base,
     CUBELINK_MODRINTH_API_URL: servers.modrinth.base,
     CUBELINK_JAVA_PATH: path.join(ROOT, 'tests-fixtures', 'mojang', 'fake-java.cmd'),
-    CUBELINK_SKIP_JAVA_PROBE: '1', CUBELINK_RELAY_MODE: relayMode,
+    CUBELINK_SKIP_JAVA_PROBE: '1',
   };
   const proc = spawn(binary, [], { env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: false, cwd: ROOT });
   proc.stdout!.on('data', (d) => app.log.push(String(d)));

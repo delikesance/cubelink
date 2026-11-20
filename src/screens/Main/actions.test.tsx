@@ -1,12 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { ShellContext, type ShellContextValue } from "../../app/context";
-import { setImportWarning } from "../../app/importWarning";
+import { setImportWarning, setPrepareDeferred } from "../../app/importWarning";
 import { createFakeServices } from "../../services/fake";
 import type { Services } from "../../services";
 import Main from "./index";
 
-afterEach(() => { cleanup(); setImportWarning(null); });
+afterEach(() => { cleanup(); setImportWarning(null); setPrepareDeferred(null); });
 
 function setup(over: Partial<Services> = {}) {
   const services = { ...createFakeServices({ tickMs: 0, requestCount: 0 }), modsCheck: async () => ({ issues: [], checked: 0 }), ...over };
@@ -38,6 +38,36 @@ describe("Main : échec du lancement rapide", () => {
     expect(alert.textContent).toContain("Instance introuvable.");
     fireEvent.click(within(alert).getByRole("button", { name: "Voir les logs" }));
     expect(navigate).toHaveBeenCalledWith("instance", { id: "inst-aeronautics", tab: "logs" });
+  });
+});
+
+describe("Main : échec d'appel sur le bon modpack", () => {
+  it("le bandeau nomme l'instance lancée, pas la précédente", async () => {
+    const { navigate } = setup({ instancesLaunch: async () => { throw new Error("Java introuvable."); } });
+    fireEvent.click(await screen.findByRole("button", { name: "Jouer à All the Mods 10" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("Échec du lancement de All the Mods 10");
+    expect(alert.textContent).toContain("Java introuvable.");
+    fireEvent.click(within(alert).getByRole("button", { name: "Voir les logs" }));
+    expect(navigate).toHaveBeenCalledWith("instance", { id: "inst-atm10", tab: "logs" });
+  });
+});
+
+describe("Main : préparation du jeu différée", () => {
+  it("bandeau non bloquant avec la cause, Ignorer le retire", async () => {
+    let push: (e: { instance_id: string; message: string }) => void = () => {};
+    setup({ onImportDeferred: (cb) => { push = cb; return () => {}; } });
+    await screen.findByRole("group", { name: "Instances" });
+    act(() => push({ instance_id: "inst-9", message: "réseau indisponible" }));
+    expect(screen.getByText(/le jeu n'a pas pu être préparé \(réseau indisponible\)\. Il sera téléchargé au premier lancement/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Ignorer" }));
+    expect(screen.queryByText(/premier lancement/)).toBeNull();
+  });
+
+  it("reprend l'avis reçu pendant l'import (écran Create)", async () => {
+    setPrepareDeferred("Java indisponible");
+    setup();
+    expect(await screen.findByText(/Java indisponible/)).toBeTruthy();
   });
 });
 

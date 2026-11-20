@@ -1,5 +1,6 @@
 //! Cubelink P2P. Chaque module est la propriété d'une seule tâche.
 pub mod identity;
+pub mod identity_backup;
 pub mod friend_code;
 pub mod verify_code;
 pub mod friends_db;

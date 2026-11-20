@@ -551,11 +551,37 @@ mod tests {
         lock(&st.settings).open_to_all_friends = true;
         st.announce_world(&mut sent).await;
         st.announce_world(&mut sent).await;
+        {
+            let got = rec.0.lock().unwrap();
+            let mut keys: Vec<_> = got.iter().map(|(k, _)| k.clone()).collect();
+            keys.sort();
+            assert_eq!(keys, vec![key(1), key(2)]);
+            assert!(got.iter().all(|(_, m)| !m.revoke && m.pack.as_deref() == Some("ATM10 Sky")));
+        }
+
+        // Monde quitté : plus d'annonce, et la table des envois est vidée pour réinviter dès la réouverture.
+        st.host_world_closed(&inst.id);
+        assert!(lock(&st.invites_sent).is_empty());
+        let n = rec.0.lock().unwrap().len();
+        st.announce_world(&mut sent).await;
+        assert!(sent.is_empty(), "table d'annonce vidée");
+        // Les révocations partent au mieux en tâche de fond ; aucune nouvelle invitation.
+        for _ in 0..50 {
+            if rec.0.lock().unwrap().len() >= n + 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(rec.0.lock().unwrap().iter().skip(n).all(|(_, m)| m.revoke), "seules des révocations sont envoyées");
+
+        // Réouverture rapide (moins de 4 min) : les amis sont réinvités aussitôt.
+        let n = rec.0.lock().unwrap().len();
+        *lock(&st.host) = Some(HostState { instance_id: inst.id.clone(), sharing: true, world_port: Some(54999) });
+        // Anti-spam de l'émetteur : on laisse l'intervalle minimal passer en vidant la table.
+        lock(&st.invites_sent).clear();
+        st.announce_world(&mut sent).await;
         let got = rec.0.lock().unwrap();
-        let mut keys: Vec<_> = got.iter().map(|(k, _)| k.clone()).collect();
-        keys.sort();
-        assert_eq!(keys, vec![key(1), key(2)]);
-        assert!(got.iter().all(|(_, m)| !m.revoke && m.pack.as_deref() == Some("ATM10 Sky")));
+        assert_eq!(got.iter().skip(n).filter(|(_, m)| !m.revoke).count(), 2);
     }
 
     #[tokio::test]

@@ -51,11 +51,7 @@ impl Default for DlOptions {
 
 /// Clients HTTP partagés : réutilisent les connexions (pas de nouveau handshake TLS par fichier).
 fn build_client(follow_redirects: bool) -> reqwest::Client {
-    let mut b = reqwest::Client::builder().connect_timeout(Duration::from_secs(15)).pool_max_idle_per_host(32);
-    if !follow_redirects {
-        b = b.redirect(reqwest::redirect::Policy::none());
-    }
-    b.build().unwrap_or_default()
+    super::http::download_client(follow_redirects)
 }
 
 fn shared_client() -> &'static reqwest::Client {
@@ -188,6 +184,8 @@ fn cached(file: &VersionFile, store_root: &Path, index: &StoreIndex) -> Result<O
         let ok = std::fs::metadata(&path).map(|m| m.is_file() && m.len() == entry.size).unwrap_or(false)
             && (file.size == 0 || file.size == entry.size);
         if ok {
+            // Réutilisé : rafraîchit l'âge pour qu'un balayage concurrent ne le retire pas avant sa liaison.
+            index.touch(&entry.sha256)?;
             return Ok(Some(StoredObject { sha256: entry.sha256, rel_path: entry.rel_path, size: entry.size, from_cache: true }));
         }
     }
@@ -244,6 +242,7 @@ fn check_cancel(opts: &DlOptions) -> Result<()> {
     }
 }
 
+#[derive(Debug)]
 struct Digests {
     sha1: String,
     sha256: String,
@@ -251,8 +250,25 @@ struct Digests {
     size: u64,
 }
 
+/// Rend `Err(Cancelled)` dès que le drapeau d'annulation passe à vrai (sondé toutes les 100 ms).
+async fn wait_cancel(opts: &DlOptions) -> Error {
+    while !opts.cancel.load(Ordering::SeqCst) {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    Error::Cancelled
+}
+
+/// Attend `fut` mais rend la main aussitôt si l'utilisateur annule : un flux muet ne bloque plus Annuler.
+async fn or_cancel<T>(opts: &DlOptions, fut: impl std::future::Future<Output = T>) -> Result<T> {
+    tokio::select! {
+        biased;
+        e = wait_cancel(opts) => Err(e),
+        v = fut => Ok(v),
+    }
+}
+
 async fn download_once(client: &reqwest::Client, url: &str, size_hint: u64, tmp: &Path, opts: &DlOptions, max_bytes: Option<u64>) -> Result<Digests> {
-    let resp = client.get(url).send().await.map_err(net)?;
+    let resp = or_cancel(opts, client.get(url).send()).await?.map_err(net)?;
     let status = resp.status();
     if !status.is_success() {
         return Err(Error::Network(format!("HTTP {} pour {}", status.as_u16(), url)));
@@ -267,7 +283,7 @@ async fn download_once(client: &reqwest::Client, url: &str, size_hint: u64, tmp:
     let (mut s1, mut s256, mut s512) = (Sha1::new(), Sha256::new(), Sha512::new());
     let mut size = 0u64;
     let mut stream = resp.bytes_stream();
-    while let Some(chunk) = stream.next().await {
+    while let Some(chunk) = or_cancel(opts, stream.next()).await? {
         check_cancel(opts)?;
         let chunk = chunk.map_err(net)?;
         s1.update(&chunk);
@@ -611,5 +627,86 @@ mod tests {
         let err = fetch_into_store_unverified(&url, 3, dir2.path(), &idx2, &opts()).await.unwrap_err();
         assert!(matches!(err, Error::Invalid(_)), "{err:?}");
         assert_eq!(cache_files(dir2.path()), 0);
+    }
+
+    // ---------- flux bloqué (vrai serveur TCP local qui se tait) ----------
+
+    /// Serveur local : après la requête, envoie `reply` (peut être vide) puis se tait sans fermer.
+    async fn mute_server(reply: &'static [u8]) -> String {
+        use tokio::io::AsyncReadExt;
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((mut sock, _)) = l.accept().await {
+                let mut buf = [0u8; 2048];
+                let _ = sock.read(&mut buf).await;
+                if !reply.is_empty() {
+                    let _ = sock.write_all(reply).await;
+                }
+                held.push(sock);
+            }
+        });
+        format!("http://{addr}/f.jar")
+    }
+
+    const STALLED: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\n\r\nabcdef";
+
+    fn cancel_after(opts: &DlOptions, ms: u64) {
+        let c = opts.cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(ms)).await;
+            c.store(true, Ordering::SeqCst);
+        });
+    }
+
+    #[tokio::test]
+    async fn cancel_returns_quickly_on_stalled_stream() {
+        let url = mute_server(STALLED).await;
+        let (dir, idx) = setup();
+        let o = DlOptions { attempts: 1, ..opts() };
+        cancel_after(&o, 300);
+        let t = std::time::Instant::now();
+        let r = tokio::time::timeout(Duration::from_secs(3), fetch_into_store_unverified(&url, 10_000_000, dir.path(), &idx, &o)).await;
+        assert!(matches!(r, Ok(Err(Error::Cancelled))), "{r:?}");
+        assert!(t.elapsed() < Duration::from_secs(1), "annulation trop lente : {:?}", t.elapsed());
+        let parts = std::fs::read_dir(dir.path().join(".tmp")).unwrap().count();
+        assert_eq!(parts, 0, ".part non supprimé");
+    }
+
+    #[tokio::test]
+    async fn cancel_returns_quickly_while_waiting_for_headers() {
+        let url = mute_server(b"").await;
+        let (dir, idx) = setup();
+        let o = DlOptions { attempts: 1, ..opts() };
+        cancel_after(&o, 300);
+        let t = std::time::Instant::now();
+        let r = tokio::time::timeout(Duration::from_secs(3), fetch_into_store_unverified(&url, 10_000_000, dir.path(), &idx, &o)).await;
+        assert!(matches!(r, Ok(Err(Error::Cancelled))), "{r:?}");
+        assert!(t.elapsed() < Duration::from_secs(1), "annulation trop lente : {:?}", t.elapsed());
+    }
+
+    #[tokio::test]
+    async fn read_timeout_fails_cleanly_on_stalled_stream() {
+        use crate::providers::http::{client_with, Timeouts};
+        let url = mute_server(STALLED).await;
+        let dir = tempfile::tempdir().unwrap();
+        let client = client_with(Timeouts { connect: Duration::from_secs(2), read: Duration::from_millis(300), total: None }, None, true);
+        let tmp = dir.path().join("x.part");
+        let t = std::time::Instant::now();
+        let r = tokio::time::timeout(Duration::from_secs(5), download_once(&client, &url, 0, &tmp, &DlOptions::default(), None)).await;
+        match r {
+            Ok(Err(Error::Network(m))) => assert!(!m.starts_with("HTTP 4"), "{m}"),
+            other => panic!("attendu Network, reçu {other:?}"),
+        }
+        assert!(t.elapsed() < Duration::from_secs(3));
+    }
+
+    #[test]
+    fn shared_download_client_has_read_timeout_but_no_total() {
+        use crate::providers::http::Timeouts;
+        assert!(Timeouts::DOWNLOAD.total.is_none());
+        assert!(Timeouts::API.total.is_some());
+        assert!(Timeouts::DOWNLOAD.read <= Duration::from_secs(60));
     }
 }

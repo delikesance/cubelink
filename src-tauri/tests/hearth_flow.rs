@@ -325,7 +325,9 @@ async fn serveur_de_groupe_de_la_creation_a_la_fourche() {
     b.stop().await;
     a.close_game();
     wait_for("serveur d'Alice arrêté (2)", 30, || a.state_of(&g) != HearthStateKind::Hosting).await;
-    assert_eq!(a.rt().head(&g).unwrap().header.number, 3);
+    // La carte quitte l'état « Hosting » dès que le serveur est retiré, un peu AVANT que la version de fin de partie soit
+    // signée et enregistrée : on l'attend au lieu de la lire tout de suite (course vue en CI, tests-linux).
+    wait_for("version 3 publiée chez Alice", 30, || a.rt().head(&g).is_some_and(|h| h.header.number == 3)).await;
     tokio::time::sleep(Duration::from_secs(2)).await;
     assert_eq!(a.rt().pending_outbox(), 1, "personne de joignable : la version 3 attend en file");
     c.restart().await;

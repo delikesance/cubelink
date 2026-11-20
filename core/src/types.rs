@@ -249,6 +249,8 @@ pub struct HearthCard {
     pub instance_id: Option<String>,
     /// Numéro de la version du monde la plus récente connue.
     pub version: Option<u64>,
+    /// Fins de partie non publiées, mises de côté sur ce PC (`HearthDetail::orphans`) : l'hôte n'a pas encore choisi.
+    pub orphans: u32,
 }
 
 /// Invitation à un groupe reçue d'un ami (événement `hearth://invites`).
@@ -334,6 +336,20 @@ pub struct HearthBranch {
     pub total_size: u64,
 }
 
+/// Fin de partie non publiée (plantage, arrêt de Cubelink, fermeture trop longue), mise de côté sur ce PC. Jamais annoncée
+/// aux autres membres : l'hôte la publie ou la supprime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+pub struct HearthOrphan {
+    pub id: String,
+    /// Dernière écriture du monde (secondes Unix).
+    pub at: i64,
+    /// Temps de jeu approximatif de cette partie.
+    pub played_secs: u64,
+    /// Numéro de la version dont la partie était partie (point de reprise le plus récent), si connue.
+    pub base_number: Option<u64>,
+    pub size_bytes: u64,
+}
+
 /// Réglages d'un groupe pour ce PC.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct HearthSettings {
@@ -356,6 +372,8 @@ pub struct HearthDetail {
     pub proposals: Vec<HearthProposal>,
     pub blocker: Option<HearthBlocker>,
     pub fork: Vec<HearthBranch>,
+    /// Fins de partie non publiées, de la plus récente à la plus ancienne.
+    pub orphans: Vec<HearthOrphan>,
     pub settings: HearthSettings,
 }
 

@@ -5,6 +5,22 @@
 
 import type * as B from "./bindings";
 
+/** Échec de `hearthLeave` : `code` dit quoi proposer (voir `LeaveError` côté Rust). Rien n'est supprimé dans aucun de ces cas. */
+export class HearthLeaveError extends Error {
+  constructor(readonly code: B.LeaveError["code"], message?: string) {
+    super(message ?? (code === "last_member"
+      ? "Tu es le dernier membre de ce groupe : le quitter effacerait la seule copie du monde."
+      : code === "unreachable"
+        ? "Personne du groupe n'a pu être joint : ton départ n'a pas pu leur être annoncé."
+        : code === "outbox_pending"
+          ? "Ta dernière partie n'a pas encore été envoyée aux autres membres."
+          : code === "orphan_pending"
+            ? "Une partie non publiée est gardée de côté sur ce PC : la quitter la supprimerait."
+            : "Une erreur est survenue."));
+    this.name = "HearthLeaveError";
+  }
+}
+
 // Les structures que serde lit et écrit différemment (champ `serde(default)`, `Option`) existent en deux variantes
 // générées : `_Serialize` (ce que Rust renvoie, tous les champs présents) et `_Deserialize` (ce que Rust accepte).
 // Le front reçoit la première et envoie la seconde.
@@ -149,6 +165,12 @@ export type HearthUncleanChoice = "wait" | "checkpoint" | "last";
 
 /** Erreur renvoyée par `hearthPlay` tant que le contrat d'utilisation de Minecraft n'est pas accepté. */
 export const HEARTH_EULA_REQUIRED = "eula_required";
+
+/**
+ * Préfixe de l'erreur de `hearthPlay` quand la dernière version est connue mais que personne de joignable n'en a le contenu.
+ * Format : `head_unavailable|<n° de la tête>|<n° de la dernière version complète, ou vide>|<nom de l'auteur>`.
+ */
+export const HEARTH_HEAD_UNAVAILABLE = "head_unavailable";
 
 export interface Services {
   authStatus(): Promise<Profile | null>;
@@ -299,20 +321,28 @@ export interface Services {
   hearthInviteDismiss(groupId: string): Promise<void>;
   /** Le bouton unique de la carte : jouer ou rejoindre selon l'état. Rejette avec `eula_required` au premier hébergement. */
   hearthPlay(id: string): Promise<void>;
+  /** Repart de la dernière version complète quand `hearthPlay` a rejeté avec `head_unavailable` : crée une fourche quand l'auteur revient. */
+  hearthPlayFromPrevious(id: string): Promise<void>;
   hearthStop(id: string): Promise<void>;
   hearthUncleanChoice(id: string, choice: HearthUncleanChoice): Promise<void>;
   /** Associe le modpack du groupe à une instance locale. */
   hearthSetInstance(id: string, instanceId: string): Promise<void>;
   hearthAddMember(id: string, publicKey: string): Promise<void>;
   hearthRemoveMember(id: string, publicKey: string): Promise<void>;
-  hearthLeave(id: string): Promise<void>;
-  /** Supprime le serveur de CE PC seulement, sans prévenir le groupe (repli quand quitter est impossible : aucun membre joignable). */
+  /** Rejette avec une `HearthLeaveError` (`last_member`, `unreachable`, `other`) : rien n'est supprimé, c'est à l'écran de proposer la suite. */
+  /** `force` : ne pas attendre l'envoi de ma dernière partie (elle est perdue pour le groupe si elle n'est pas partie). */
+  hearthLeave(id: string, force?: boolean): Promise<void>;
+  /** Supprime le serveur de CE PC seulement, sans prévenir le groupe (choix explicite après « personne n'est joignable » ou « dernier membre », jamais un repli automatique). */
   hearthForget(id: string): Promise<void>;
   hearthVote(id: string, proposalId: string): Promise<void>;
   hearthContinueWithout(id: string, publicKey: string): Promise<void>;
   hearthPackUpdate(id: string, instanceId: string): Promise<void>;
   hearthRestore(id: string, versionId: string): Promise<void>;
   hearthResolveFork(id: string, versionId: string): Promise<void>;
+  /** Publie une fin de partie non publiée, mise de côté après un plantage : une nouvelle version, enfant de celle dont elle est partie. */
+  hearthOrphanPublish(id: string, orphanId: string): Promise<void>;
+  /** Supprime une fin de partie non publiée mise de côté. */
+  hearthOrphanDiscard(id: string, orphanId: string): Promise<void>;
   hearthSetBackground(id: string, on: boolean): Promise<void>;
   hearthEula(): Promise<HearthEula>;
   hearthEulaAccept(): Promise<void>;

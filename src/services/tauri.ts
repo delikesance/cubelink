@@ -1,6 +1,6 @@
 import { listen } from "@tauri-apps/api/event";
 import { commands } from "./bindings";
-import type { HearthDetail, Services, Unsubscribe } from "./types";
+import { HearthLeaveError, type HearthDetail, type Services, type Unsubscribe } from "./types";
 
 // Commandes : fonctions générées depuis Rust (`bindings.ts`, `npm run bindings`), donc noms, arguments et types de retour
 // vérifiés par tsc. Une erreur Rust (`Result<T, String>`) rejette la promesse avec le message en français.
@@ -9,6 +9,16 @@ import type { HearthDetail, Services, Unsubscribe } from "./types";
 /** Les commandes sans valeur de retour résolvent `null` côté Tauri : `Services` les expose en `Promise<void>`. */
 async function done(p: Promise<unknown>): Promise<void> {
   await p;
+}
+
+/** `hearth_leave` rejette `{ code, message? }` (voir `LeaveError`) ; tout ce qui n'a pas ce format reste une erreur ordinaire. */
+export function toLeaveError(e: unknown): Error {
+  if (e && typeof e === "object" && "code" in e) {
+    const { code, message } = e as { code: unknown; message?: unknown };
+    if (code === "last_member" || code === "unreachable" || code === "outbox_pending" || code === "orphan_pending") return new HearthLeaveError(code);
+    if (code === "other") return new HearthLeaveError("other", typeof message === "string" ? message : undefined);
+  }
+  return new HearthLeaveError("other", typeof e === "string" ? e : e instanceof Error ? e.message : undefined);
 }
 
 function on<T>(event: string, cb: (p: T) => void): Unsubscribe {
@@ -141,17 +151,20 @@ export function createTauriServices(): Services {
     hearthInviteDismiss: (id) => done(commands.hearthInviteDismiss(id)),
     hearthPlay: (id) => done(commands.hearthPlay(id)),
     hearthStop: (id) => done(commands.hearthStop(id)),
+    hearthPlayFromPrevious: (id) => done(commands.hearthPlayFromPrevious(id)),
     hearthUncleanChoice: (id, choice) => done(commands.hearthUncleanChoice(id, choice)),
     hearthSetInstance: (id, instanceId) => done(commands.hearthSetInstance(id, instanceId)),
     hearthAddMember: (id, publicKey) => done(commands.hearthAddMember(id, publicKey)),
     hearthRemoveMember: (id, publicKey) => done(commands.hearthRemoveMember(id, publicKey)),
-    hearthLeave: (id) => done(commands.hearthLeave(id)),
+    hearthLeave: (id, force) => done(commands.hearthLeave(id, force ?? false)).catch((e: unknown) => { throw toLeaveError(e); }),
     hearthForget: (id) => done(commands.hearthForget(id)),
     hearthVote: (id, proposalId) => done(commands.hearthVote(id, proposalId)),
     hearthContinueWithout: (id, publicKey) => done(commands.hearthContinueWithout(id, publicKey)),
     hearthPackUpdate: (id, instanceId) => done(commands.hearthPackUpdate(id, instanceId)),
     hearthRestore: (id, versionId) => done(commands.hearthRestore(id, versionId)),
     hearthResolveFork: (id, versionId) => done(commands.hearthResolveFork(id, versionId)),
+    hearthOrphanPublish: (id, orphanId) => done(commands.hearthOrphanPublish(id, orphanId)),
+    hearthOrphanDiscard: (id, orphanId) => done(commands.hearthOrphanDiscard(id, orphanId)),
     hearthSetBackground: (id, on) => done(commands.hearthSetBackground(id, on)),
     hearthEula: () => commands.hearthEula(),
     hearthEulaAccept: () => commands.hearthEulaAccept(),

@@ -170,15 +170,17 @@ export const commands = {
 	hearthStop: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_stop", { id }, options),
 	/**  Choix du groupe après une partie mal terminée. */
 	hearthUncleanChoice: (id: string, choice: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_unclean_choice", { id, choice }, options),
+	/**  Jouer depuis la dernière version complète quand le contenu de la dernière version n'est chez personne de joignable. */
+	hearthPlayFromPrevious: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_play_from_previous", { id }, options),
 	/**  Associe l'instance locale du modpack au groupe. */
 	hearthSetInstance: (id: string, instanceId: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_set_instance", { id, instance_id: instanceId }, options),
 	/**  Propose d'ajouter un ami au groupe. */
 	hearthAddMember: (id: string, publicKey: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_add_member", { id, public_key: publicKey }, options),
 	/**  Propose de retirer un membre du groupe. */
 	hearthRemoveMember: (id: string, publicKey: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_remove_member", { id, public_key: publicKey }, options),
-	/**  Quitte le groupe. */
-	hearthLeave: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_leave", { id }, options),
-	/**  Supprime le serveur de ce PC seulement, sans prévenir le groupe : arrête mon serveur, libère les blobs et efface le dossier (repli quand quitter est impossible). */
+	/**  Quitte le groupe, après avoir attendu (jusqu'à 5 min) que ma dernière partie soit remise à un membre. Rejette `{ code: "last_member" | "unreachable" | "outbox_pending" | "orphan_pending" | "other", message? }` : rien n'est supprimé dans ces cas. `force: true` saute l'attente de la file d'envoi (la dernière partie est perdue pour le groupe) et la garde d'une fin de partie non publiée (elle est supprimée avec le monde). */
+	hearthLeave: (id: string, force: boolean | null, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_leave", { id, force }, options),
+	/**  Supprime le serveur de ce PC seulement, sans prévenir le groupe : arrête mon serveur, libère les blobs et efface le dossier (choix explicite de l'utilisateur quand personne n'est joignable, jamais un repli automatique). */
 	hearthForget: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_forget", { id }, options),
 	/**  Approuve une décision du groupe en attente. */
 	hearthVote: (id: string, proposalId: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_vote", { id, proposal_id: proposalId }, options),
@@ -190,6 +192,10 @@ export const commands = {
 	hearthRestore: (id: string, versionId: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_restore", { id, version_id: versionId }, options),
 	/**  Choisit la version gardée quand le monde a deux versions. */
 	hearthResolveFork: (id: string, versionId: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_resolve_fork", { id, version_id: versionId }, options),
+	/**  Publie une fin de partie non publiée mise de côté (`HearthDetail.orphans`) : une nouvelle `Session`, enfant de la version dont elle est partie (une fourche si le groupe a avancé). */
+	hearthOrphanPublish: (id: string, orphanId: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_orphan_publish", { id, orphan_id: orphanId }, options),
+	/**  Supprime une fin de partie non publiée mise de côté. */
+	hearthOrphanDiscard: (id: string, orphanId: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_orphan_discard", { id, orphan_id: orphanId }, options),
 	/**  Garde le serveur ouvert quand le jeu de ce PC se ferme. */
 	hearthSetBackground: (id: string, on: boolean, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_set_background", { id, on }, options),
 	/**  État de l'acceptation du CLUF Minecraft (serveur dédié) et son adresse. */
@@ -565,6 +571,8 @@ export type HearthCard_Deserialize = {
 	instance_id?: string | null,
 	/**  Numéro de la version du monde la plus récente connue. */
 	version?: number | null,
+	/**  Fins de partie non publiées, mises de côté sur ce PC (`HearthDetail::orphans`) : l'hôte n'a pas encore choisi. */
+	orphans: number,
 };
 
 /**  Carte d'un serveur de groupe sur l'accueil (événement `hearth://state`, commande `hearth_list`). */
@@ -596,6 +604,8 @@ export type HearthCard_Serialize = {
 	instance_id: string | null,
 	/**  Numéro de la version du monde la plus récente connue. */
 	version: number | null,
+	/**  Fins de partie non publiées, mises de côté sur ce PC (`HearthDetail::orphans`) : l'hôte n'a pas encore choisi. */
+	orphans: number,
 };
 
 /**  Page du serveur (commande `hearth_detail`). */
@@ -609,6 +619,8 @@ export type HearthDetail_Deserialize = {
 	proposals: HearthProposal_Deserialize[],
 	blocker?: HearthBlocker | null,
 	fork: HearthBranch[],
+	/**  Fins de partie non publiées, de la plus récente à la plus ancienne. */
+	orphans: HearthOrphan_Deserialize[],
 	settings: HearthSettings_Deserialize,
 };
 
@@ -620,6 +632,8 @@ export type HearthDetail_Serialize = {
 	proposals: HearthProposal_Serialize[],
 	blocker: HearthBlocker | null,
 	fork: HearthBranch[],
+	/**  Fins de partie non publiées, de la plus récente à la plus ancienne. */
+	orphans: HearthOrphan_Serialize[],
 	settings: HearthSettings_Serialize,
 };
 
@@ -678,6 +692,42 @@ export type HearthMember_Serialize = {
 	version: number | null,
 	/**  Jours depuis qu'on l'a vu en ligne (`None` : jamais vu, ou en ligne). */
 	unseen_days: number | null,
+};
+
+/**
+ *  Fin de partie non publiée (plantage, arrêt de Cubelink, fermeture trop longue), mise de côté sur ce PC. Jamais annoncée
+ *  aux autres membres : l'hôte la publie ou la supprime.
+ */
+export type HearthOrphan = HearthOrphan_Serialize | HearthOrphan_Deserialize;
+
+/**
+ *  Fin de partie non publiée (plantage, arrêt de Cubelink, fermeture trop longue), mise de côté sur ce PC. Jamais annoncée
+ *  aux autres membres : l'hôte la publie ou la supprime.
+ */
+export type HearthOrphan_Deserialize = {
+	id: string,
+	/**  Dernière écriture du monde (secondes Unix). */
+	at: number,
+	/**  Temps de jeu approximatif de cette partie. */
+	played_secs: number,
+	/**  Numéro de la version dont la partie était partie (point de reprise le plus récent), si connue. */
+	base_number?: number | null,
+	size_bytes: number,
+};
+
+/**
+ *  Fin de partie non publiée (plantage, arrêt de Cubelink, fermeture trop longue), mise de côté sur ce PC. Jamais annoncée
+ *  aux autres membres : l'hôte la publie ou la supprime.
+ */
+export type HearthOrphan_Serialize = {
+	id: string,
+	/**  Dernière écriture du monde (secondes Unix). */
+	at: number,
+	/**  Temps de jeu approximatif de cette partie. */
+	played_secs: number,
+	/**  Numéro de la version dont la partie était partie (point de reprise le plus récent), si connue. */
+	base_number: number | null,
+	size_bytes: number,
 };
 
 /**  Décision du groupe en attente de votes. */
@@ -1006,6 +1056,29 @@ export type LaunchStateEvent_Serialize = {
 	state: LaunchPhase,
 	message?: string,
 };
+
+/**
+ *  Échec de `hearth_leave`, avec un code stable pour que l'écran choisisse quoi proposer. Seul `Unreachable` autorise le
+ *  repli « supprimer quand même ce PC » (après une seconde confirmation), et seuls `OutboxPending` et `OrphanPending` autorisent de rejouer avec
+ *  `force` (« Quitter quand même », la dernière partie sera perdue pour le groupe) ; jamais une autre erreur.
+ */
+export type LeaveError = 
+/**  Je suis le dernier membre : quitter effacerait la seule copie du monde. Rien n'a été touché. */
+{ code: "last_member" } | 
+/**  Aucun autre membre n'a reçu mon départ. Rien n'a été supprimé. */
+{ code: "unreachable" } | 
+/**
+ *  Ma dernière partie n'a été remise à aucun membre (file d'envoi non vidée) : la quitter maintenant la perdrait pour le
+ *  groupe. Rien n'a été supprimé ; mon serveur est arrêté et la version reste en file. Rejouable, ou avec `force`.
+ */
+{ code: "outbox_pending" } | 
+/**
+ *  Une fin de partie non publiée est mise de côté sur ce PC : quitter la supprimerait. Rien n'a été supprimé ; rejouable
+ *  avec `force` (« Quitter quand même »), ou après l'avoir publiée ou supprimée depuis la page du serveur.
+ */
+{ code: "orphan_pending" } | 
+/**  Toute autre erreur (quota, disque, jeu en cours…) : message affichable, rien n'est supprimé par le front. */
+{ code: "other"; message: string };
 
 export type Loader = "vanilla" | "neoforge" | "fabric" | "quilt" | "forge";
 

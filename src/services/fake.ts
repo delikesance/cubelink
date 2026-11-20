@@ -1,5 +1,5 @@
 import { validateOfflineName } from "./accounts";
-import { HEARTH_EULA_REQUIRED } from "./types";
+import { HEARTH_EULA_REQUIRED, HEARTH_HEAD_UNAVAILABLE, HearthLeaveError } from "./types";
 import type {
   AccountInfo, AccountsState, BrowseHit, BrowseInstallResult, BrowseKind, BrowseProgressEvent, BrowseSource, BrowseVersion, FixPlan, FixProgressEvent, FixResult, ModCheck, ModEntry, ModIssue,
   CreateInstanceInput, DeviceCode, HostState, Invite, JoinAnswer, JoinRequest, ImportWarningEvent, LaunchLogEvent, FriendRequest, FriendWithPresence, Instance, InstanceArt,
@@ -64,6 +64,8 @@ export interface FakeControls {
   emitHearthHostPrompt(e: HearthHostPrompt): void;
   /** Test : le contrat d'utilisation de Minecraft est déjà accepté (ou non). Défaut : non. */
   setHearthEula(accepted: boolean): void;
+  /** Test : la dernière version n'a de contenu chez personne : `hearthPlay` rejette avec `head_unavailable` jusqu'à `hearthPlayFromPrevious`. `previous: null` : aucune version complète. */
+  setHearthHeadUnavailable(info: { author: string; head: number; previous: number | null } | null): void;
   /** Test : commandes Hearth reçues, dans l'ordre (nom sans préfixe `hearth`, arguments). */
   readonly hearthCalls: Array<{ kind: string; args: unknown[] }>;
   /** Test : fusionne `patch` dans l'état de la zone de jeu et émet stage://state. */
@@ -321,6 +323,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
   const hearthGroups = new Map<string, HearthDetail>();
   let hearthInvs: HearthInvite[] = [];
   let hearthEula = false;
+  let hearthHeadMissing: { author: string; head: number; previous: number | null } | null = null;
   /** Le faux service part avec Hearth activé (le vrai réglage est coupé par défaut) ; `hearthSetEnabled` le change. */
   let hearthOn = true;
   let hearthN = 0;
@@ -365,10 +368,10 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     const card: HearthCard = {
       minecraft: "1.21.1", loader: "NeoForge", state: "idle", host: null, players: 0, progress: null, step: null, step_index: null,
       step_count: 3, unclean: null, members_online: [], members_total: members.length, is_creator: true, can_host: true,
-      instance_id: "inst-aeronautics", version: 1, ...p,
+      instance_id: "inst-aeronautics", version: 1, orphans: d.orphans?.length ?? 0, ...p,
     };
     const g: HearthDetail = {
-      card, members, proposals: [], blocker: null, fork: [],
+      card, members, proposals: [], blocker: null, fork: [], orphans: [],
       versions: [{ id: `v-${p.id}-1`, number: 1, kind: "session", author: ME.public_key, author_name: ME.name, created_at: NOW - 86400, played_secs: 5400, total_size: 380_000_000, is_head: true, side_branch: false }],
       settings: { keep_background: false, disk_bytes: 380_000_000, outbox_pending: 0, instance_name: "Create: Aeronautics" },
       ...d,
@@ -677,12 +680,24 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
       const st = g.card.state;
       if (st === "idle" || st === "unclean" || st === "blocked") {
         if (!hearthEula) throw new Error(HEARTH_EULA_REQUIRED);
+        if (hearthHeadMissing) {
+          const m = hearthHeadMissing;
+          throw new Error(`${HEARTH_HEAD_UNAVAILABLE}|${m.head}|${m.previous ?? ""}|${m.author}`);
+        }
         hearthLaunch(id, ["Mise à jour du monde", "Démarrage du serveur", "Ouverture de Minecraft"], { state: "hosting", host: { ...ME }, players: 1, unclean: null });
       } else if (st === "hosted") {
         hearthLaunch(id, ["Connexion à l'hôte", "Ouverture de Minecraft"], { state: "hosted", players: g.card.players + 1 });
       } else {
         throw new Error("Ce serveur ne peut pas être lancé pour l'instant.");
       }
+    },
+    hearthPlayFromPrevious: async (id) => {
+      hearthCalls.push({ kind: "PlayFromPrevious", args: [id] });
+      hearthCard(id);
+      if (!hearthHeadMissing || hearthHeadMissing.previous === null) throw new Error("aucune version complète sur ce PC pour repartir : il faut attendre l'auteur");
+      if (!hearthEula) throw new Error(HEARTH_EULA_REQUIRED);
+      hearthHeadMissing = null;
+      hearthLaunch(id, ["Mise à jour du monde", "Démarrage du serveur", "Ouverture de Minecraft"], { state: "hosting", host: { ...ME }, players: 1, unclean: null });
     },
     hearthStop: async (id) => {
       hearthCalls.push({ kind: "Stop", args: [id] });
@@ -719,9 +734,15 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
       hearthSync(g);
       hearthEmit();
     },
-    hearthLeave: async (id) => {
-      hearthCalls.push({ kind: "Leave", args: [id] });
-      hearthCard(id);
+    hearthLeave: async (id, force) => {
+      hearthCalls.push({ kind: "Leave", args: force ? [id, true] : [id] });
+      const g = hearthCard(id);
+      // Comme Rust : le dernier membre ne peut pas quitter, rien n'est supprimé.
+      if (g.members.length <= 1) throw new HearthLeaveError("last_member");
+      // Comme Rust : une partie encore en file n'est pas jetée sans `force`.
+      if (!force && g.settings.outbox_pending > 0) throw new HearthLeaveError("outbox_pending");
+      // Comme Rust : une fin de partie non publiée, gardée de côté, n'est pas supprimée sans `force`.
+      if (!force && g.orphans.length > 0) throw new HearthLeaveError("orphan_pending");
       hearthGroups.delete(id);
       hearthEmit();
     },
@@ -771,6 +792,23 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
       g.fork = [];
       hearthPatch(id, { state: "idle" });
     },
+    hearthOrphanPublish: async (id, orphanId) => {
+      hearthCalls.push({ kind: "OrphanPublish", args: [id, orphanId] });
+      const g = hearthCard(id);
+      if (!g.orphans.some((o) => o.id === orphanId)) throw new Error("Cette partie n'existe plus sur ce PC.");
+      g.orphans = g.orphans.filter((o) => o.id !== orphanId);
+      g.card.orphans = g.orphans.length;
+      newVersion(g, "session");
+      hearthEmit();
+    },
+    hearthOrphanDiscard: async (id, orphanId) => {
+      hearthCalls.push({ kind: "OrphanDiscard", args: [id, orphanId] });
+      const g = hearthCard(id);
+      if (!g.orphans.some((o) => o.id === orphanId)) throw new Error("Cette partie n'existe plus sur ce PC.");
+      g.orphans = g.orphans.filter((o) => o.id !== orphanId);
+      g.card.orphans = g.orphans.length;
+      hearthEmit();
+    },
     hearthSetBackground: async (id, on) => {
       hearthCalls.push({ kind: "SetBackground", args: [id, on] });
       hearthCard(id).settings.keep_background = on;
@@ -809,6 +847,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     emitHearthHandover: (e) => emit(listeners.hearthHandover, e),
     emitHearthHostPrompt: (e) => emit(listeners.hearthHostPrompt, e),
     setHearthEula: (a) => { hearthEula = a; },
+    setHearthHeadUnavailable: (i) => { hearthHeadMissing = i; },
     hearthCalls,
     friendInvites: async () => invites.map((i) => ({ ...i })),
     friendInviteDismiss: async (id) => {

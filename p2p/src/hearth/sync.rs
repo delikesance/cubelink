@@ -1084,6 +1084,10 @@ mod tests {
         assert!(is_excluded("level.dat.TMP"));
         assert!(!is_excluded("level.dat"));
         assert!(!is_excluded("tmp.dat"));
+        assert!(is_excluded("level42.dat"));
+        assert!(is_excluded("data/map_1.dat_new"));
+        assert!(is_excluded("playerdata/123e4567-e89b-12d3-a456-426614174000-77.dat"));
+        assert!(!is_excluded("playerdata/123e4567-e89b-12d3-a456-426614174000.dat"));
     }
 
     #[test]
@@ -1105,6 +1109,23 @@ mod tests {
         let names: Vec<&str> = s.files.iter().map(|f| f.rel.as_str()).collect();
         assert_eq!(names, vec!["level.dat", "region/r.0.0.mca"]);
         assert_eq!(s.skipped_unsafe, vec!["evil.exe".to_string()]);
+    }
+
+    #[test]
+    fn scan_ecarte_les_temporaires_de_minecraft() {
+        let d = tempfile::tempdir().unwrap();
+        let w = d.path();
+        let u = "123e4567-e89b-12d3-a456-426614174000";
+        std::fs::create_dir_all(w.join("playerdata")).unwrap();
+        std::fs::write(w.join("level.dat"), b"x").unwrap();
+        std::fs::write(w.join("level42.dat"), b"x").unwrap();
+        std::fs::write(w.join("map_1.dat_new"), b"x").unwrap();
+        std::fs::write(w.join(format!("playerdata/{u}.dat")), b"x").unwrap();
+        std::fs::write(w.join(format!("playerdata/{u}-1234.dat")), b"x").unwrap();
+        let s = scan_world(w).unwrap();
+        let mut names: Vec<String> = s.files.iter().map(|f| f.rel.clone()).collect();
+        names.sort();
+        assert_eq!(names, vec!["level.dat".to_string(), format!("playerdata/{u}.dat")]);
     }
 
     #[test]

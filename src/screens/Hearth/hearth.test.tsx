@@ -3,10 +3,10 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { ShellContext, type ShellContextValue } from "../../app/context";
 import { createFakeServices } from "../../services/fake";
 import { HearthSection } from "./HearthSection";
-import { HearthMoments } from "./Moments";
+import { HearthMoments, resetPostponedInvites } from "./Moments";
 import Hearth from "./index";
 
-afterEach(cleanup);
+afterEach(() => { cleanup(); resetPostponedInvites(); });
 
 function shell(services: ReturnType<typeof createFakeServices>, params: Record<string, string>) {
   const navigate = vi.fn();
@@ -159,6 +159,45 @@ describe("Moments du groupe", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Rejoindre le groupe" }));
     await screen.findByRole("listitem", { name: "Serveur Les autres" });
     expect(services.hearthCalls).toEqual([{ kind: "InviteAccept", args: ["g10"] }]);
+  });
+
+  it("Plus tard survit au démontage : la modale ne revient pas après un changement d'écran, une autre invitation s'affiche", async () => {
+    const services = createFakeServices({ tickMs: 0 });
+    const first = render(<HearthMoments services={services} />);
+    await act(async () => {});
+    act(() => { services.emitHearthInvite({ group_id: "g9", name: "Les potes" }); });
+    fireEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Plus tard" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    first.unmount();
+    render(<HearthMoments services={services} />);
+    await act(async () => {});
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect((await services.hearthInvites()).length).toBe(1);
+    expect(services.hearthCalls).toEqual([]);
+    act(() => { services.emitHearthInvite({ group_id: "g10", name: "Les autres" }); });
+    expect(within(await screen.findByRole("dialog")).getByText(/Les autres/)).toBeTruthy();
+  });
+
+  it("invitation : Refuser appelle hearthInviteDismiss, la modale se ferme et l'invitation disparaît", async () => {
+    const services = createFakeServices({ tickMs: 0 });
+    render(<HearthMoments services={services} />);
+    await act(async () => {});
+    act(() => { services.emitHearthInvite({ group_id: "g9", name: "Les potes" }); });
+    fireEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Refuser" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(services.hearthCalls).toEqual([{ kind: "InviteDismiss", args: ["g9"] }]);
+    expect(await services.hearthInvites()).toEqual([]);
+  });
+
+  it("invitation : si Refuser échoue, l'erreur s'affiche et la modale reste", async () => {
+    const services = createFakeServices({ tickMs: 0 });
+    services.hearthInviteDismiss = async () => { throw new Error("Impossible de refuser."); };
+    render(<HearthMoments services={services} />);
+    await act(async () => {});
+    act(() => { services.emitHearthInvite({ group_id: "g9", name: "Les potes" }); });
+    fireEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Refuser" }));
+    expect((await screen.findByRole("alert")).textContent).toBe("Impossible de refuser.");
+    expect(screen.getByRole("dialog")).toBeTruthy();
   });
 
   it("passation : l'hôte s'arrête, Reprendre le serveur lance hearthPlay", async () => {

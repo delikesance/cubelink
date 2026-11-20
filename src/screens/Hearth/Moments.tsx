@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import "./hearth.css";
 import type { HearthHandover, HearthHostPrompt, Services } from "../../services/types";
 import { Button } from "../../ui";
@@ -8,31 +8,65 @@ import { errText, plural } from "./format";
 import { useHearthRun } from "./usePlay";
 import { useHearthEnabled } from "./useEnabled";
 
-/** Invitation à un groupe : « Rejoindre le groupe » ou « Plus tard » (l'invitation reste proposée à la prochaine ouverture). */
+/**
+ * Invitations repoussées par « Plus tard », gardées au niveau du module : InviteMoment est démonté à chaque
+ * changement d'écran (il vit dans Main et dans Hearth), un état local ferait revenir la modale à chaque retour
+ * sur l'accueil. Volatile : l'invitation reste côté Rust et revient au prochain lancement de Cubelink.
+ */
+const postponed = new Set<string>();
+const postponedListeners = new Set<() => void>();
+let postponedVersion = 0;
+
+function setPostponed(id: string, on: boolean) {
+  if (postponed.has(id) === on) return;
+  if (on) postponed.add(id); else postponed.delete(id);
+  postponedVersion += 1;
+  postponedListeners.forEach((l) => l());
+}
+
+function subscribePostponed(l: () => void) {
+  postponedListeners.add(l);
+  return () => { postponedListeners.delete(l); };
+}
+
+/** Réservé aux tests : l'état du module survit entre deux rendus. */
+export function resetPostponedInvites() {
+  postponed.clear();
+  postponedVersion += 1;
+  postponedListeners.forEach((l) => l());
+}
+
+/** Invitation à un groupe : « Rejoindre le groupe », « Refuser » (supprimée) ou « Plus tard » (masquée jusqu'au prochain lancement). */
 function InviteMoment({ services }: { services: Services }) {
   const invites = useHearthInvites(services);
-  const [later, setLater] = useState<Set<string>>(() => new Set());
+  useSyncExternalStore(subscribePostponed, () => postponedVersion);
   const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const inv = invites.find((i) => !later.has(i.group_id));
+  const [busy, setBusy] = useState<"accept" | "decline" | null>(null);
+  const inv = invites.find((i) => !postponed.has(i.group_id));
   if (!inv) return null;
-  const accept = async () => {
+  const later = () => setPostponed(inv.group_id, true);
+  const answer = async (kind: "accept" | "decline") => {
     setError(null);
-    setBusy(true);
-    try { await services.hearthInviteAccept(inv.group_id); }
-    catch (e) { setError(errText(e)); }
-    finally { setBusy(false); }
+    setBusy(kind);
+    try {
+      if (kind === "accept") await services.hearthInviteAccept(inv.group_id);
+      else await services.hearthInviteDismiss(inv.group_id);
+      // Réglée : une nouvelle invitation au même groupe doit se voir.
+      setPostponed(inv.group_id, false);
+    } catch (e) { setError(errText(e)); }
+    finally { setBusy(null); }
   };
   return (
-    <Modal title="Invitation à un serveur de groupe" onClose={() => setLater((s) => new Set(s).add(inv.group_id))}>
+    <Modal title="Invitation à un serveur de groupe" onClose={later}>
       <div className="home-modal-text hearth-moment">
         <p><strong>{inv.from.name}</strong> t'invite dans le groupe <strong>« {inv.name} »</strong>.</p>
         <p>{plural(inv.members, "membre", "membres")} · Minecraft {inv.minecraft} · {inv.loader}. Le monde est copié sur ton PC et reste à jour entre vous.</p>
         {error && <p className="hearth-err" role="alert">{error}</p>}
       </div>
       <div className="home-modal-foot">
-        <Button variant="secondary" onClick={() => setLater((s) => new Set(s).add(inv.group_id))}>Plus tard</Button>
-        <Button loading={busy} data-autofocus onClick={() => { void accept(); }}>Rejoindre le groupe</Button>
+        <Button variant="secondary" loading={busy === "decline"} disabled={busy !== null} onClick={() => { void answer("decline"); }}>Refuser</Button>
+        <Button variant="secondary" disabled={busy !== null} onClick={later}>Plus tard</Button>
+        <Button loading={busy === "accept"} disabled={busy !== null} data-autofocus onClick={() => { void answer("accept"); }}>Rejoindre le groupe</Button>
       </div>
     </Modal>
   );

@@ -513,6 +513,7 @@ impl IrohBackend {
         });
         let friends_svc = FriendService::attach(endpoint.clone(), st.identity.clone(), st.friends.clone(), sink, opts.friend.clone())
             .map_err(|e| user_msg(&e))?;
+        friends_svc.set_code_token(st.code_token());
 
         // Présence.
         let emit = st.emit.clone();
@@ -914,6 +915,10 @@ impl P2pBackend for IrohBackend {
         // Adresses directes seulement si le relais est désactivé (elles révèlent nos IP à qui reçoit le code).
         let addrs = if self.advertise { info.addrs } else { vec![] };
         (info.relay, addrs)
+    }
+
+    fn set_code_token(&self, token: friend_code::Token) {
+        self.friends_svc.set_code_token(token);
     }
 
     fn send_request(&self, target: FriendCodePayload, my_name: String) -> BoxFuture<'_, std::result::Result<VerifyCode, String>> {

@@ -148,8 +148,8 @@ pub struct EndpointAddrInfo {
 
 impl EndpointAddrInfo {
     /// Construit le payload de code ami (à passer à `friend_code::encode`).
-    pub fn into_payload(self, public_key: [u8; 32], epoch: u32) -> FriendCodePayload {
-        FriendCodePayload { public_key, epoch, relay: self.relay, addrs: self.addrs }
+    pub fn into_payload(self, public_key: [u8; 32], token: friend_code::Token) -> FriendCodePayload {
+        FriendCodePayload { public_key, token, relay: self.relay, addrs: self.addrs }
     }
 }
 
@@ -464,7 +464,7 @@ mod tests {
         let mk = |relay: Option<&str>| {
             friend_code::encode(&FriendCodePayload {
                 public_key: [1; 32],
-                epoch: 1,
+                token: [1; friend_code::TOKEN_LEN],
                 relay: relay.map(String::from),
                 addrs: vec![],
             })
@@ -635,7 +635,7 @@ mod tests {
         let info = endpoint_addr_info(&addr);
         assert_eq!(info.addrs, ["192.168.1.5:4001", "127.0.0.1:4000"], "non-loopback d'abord");
         assert!(info.relay.as_deref().unwrap().contains("relay.example.org"));
-        let payload = info.into_payload(*id.as_bytes(), 0);
+        let payload = info.into_payload(*id.as_bytes(), [0; friend_code::TOKEN_LEN]);
         let parsed = friend_code::parse(&friend_code::encode(&payload)).unwrap();
         let back = endpoint_addr_from_payload(&parsed).unwrap();
         assert_eq!(back.id, id);

@@ -1,9 +1,13 @@
-//! Code ami `mcl1-…` : chaîne partageable (aucun secret, mais elle peut contenir
-//! un relais d'attache et des adresses d'indice).
+//! Code ami `mcl1-…` : chaîne partageable. Il porte un **jeton aléatoire révocable** (16 octets) :
+//! l'hôte ne laisse entrer de NOUVELLE demande d'ami que si elle porte son jeton courant, et
+//! « Générer un nouveau code » le renouvelle (les anciens codes ne servent plus à rien). Ce n'est pas un
+//! secret d'authentification (le code se partage, l'identité reste prouvée par les signatures) : il sert
+//! à couper les anciens codes diffusés. Il peut aussi contenir un relais d'attache et des adresses d'indice.
 //!
-//! Format binaire (avant encodage) : `version(1) | epoch(u32 BE) | clé publique(32)
+//! Format binaire (avant encodage), version 2 : `version(1) | jeton(16) | clé publique(32)
 //! | relais(len u8 + UTF-8) | nb adresses(u8) | adresses(len u8 + UTF-8)… | CRC-32 BE(4)`.
-//! Le CRC couvre tout ce qui précède. Encodage : base32 minuscule sans padding,
+//! La version 1 (sans jeton, `epoch u32` à la place) n'est plus acceptée : un code v1 valide reçoit un
+//! message dédié. Le CRC couvre tout ce qui précède. Encodage : base32 minuscule sans padding,
 //! groupes de 4 caractères séparés par `-`, préfixe `mcl1-`.
 
 use core_lib::types::{Error, Result};
@@ -11,7 +15,17 @@ use data_encoding::BASE32_NOPAD;
 
 const PREFIX: &str = "mcl1-";
 const LINK_PREFIX: &str = "launcher://add/";
-const FORMAT_VERSION: u8 = 1;
+const FORMAT_VERSION: u8 = 2;
+/// Dernière version sans jeton (ancienne application).
+const LEGACY_VERSION: u8 = 1;
+/// Longueur du jeton, en octets.
+pub const TOKEN_LEN: usize = 16;
+/// Jeton aléatoire d'un code ami.
+pub type Token = [u8; TOKEN_LEN];
+/// Message affiché pour un code d'une ancienne version (sans jeton).
+pub const LEGACY_CODE_MSG: &str = "Ce code ami vient d'une ancienne version de Cubelink : demande à ton ami de mettre l'application à jour, puis de te renvoyer son code.";
+/// Message affiché pour un code d'une version plus récente que la nôtre.
+pub const NEWER_CODE_MSG: &str = "Ce code ami vient d'une version plus récente de Cubelink : mets l'application à jour.";
 /// Longueur maximale d'une chaîne (relais ou adresse), en octets.
 pub const MAX_STR_LEN: usize = 64;
 /// Nombre maximal d'adresses d'indice.
@@ -22,7 +36,7 @@ const MAX_NORMALIZED_LEN: usize = 1024;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FriendCodePayload {
     pub public_key: [u8; 32],
-    pub epoch: u32,
+    pub token: Token,
     pub relay: Option<String>,
     pub addrs: Vec<String>,
 }
@@ -43,11 +57,24 @@ fn push_str(out: &mut Vec<u8>, s: &str) {
     out.extend_from_slice(s.as_bytes());
 }
 
+/// Génère un jeton aléatoire neuf.
+pub fn new_token() -> Token {
+    use rand::Rng;
+    let mut t = [0u8; TOKEN_LEN];
+    rand::rand_core::UnwrapErr(rand::rngs::SysRng).fill_bytes(&mut t);
+    t
+}
+
+/// Compare deux jetons en temps constant.
+pub fn token_eq(a: &Token, b: &Token) -> bool {
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
 /// Encode un payload. Les champs hors bornes (relais ou adresse > 64 octets,
 /// au-delà de 8 adresses) sont ignorés pour que le code reste parsable.
 pub fn encode(p: &FriendCodePayload) -> String {
     let mut buf = vec![FORMAT_VERSION];
-    buf.extend_from_slice(&p.epoch.to_be_bytes());
+    buf.extend_from_slice(&p.token);
     buf.extend_from_slice(&p.public_key);
     match p.relay.as_deref().filter(|r| r.len() <= MAX_STR_LEN) {
         Some(r) => push_str(&mut buf, r),
@@ -114,8 +141,8 @@ pub fn parse(input: &str) -> Result<FriendCodePayload> {
     let bytes = BASE32_NOPAD
         .decode(body.to_ascii_uppercase().as_bytes())
         .map_err(|_| invalid("base32 invalide"))?;
-    // version + epoch + clé + relais(1) + nb adresses(1) + crc
-    if bytes.len() < 1 + 4 + 32 + 1 + 1 + 4 {
+    // version + CRC au minimum ; le reste est vérifié champ par champ après la version.
+    if bytes.len() < 1 + 4 {
         return Err(invalid("trop court"));
     }
     let (data, crc_bytes) = bytes.split_at(bytes.len() - 4);
@@ -124,10 +151,14 @@ pub fn parse(input: &str) -> Result<FriendCodePayload> {
     }
     let mut r = Reader(data);
     let version = r.take(1)?[0];
-    if version != FORMAT_VERSION {
-        return Err(invalid("version inconnue"));
+    match version {
+        FORMAT_VERSION => {}
+        // CRC déjà vérifié : le code est bien un code Cubelink, d'une version sans jeton.
+        LEGACY_VERSION => return Err(Error::Invalid(LEGACY_CODE_MSG.into())),
+        v if v > FORMAT_VERSION => return Err(Error::Invalid(NEWER_CODE_MSG.into())),
+        _ => return Err(invalid("version inconnue")),
     }
-    let epoch = u32::from_be_bytes(r.take(4)?.try_into().expect("4 octets"));
+    let token: Token = r.take(TOKEN_LEN)?.try_into().expect("16 octets");
     let public_key: [u8; 32] = r.take(32)?.try_into().expect("32 octets");
     let relay = Some(r.string()?).filter(|s| !s.is_empty());
     let n = usize::from(r.take(1)?[0]);
@@ -138,7 +169,7 @@ pub fn parse(input: &str) -> Result<FriendCodePayload> {
     if !r.0.is_empty() {
         return Err(invalid("octets en trop"));
     }
-    Ok(FriendCodePayload { public_key, epoch, relay, addrs })
+    Ok(FriendCodePayload { public_key, token, relay, addrs })
 }
 
 #[cfg(test)]
@@ -149,7 +180,7 @@ mod tests {
     fn sample() -> FriendCodePayload {
         FriendCodePayload {
             public_key: [7; 32],
-            epoch: 3,
+            token: [3; TOKEN_LEN],
             relay: Some("relay.example.org:4433".into()),
             addrs: vec!["203.0.113.5:4433".into(), "[2001:db8::1]:4433".into()],
         }
@@ -187,13 +218,51 @@ mod tests {
 
     #[test]
     fn unknown_version_with_valid_crc_rejected() {
-        let mut buf = vec![2u8];
-        buf.extend_from_slice(&[0; 4 + 32]);
+        let code = raw_code(3, &[0; TOKEN_LEN + 32]);
+        match parse(&code) {
+            Err(Error::Invalid(m)) => assert_eq!(m, NEWER_CODE_MSG),
+            r => panic!("{r:?}"),
+        }
+        assert!(parse(&raw_code(0, &[0; TOKEN_LEN + 32])).is_err());
+    }
+
+    /// Code `mcl1-` dont le CRC est valide, pour une version et un corps donnés (relais vide, 0 adresse).
+    fn raw_code(version: u8, body: &[u8]) -> String {
+        let mut buf = vec![version];
+        buf.extend_from_slice(body);
         buf.extend_from_slice(&[0, 0]);
         let crc = crc32(&buf);
         buf.extend_from_slice(&crc.to_be_bytes());
-        let code = format!("mcl1-{}", BASE32_NOPAD.encode(&buf).to_lowercase());
-        assert!(parse(&code).is_err());
+        format!("mcl1-{}", BASE32_NOPAD.encode(&buf).to_lowercase())
+    }
+
+    #[test]
+    fn legacy_v1_code_gets_dedicated_message() {
+        // Ancien format : version 1, epoch u32, clé publique (CRC correct).
+        let code = raw_code(1, &[0; 4 + 32]);
+        match parse(&code) {
+            Err(Error::Invalid(m)) => assert_eq!(m, LEGACY_CODE_MSG),
+            r => panic!("{r:?}"),
+        }
+        // Un code v1 abîmé reste une simple erreur de somme de contrôle.
+        let mut bad = code.clone();
+        bad.pop();
+        bad.push(if code.ends_with('a') { 'b' } else { 'a' });
+        match parse(&bad) {
+            Err(Error::Invalid(m)) => assert!(!m.contains("ancienne version"), "{m}"),
+            r => panic!("{r:?}"),
+        }
+    }
+
+    #[test]
+    fn token_is_part_of_the_code() {
+        let a = sample();
+        let b = FriendCodePayload { token: [4; TOKEN_LEN], ..sample() };
+        assert_ne!(encode(&a), encode(&b));
+        assert_eq!(parse(&encode(&b)).unwrap().token, [4; TOKEN_LEN]);
+        assert_ne!(new_token(), new_token());
+        assert!(token_eq(&a.token, &[3; TOKEN_LEN]));
+        assert!(!token_eq(&a.token, &b.token));
     }
 
     #[test]
@@ -204,11 +273,11 @@ mod tests {
     fn payload_strategy() -> impl Strategy<Value = FriendCodePayload> {
         (
             any::<[u8; 32]>(),
-            any::<u32>(),
+            any::<[u8; TOKEN_LEN]>(),
             proptest::option::of("[a-z0-9.:-]{1,64}"),
             proptest::collection::vec("[a-zA-Z0-9.:]{1,64}", 0..=MAX_ADDRS),
         )
-            .prop_map(|(public_key, epoch, relay, addrs)| FriendCodePayload { public_key, epoch, relay, addrs })
+            .prop_map(|(public_key, token, relay, addrs)| FriendCodePayload { public_key, token, relay, addrs })
     }
 
     proptest! {

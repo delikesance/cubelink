@@ -79,9 +79,9 @@ describe("Mon code ami", () => {
     mount(svc);
     await screen.findByText(old);
     fireEvent.click(screen.getByRole("button", { name: "Générer un nouveau code" }));
-    expect(screen.getByText(/ancien code ne fonctionnera plus/)).toBeTruthy();
+    expect(screen.getByText(/ancien code ne permettra plus de t'envoyer de nouvelles demandes/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Annuler" }));
-    expect(screen.queryByText(/ancien code ne fonctionnera plus/)).toBeNull();
+    expect(screen.queryByText(/ancien code ne permettra plus de t'envoyer de nouvelles demandes/)).toBeNull();
     expect(screen.getByText(old)).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "Générer un nouveau code" }));

@@ -41,7 +41,10 @@ pub struct Paths {
     pub tokens_file: PathBuf,
     pub accounts_file: PathBuf,
     pub key_file: PathBuf,
-    pub epoch_file: PathBuf,
+    /// Jeton aléatoire du code ami (32 caractères hex), renouvelé par « Générer un nouveau code ».
+    pub code_token_file: PathBuf,
+    /// Ancien fichier (compteur `epoch` du code ami, jamais vérifié) : supprimé à la migration.
+    pub legacy_epoch_file: PathBuf,
 }
 
 impl Paths {
@@ -62,7 +65,8 @@ impl Paths {
             tokens_file: r.join("auth").join("tokens.bin"),
             accounts_file: r.join("auth").join("accounts.bin"),
             key_file: r.join("auth").join("tokens.key"),
-            epoch_file: r.join("p2p").join("friend_code_epoch"),
+            code_token_file: r.join("p2p").join("friend_code_token"),
+            legacy_epoch_file: r.join("p2p").join("friend_code_epoch"),
             root: r,
         }
     }
@@ -101,6 +105,8 @@ pub struct AppState {
     pub friends: Arc<FriendsDb>,
     /// Dernière fois que chaque ami a été vu en ligne.
     pub last_seen: Arc<crate::last_seen::LastSeen>,
+    /// Jeton courant du code ami (source de vérité en mémoire ; le fichier le conserve d'un lancement à l'autre).
+    pub code_token: Mutex<Option<p2p_lib::friend_code::Token>>,
     /// Mods inconnus déjà acceptés (par sha256) : la case de confiance ne les redemande pas.
     pub trusted_mods: Arc<crate::trusted_mods::TrustedMods>,
     /// Par ami : le dernier `join_plan` montré (hash du manifeste, sha256 des fichiers qui demandent l'accord), vérifié
@@ -268,6 +274,11 @@ impl P2pBackend for PendingBackend {
     fn code_hints(&self) -> (Option<String>, Vec<String>) {
         self.current().map(|b| b.code_hints()).unwrap_or((None, vec![]))
     }
+    fn set_code_token(&self, token: p2p_lib::friend_code::Token) {
+        if let Some(b) = self.current() {
+            b.set_code_token(token);
+        }
+    }
     fn send_request(&self, target: FriendCodePayload, my_name: String) -> BoxFuture<'_, Result<VerifyCode, String>> {
         Box::pin(async move { self.wait().await?.send_request(target, my_name).await })
     }
@@ -396,6 +407,7 @@ impl AppState {
         let hearth = crate::hearth::HearthRuntime::new(&paths.root, identity.clone(), friends.clone(), instances.clone(), access.clone(), emit.clone())?;
         Ok(Self {
             last_seen,
+            code_token: Mutex::new(None),
             trusted_mods,
             pending_trust: Mutex::new(std::collections::HashMap::new()),
             instances,
@@ -432,7 +444,9 @@ impl AppState {
     }
 
     pub fn set_backend(&self, b: Arc<dyn P2pBackend>) {
-        *self.backend.write().unwrap_or_else(|e| e.into_inner()) = b;
+        *self.backend.write().unwrap_or_else(|e| e.into_inner()) = b.clone();
+        // Le backend a pu lire le jeton avant une régénération : on lui donne le jeton courant.
+        b.set_code_token(self.code_token());
     }
 
     pub fn emit_event<T: Serialize>(&self, name: &str, payload: &T) {

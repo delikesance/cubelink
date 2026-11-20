@@ -309,6 +309,8 @@ async fn serveur_de_groupe_de_la_creation_a_la_fourche() {
     // 5. Fin de partie chez A : version publiée, bail relâché ; B reçoit la passation et la version.
     a.close_game();
     wait_for("serveur d'Alice arrêté", 30, || a.state_of(&g) != HearthStateKind::Hosting).await;
+    // `finish_hosting` retire l'hôte de `active` avant d'appeler `stop` : attendre l'appel lui-même.
+    wait_for("stop chez Alice", 30, || a.runner.calls.lock().unwrap().contains(&"stop")).await;
     assert_eq!(a.runner.calls.lock().unwrap().iter().filter(|c| **c == "stop").count(), 1);
     wait_for("version 2 chez B", 30, || b.rt().head(&g).is_some_and(|h| h.header.number == 2 && b.rt().world_complete(&h))).await;
     wait_for("passation chez B", 10, || b.node.count("hearth://handover") == 1).await;
@@ -325,7 +327,9 @@ async fn serveur_de_groupe_de_la_creation_a_la_fourche() {
     b.stop().await;
     a.close_game();
     wait_for("serveur d'Alice arrêté (2)", 30, || a.state_of(&g) != HearthStateKind::Hosting).await;
-    assert_eq!(a.rt().head(&g).unwrap().header.number, 3);
+    // La carte quitte l'état « Hosting » dès que le serveur est retiré, un peu AVANT que la version de fin de partie soit
+    // signée et enregistrée : on l'attend au lieu de la lire tout de suite (course vue en CI, tests-linux).
+    wait_for("version 3 publiée chez Alice", 30, || a.rt().head(&g).is_some_and(|h| h.header.number == 3)).await;
     tokio::time::sleep(Duration::from_secs(2)).await;
     assert_eq!(a.rt().pending_outbox(), 1, "personne de joignable : la version 3 attend en file");
     c.restart().await;
@@ -555,6 +559,8 @@ async fn auto_exclusion_apres_veille() {
     clock.advance_wall(Duration::from_secs(900));
     assert_eq!(a.rt().renew_tick(&host).await, RenewTick::Fenced);
     wait_for("serveur d'Alice arrêté", 30, || a.rt().active(&g).is_none()).await;
+    // `finish_hosting` retire l'hôte de `active` avant d'appeler `stop` : attendre l'appel lui-même.
+    wait_for("stop chez Alice", 30, || a.runner.calls.lock().unwrap().contains(&"stop")).await;
     let calls = a.runner.calls.lock().unwrap().clone();
     assert_eq!(calls, ["start", "save-off", "save-on", "stop"], "save-all flush, puis stop");
     wait_for("bail relâché chez Bob", 20, || b.rt().lease_of_holder(&g, &a.key()).is_none()).await;

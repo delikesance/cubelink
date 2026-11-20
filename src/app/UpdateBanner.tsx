@@ -23,7 +23,7 @@ export function UpdateBanner({ services }: { services: Services }) {
       <div className="update-banner-body">
         <strong className="update-banner-title">Mise à jour{version ? ` ${version}` : ""} prête</strong>
         <span className={`update-banner-txt${error ? " is-error" : ""}`} role="status">
-          {error || "Redémarrez pour l'installer. Rien n'est perdu."}
+          {error || "Redémarre Cubelink pour l'installer (quelques secondes)."}
         </span>
       </div>
       <div className="update-banner-actions">

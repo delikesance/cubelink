@@ -281,6 +281,10 @@ pub fn run() {
             };
             let handle = app.handle().clone();
             let sink: state::EventSink = Arc::new(move |name, payload| {
+                // L'état du jeu pilote le raccourci global par appel direct, pas par un événement que le webview pourrait forger.
+                if name == "launch://state" {
+                    hotkey::on_launch_state(&handle, &payload);
+                }
                 let _ = handle.emit(name, payload);
             });
             // L'état est créé tout de suite avec un backend « en démarrage » ; Iroh démarre en tâche de fond

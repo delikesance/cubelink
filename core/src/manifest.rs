@@ -158,7 +158,7 @@ fn hash_stream(
 ) -> Result<(Sha256Hex, Option<String>, Option<u32>, u64)> {
     let mut f = fs::File::open(path)?;
     let mut hasher = Sha256::new();
-    let mut sha1 = want_sha1.then(crate::unknown_mods::Sha1::new);
+    let mut sha1 = want_sha1.then(sha1::Sha1::new);
     // Octets non blancs (seuls comptés par l'empreinte CurseForge) ; abandonné au-delà du plafond.
     let mut cf_data: Option<Vec<u8>> = want_sha1.then(Vec::new);
     let mut buf = vec![0u8; CHUNK];
@@ -182,7 +182,7 @@ fn hash_stream(
         progress(size);
     }
     let cf = cf_data.map(|d| crate::providers::curseforge_api::murmur2_fingerprint(&d));
-    Ok((hex::encode(hasher.finalize()), sha1.map(|s| s.finish()), cf, size))
+    Ok((hex::encode(hasher.finalize()), sha1.map(|s| hex::encode(s.finalize())), cf, size))
 }
 
 /// Erreurs d'E/S « le fichier est utilisé par le jeu » (Windows 32 partage, 33 verrou) ou « disparu entre-temps ».

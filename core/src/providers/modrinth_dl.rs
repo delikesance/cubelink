@@ -5,8 +5,7 @@
 //! Modrinth, rename atomique vers `object_rel_path(sha256)`, `insert` dans l'index.
 //!
 //! Limite : `StoreIndex` n'a pas de table d'alias (et on ne le modifie pas) ; les alias sont donc
-//! dans `store_root/aliases.json`, écrit atomiquement. Le crate `sha1` n'est pas une dépendance :
-//! une implémentation SHA-1 minimale est incluse ici.
+//! dans `store_root/aliases.json`, écrit atomiquement.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -15,6 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures_util::StreamExt;
+use sha1::Sha1;
 use sha2::{Digest, Sha256, Sha512};
 use tokio::io::AsyncWriteExt;
 
@@ -70,72 +70,6 @@ fn shared_client_no_redirect() -> &'static reqwest::Client {
 
 fn net(e: impl std::fmt::Display) -> Error {
     Error::Network(e.to_string())
-}
-
-// ---------- SHA-1 minimal ----------
-
-struct Sha1 {
-    h: [u32; 5],
-    buf: Vec<u8>,
-    len: u64,
-}
-
-impl Sha1 {
-    fn new() -> Self {
-        Self { h: [0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0], buf: Vec::with_capacity(64), len: 0 }
-    }
-
-    fn block(h: &mut [u32; 5], b: &[u8]) {
-        let mut w = [0u32; 80];
-        for i in 0..16 {
-            w[i] = u32::from_be_bytes([b[4 * i], b[4 * i + 1], b[4 * i + 2], b[4 * i + 3]]);
-        }
-        for i in 16..80 {
-            w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
-        }
-        let [mut a, mut bb, mut c, mut d, mut e] = *h;
-        for (i, wi) in w.iter().enumerate() {
-            let (f, k) = match i {
-                0..=19 => ((bb & c) | (!bb & d), 0x5A827999u32),
-                20..=39 => (bb ^ c ^ d, 0x6ED9EBA1),
-                40..=59 => ((bb & c) | (bb & d) | (c & d), 0x8F1BBCDC),
-                _ => (bb ^ c ^ d, 0xCA62C1D6),
-            };
-            let t = a.rotate_left(5).wrapping_add(f).wrapping_add(e).wrapping_add(k).wrapping_add(*wi);
-            e = d;
-            d = c;
-            c = bb.rotate_left(30);
-            bb = a;
-            a = t;
-        }
-        for (x, y) in h.iter_mut().zip([a, bb, c, d, e]) {
-            *x = x.wrapping_add(y);
-        }
-    }
-
-    fn update(&mut self, data: &[u8]) {
-        self.len += data.len() as u64;
-        self.buf.extend_from_slice(data);
-        let full = self.buf.len() / 64 * 64;
-        for chunk in self.buf[..full].chunks(64) {
-            Self::block(&mut self.h, chunk);
-        }
-        self.buf.drain(..full);
-    }
-
-    fn finish(mut self) -> String {
-        let bits = self.len * 8;
-        let mut tail = std::mem::take(&mut self.buf);
-        tail.push(0x80);
-        while tail.len() % 64 != 56 {
-            tail.push(0);
-        }
-        tail.extend_from_slice(&bits.to_be_bytes());
-        for chunk in tail.chunks(64) {
-            Self::block(&mut self.h, chunk);
-        }
-        self.h.iter().map(|x| format!("{x:08x}")).collect()
-    }
 }
 
 // ---------- Alias ----------
@@ -287,7 +221,7 @@ async fn download_once(client: &reqwest::Client, url: &str, size_hint: u64, tmp:
     out.flush().await?;
     drop(out);
     check_cancel(opts)?;
-    Ok(Digests { sha1: s1.finish(), sha256: hex::encode(s256.finalize()), sha512: hex::encode(s512.finalize()), size })
+    Ok(Digests { sha1: hex::encode(s1.finalize()), sha256: hex::encode(s256.finalize()), sha512: hex::encode(s512.finalize()), size })
 }
 
 fn finalize(file: &VersionFile, store_root: &Path, index: &StoreIndex, tmp: &Path, d: Digests) -> Result<StoredObject> {
@@ -414,9 +348,7 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn sha1_of(b: &[u8]) -> String {
-        let mut s = Sha1::new();
-        s.update(b);
-        s.finish()
+        hex::encode(Sha1::digest(b))
     }
 
     fn file_for(server: &MockServer, content: &[u8]) -> VersionFile {
@@ -464,7 +396,47 @@ mod tests {
         for _ in 0..1000 {
             s.update(b"a");
         }
-        assert_eq!(s.finish(), "291e9a6c66994949b57ba5e650361e98fc36b1ba");
+        assert_eq!(hex::encode(s.finalize()), "291e9a6c66994949b57ba5e650361e98fc36b1ba");
+    }
+
+    /// Preuve sur disque : un vrai fichier de plusieurs Mio, servi par un vrai serveur HTTP loopback, haché en flux par
+    /// le téléchargeur (sha1 + sha256 + sha512 en une passe) puis relu par `sha1_file` ; les empreintes attendues
+    /// viennent de `sha1sum` / `sha256sum` / `sha512sum` du système, pas de vecteurs fixes.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn streamed_hashes_match_system_tools_on_real_file() {
+        fn system_hash(tool: &str, p: &Path) -> String {
+            let out = std::process::Command::new(tool).arg(p).output().unwrap_or_else(|e| panic!("{tool} indisponible : {e}"));
+            assert!(out.status.success(), "{tool} a échoué");
+            String::from_utf8(out.stdout).unwrap().split_whitespace().next().unwrap().to_string()
+        }
+        // 5 Mio + 13 octets : pas multiple de 64, plusieurs blocs de lecture réseau.
+        let mut x = 0x9E37_79B9u32;
+        let content: Vec<u8> = (0..5 * 1024 * 1024 + 13)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 17;
+                x ^= x << 5;
+                (x >> 8) as u8
+            })
+            .collect();
+        let (dir, idx) = setup();
+        let on_disk = dir.path().join("reel.bin");
+        std::fs::write(&on_disk, &content).unwrap();
+        let (sys1, sys256, sys512) = (system_hash("sha1sum", &on_disk), system_hash("sha256sum", &on_disk), system_hash("sha512sum", &on_disk));
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/f.jar")).respond_with(ResponseTemplate::new(200).set_body_bytes(content.clone())).mount(&server).await;
+        let mut f = file_for(&server, b"autre");
+        f.size = content.len() as u64;
+        f.hashes = FileHashes { sha1: sys1.clone(), sha512: sys512 };
+        // Les hashes attendus sont ceux du système : le téléchargeur ne les accepte que si son flux concorde.
+        let store = dir.path().join("store");
+        let o = fetch_into_store(&f, &store, &idx, &opts()).await.unwrap();
+        assert_eq!(o.sha256, sys256);
+        assert_eq!(std::fs::read(store.join(&o.rel_path)).unwrap(), content);
+        assert_eq!(crate::unknown_mods::sha1_file(&on_disk).unwrap(), sys1);
+        assert_eq!(crate::unknown_mods::sha1_hex(&content), sys1);
     }
 
     #[tokio::test]

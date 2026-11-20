@@ -18,8 +18,6 @@ pub const PROVENANCE_FILE: &str = ".cubelink-mods.json";
 /// Taille maximale d'un mod ajouté à la main.
 pub const MAX_CUSTOM_BYTES: u64 = 512 * 1024 * 1024;
 const DISABLED: &str = ".disabled";
-/// Extensions exécutables refusées dans un nom de fichier.
-const DANGEROUS_EXT: &[&str] = &["exe", "bat", "cmd", "dll", "ps1", "com", "scr", "msi", "vbs", "lnk", "sh"];
 
 static LOCK: Mutex<()> = Mutex::new(());
 
@@ -60,11 +58,8 @@ pub fn validate_file_name(name: &str) -> Result<()> {
     if bad {
         return Err(invalid(format!("nom de fichier invalide : {name:?}")));
     }
-    let base = name.strip_suffix(DISABLED).unwrap_or(name);
-    if let Some((_, ext)) = base.rsplit_once('.') {
-        if DANGEROUS_EXT.iter().any(|d| ext.eq_ignore_ascii_case(d)) {
-            return Err(invalid(format!("extension refusée : {name:?}")));
-        }
+    if crate::mrpack::has_dangerous_ext(name) {
+        return Err(invalid(format!("extension refusée : {name:?}")));
     }
     Ok(())
 }
@@ -654,7 +649,7 @@ mod tests {
         for ok in ["a.jar", "My Mod [1.20]+x.jar", "a.jar.disabled", "x.zip"] {
             assert!(validate_file_name(ok).is_ok(), "{ok}");
         }
-        for bad in ["a..jar", "a.exe", "run.bat.disabled", "a/b", ".h", "a:b.jar", "x\n.jar"] {
+        for bad in ["a..jar", "a.exe", "run.bat.disabled", "x.hta", "x.MSC", "a.reg.disabled", "x.AppImage", "x.desktop", "a/b", ".h", "a:b.jar", "x\n.jar"] {
             assert!(validate_file_name(bad).is_err(), "{bad:?}");
         }
     }

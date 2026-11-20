@@ -35,8 +35,15 @@ const MAX_INDEX_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_ENTRIES: usize = 100_000;
 /// Dossiers autorisés pour les fichiers listés dans l'index.
 const FILE_DIRS: &[&str] = &["mods", "config", "resourcepacks", "shaderpacks", "datapacks", "defaultconfigs", "kubejs"];
-/// Extensions exécutables refusées (fichiers du pack et overrides).
-const DANGEROUS_EXT: &[&str] = &["exe", "bat", "cmd", "dll", "ps1", "com", "scr", "msi", "vbs", "lnk", "sh"];
+/// Extensions exécutables refusées (fichiers du pack, overrides, manifestes P2P et ajout manuel d'un mod) : liste
+/// unique, aussi utilisée par `mods::validate_file_name`. Les `.jar` ne sont pas dedans : ce sont les mods eux-mêmes.
+/// Windows : exécutables et scripts, dont les types que l'Explorateur lance d'un double-clic (`hta`, `reg`, `pif`,
+/// `cpl`, `wsf`, `jse`, `msc`). Linux : lanceurs `desktop` et `appimage`.
+pub const DANGEROUS_EXT: &[&str] = &[
+    "exe", "bat", "cmd", "dll", "ps1", "com", "scr", "msi", "vbs", "lnk", "sh", //
+    "hta", "reg", "pif", "cpl", "wsf", "jse", "msc", //
+    "desktop", "appimage",
+];
 const DEFAULT_HOSTS: &[&str] = &["cdn.modrinth.com", "github.com", "raw.githubusercontent.com", "gitlab.com"];
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
@@ -174,9 +181,11 @@ fn invalid(msg: impl Into<String>) -> Error {
 
 // ---------- Validation des chemins ----------
 
-/// Nom de fichier à extension exécutable (`DANGEROUS_EXT`), quel que soit le dossier.
+/// Nom de fichier à extension exécutable (`DANGEROUS_EXT`), quel que soit le dossier. Un suffixe `.disabled` (mod
+/// désactivé) est ignoré : `x.exe.disabled` est refusé comme `x.exe`.
 pub fn has_dangerous_ext(name: &str) -> bool {
-    let last = name.rsplit('/').next().unwrap_or(name);
+    let last = name.rsplit(['/', '\\']).next().unwrap_or(name);
+    let last = last.strip_suffix(".disabled").unwrap_or(last);
     match last.rsplit_once('.') {
         Some((_, ext)) => DANGEROUS_EXT.iter().any(|d| ext.eq_ignore_ascii_case(d)),
         None => false,
@@ -1060,11 +1069,25 @@ mod tests {
         assert!(e.instances.list().is_empty());
     }
 
+    #[test]
+    fn dangerous_ext_list_complete() {
+        for ext in ["exe", "bat", "cmd", "dll", "ps1", "com", "scr", "msi", "vbs", "lnk", "sh", "hta", "reg", "pif", "cpl", "wsf", "jse", "msc", "desktop", "appimage"] {
+            assert!(DANGEROUS_EXT.contains(&ext), "{ext} absente de la liste");
+            for name in [format!("a.{ext}"), format!("a.{}", ext.to_uppercase()), format!("dir/sub/a.{ext}"), format!("dir\\a.{ext}"), format!("mod.{ext}.disabled")] {
+                assert!(has_dangerous_ext(&name), "{name}");
+            }
+        }
+        assert_eq!(DANGEROUS_EXT.len(), 20);
+        for ok in ["a.jar", "a.jar.disabled", "a.json", "LICENSE", "a.exe.txt", "dossier.exe/lisezmoi", "a.js", "a.toml", ".disabled", "desktop"] {
+            assert!(!has_dangerous_ext(ok), "{ok}");
+        }
+    }
+
     #[tokio::test]
     async fn dangerous_and_slip_overrides_rejected() {
         let e = env().await;
         let idxj = index_json(serde_json::json!({"minecraft": "1.21.1"}), vec![]);
-        for bad in ["overrides/run.exe", "overrides/scripts/x.BAT", "overrides/a.dll", "overrides/p.ps1", "overrides/c.cmd", "overrides/../evil.txt", "overrides/a/../../evil.txt", "overrides/a\\..\\evil.txt", "overrides//abs.txt", "overrides/C:evil.txt"] {
+        for bad in ["overrides/run.exe", "overrides/scripts/x.BAT", "overrides/a.dll", "overrides/p.ps1", "overrides/c.cmd", "overrides/evil.hta", "overrides/mods/x.reg", "overrides/a/p.PIF", "overrides/s.cpl", "overrides/w.wsf", "overrides/j.jse", "overrides/m.msc", "overrides/x.desktop", "overrides/App.AppImage", "overrides/../evil.txt", "overrides/a/../../evil.txt", "overrides/a\\..\\evil.txt", "overrides//abs.txt", "overrides/C:evil.txt"] {
             let pack = build_zip(e.tmp.path(), &[(INDEX_NAME, &idxj), (bad, b"x")]);
             assert!(matches!(run(&e, &pack, &opts()).await, Err(Error::Invalid(_))), "{bad}");
         }

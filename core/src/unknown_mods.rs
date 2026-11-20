@@ -9,6 +9,8 @@ use std::io::Read;
 use std::path::Path;
 use std::time::Duration;
 
+use sha1::{Digest, Sha1};
+
 use crate::providers::curseforge_api::{murmur2_fingerprint, CfApi};
 use crate::providers::modrinth_api::{ModrinthClient, Version};
 use crate::types::{Error, ManifestFile, Result};
@@ -257,76 +259,9 @@ pub fn describe(report: &UnknownReport) -> String {
     out
 }
 
-// --- SHA-1 en flux (RFC 3174), uniquement pour interroger Modrinth ---
-
-pub(crate) struct Sha1 {
-    h: [u32; 5],
-    buf: Vec<u8>,
-    len: u64,
-}
-
-impl Sha1 {
-    pub(crate) fn new() -> Self {
-        Self { h: [0x6745_2301, 0xEFCD_AB89, 0x98BA_DCFE, 0x1032_5476, 0xC3D2_E1F0], buf: Vec::with_capacity(128), len: 0 }
-    }
-
-    fn block(h: &mut [u32; 5], chunk: &[u8; 64]) {
-        let mut w = [0u32; 80];
-        for (i, b) in chunk.as_chunks::<4>().0.iter().enumerate() {
-            w[i] = u32::from_be_bytes(*b);
-        }
-        for i in 16..80 {
-            w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
-        }
-        let [mut a, mut b, mut c, mut d, mut e] = *h;
-        for (i, wi) in w.iter().enumerate() {
-            let (f, k) = match i {
-                0..=19 => ((b & c) | (!b & d), 0x5A82_7999),
-                20..=39 => (b ^ c ^ d, 0x6ED9_EBA1),
-                40..=59 => ((b & c) | (b & d) | (c & d), 0x8F1B_BCDC),
-                _ => (b ^ c ^ d, 0xCA62_C1D6u32),
-            };
-            let t = a.rotate_left(5).wrapping_add(f).wrapping_add(e).wrapping_add(k).wrapping_add(*wi);
-            e = d;
-            d = c;
-            c = b.rotate_left(30);
-            b = a;
-            a = t;
-        }
-        for (x, y) in h.iter_mut().zip([a, b, c, d, e]) {
-            *x = x.wrapping_add(y);
-        }
-    }
-
-    pub(crate) fn update(&mut self, data: &[u8]) {
-        self.len += data.len() as u64;
-        self.buf.extend_from_slice(data);
-        let full = self.buf.len() / 64 * 64;
-        for chunk in self.buf[..full].as_chunks::<64>().0 {
-            Self::block(&mut self.h, chunk);
-        }
-        self.buf.drain(..full);
-    }
-
-    pub(crate) fn finish(mut self) -> String {
-        let bits = self.len * 8;
-        self.buf.push(0x80);
-        while self.buf.len() % 64 != 56 {
-            self.buf.push(0);
-        }
-        self.buf.extend_from_slice(&bits.to_be_bytes());
-        for chunk in self.buf.as_chunks::<64>().0 {
-            Self::block(&mut self.h, chunk);
-        }
-        self.h.iter().map(|x| format!("{x:08x}")).collect()
-    }
-}
-
 /// SHA-1 (hex minuscule) d'un tampon en mémoire.
 pub fn sha1_hex(data: &[u8]) -> String {
-    let mut s = Sha1::new();
-    s.update(data);
-    s.finish()
+    hex::encode(Sha1::digest(data))
 }
 
 /// Vérifie en flux que le SHA-1 du fichier est `expected` (40 hex minuscules) ; sinon `Error::Integrity`.
@@ -354,7 +289,7 @@ pub(crate) fn sha1_file(path: &Path) -> std::io::Result<String> {
         }
         s.update(&buf[..n]);
     }
-    Ok(s.finish())
+    Ok(hex::encode(s.finalize()))
 }
 
 #[cfg(test)]

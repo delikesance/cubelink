@@ -167,7 +167,7 @@ Le dépôt est prêt pour les agents : [`CLAUDE.md`](CLAUDE.md) décrit le flux 
 - [ ] Validation de la version Linux
 - [ ] Découverte publique optionnelle des amis (décision de confidentialité à prendre)
 
-L'état détaillé vit dans [`plan.md`](plan.md) et [`docs/architecture.md`](docs/architecture.md).
+L'état détaillé vit dans [`docs/architecture.md`](docs/architecture.md), § 8.
 
 ## Licence
 

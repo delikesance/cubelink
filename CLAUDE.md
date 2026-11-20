@@ -18,6 +18,7 @@ Claude mène le chantier de bout en bout sans demander la permission : comprendr
 
 ## Carte du dépôt
 - Crates du workspace : `core/` (`cubelink-core`), `p2p/` (`cubelink-p2p`, Iroh/QUIC), `host/` (`cubelink-host`, la Scène sous Windows et Linux X11), `src-tauri/` (`cubelink`, l'app).
+- Pas de rapport d'agent ni de plan de travail commité dans `docs/` ou à la racine (ils vont dans la description de PR) ; `docs/archive/` est figé.
 - Front : `src/` (React). E2E : `e2e/` (Playwright).
 - Docs utiles : `docs/architecture.md`, `docs/contrats.md` (commandes et événements Tauri), `docs/ux-guidelines.md`, `docs/release.md`, `docs/taches-agents.md`.
 - Une commande ou un événement Tauri qui change : mettre à jour `docs/contrats.md` dans le même commit.

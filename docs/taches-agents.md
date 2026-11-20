@@ -1,6 +1,8 @@
 # Cubelink : mini-tâches pour sub-agents (implémentation + E2E)
 
-Source : `plan.md`, `docs/architecture.md`, canvas de design (9 écrans : Login, Main, Create, Install, Join, Friends, Settings, Error, Legal).
+> Plan initial des vagues d'agents, conservé pour mémoire : les écrans ont évolué depuis (design Hearth dans `docs/hearth.md`, état réel dans `docs/architecture.md` § 8).
+
+Source : `docs/architecture.md`, canvas de design (9 écrans : Login, Main, Create, Install, Join, Friends, Settings, Error, Legal).
 Objectif : tout est implémenté et couvert par des tests E2E. Aucun agent n'est lancé sans go explicite.
 Décision du 2026-11-09 : pour ce projet, la limite globale de 3 coéquipiers est levée. **Plafond : 6 agents en parallèle.**
 
@@ -10,7 +12,7 @@ Décision du 2026-11-09 : pour ce projet, la limite globale de 3 coéquipiers es
 - **Un agent a son propre `CARGO_TARGET_DIR`** (`target/<id>`) pour éviter les verrous. Les tests ne ciblent que son crate (`cargo test -p core <module>`).
 - **Mode hors ligne pour les E2E** : le lancement du jeu et le scénario complet utilisent un profil hors ligne (UUID dérivé du pseudo), activé par un drapeau de test, absent de l'interface publique. L'auth Microsoft est testée à part contre de faux serveurs.
 - **Pas de réseau réel en CI** : Microsoft/Mojang/Modrinth sont simulés (tâches E0.x). Le P2P se teste entre 2 nœuds locaux.
-- **Terminé =** code + test(s) qui passent + `cargo clippy -D warnings` (ou lint front) sans erreur + rapport de 10 lignes max dans `docs/rapports/<ID>.md`.
+- **Terminé =** code + test(s) qui passent + `cargo clippy -D warnings` (ou lint front) sans erreur + rapport de 10 lignes max dans la description de PR (pas de fichier de rapport dans `docs/`).
 - Pas de push forcé, pas de merge sans validation humaine. Synthèse finale par le team lead.
 
 ## Vague 0 : fondations (team lead, séquentiel)

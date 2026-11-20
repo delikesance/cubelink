@@ -16,12 +16,11 @@ test('T1 : B ajoute A, codes de verification identiques, A accepte, presence en 
   const codeB = ((await verifyB.textContent()) ?? '').trim();
   expect(codeB).not.toBe('');
 
-  // A voit le badge (Accueil), puis la demande dans l'onglet Demandes.
+  // A voit le lien « 1 demande » (Accueil), puis la demande en tete de Parametres > Amis.
   await gotoRoute(appA, 'main');
-  await expect(appA.page.getByRole('button', { name: /^Amis \(1 demande\)/ })).toBeVisible({ timeout: 30_000 });
+  await expect(appA.page.getByRole('button', { name: '1 demande', exact: true })).toBeVisible({ timeout: 30_000 });
   await gotoRoute(appA, 'friends');
-  await expect(appA.page.getByRole('tab', { name: /Demandes/ }).getByLabel('1 demande en attente')).toBeVisible({ timeout: 30_000 });
-  await appA.page.getByRole('tab', { name: /Demandes/ }).click();
+  await expect(appA.page.getByLabel('1 demande en attente')).toBeVisible({ timeout: 30_000 });
   await expect(appA.page.getByRole('heading', { name: `Demande de ${NAME_B}` })).toBeVisible();
   const verifyA = appA.page.getByLabel('Code de vérification', { exact: true });
   await expect(verifyA).toBeVisible();
@@ -38,14 +37,12 @@ test('T1 : B ajoute A, codes de verification identiques, A accepte, presence en 
     await expect.poll(async () => (await invoke<{ presence: string }[]>(app.page, 'friend_list'))[0]?.presence, { timeout: 60_000 }).toBe('online');
   }
 
-  // Chacun voit l'autre dans sa liste d'amis (Accueil) avec la presence en ligne.
+  // Chacun voit l'autre dans la colonne d'amis de l'Accueil (onglet « Tous » par defaut) avec la presence en ligne.
   for (const [app, other] of [[appA, NAME_B], [appB, NAME_A]] as const) {
     await gotoRoute(app, 'main');
-    await app.page.getByRole('button', { name: /^Amis/ }).click();
-    const friends = app.page.getByRole('dialog', { name: 'Amis · 1' });
+    const friends = app.page.getByRole('complementary', { name: 'Amis' }).getByRole('list', { name: 'Amis' });
     await expect(friends.getByText(other).first()).toBeVisible({ timeout: 20_000 });
-    await expect(friends.getByRole('list', { name: 'Amis' })).toBeVisible();
-    await expect(friends.getByText('En ligne')).toBeVisible({ timeout: 30_000 });
+    await expect(friends.getByText('En ligne', { exact: true })).toBeVisible({ timeout: 30_000 });
   }
   const la = await invoke<{ friend: { name: string }; presence: string }[]>(appA.page, 'friend_list');
   expect(la[0].friend.name).toBe(NAME_B);
@@ -82,7 +79,6 @@ test('T1 negatif : code invalide, soi-meme, refus', async ({ world }) => {
   await sendRequest(appB, codeA);
   await expect(appB.page.getByLabel(/^Code de vérification : /)).toBeVisible({ timeout: 30_000 });
   await gotoRoute(appA, 'friends');
-  await appA.page.getByRole('tab', { name: /Demandes/ }).click();
   await appA.page.getByRole('button', { name: `Refuser ${NAME_B}` }).click({ timeout: 30_000 });
   await expect(appA.page.getByText(`Demande de ${NAME_B} refusée.`)).toBeVisible();
   await expect(appA.page.getByText('Aucune demande en attente.')).toBeVisible();
@@ -90,8 +86,7 @@ test('T1 negatif : code invalide, soi-meme, refus', async ({ world }) => {
   expect((await invoke<unknown[]>(appA.page, 'friend_list')).length).toBe(0);
   expect((await invoke<unknown[]>(appB.page, 'friend_list')).length).toBe(0);
   await gotoRoute(appA, 'main');
-  await appA.page.getByRole('button', { name: /^Amis/ }).click();
-  await expect(appA.page.getByRole('dialog', { name: 'Amis · 0' })).toBeVisible();
+  await expect(appA.page.getByRole('complementary', { name: 'Amis' }).getByText("Aucun ami pour l'instant.")).toBeVisible();
 });
 
 test('T1 retrait : A retire B, B n\'obtient plus de PONG et A n\'a plus d\'ami', async ({ world }) => {

@@ -82,7 +82,6 @@ export async function startRealApp(binary: string, tmp: string, dataDir: string,
       WEBVIEW2_USER_DATA_FOLDER: userDataDir,
       CUBELINK_TEST_MODE: '1',
       CUBELINK_DATA_DIR: dataDir,
-      CUBELINK_RELAY_MODE: 'disabled',
       ...env,
     },
   });

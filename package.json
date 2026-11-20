@@ -11,7 +11,9 @@
     "bindings": "CUBELINK_WRITE_BINDINGS=1 cargo test -p cubelink --lib bindings::",
     "test:rust": "cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings",
     "test": "npm run test:rust && npm run lint && npm run test:front",
-    "e2e": "playwright test --config e2e/playwright.config.ts"
+    "e2e": "playwright test --config e2e/playwright.config.ts",
+    "test:e2e-harness": "node --test e2e/harness/build.test.mjs",
+    "test:scripts": "node --test scripts/canary-version.test.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

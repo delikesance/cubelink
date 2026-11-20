@@ -124,7 +124,7 @@ pub(super) fn present(s: &Shared) {
     let m = f.model();
     let mut r = s.render.lock().unwrap_or_else(|e| e.into_inner());
     let Render { curtain, buf } = &mut *r;
-    let pm = curtain.render_ref(&m, w as u32, h as u32, s.scale);
+    let pm = curtain.render_ref(&m, w as u32, h as u32, s.scale());
     if pm.data().len() != w * h * 4 {
         return;
     }

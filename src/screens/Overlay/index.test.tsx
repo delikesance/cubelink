@@ -70,6 +70,17 @@ describe("Panneau en jeu : modpack en cours", () => {
     expect(within(friends).queryByRole("button", { name: `Demander à rejoindre ${alex.name}` })).toBeNull();
   });
 
+  it("invitation reçue : Ignorer la retire du panneau et de la file (seul endroit où le bouton existe)", async () => {
+    const svc = createFakeServices({ tickMs: 0 });
+    const alex = (await svc.friendList())[0].friend;
+    svc.emitInvite({ public_key: alex.public_key });
+    mount(svc);
+    const list = await screen.findByRole("list", { name: "Invitations" });
+    fireEvent.click(within(list).getByRole("button", { name: `Ignorer l'invitation de ${alex.name}` }));
+    await waitFor(() => expect(screen.queryByRole("list", { name: "Invitations" })).toBeNull());
+    expect(await svc.friendInvites()).toEqual([]);
+  });
+
   it("hôte : la demande d'un ami apparaît avec Accepter / Refuser, et disparaît une fois décidée", async () => {
     const svc = createFakeServices({ tickMs: 0 });
     mount(svc);

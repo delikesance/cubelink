@@ -10,6 +10,7 @@ use serde::Serialize;
 use tauri::State;
 
 use crate::commands_instances::valid_id;
+use core_lib::launch_run::LaunchPhase;
 use crate::error::user_msg;
 use crate::state::{lock, AppState};
 
@@ -98,10 +99,21 @@ impl AppState {
         };
         match handle {
             Some(g) => g.kill().await.map_err(|e| user_msg(&e)),
-            None if lock(&self.game).as_deref() == Some(id) => {
-                Err("le jeu est encore en préparation : réessayez dans un instant".into())
+            // Préparation en cours (téléchargements, Java) : on lève le drapeau ; la tâche de lancement s'arrête et émet `exited`.
+            None => {
+                let flag = lock(&self.launch_cancel).as_ref().filter(|(gid, _)| gid == id).map(|(_, f)| f.clone());
+                let Some(flag) = flag else { return Err("cette instance n'est pas en cours d'exécution".into()) };
+                if !flag.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    self.emit_state(id, LaunchPhase::Preparing, Some("Annulation en cours…".into()));
+                }
+                // Le jeu a pu être posé entre la lecture de `game_handle` et la levée du drapeau : la boucle de lancement a alors
+                // lu le drapeau avant nous. On relit le handle et on arrête le jeu nous-mêmes (un second arrêt est sans effet).
+                let started = lock(&self.game_handle).as_ref().filter(|(gid, _)| gid == id).map(|(_, g)| g.clone());
+                if let Some(g) = started {
+                    let _ = g.kill().await;
+                }
+                Ok(())
             }
-            None => Err("cette instance n'est pas en cours d'exécution".into()),
         }
     }
 
@@ -427,7 +439,7 @@ pub async fn game_join_friend(
     state.inner().game_join_friend(&public_key, instance_id.as_deref()).await
 }
 
-/// Arrête le jeu de l'instance.
+/// Arrête le jeu de l'instance. Pendant la préparation (état `preparing`), annule le lancement : `launch://state` passe à `exited` sans message.
 #[tauri::command(rename_all = "snake_case")]
 #[specta::specta(rename_all = "snake_case")]
 pub async fn instances_kill(state: State<'_, Arc<AppState>>, id: String) -> Result<(), String> {
@@ -438,10 +450,13 @@ pub async fn instances_kill(state: State<'_, Arc<AppState>>, id: String) -> Resu
 #[tauri::command(rename_all = "snake_case")]
 #[specta::specta(rename_all = "snake_case")]
 pub fn instances_delete(state: State<'_, Arc<AppState>>, id: String) -> Result<(), String> {
-    state.instances_delete(&id)
+    state.instances_delete(&id)?;
+    // Les jars de l'instance restent dans le cache tant qu'une autre instance les utilise : le balayage libère le reste.
+    state.inner().store_gc_later(std::time::Duration::from_secs(2), crate::state::STORE_GC_DELETE_MIN_AGE);
+    Ok(())
 }
 
-/// Modifie les champs donnés d'une instance (les autres restent). `wrapper` : commande d'enrobage placée devant Java, Linux seulement ; chaîne vide = aucune.
+/// Modifie les champs donnés d'une instance (les autres restent). `wrapper` : commande d'enrobage placée devant Java, Linux seulement ; chaîne vide = aucune. `java_path` : `""` efface le chemin Java de l'instance, `null` le laisse inchangé ; un Java dont la version ne convient pas à Minecraft fait échouer le lancement (le Java global, lui, est alors ignoré). `jvm_args` et `wrapper` sont découpés façon shell (guillemets simples ou doubles pour une valeur avec espaces) ; un guillemet non fermé est refusé.
 #[tauri::command(rename_all = "snake_case")]
 #[specta::specta(rename_all = "snake_case")]
 pub fn instances_update(
@@ -493,6 +508,22 @@ mod tests {
     }
 
     #[test]
+    fn update_efface_le_java_par_chaine_vide_et_garde_par_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let (st, _) = test_state(dir.path());
+        let i = st.instances.create("Java", "1.21.1", vanilla(), 2048).unwrap();
+        let u = st.instances_update(&i.id, None, None, Some("/usr/lib/jvm/java-17/bin/java".into()), None, None).unwrap();
+        assert_eq!(u.java_path.as_deref(), Some("/usr/lib/jvm/java-17/bin/java"));
+        // None = champ inchangé (c'est ce que le front envoyait à tort pour « vider »).
+        let u = st.instances_update(&i.id, Some("Java 2".into()), None, None, None, None).unwrap();
+        assert_eq!(u.java_path.as_deref(), Some("/usr/lib/jvm/java-17/bin/java"));
+        // Chaîne vide = effacé, et c'est persisté sur disque.
+        let u = st.instances_update(&i.id, None, None, Some(String::new()), None, None).unwrap();
+        assert_eq!(u.java_path, None);
+        assert_eq!(st.instances.get(&i.id).unwrap().java_path, None);
+    }
+
+    #[test]
     fn suppression_refusee_pendant_le_jeu_puis_nettoie() {
         let dir = tempfile::tempdir().unwrap();
         let (st, _) = test_state(dir.path());
@@ -514,10 +545,29 @@ mod tests {
         let (st, _) = test_state(dir.path());
         let e = tauri::async_runtime::block_on(st.instances_kill("abc")).unwrap_err();
         assert!(e.contains("pas en cours"), "{e}");
-        *lock(&st.game) = Some("abc".into());
-        let e = tauri::async_runtime::block_on(st.instances_kill("abc")).unwrap_err();
-        assert!(e.contains("préparation"), "{e}");
         assert!(tauri::async_runtime::block_on(st.instances_kill("../x")).is_err());
+    }
+
+    /// Pendant la préparation (`game` pris, pas de processus) : « Annuler le lancement » lève le drapeau au lieu d'échouer.
+    #[test]
+    fn kill_pendant_la_preparation_leve_le_drapeau() {
+        let dir = tempfile::tempdir().unwrap();
+        let (st, events) = test_state(dir.path());
+        let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        *lock(&st.game) = Some("abc".into());
+        *lock(&st.launch_cancel) = Some(("abc".into(), flag.clone()));
+        // une autre instance n'est pas concernée
+        let e = tauri::async_runtime::block_on(st.instances_kill("autre")).unwrap_err();
+        assert!(e.contains("pas en cours"), "{e}");
+        assert!(!flag.load(std::sync::atomic::Ordering::SeqCst));
+        tauri::async_runtime::block_on(st.instances_kill("abc")).unwrap();
+        assert!(flag.load(std::sync::atomic::Ordering::SeqCst));
+        // un second clic reste sans erreur ni nouveau message
+        tauri::async_runtime::block_on(st.instances_kill("abc")).unwrap();
+        let ev = lock(&events);
+        let msgs: Vec<_> = ev.iter().filter(|(n, _)| n == "launch://state").collect();
+        assert_eq!(msgs.len(), 1, "{msgs:?}");
+        assert_eq!(msgs[0].1["state"], "preparing");
     }
 
     #[test]
@@ -564,7 +614,6 @@ mod tests {
 
     /// Fermeture du launcher et changement de modpack selon que le jeu a deja ete montre au joueur : faux hote (vraie machine du
     /// rideau) et un processus temoin inoffensif a la place de java.
-    #[cfg(windows)]
     mod quit {
         use super::*;
         use crate::stage::fake::{play, FakeHost};
@@ -572,12 +621,22 @@ mod tests {
         use core_lib::launch_run::{self, RunningGame};
         use std::path::Path;
 
+        /// Commande du processus temoin : dort 30 s sans rien faire.
+        #[cfg(windows)]
+        fn witness(cwd: std::path::PathBuf) -> LaunchCommand {
+            LaunchCommand::new("cmd".into(), vec!["/C".into(), "ping -n 30 127.0.0.1 >nul".into()], cwd)
+        }
+        #[cfg(not(windows))]
+        fn witness(cwd: std::path::PathBuf) -> LaunchCommand {
+            LaunchCommand::new("sleep".into(), vec!["30".into()], cwd)
+        }
+
         /// Processus temoin (30 s) tenu comme le jeu en cours ; une tache joue le role de la tache de jeu (fin du processus :
         /// fin annoncee a la Scene, verrou libere).
         async fn fake_game(st: &Arc<AppState>, dir: &Path) -> Arc<RunningGame> {
             let cwd = dir.join("jeu");
             std::fs::create_dir_all(&cwd).unwrap();
-            let cmd = LaunchCommand::new("cmd".into(), vec!["/C".into(), "ping -n 30 127.0.0.1 >nul".into()], cwd);
+            let cmd = witness(cwd);
             let game = Arc::new(launch_run::spawn(&cmd, &dir.join("journal-jeu")).await.unwrap());
             *lock(&st.game) = Some("jeu".into());
             *lock(&st.game_handle) = Some(("jeu".into(), game.clone()));

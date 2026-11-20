@@ -3,7 +3,7 @@
 // (`src/services/bindings.ts`). Vérifie que chaque appel atteint Rust avec les bons noms d'arguments : une clé mal
 // nommée donnerait « missing required key », un type faux « invalid args ».
 //
-// Prérequis : `cargo build -p cubelink`, `cargo install tauri-driver`, paquet `webkit2gtk-driver`, `npm ci`.
+// Prérequis : `cargo build -p cubelink` (CUBELINK_BIN ou CARGO_TARGET_DIR pour un binaire ailleurs que target/debug), `cargo install tauri-driver`, paquet `webkit2gtk-driver`, `npm ci`.
 // Lancer : `xvfb-run -a node e2e/linux/bindings-real.mjs` (sans Xvfb sur un bureau Linux). Code de sortie 0 si tout passe.
 
 import { spawn } from "node:child_process";
@@ -13,8 +13,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
-const APP = path.join(ROOT, "target/debug/cubelink");
+const APP = process.env.CUBELINK_BIN ?? path.join(process.env.CARGO_TARGET_DIR ?? path.join(ROOT, "target"), "debug/cubelink");
 const DRIVER = process.env.TAURI_DRIVER ?? path.join(os.homedir(), ".cargo/bin/tauri-driver");
+for (const [what, file, how] of [["binaire", APP, "cargo build -p cubelink"], ["tauri-driver", DRIVER, "cargo install tauri-driver --locked"]]) {
+  if (!fs.existsSync(file)) { console.error(`${what} introuvable : ${file} (${how})`); process.exit(2); }
+}
 const WD = "http://127.0.0.1:4444";
 const VITE_PORT = 5173; // devUrl de tauri.conf.json : le build debug charge l'interface depuis Vite.
 
@@ -63,16 +66,17 @@ const SCENARIO = async () => {
   const { createTauriServices } = await import("/src/services/tauri.ts");
   const svc = createTauriServices();
   const out = [];
+  // expectError : false (succès attendu), true (erreur Rust attendue), "any" (selon le réseau : succès ou erreur Rust).
   const step = async (name, fn, expectError = false) => {
     try {
       const v = await fn();
-      out.push({ name, ok: !expectError, value: v ?? null });
+      out.push({ name, ok: expectError !== true, value: v ?? null });
       return v;
     } catch (e) {
       const msg = String(e?.message ?? e);
       // Erreur attendue : elle doit venir de Rust (message en français), pas de la désérialisation des arguments.
       const ipc = /missing required key|invalid args|invalid type|unknown variant|not found/i.test(msg);
-      out.push({ name, ok: expectError && !ipc, error: msg });
+      out.push({ name, ok: Boolean(expectError) && !ipc, error: msg });
       return null;
     }
   };
@@ -84,10 +88,11 @@ const SCENARIO = async () => {
   if (s) {
     await step("settingsSet", () => svc.settingsSet({ ...s, close_on_launch: !s.close_on_launch, overlay_hotkey: "Ctrl+Alt+F9", start_with_os: false, open_to_all_friends: true }));
     await step("settingsGet (relu)", () => svc.settingsGet());
-    await step("settingsSet (refus français)", () => svc.settingsSet({ ...s, allow_relay: false, relay_only: true }), true);
+    await step("settingsSet (refus français)", () => svc.settingsSet({ ...s, default_ram_mb: 1 }), true);
   }
   await step("instancesList", () => svc.instancesList());
-  await step("minecraftVersions (hors réseau)", () => svc.minecraftVersions(), true);
+  // Hors réseau (bac à sable) : erreur Rust en français ; avec réseau (CI GitHub) : la liste Mojang. Les deux prouvent la liaison.
+  await step("minecraftVersions", () => svc.minecraftVersions(), "any");
   await step("instancesCreate (nom vide refusé)", () => svc.instancesCreate({ name: " ", minecraft: "1.21.1", loader: { loader: "vanilla", version: "" }, ram_mb: 2048 }), true);
   await step("instancesUpdate (inconnue)", () => svc.instancesUpdate("absente", { name: "X", ram_mb: 3072 }), true);
   // Commande d'enrobage (Linux) : instance semée sur le disque (Mojang est injoignable ici), enregistrée puis relue.
@@ -122,6 +127,7 @@ const SCENARIO = async () => {
   await step("gameCurrent", () => svc.gameCurrent());
   await step("browseCheck (inconnue)", () => svc.browseCheck("modrinth", "sodium", "mod", "absente", "v1"), true);
   await step("stageSupported", () => svc.stageSupported());
+  await step("stageRetry", () => svc.stageRetry());
   await step("stageState", () => svc.stageState());
   await step("stageLayout", () => svc.stageLayout({ x: 0, y: 36, w: 1100, h: 684, panel_w: 380 }));
   await step("stagePanel", () => svc.stagePanel(false));
@@ -137,7 +143,6 @@ try {
   const driver = start(DRIVER, [], {
     CUBELINK_TEST_MODE: "1",
     CUBELINK_DATA_DIR: dataDir,
-    CUBELINK_RELAY_MODE: "disabled",
     CUBELINK_SKIP_JAVA_PROBE: "1",
   });
   await waitHttp(`${WD}/status`, 30_000).catch((e) => { throw new Error(`${e.message}\n${driver.log.join("")}`); });

@@ -84,28 +84,21 @@ pub struct HostManifest {
     pub manifest: Manifest,
 }
 
-/// Résultat du test « Ta connexion avec tes amis » (Paramètres).
+/// Résultat du test « Ta connexion avec tes amis » (Paramètres). Aucun relais ni serveur tiers : ce test dit seulement
+/// si cet appareil est joignable directement par un ami (IPv6 publique ou port ouvert sur la box).
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize, specta::Type)]
 pub struct NetTest {
-    /// Connecté à un relais (secours quand la connexion directe échoue).
-    pub relay_connected: bool,
-    /// Nom d'hôte du relais (« euc1-1.relay.n0.iroh.link »).
-    pub relay: Option<String>,
-    /// Latence vers ce relais, en millisecondes.
-    pub relay_ms: Option<u32>,
-    /// L'UDP passe (indispensable à la connexion directe).
-    pub udp: bool,
+    /// Une adresse IPv6 globale est disponible : un ami peut s'y connecter sans que la box ouvre quoi que ce soit (si
+    /// aucun pare-feu ne la filtre).
     pub ipv6: bool,
-    /// Connexion directe : `Some(true)` facile, `Some(false)` routeur strict (adresse publique changeante), `None` inconnu.
-    pub direct: Option<bool>,
-    /// Réglage « Passer toujours par le relais ».
-    pub relay_only: bool,
-    /// Le rapport réseau n'est pas arrivé à temps : `udp` et `direct` ne sont pas fiables.
-    pub partial: bool,
+    /// Une adresse IPv4 publique est portée directement par l'appareil (sans NAT).
+    pub ipv4_public: bool,
+    /// La box a ouvert le port UDP de Cubelink (UPnP, NAT-PMP ou PCP).
+    pub port_mapped: bool,
 }
 
 pub trait P2pBackend: Send + Sync {
-    /// Test de la connexion réseau entre amis (relais, UDP, type de routeur).
+    /// Test de la connexion réseau entre amis (IPv6 publique, port ouvert sur la box).
     fn net_test(&self) -> BoxFuture<'_, Result<NetTest, String>> {
         Box::pin(async { Err("Le réseau entre amis n'est pas démarré.".to_string()) })
     }
@@ -165,6 +158,8 @@ pub trait P2pBackend: Send + Sync {
     fn host_stop_sharing(&self) {}
     /// Hôte : le monde LAN vient de s'ouvrir sur `port` (127.0.0.1) ; 0 le referme. N'altère pas le partage de fichiers.
     fn host_set_world_port(&self, _port: u16) {}
+    /// Hôte : les demandes à rejoindre en attente ne valent plus rien (monde fermé) ; les demandeurs reçoivent « expirée ».
+    fn host_cancel_join_requests(&self) {}
     /// Invité : ouvre un tunnel local vers le monde de l'ami ; renvoie le port local (127.0.0.1) pour Minecraft.
     fn join_open_tunnel(&self, _friend_public_key: String) -> BoxFuture<'_, Result<u16, String>> {
         Box::pin(async { Err(UNAVAILABLE.to_string()) })

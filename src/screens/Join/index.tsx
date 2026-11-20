@@ -2,7 +2,7 @@ import { friendlyJoinError, classifyJoinError, joinErrorAdvice } from "./message
 import { useCallback, useEffect, useRef, useState } from "react";
 import "./join.css";
 import { useBack, useShell } from "../../app/context";
-import { Button, Card, RAM_DEFAULT, RamPicker, useDefaultRam } from "../../ui";
+import { Button, Card, RAM_DEFAULT, RamPicker, useDefaultRam, useSystemRam } from "../../ui";
 import { buildStates } from "../Error/states";
 import { Avatar } from "../Friends/Avatar";
 import { classifyFailure } from "../Install/format";
@@ -10,11 +10,11 @@ import { TransferPanel, type TransferFailure } from "../Install/TransferPanel";
 import { useTransfer } from "../Install/useTransfer";
 import type { JoinPlan, ManifestFile, Presence } from "../../services/types";
 
-/** Conseil RAM selon la taille du pack (nombre de mods reçus). */
+/** Conseil RAM selon la taille du pack (nombre de mods reçus) ; mêmes seuils que la mémoire « Automatique » (`auto_ram_mb`). */
 export function ramHint(files: ManifestFile[]): string | undefined {
   const mods = files.filter((f) => f.path.startsWith("mods/") && f.path.endsWith(".jar")).length;
-  if (mods >= 200) return `Ce modpack compte ${mods} mods : prévois 8 Go ou plus.`;
-  if (mods >= 80) return `Ce modpack compte ${mods} mods : 6 Go ou plus conseillés.`;
+  if (mods >= 250) return `Ce modpack compte ${mods} mods : prévois 8 Go ou plus.`;
+  if (mods >= 100) return `Ce modpack compte ${mods} mods : 6 Go ou plus conseillés.`;
   return undefined;
 }
 
@@ -24,6 +24,12 @@ type PlanState =
   | { kind: "error"; message: string };
 
 const mo = (bytes: number) => `${(bytes / 1_000_000).toLocaleString("fr-FR", { maximumFractionDigits: 1 })} Mo`;
+/** Taille lisible pour l'espace disque : en Go dès 1 Go, sinon en Mo. */
+const go = (bytes: number, round: (n: number) => number) =>
+  `${(round(bytes / 100_000_000) / 10).toLocaleString("fr-FR", { maximumFractionDigits: 1 })} Go`;
+/** `need` arrondi au-dessus et `free` au-dessous : jamais « il te faut 2 Go, il en reste 2 Go » alors que l'un manque. */
+const taille = (bytes: number, round: (n: number) => number = Math.round) =>
+  bytes >= 1_000_000_000 ? go(bytes, round) : mo(bytes);
 const stagger = (i: number) => ({ "--i": i }) as React.CSSProperties;
 
 export default function Join() {
@@ -38,6 +44,7 @@ export default function Join() {
   const [startError, setStartError] = useState<string | null>(null);
   const [ram, setRam] = useState(RAM_DEFAULT);
   const defaultRam = useDefaultRam(services);
+  const systemRam = useSystemRam(services);
   // « plan » : ce qui sera reçu ; « transfer » : réception, installation, lancement et erreurs, sur place.
   const [stage, setStage] = useState<"plan" | "transfer">("plan");
   const stageRef = useRef(stage);
@@ -125,18 +132,31 @@ export default function Join() {
   const name = peer?.name ?? "ton ami";
   peerName.current = peer?.name ?? "";
 
+  // Époque de l'écran : change au démontage et quand on passe à un autre ami sans démonter (le shell garde le même
+  // composant pour #/join?friend=A puis #/join?friend=B). Un lancement démarré dans une époque révolue ne doit plus
+  // ni renvoyer à l'accueil ni toucher à l'état.
+  const epoch = useRef(0);
+  useEffect(() => {
+    epoch.current += 1;
+    return () => { epoch.current += 1; };
+  }, [friend]);
+
   const joinAndPlay = useCallback(async () => {
     if (!friend) return;
+    const ep = epoch.current;
+    const stale = () => ep !== epoch.current;
     setPlaying(true);
     setPlayError(null);
     try {
       // Sans instance précisée : celle que le transfert vient de préparer (le backend la connaît ; les instances
       // reçues d'un ami ne figurent pas dans la liste des instances).
-      try { await services.joinPlay(friend, params.instance ?? ""); } catch (e) { setPlayError(friendlyJoinError(e, peerName.current)); return; }
+      try { await services.joinPlay(friend, params.instance ?? ""); } catch (e) { if (!stale()) setPlayError(friendlyJoinError(e, peerName.current)); return; }
+      // Écran quitté pendant le lancement : le jeu démarre quand même, mais on ne renvoie pas l'utilisateur à l'accueil.
+      if (stale()) return;
       navigate("main");
     } catch (e) {
-      setPlayError(friendlyJoinError(e, peerName.current));
-    } finally { setPlaying(false); }
+      if (!stale()) setPlayError(friendlyJoinError(e, peerName.current));
+    } finally { if (!stale()) setPlaying(false); }
   }, [services, friend, params.instance, navigate]);
 
   // Transfert terminé : le jeu se lance et rejoint l'ami (une seule fois).
@@ -239,6 +259,7 @@ export default function Join() {
     const total = m.files.length;
     const pct = total > 0 ? Math.max(0, Math.min(100, (plan.to_receive / total) * 100)) : 0;
     sub = "Rien n'est téléchargé avant ton clic.";
+    const warnings = plan.warnings ?? [];
     card = (
       <Card as="div" className="join-card enter" style={stagger(1)}>
         <div className="join-who">
@@ -248,14 +269,63 @@ export default function Join() {
             <p>{m.name} · {m.loader.loader} {m.loader.version} · Minecraft {m.minecraft}</p>
           </div>
         </div>
+        {toAccept > 0 && (
+          <div className="join-warn" role="note">
+            {unknown.length > 0 && (
+              <>
+                <h2>{unknown.length > 1 ? `${unknown.length} mods inconnus vont s'exécuter sur ton ordinateur` : "Un mod inconnu va s'exécuter sur ton ordinateur"}</h2>
+                <ul>{unknown.map((u) => <li key={u}>{u}</li>)}</ul>
+                <p>Ces mods ne sont pas référencés dans les catalogues : Cubelink ne peut pas les comparer à une version connue.</p>
+              </>
+            )}
+            {unchecked.length > 0 && (
+              <div data-testid="unchecked">
+                <h2>{unchecked.length > 1 ? `${unchecked.length} mods n'ont pas pu être vérifiés` : "Un mod n'a pas pu être vérifié"}</h2>
+                <ul>{unchecked.map((u) => <li key={u}>{u}</li>)}</ul>
+                <p>Cubelink n'a pas pu comparer ces jars aux catalogues (empreinte absente ou vérification impossible, par exemple sans réseau). Ils sont traités comme inconnus.</p>
+              </div>
+            )}
+            {scripts.length > 0 && (
+              <div data-testid="scripts">
+                <h2>{scripts.length > 1 ? `${scripts.length} scripts KubeJS vont s'exécuter dans le jeu` : "Un script KubeJS va s'exécuter dans le jeu"}</h2>
+                <ul>{scripts.map((u) => <li key={u}>{u}</li>)}</ul>
+              </div>
+            )}
+            <p>Ces fichiers s'exécuteront avec les mêmes droits que le jeu. L'intégrité est vérifiée, pas la sécurité : vérifie-les avant d'accepter.</p>
+          <label className="join-trust">
+            <input type="checkbox" checked={trusted} onChange={(e) => setTrusted(e.target.checked)} />
+            <span>Je fais confiance à {name} pour {scripts.length > 0 ? (toAccept > 1 ? "ces fichiers" : "ce fichier") : toAccept > 1 ? "ces mods" : "ce mod"}</span>
+          </label>
+          </div>
+        )}
         <div className="join-body">
           <strong>{plan.to_receive}&nbsp;fichiers à recevoir ({mo(plan.to_receive_bytes)}) sur {total}</strong>
           {plan.cached}&nbsp;fichiers sont déjà dans ton cache · Java {m.java_major}
           <div className="join-meter" aria-hidden="true"><span style={{ width: `${pct}%` }} /></div>
         </div>
         <div className="join-ram">
-          <RamPicker value={ram} onChange={setRam} defaultMb={defaultRam} disabled={starting} hint={ramHint(m.files)} />
+          <RamPicker value={ram} onChange={setRam} defaultMb={defaultRam} systemMb={systemRam} disabled={starting} hint={ramHint(m.files)} />
         </div>
+        {warnings.length > 0 && (
+          <div className="join-warn join-heads-up" role="status" data-testid="join-warnings">
+            {warnings.map((w) =>
+              w.kind === "disk" ? (
+                <div key="disk" data-testid="warn-disk">
+                  <h2>Il risque de manquer de place</h2>
+                  <p>Il te faut {taille(w.need, Math.ceil)} libres, il en reste {taille(w.free, Math.floor)}. Libère de la place avant de rejoindre, sinon le transfert pourra échouer.</p>
+                </div>
+              ) : (
+                <div key="offline" data-testid="warn-offline">
+                  <h2>Tu joues avec un compte hors ligne</h2>
+                  <p>Le monde de {name} peut te refuser (« Failed to verify username »). Avec un compte Microsoft, la connexion passe.</p>
+                  <div>
+                    <Button variant="secondary" onClick={() => navigate("settings", { tab: "compte" })}>Changer de compte</Button>
+                  </div>
+                </div>
+              ),
+            )}
+          </div>
+        )}
         <div className="join-acts">
           <Button disabled={!canJoin} loading={starting} onClick={() => { void join(); }}>Rejoindre et jouer</Button>
           {cancelBtn}
@@ -309,35 +379,6 @@ export default function Join() {
       <section aria-label="Rejoindre un ami" className="join-extra">
         {card}
         {startError && <p className="join-error" role="alert" style={{ margin: 0, color: "var(--danger)" }}>{startError}</p>}
-        {ready && toAccept > 0 && (
-          <div className="join-warn enter" role="note" style={stagger(2)}>
-            {unknown.length > 0 && (
-              <>
-                <h2>{unknown.length > 1 ? `${unknown.length} mods inconnus vont s'exécuter sur ton ordinateur` : "Un mod inconnu va s'exécuter sur ton ordinateur"}</h2>
-                <ul>{unknown.map((u) => <li key={u}>{u}</li>)}</ul>
-                <p>Ces mods ne sont pas référencés dans les catalogues : Cubelink ne peut pas les comparer à une version connue.</p>
-              </>
-            )}
-            {unchecked.length > 0 && (
-              <div data-testid="unchecked">
-                <h2>{unchecked.length > 1 ? `${unchecked.length} mods n'ont pas pu être vérifiés` : "Un mod n'a pas pu être vérifié"}</h2>
-                <ul>{unchecked.map((u) => <li key={u}>{u}</li>)}</ul>
-                <p>Cubelink n'a pas pu comparer ces jars aux catalogues (empreinte absente ou vérification impossible, par exemple sans réseau). Ils sont traités comme inconnus.</p>
-              </div>
-            )}
-            {scripts.length > 0 && (
-              <div data-testid="scripts">
-                <h2>{scripts.length > 1 ? `${scripts.length} scripts KubeJS vont s'exécuter dans le jeu` : "Un script KubeJS va s'exécuter dans le jeu"}</h2>
-                <ul>{scripts.map((u) => <li key={u}>{u}</li>)}</ul>
-              </div>
-            )}
-            <p>Ces fichiers s'exécuteront avec les mêmes droits que le jeu. L'intégrité est vérifiée, pas la sécurité : vérifie-les avant d'accepter.</p>
-            <label className="join-trust">
-              <input type="checkbox" checked={trusted} onChange={(e) => setTrusted(e.target.checked)} />
-              <span>Je fais confiance à {name} pour {scripts.length > 0 ? (toAccept > 1 ? "ces fichiers" : "ce fichier") : toAccept > 1 ? "ces mods" : "ce mod"}</span>
-            </label>
-          </div>
-        )}
         {ready && alreadyTrusted.length > 0 && (
           <p className="join-note enter" data-testid="already-trusted" style={stagger(2)}>
             {alreadyTrusted.length > 1

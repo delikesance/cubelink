@@ -210,7 +210,7 @@ async fn check(app: &AppHandle, ctl: &Arc<UpdateCtl>, manual: bool) -> UpdateSta
             ctl.set(app, |s| s.phase = if manual { UpdatePhase::UpToDate } else { UpdatePhase::Idle })
         }
         Err(e) => {
-            eprintln!("[Cubelink] mise à jour : vérification impossible : {e}");
+            tracing::warn!("mise à jour : vérification impossible : {e}");
             ctl.busy.store(false, Ordering::SeqCst);
             let msg = friendly(&e);
             ctl.set(app, |s| {
@@ -258,7 +258,7 @@ async fn download(app: &AppHandle, ctl: &Arc<UpdateCtl>) {
             });
         }
         Err(e) => {
-            eprintln!("[Cubelink] mise à jour : téléchargement impossible : {e}");
+            tracing::warn!("mise à jour : téléchargement impossible : {e}");
             let msg = friendly(&e);
             ctl.set(app, |s| {
                 s.phase = UpdatePhase::Error;
@@ -308,7 +308,7 @@ pub async fn update_install(app: AppHandle, ctl: State<'_, Arc<UpdateCtl>>, st: 
         return Err("Aucune mise à jour prête à installer.".into());
     };
     if let Err(e) = update.install(&bytes) {
-        eprintln!("[Cubelink] mise à jour : installation impossible : {e}");
+        tracing::warn!("mise à jour : installation impossible : {e}");
         // On garde la mise à jour pour pouvoir réessayer.
         *lock(&ctl.update) = Some(update);
         *lock(&ctl.bytes) = Some(bytes);

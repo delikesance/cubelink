@@ -149,6 +149,30 @@ impl AppState {
         self.host_set(HostState { instance_id: instance_id.to_string(), sharing, world_port: Some(port) }, sharing);
     }
 
+    /// Le monde LAN de `instance_id` est fermé (serveur intégré arrêté, retour à l'écran titre) alors que le jeu tourne :
+    /// le tunnel n'a plus de port, les invitations envoyées sont révoquées, l'accès donné pour ce monde tombe.
+    /// Le partage des fichiers continue ; le monde suivant ouvert au réseau local redonne un port.
+    /// Sans effet si ce monde n'avait pas de port, ou si l'hôte sert le serveur d'un groupe (son tunnel n'est pas le nôtre).
+    pub fn host_world_closed(&self, instance_id: &str) {
+        let sharing = {
+            let h = lock(&self.host);
+            match h.as_ref() {
+                Some(h) if h.instance_id == instance_id && h.world_port.is_some() => h.sharing,
+                _ => return,
+            }
+        };
+        if !self.access.serving_group() {
+            self.backend().host_set_world_port(0);
+            // Les demandeurs en attente reçoivent « expirée » tout de suite, au lieu d'attendre une réponse qui ne viendra pas.
+            self.backend().host_cancel_join_requests();
+            set_tunnel_port(0);
+            self.access.clear_guests();
+            self.join_requests_clear();
+        }
+        self.invites_revoke_sent();
+        self.host_set(HostState { instance_id: instance_id.to_string(), sharing, world_port: None }, sharing);
+    }
+
     pub fn host_stop_sharing(&self) {
         self.backend().host_stop_sharing();
         set_tunnel_port(0);
@@ -184,6 +208,8 @@ impl AppState {
     /// Sans effet tant que le monde n'est pas ouvert et partagé.
     pub(crate) async fn announce_world(&self, sent: &mut std::collections::HashMap<String, std::time::Instant>) {
         if self.host_state().and_then(|h| h.world_port).is_none() {
+            // Monde fermé : une réouverture rapide réinvite tout de suite, sans attendre l'échéance des anciens envois.
+            sent.clear();
             return;
         }
         // Règle de jonction : sans ce réglage, on n'invite que les amis choisis un à un (`friend_invite`).
@@ -205,7 +231,7 @@ impl AppState {
                 Ok(()) => {
                     sent.insert(key, std::time::Instant::now());
                 }
-                Err(e) => eprintln!("[Cubelink] annonce du monde à un ami impossible : {e}"),
+                Err(e) => tracing::warn!("annonce du monde à un ami impossible : {e}"),
             }
         }
     }
@@ -217,7 +243,7 @@ impl HostAuto {
         let (s, id) = (st.clone(), instance_id.to_string());
         let share = tauri::async_runtime::spawn(async move {
             if let Err(e) = s.host_start_sharing(&id, 0).await {
-                eprintln!("partage automatique impossible : {e}");
+                tracing::warn!("partage automatique impossible : {e}");
             }
         });
         let s = st.clone();
@@ -233,12 +259,14 @@ impl HostAuto {
 
     /// Une ligne de sortie du jeu : détecte l'ouverture du monde au réseau local. Le port détecté est définitif tant
     /// que ce monde tourne : une ligne plus tardive (même forgée) ne détourne pas le tunnel. Après l'arrêt du serveur
-    /// intégré (`Stopping server`, monde quitté), le monde suivant ouvert au réseau local donne le nouveau port.
+    /// intégré (`Stopping server`, monde quitté), le monde est refermé (`host_world_closed` : tunnel, état, invitations) et
+    /// le monde suivant ouvert au réseau local donne le nouveau port.
     pub fn on_line(&mut self, line: &str) {
         if self.port.is_some() {
             // Monde quitté (serveur intégré arrêté) : le prochain monde ouvert au réseau local pourra donner son port.
             if is_server_stop(line) {
                 self.port = None;
+                self.st.host_world_closed(&self.id);
             }
             return;
         }
@@ -411,6 +439,9 @@ mod tests {
         fn host_stop_sharing(&self) {
             self.log("stop".into());
         }
+        fn host_cancel_join_requests(&self) {
+            self.log("cancel_requests".into());
+        }
         fn receive_files(&self, _k: String, _i: String, _p: Plan, _pr: ProgressFn, _c: Arc<TransferControl>) -> BoxFuture<'_, Result<(), Error>> {
             Box::pin(async { Ok(()) })
         }
@@ -455,5 +486,92 @@ mod tests {
         assert!(!ev.is_empty(), "{ev:?}");
         assert_eq!(ev.last().unwrap(), &serde_json::json!({"instance_id": id, "sharing": false, "world_port": null}));
         assert!(ev.contains(&serde_json::json!({"instance_id": id, "sharing": true, "world_port": 54321})), "{ev:?}");
+    }
+
+    /// Attend (au plus 2 s) que `cond` soit vraie.
+    async fn wait_until(cond: impl Fn() -> bool) {
+        for _ in 0..100 {
+            if cond() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn monde_quitte_remet_port_a_zero_puis_reouvre() {
+        let dir = tempfile::tempdir().unwrap();
+        let (st, events) = test_state(dir.path());
+        let rec = Arc::new(Rec::default());
+        st.set_backend(rec.clone());
+        let inst = st.instances.create("Hote", "1.21.1", LoaderSpec { loader: Loader::Vanilla, version: String::new() }, 2048).unwrap();
+        let id = inst.id.clone();
+        let state = |port: Option<u16>| Some(HostState { instance_id: id.clone(), sharing: true, world_port: port });
+        let ports = |rec: &Rec| rec.0.lock().unwrap().iter().filter(|l| l.starts_with("port ")).cloned().collect::<Vec<_>>();
+        let state_events = |events: &std::sync::Mutex<Vec<(String, serde_json::Value)>>| {
+            events.lock().unwrap().iter().filter(|(n, _)| n == "host://state").map(|(_, v)| v.clone()).collect::<Vec<_>>()
+        };
+
+        let mut auto = HostAuto::start(&st, &id);
+        wait_until(|| st.host_state().is_some()).await; // partage prêt, sans port
+        auto.on_line("[Server thread/INFO] [minecraft/IntegratedServer]: Started serving on 54321");
+        assert_eq!(st.host_state(), state(Some(54321)));
+
+        // Un « Stopping server » du chat ne ferme rien.
+        auto.on_line("[Server thread/INFO]: <Bob> Stopping server");
+        assert_eq!(st.host_state(), state(Some(54321)));
+
+        // Monde quitté : plus de port côté tunnel, état et événement à jour, partage des fichiers conservé.
+        auto.on_line("[Server thread/INFO] [minecraft/MinecraftServer]: Stopping server");
+        assert_eq!(st.host_state(), state(None));
+        assert_eq!(ports(&rec), ["port 54321", "port 0"]);
+        let last = state_events(&events).last().cloned().unwrap();
+        assert_eq!(last, serde_json::json!({"instance_id": id, "sharing": true, "world_port": null}));
+
+        // Un deuxième arrêt (ou une ligne en double) ne change rien : ni événement ni appel au backend.
+        let n_events = state_events(&events).len();
+        auto.on_line("[Server thread/INFO] [minecraft/MinecraftServer]: Stopping server");
+        assert_eq!(state_events(&events).len(), n_events);
+        assert_eq!(ports(&rec), ["port 54321", "port 0"]);
+
+        // Réouverture sur un autre port.
+        auto.on_line("[Server thread/INFO] [minecraft/IntegratedServer]: Started serving on 54999");
+        assert_eq!(st.host_state(), state(Some(54999)));
+        assert_eq!(ports(&rec), ["port 54321", "port 0", "port 54999"]);
+        let last = state_events(&events).last().cloned().unwrap();
+        assert_eq!(last, serde_json::json!({"instance_id": id, "sharing": true, "world_port": 54999}));
+
+        auto.finish().await;
+        assert_eq!(st.host_state(), None);
+    }
+
+    #[tokio::test]
+    async fn monde_quitte_revoque_invitations_et_acces_sauf_groupe() {
+        let dir = tempfile::tempdir().unwrap();
+        let (st, _) = test_state(dir.path());
+        let rec = Arc::new(Rec::default());
+        st.set_backend(rec.clone());
+        let inst = st.instances.create("Hote", "1.21.1", LoaderSpec { loader: Loader::Vanilla, version: String::new() }, 2048).unwrap();
+        let open = || *lock(&st.host) = Some(HostState { instance_id: inst.id.clone(), sharing: true, world_port: Some(54321) });
+
+        // Un invité (accès solo) perd l'accès avec le monde, et les demandes à rejoindre en attente sont annulées côté backend.
+        open();
+        st.access.allow_friend(&[1; 32]);
+        st.host_world_closed(&inst.id);
+        assert!(!st.access.contains(&[1; 32]));
+        assert!(rec.0.lock().unwrap().contains(&"cancel_requests".to_string()), "demandes en attente annulées");
+        rec.0.lock().unwrap().clear();
+
+        // Serveur de groupe servi : le tunnel et l'accès des membres ne sont pas touchés.
+        open();
+        st.access.allow_members(p2p_lib::hearth::model::GroupId([7u8; 16]), [[2u8; 32]]);
+        st.host_world_closed(&inst.id);
+        assert!(st.access.contains(&[2; 32]), "accès du groupe conservé");
+        assert!(rec.0.lock().unwrap().is_empty(), "le tunnel du groupe n'est pas touché");
+
+        // Une autre instance ne ferme pas ce monde.
+        open();
+        st.host_world_closed("autre");
+        assert_eq!(st.host_state().unwrap().world_port, Some(54321));
     }
 }

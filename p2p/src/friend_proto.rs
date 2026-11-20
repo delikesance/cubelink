@@ -28,7 +28,7 @@ use core_lib::types::{Error, Friend, FriendRequest, Result, TrustLevel, VerifyCo
 use ed25519_dalek::Signature;
 use iroh::endpoint::{Connection, ConnectionError, RecvStream, SendStream};
 use iroh::protocol::{AcceptError, ProtocolHandler, Router};
-use iroh::{Endpoint, EndpointAddr, EndpointId, RelayUrl};
+use iroh::{Endpoint, EndpointAddr, EndpointId};
 use rand::Rng;
 use sha2::{Digest, Sha256};
 use tokio::sync::{oneshot, OwnedSemaphorePermit, Semaphore};
@@ -37,6 +37,9 @@ use crate::friend_code;
 use crate::friends_db::{Direction, FriendsDb};
 use crate::identity::Identity;
 use crate::presence::{observed_addr, AddrSink};
+
+/// Code ami sans aucune adresse IP : ancienne version (relais n0 seul), ou code généré avant que le réseau soit prêt.
+pub const OLD_CODE_MESSAGE: &str = "Ce code ne contient aucune adresse : il vient d'une ancienne version de Cubelink, ou a été généré avant que le réseau soit prêt. Demande à ton ami un nouveau code.";
 use crate::verify_code::verify_code;
 
 /// ALPN du protocole d'ajout d'ami.
@@ -682,6 +685,11 @@ impl FriendService {
         if peer_bytes == sh.me {
             return Err(Error::Invalid("on ne peut pas s'ajouter soi-même".into()));
         }
+        // Sans relais ni annuaire (#55), seules les IP du code permettent de joindre le pair. Un code d'une ancienne
+        // version n'a que le relais n0 de son auteur : inutilisable, on le dit en clair plutôt que d'échouer en réseau.
+        if !payload.addrs.iter().any(|a| a.parse::<SocketAddr>().is_ok()) {
+            return Err(Error::Invalid(OLD_CODE_MESSAGE.into()));
+        }
         let peer = hex::encode(peer_bytes);
         if sh.db.is_friend(&peer)? {
             return Err(Error::Invalid("déjà ami".into()));
@@ -696,9 +704,7 @@ impl FriendService {
 
         let id = EndpointId::from_bytes(&peer_bytes).map_err(|_| Error::Invalid("clé publique invalide".into()))?;
         let mut addr = EndpointAddr::new(id);
-        if let Some(r) = payload.relay.as_deref().and_then(|r| r.parse::<RelayUrl>().ok()) {
-            addr = addr.with_relay_url(r);
-        }
+        // Le relais éventuel du code est ignoré (#55) : aucun relais n'est contacté, un ancien code porte celui de n0.
         for a in payload.addrs.iter().filter_map(|a| a.parse::<SocketAddr>().ok()) {
             addr = addr.with_ip_addr(a);
         }
@@ -1223,6 +1229,23 @@ mod tests {
         let r = a.svc.send_request(&a.code).await;
         assert!(matches!(r, Err(Error::Invalid(_))), "{r:?}");
         assert!(a.svc.send_request("pas un code").await.is_err());
+        nothing_happened(&a);
+    }
+
+    /// Code d'une ancienne version (relais n0 seul, aucune IP) : message français clair, aucun réseau, rien d'enregistré.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn old_code_without_ip_gets_a_clear_message() {
+        let a = Node::new("Alice").await;
+        let old = friend_code::encode(&friend_code::FriendCodePayload {
+            public_key: SecretKey::from_bytes(&[5u8; 32]).public().as_bytes().to_owned(),
+            token: [0; friend_code::TOKEN_LEN],
+            relay: Some("euc1-1.relay.n0.iroh.link".into()),
+            addrs: vec![],
+        });
+        let started = std::time::Instant::now();
+        let e = a.svc.send_request(&old).await.unwrap_err().to_string();
+        assert!(e.contains("ancienne version de Cubelink") && e.contains("nouveau code"), "{e}");
+        assert!(started.elapsed() < Duration::from_secs(1), "aucune tentative réseau");
         nothing_happened(&a);
     }
 

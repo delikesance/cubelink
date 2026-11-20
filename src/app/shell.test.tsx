@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Shell, useScreenTitle } from "./shell";
-import { buildHash, navigate, parseHash, goBack, canGoBack, resetHistory } from "./router";
+import { buildHash, navigate, parseHash, goBack, canGoBack, resetHistory, ROUTES } from "./router";
 import { ShellContext, type ShellContextValue } from "./context";
 import { createFakeServices } from "../services/fake";
 
@@ -46,8 +46,14 @@ describe("routeur", () => {
     expect(screen.getByRole("main").getAttribute("data-route")).toBe("login");
   });
 
+  it("ancien écran Install : #/install?friend=… ouvre Rejoindre, sans ami l'accueil", () => {
+    expect(ROUTES as readonly string[]).not.toContain("install");
+    expect(parseHash("#/install?friend=abc")).toEqual({ route: "join", params: { friend: "abc" } });
+    expect(parseHash("#/install")).toEqual({ route: "main", params: {} });
+  });
+
   it("parse et construit les paramètres", () => {
-    expect(parseHash("#/install?friend=abc")).toEqual({ route: "install", params: { friend: "abc" } });
+    expect(parseHash("#/join?friend=abc")).toEqual({ route: "join", params: { friend: "abc" } });
     expect(buildHash("join", { friend: "x" })).toBe("#/join?friend=x");
   });
 

@@ -2,7 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Shell } from "../../app/shell";
 import { createFakeServices } from "../../services/fake";
-import { DEFAULT_ERROR_STATE, ERROR_STATES, STATES } from "./states";
+import { buildStates, DEFAULT_ERROR_STATE, ERROR_STATES, STATES } from "./states";
 
 afterEach(() => { cleanup(); window.location.hash = ""; });
 
@@ -17,7 +17,7 @@ describe("écran Erreur", () => {
     expect(container.querySelector(`[data-state="${id}"]`)).toBeTruthy();
     const h = await screen.findByRole("heading", { level: 1, name: STATES[id].title });
     await waitFor(() => expect(document.activeElement).toBe(h));
-    expect(screen.getByRole(STATES[id].wait ? "status" : "alert")).toBeTruthy();
+    expect(screen.getByRole("alert")).toBeTruthy();
   });
 
   it("état inconnu ou absent : état par défaut", () => {
@@ -28,14 +28,10 @@ describe("écran Erreur", () => {
     expect(b.container.querySelector(`[data-state="${DEFAULT_ERROR_STATE}"]`)).toBeTruthy();
   });
 
-  it("Réessayer / Annuler / Installer Java naviguent", () => {
+  it("Réessayer / Annuler naviguent", () => {
     show("#/error?state=disk-full");
     fireEvent.click(screen.getByRole("button", { name: "Annuler" }));
     expect(window.location.hash).toBe("#/main");
-    cleanup();
-    show("#/error?state=java-missing");
-    fireEvent.click(screen.getByRole("button", { name: /Installer Java/ }));
-    expect(window.location.hash).toBe("#/install");
     cleanup();
     show("#/error?state=no-license");
     fireEvent.click(screen.getByRole("button", { name: "Réessayer" }));
@@ -45,16 +41,6 @@ describe("écran Erreur", () => {
   it("lien Obtenir Minecraft externe", () => {
     show("#/error?state=no-license");
     expect(screen.getByRole("link", { name: "Obtenir Minecraft" }).getAttribute("href")).toBe("https://www.minecraft.net/");
-  });
-
-  it("Rouvrir la fenêtre appelle le service puis Annuler revient à la connexion", async () => {
-    const svc = createFakeServices({ tickMs: 0 });
-    const spy = vi.spyOn(svc, "authBeginLogin");
-    show("#/error?state=waiting", svc);
-    fireEvent.click(screen.getByRole("button", { name: "Rouvrir la fenêtre" }));
-    await waitFor(() => expect(spy).toHaveBeenCalledTimes(1));
-    fireEvent.click(screen.getByRole("button", { name: "Annuler" }));
-    expect(window.location.hash).toBe("#/login");
   });
 
   it("Réessayer (bad-hash) avec un ami retourne à l'écran Rejoindre, sans appel de service", () => {
@@ -74,18 +60,22 @@ describe("écran Erreur", () => {
     expect(window.location.hash).toBe("#/main");
   });
 
-  it("lancement échoué : détail technique copiable, Réessayer relance l'instance", async () => {
-    const base = createFakeServices({ tickMs: 0 });
-    const launch = vi.fn(async () => {});
-    show("#/error?state=launch-failed&instance=i-1&detail=Code%20de%20sortie%20%3A%201", { ...base, instancesLaunch: launch });
-    expect(screen.getByRole("heading", { level: 1, name: "Minecraft s'est arrêté avant de démarrer" })).toBeTruthy();
-    expect(screen.getByText("Code de sortie : 1")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Copier le détail" })).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: /Détail technique/ }));
-    expect(screen.queryByText("Code de sortie : 1")).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Réessayer" }));
-    await waitFor(() => expect(launch).toHaveBeenCalledWith("i-1"));
-    await waitFor(() => expect(window.location.hash).toBe("#/main"));
+  it.each(["java-missing", "waiting", "launch-failed"])("état supprimé %s : retombe sur l'état par défaut", (id) => {
+    const { container } = show(`#/error?state=${id}`);
+    expect(container.querySelector(`[data-state="${DEFAULT_ERROR_STATE}"]`)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Java|Rouvrir|Copier le détail/ })).toBeNull();
+  });
+
+  it("aucun texte de maquette : ni prénom en dur (Alex), ni durée de 5 minutes, avec ou sans contexte", () => {
+    const texts = [buildStates(), buildStates({ friend: "Léa", file: "a.jar", others: 2, need: "1,2 Go" })].flatMap((all) =>
+      Object.values(all).map((d) => {
+        const { container } = render(<>{d.kicker} {d.title} {d.body} {d.more}</>);
+        const t = container.textContent ?? "";
+        cleanup();
+        return t;
+      }));
+    expect(texts.length).toBe(ERROR_STATES.length * 2);
+    for (const t of texts) expect(t).not.toMatch(/Alex|5 minutes|Java 21/);
   });
 
   it("sans données : libellés neutres, aucune valeur inventée", () => {

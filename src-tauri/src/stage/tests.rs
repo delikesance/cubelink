@@ -1,4 +1,5 @@
 use super::*;
+use super::fake;
 
 #[test]
 fn scene_linux_seulement_avec_x11() {
@@ -36,6 +37,69 @@ fn deux_replis_de_suite_coupent_la_session() {
     h.begin();
     assert_eq!(h.fallback(true, "no_window"), None, "deja coupee : pas d'annonce en double");
     assert!(h.off());
+}
+
+#[test]
+fn reessai_leve_la_coupure_et_recompte_depuis_zero() {
+    let mut h = Health::default();
+    for r in ["a", "b"] {
+        h.begin();
+        h.fallback(true, r);
+        h.finish();
+    }
+    assert!(h.off());
+    h.reset();
+    assert!(!h.off(), "coupure levee");
+    // un seul repli ne recoupe pas : la serie precedente est oubliee
+    h.begin();
+    assert_eq!(h.fallback(true, "c"), None);
+    h.finish();
+    assert!(!h.off());
+    h.begin();
+    assert_eq!(h.fallback(true, "d"), Some(vec!["c".to_string(), "d".to_string()]), "recoupe au deuxieme repli depuis le reessai");
+}
+
+#[test]
+fn reessai_pendant_un_lancement_garde_ses_drapeaux() {
+    let mut h = Health::default();
+    h.begin();
+    h.adopted();
+    h.fallback(true, "a");
+    h.reset();
+    assert!(h.finish(), "le lancement en cours reste replie : `finish` le rend une seule fois");
+    // lancement adopte et sain : sa fin efface la serie, meme apres un reset
+    h.begin();
+    h.adopted();
+    h.reset();
+    assert!(!h.finish());
+}
+
+#[test]
+fn stage_retry_rend_la_scene_au_prochain_lancement() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = Stage::default();
+    s.open_log(dir.path());
+    s.set_wanted(true);
+    for _ in 0..2 {
+        s.core.begin_launch();
+        s.core.on_fallback("adoption_failed", "styles refuses");
+        s.run_finished();
+    }
+    assert!(lock(&s.core.health).off(), "session coupee apres deux replis");
+    // sans hote (tests, Wayland natif) : rien a retenter, la reponse le dit, mais la sante est quand meme remise a zero
+    assert!(!s.retry());
+    assert!(!lock(&s.core.health).off());
+    assert_eq!(s.unavailable_reason(), Some("zone de jeu integree absente"), "plus la coupure de session");
+    // un nouveau repli ne recoupe pas tout de suite
+    s.core.begin_launch();
+    s.core.on_fallback("no_window", "x");
+    s.run_finished();
+    assert!(!lock(&s.core.health).off());
+    let Stage { core, .. } = s;
+    let core = Arc::try_unwrap(core).ok().expect("seul proprietaire");
+    core.outbox.into_inner().unwrap().finish();
+    let text = std::fs::read_to_string(dir.path().join(crate::stage_log::FILE_NAME)).unwrap();
+    assert!(text.contains("[launcher] Scene reactivee par le joueur"), "{text}");
 }
 
 #[test]
@@ -161,7 +225,7 @@ fn journal_decisions_et_evenements_de_l_hote() {
     assert!(lines[4].ends_with("[hote] repli (hook_failed) : acces refuse"));
     assert!(lines[5].ends_with("[launcher] jeu termine (hors Scene apres repli), code de sortie -1"), "{text}");
     assert!(lines[6].ends_with("[hote] repli (no_window) : rien apres 240 s"));
-    assert!(lines[7].contains("[launcher] Scene desactivee jusqu'au redemarrage de Cubelink : 2 replis de suite (hook_failed, puis no_window)"), "{text}");
+    assert!(lines[7].contains("[launcher] Scene desactivee pour la session (jusqu'au reessai du joueur ou au redemarrage de Cubelink) : 2 replis de suite (hook_failed, puis no_window)"), "{text}");
     assert!(lines[8].ends_with("[launcher] jeu termine (hors Scene apres repli)"), "sans code de sortie connu : {text}");
 }
 
@@ -182,4 +246,17 @@ fn rectangle_jamais_vide_ni_negatif() {
     assert_eq!(Layout::from_rect(0, 45, 1600, 854, 475, 1600, 900).bottom, 0);
     let l = Layout::from_rect(10, 40, 100, 100, 0, 800, 600);
     assert_eq!(l.rect(20, 20), (10, 40, 1, 1));
+}
+
+#[test]
+fn le_recalage_transmet_l_echelle_avant_le_rectangle() {
+    let (stage, fake) = fake::FakeHost::stage();
+    let h = stage.host.get().unwrap();
+    stage.relayout_to(&**h, (1600, 900), 2.0);
+    assert_eq!(fake.scale(), Some(2.0), "l'echelle de la fenetre part vers l'hote");
+    assert_eq!(fake.rect(), Some((0, 72, 1600, 828)), "repli : barre de titre de 36 px CSS a l'echelle 2");
+    assert_eq!(fake.calls(), vec!["set_scale", "relayout"], "l'echelle d'abord : le redessin du recalage l'utilise deja");
+    // l'echelle change (autre ecran, reglage du bureau) : elle repart au recalage suivant
+    stage.relayout_to(&**h, (1600, 900), 1.0);
+    assert_eq!(fake.scale(), Some(1.0));
 }

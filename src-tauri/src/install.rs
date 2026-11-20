@@ -2,14 +2,15 @@
 //! Idempotent : tout ce qui est déjà présent et valide est sauté.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use core_lib::java::{default_search_dirs, find_installed, required_java_major, select_for};
+use core_lib::java::{check_configured, default_search_dirs, find_installed, required_java_major, select_for, ConfiguredJava};
 use core_lib::java_install;
 use core_lib::launch_args::LaunchVersion;
 use core_lib::loader::{fabric, forge, neoforge, quilt};
-use core_lib::mojang::assets::{download_assets, fetch_asset_index};
+use core_lib::mojang::assets::{download_assets_with, fetch_asset_index, DownloadOptions};
 use core_lib::loader::fabric::FabricClient;
 use core_lib::mojang::libraries::{self, Arch, Library, Os};
 use core_lib::mojang::natives::extract_natives;
@@ -91,22 +92,50 @@ fn forge_client() -> forge::ForgeClient {
 }
 
 fn http() -> Result<reqwest::Client> {
-    reqwest::Client::builder()
+    core_lib::http::builder()
         .user_agent(concat!("Cubelink/", env!("CARGO_PKG_VERSION")))
         .build()
-        .map_err(|e| Error::Network(e.without_url().to_string()))
+        .map_err(core_lib::http::net_error)
 }
 
 async fn get_bytes(client: &reqwest::Client, url: &str) -> Result<Vec<u8>> {
     if !url.starts_with("https://") && !crate::test_hooks::http_allowed(url) {
         return Err(Error::Invalid("téléchargement refusé : seul https est accepté".into()));
     }
-    let resp = client.get(url).send().await.map_err(|e| Error::Network(e.without_url().to_string()))?;
+    fetch_bytes(client, url).await
+}
+
+async fn fetch_bytes(client: &reqwest::Client, url: &str) -> Result<Vec<u8>> {
+    let resp = client.get(url).send().await.map_err(core_lib::http::net_error)?;
     if !resp.status().is_success() {
         return Err(Error::Network(format!("réponse HTTP {}", resp.status().as_u16())));
     }
-    let b = resp.bytes().await.map_err(|e| Error::Network(e.without_url().to_string()))?;
+    let b = resp.bytes().await.map_err(core_lib::http::net_error)?;
     Ok(b.to_vec())
+}
+
+/// Intervalle de lecture du drapeau d'annulation pendant une requête réseau.
+const CANCEL_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+
+fn check_cancel(cancel: &AtomicBool) -> Result<()> {
+    if cancel.load(Ordering::SeqCst) {
+        Err(Error::Cancelled)
+    } else {
+        Ok(())
+    }
+}
+
+/// Attend `fut`, mais rend `Error::Cancelled` dès que `cancel` est levé (le futur est abandonné : la connexion se ferme).
+/// Réservé aux étapes réseau dont l'abandon est sans danger (écritures atomiques) : jamais autour d'un `spawn_blocking`.
+pub(crate) async fn cancellable<T>(cancel: &AtomicBool, fut: impl Future<Output = Result<T>>) -> Result<T> {
+    check_cancel(cancel)?;
+    tokio::pin!(fut);
+    loop {
+        tokio::select! {
+            r = &mut fut => return r,
+            _ = tokio::time::sleep(CANCEL_POLL) => check_cancel(cancel)?,
+        }
+    }
 }
 
 fn valid_on_disk(dest: &Path, size: Option<u64>) -> bool {
@@ -163,12 +192,79 @@ async fn vanilla_json(paths: &Paths, client: &reqwest::Client, mc: &str) -> Resu
     Ok(parsed)
 }
 
-async fn resolve_java(paths: &Paths, required: u32, setting: Option<&str>) -> Result<PathBuf> {
-    // Mode test : chemin de java imposé (faux java).
-    let forced = crate::test_hooks::hooks().java_path.as_ref().map(|p| p.display().to_string());
-    if let Some(p) = forced.as_deref().or(setting) {
-        let p = PathBuf::from(p);
-        return if p.is_file() { Ok(p) } else { Err(Error::NotFound("l'exécutable Java configuré est introuvable".into())) };
+/// Un chemin de Java choisi à la main, avec son origine : elle décide de ce qui se passe s'il ne convient pas.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JavaSetting {
+    /// Réglage propre à l'instance : imposé, un Java qui ne convient pas fait échouer le lancement (message explicite).
+    Instance(String),
+    /// Réglage global (Paramètres) : simple candidat, ignoré (et journalisé) s'il ne convient pas à cette version.
+    Global(String),
+}
+
+impl JavaSetting {
+    /// Le réglage propre à l'instance s'il est renseigné, sinon le global.
+    pub fn for_instance(instance: Option<&str>, global: Option<String>) -> Option<JavaSetting> {
+        let own = instance.map(str::trim).filter(|j| !j.is_empty());
+        match (own, global.filter(|g| !g.trim().is_empty())) {
+            (Some(i), _) => Some(JavaSetting::Instance(i.to_string())),
+            (None, Some(g)) => Some(JavaSetting::Global(g)),
+            (None, None) => None,
+        }
+    }
+
+    /// Réglage global seul (création, import, rejoindre un ami : l'instance n'a pas encore de Java propre).
+    pub fn global(global: Option<String>) -> Option<JavaSetting> {
+        Self::for_instance(None, global)
+    }
+}
+
+/// Évalue le Java réglé à la main. `Ok(Some)` : à utiliser. `Ok(None)` : réglage global qui ne convient pas, à ignorer.
+/// `Err` : réglage d'instance qui ne convient pas. Un Java dont la version ne se lit pas (wrapper, sortie inhabituelle)
+/// est gardé tel quel, comme avant : on ne peut pas affirmer qu'il est faux.
+async fn resolve_setting(setting: &JavaSetting, required: u32, mc: &str) -> Result<Option<PathBuf>> {
+    let (own, raw) = match setting {
+        JavaSetting::Instance(p) => (true, p),
+        JavaSetting::Global(p) => (false, p),
+    };
+    let p = PathBuf::from(raw);
+    if !p.is_file() {
+        if own {
+            return Err(Error::NotFound("l'exécutable Java configuré est introuvable".into()));
+        }
+        eprintln!("[java] Java des Paramètres introuvable, ignoré : Cubelink choisit le Java de Minecraft {mc} (Java {required})");
+        return Ok(None);
+    }
+    let probe_path = p.clone();
+    let verdict = tokio::task::spawn_blocking(move || check_configured(&probe_path, required))
+        .await
+        .map_err(|_| Error::Other("vérification de Java interrompue".into()))?;
+    match (verdict, own) {
+        (ConfiguredJava::Fits | ConfiguredJava::Unprobeable, _) => Ok(Some(p)),
+        // Java d'instance plus récent que le minimum d'un vieux Minecraft (11 ou 17 pour un 1.16.5 : Java 8) : choix explicite
+        // du joueur, qui fonctionne en vanilla et avec Fabric. On le garde (comme avant) au lieu de faire échouer le lancement.
+        (ConfiguredJava::Mismatch { found }, true) if required < 16 && found > required => {
+            eprintln!("[java] Java {found} réglé pour l'instance, Minecraft {mc} demande Java {required} : gardé, choix explicite");
+            Ok(Some(p))
+        }
+        (ConfiguredJava::Mismatch { found }, true) => Err(Error::Invalid(format!(
+            "Java {found} configuré pour cette instance, Minecraft {mc} demande Java {required}. Change le chemin ou vide-le pour laisser Cubelink choisir."
+        ))),
+        (ConfiguredJava::Mismatch { found }, false) => {
+            eprintln!("[java] Java {found} des Paramètres ignoré : Minecraft {mc} demande Java {required}, Cubelink choisit le bon");
+            Ok(None)
+        }
+    }
+}
+
+async fn resolve_java(paths: &Paths, required: u32, mc: &str, setting: Option<&JavaSetting>, cancel: &Arc<AtomicBool>) -> Result<PathBuf> {
+    // Mode test : chemin de java imposé (faux java), pris tel quel, jamais sondé.
+    if let Some(p) = crate::test_hooks::hooks().java_path.as_ref() {
+        return if p.is_file() { Ok(p.clone()) } else { Err(Error::NotFound("l'exécutable Java configuré est introuvable".into())) };
+    }
+    if let Some(s) = setting {
+        if let Some(p) = resolve_setting(s, required, mc).await? {
+            return Ok(p);
+        }
     }
     let dirs = default_search_dirs(&paths.java);
     let installs = tokio::task::spawn_blocking(move || find_installed(&dirs))
@@ -178,11 +274,15 @@ async fn resolve_java(paths: &Paths, required: u32, setting: Option<&str>) -> Re
         return Ok(i.path.clone());
     }
     let (os, arch) = (java_install::host_os(), java_install::host_arch());
-    let pkg = match &crate::test_hooks::hooks().adoptium {
-        Some(u) => java_install::resolve_package_from(u, required, os, arch).await?,
-        None => java_install::resolve_package(required, os, arch).await?,
-    };
-    let cancel = Arc::new(AtomicBool::new(false));
+    let pkg = cancellable(cancel, async {
+        match &crate::test_hooks::hooks().adoptium {
+            Some(u) => java_install::resolve_package_from(u, required, os, arch).await,
+            None => java_install::resolve_package(required, os, arch).await,
+        }
+    })
+    .await?;
+    // `install` lit le drapeau pendant le téléchargement et avant l'extraction.
+    let cancel = cancel.clone();
     let done = if crate::test_hooks::hooks().skip_java_probe {
         let probe = Arc::new(crate::test_hooks::FakeProbe(pkg.major));
         java_install::install_with(&pkg, &paths.java, |_, _| {}, cancel, probe).await?
@@ -245,6 +345,7 @@ async fn install_loader(
     spec: &LoaderSpec,
     vanilla: &VersionJson,
     java: &Path,
+    cancel: &AtomicBool,
 ) -> Result<LaunchVersion> {
     let dir = paths.loaders.join(loader_key(mc, spec));
     tokio::fs::create_dir_all(&dir).await?;
@@ -257,19 +358,19 @@ async fn install_loader(
                 Some(p) => p,
                 None => {
                     let p = if spec.loader == Loader::Fabric {
-                        fabric_client().fetch_profile(mc, &spec.version).await?
+                        cancellable(cancel, fabric_client().fetch_profile(mc, &spec.version)).await?
                     } else {
-                        quilt_client().fetch_profile(mc, &spec.version).await?
+                        cancellable(cancel, quilt_client().fetch_profile(mc, &spec.version)).await?
                     };
                     write_atomic(&profile_file, p.to_string().as_bytes()).await?;
                     p
                 }
             };
             if spec.loader == Loader::Fabric {
-                fabric_client().install(&profile, &paths.libraries, &versions_dir).await?;
+                cancellable(cancel, fabric_client().install(&profile, &paths.libraries, &versions_dir)).await?;
                 Ok(LaunchVersion::Merged(fabric::merge_with_vanilla(vanilla, &profile)))
             } else {
-                quilt_client().install(&profile, &paths.libraries, &versions_dir).await?;
+                cancellable(cancel, quilt_client().install(&profile, &paths.libraries, &versions_dir)).await?;
                 Ok(LaunchVersion::Merged(quilt::merge_with_vanilla(vanilla, &profile)))
             }
         }
@@ -278,9 +379,9 @@ async fn install_loader(
             let is_neo = spec.loader == Loader::NeoForge;
             if !valid_on_disk(&installer, None) {
                 if is_neo {
-                    neoforge_client().download_installer(&spec.version, &installer).await?;
+                    cancellable(cancel, neoforge_client().download_installer(&spec.version, &installer)).await?;
                 } else {
-                    forge_client().download_installer(mc, &spec.version, &installer).await?;
+                    cancellable(cancel, forge_client().download_installer(mc, &spec.version, &installer)).await?;
                 }
             }
             let ctx = neoforge::ProcessContext {
@@ -293,8 +394,10 @@ async fn install_loader(
             let merged = if is_neo {
                 let profile = neoforge::parse_installer(&installer)?;
                 if !marker.exists() {
-                    neoforge_client().install_libraries(&profile, &paths.libraries).await?;
+                    cancellable(cancel, neoforge_client().install_libraries(&profile, &paths.libraries)).await?;
                     neoforge::write_version_json(&profile, &versions_dir).await?;
+                    // Les processeurs (Java synchrone) ne s'interrompent pas : on ne les démarre pas si l'annulation est déjà demandée.
+                    check_cancel(cancel)?;
                     run_processors_blocking(installer.clone(), ctx, java.to_path_buf(), true).await?;
                     tokio::fs::write(&marker, b"ok").await?;
                 }
@@ -305,10 +408,11 @@ async fn install_loader(
                     match inst.era {
                         forge::Era::Legacy => forge::extract_universal(&inst, &paths.libraries)?,
                         forge::Era::Modern => {
-                            neoforge_client().install_libraries(&inst.profile, &paths.libraries).await?
+                            cancellable(cancel, neoforge_client().install_libraries(&inst.profile, &paths.libraries)).await?
                         }
                     }
                     neoforge::write_version_json(&inst.profile, &versions_dir).await?;
+                    check_cancel(cancel)?;
                     run_processors_blocking(installer.clone(), ctx, java.to_path_buf(), false).await?;
                     tokio::fs::write(&marker, b"ok").await?;
                 }
@@ -338,29 +442,43 @@ async fn run_processors_blocking(installer: PathBuf, ctx: neoforge::ProcessConte
     .map_err(|_| Error::Other("installation du loader interrompue".into()))?
 }
 
-/// Prépare tout ce qu'il faut pour lancer `inst`.
-pub async fn ensure_game(paths: &Paths, inst: &Instance, java_setting: Option<String>, progress: Progress) -> Result<Prepared> {
+/// Prépare tout ce qu'il faut pour lancer `inst` (sans annulation possible : création, import, rejoindre un ami).
+pub async fn ensure_game(paths: &Paths, inst: &Instance, java_setting: Option<JavaSetting>, progress: Progress) -> Result<Prepared> {
+    ensure_game_with(paths, inst, java_setting, progress, Arc::new(AtomicBool::new(false))).await
+}
+
+/// Comme [`ensure_game`], mais `cancel` levé => `Error::Cancelled` : tout de suite pour les requêtes réseau (le futur est
+/// abandonné), à l'étape suivante pour l'installation des processeurs du loader et l'extraction des natives (blocs bloquants,
+/// courts ou idempotents, qu'on ne coupe jamais au milieu).
+pub async fn ensure_game_with(
+    paths: &Paths,
+    inst: &Instance,
+    java_setting: Option<JavaSetting>,
+    progress: Progress,
+    cancel: Arc<AtomicBool>,
+) -> Result<Prepared> {
+    check_cancel(&cancel)?;
     if !safe_version(&inst.minecraft) || (inst.loader.loader != Loader::Vanilla && !safe_version(&inst.loader.version)) {
         return Err(Error::Invalid("version de Minecraft ou de loader invalide".into()));
     }
     let client = http()?;
     progress("Récupération de la version Minecraft…".into());
-    let vanilla = vanilla_json(paths, &client, &inst.minecraft).await?;
+    let vanilla = cancellable(&cancel, vanilla_json(paths, &client, &inst.minecraft)).await?;
 
     progress("Recherche de Java…".into());
     let required = required_java_major(&inst.minecraft, vanilla.java_version.as_ref().map(|j| j.major_version));
-    let java = resolve_java(paths, required, java_setting.as_deref()).await?;
+    let java = resolve_java(paths, required, &inst.minecraft, java_setting.as_ref(), &cancel).await?;
 
     progress("Téléchargement du jeu…".into());
     let client_jar = paths.versions.join(&inst.minecraft).join(format!("{}.jar", inst.minecraft));
     let dl = &vanilla.downloads.client;
-    download_verified(&client, &dl.url, &client_jar, Some(&dl.sha1), Some(dl.size)).await?;
+    cancellable(&cancel, download_verified(&client, &dl.url, &client_jar, Some(&dl.sha1), Some(dl.size))).await?;
 
     let spec = LoaderSpec { loader: inst.loader.loader, version: inst.loader.version.clone() };
     if spec.loader != Loader::Vanilla {
         progress("Installation du loader…".into());
     }
-    let version = install_loader(paths, &client_jar, &inst.minecraft, &spec, &vanilla, &java).await?;
+    let version = install_loader(paths, &client_jar, &inst.minecraft, &spec, &vanilla, &java, &cancel).await?;
 
     progress("Téléchargement des bibliothèques…".into());
     let raw_libs = match &version {
@@ -368,8 +486,9 @@ pub async fn ensure_game(paths: &Paths, inst: &Instance, java_setting: Option<St
         LaunchVersion::Merged(m) => m.libraries.clone(),
     };
     let libs = libraries::resolve(&raw_libs, Os::current(), Arch::current())?;
-    missing_libs(&client, &libs, &paths.libraries).await?;
+    cancellable(&cancel, missing_libs(&client, &libs, &paths.libraries)).await?;
 
+    check_cancel(&cancel)?;
     let natives_dir = paths.natives.join(&inst.id);
     let (l, ld, nd) = (libs.clone(), paths.libraries.clone(), natives_dir.clone());
     tokio::task::spawn_blocking(move || extract_natives(&l, &ld, &nd))
@@ -377,9 +496,11 @@ pub async fn ensure_game(paths: &Paths, inst: &Instance, java_setting: Option<St
         .map_err(|_| Error::Other("extraction des natives interrompue".into()))??;
 
     progress("Téléchargement des ressources…".into());
-    let index = fetch_asset_index(&vanilla.asset_index, &paths.assets).await?;
+    let index = cancellable(&cancel, fetch_asset_index(&vanilla.asset_index, &paths.assets)).await?;
     let resources = crate::test_hooks::hooks().resources_url();
-    download_assets(&index, &paths.assets, resources.as_deref(), |_| {}, 8).await?;
+    // `download_assets_with` lit le drapeau entre les objets ; les requêtes en vol sont abandonnées avec lui.
+    let opts = DownloadOptions { cancel: cancel.clone(), ..DownloadOptions::default() };
+    cancellable(&cancel, download_assets_with(&index, &paths.assets, resources.as_deref(), |_| {}, &opts)).await?;
 
     Ok(Prepared {
         java,
@@ -394,6 +515,158 @@ pub async fn ensure_game(paths: &Paths, inst: &Instance, java_setting: Option<St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Une connexion qui accepte puis ne répond plus doit échouer en `Network` (le lancement ne reste pas figé).
+    /// Délai court injecté ; le client de production utilise `core_lib::http::builder()` (30 s).
+    #[tokio::test]
+    async fn telechargement_bloque_echoue_en_network() {
+        use std::time::{Duration, Instant};
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/lib.jar", l.local_addr().unwrap());
+        let srv = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((s, _)) = l.accept().await {
+                held.push(s);
+            }
+        });
+        let client = core_lib::http::builder_with(Duration::from_secs(5), Duration::from_millis(300)).build().unwrap();
+        let t = Instant::now();
+        let err = fetch_bytes(&client, &url).await.unwrap_err();
+        assert!(t.elapsed() < Duration::from_secs(3), "{:?}", t.elapsed());
+        assert!(matches!(&err, Error::Network(m) if m.contains("délai dépassé")), "{err:?}");
+        srv.abort();
+    }
+
+    /// Une requête qui ne répond jamais s'interrompt dès que le drapeau est levé (et pas au bout du délai réseau).
+    #[tokio::test]
+    async fn annulation_interrompt_une_requete_bloquee() {
+        use std::time::{Duration, Instant};
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/lib.jar", l.local_addr().unwrap());
+        let srv = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((s, _)) = l.accept().await {
+                held.push(s);
+            }
+        });
+        let client = core_lib::http::builder_with(Duration::from_secs(30), Duration::from_secs(30)).build().unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let c2 = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            c2.store(true, Ordering::SeqCst);
+        });
+        let t = Instant::now();
+        let err = cancellable(&cancel, fetch_bytes(&client, &url)).await.unwrap_err();
+        assert!(matches!(err, Error::Cancelled), "{err:?}");
+        assert!(t.elapsed() >= Duration::from_millis(200) && t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
+        srv.abort();
+    }
+
+    #[tokio::test]
+    async fn drapeau_deja_leve_rien_n_est_lance() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path());
+        let cancel = Arc::new(AtomicBool::new(true));
+        // `cancellable` refuse de démarrer
+        let r: Result<()> = cancellable(&cancel, async { panic!("ne doit pas être lancé") }).await;
+        assert!(matches!(r, Err(Error::Cancelled)));
+        // `ensure_game_with` rend `Cancelled` avant tout accès réseau ou disque
+        let store = core_lib::instance::InstanceStore::new(paths.instances.clone());
+        let inst = store.create("T", "1.21.1", LoaderSpec { loader: Loader::Vanilla, version: String::new() }, 2048).unwrap();
+        let progress: Progress = Arc::new(|m| panic!("aucune étape ne doit démarrer : {m}"));
+        let err = ensure_game_with(&paths, &inst, None, progress, cancel).await.unwrap_err();
+        assert!(matches!(err, Error::Cancelled), "{err:?}");
+        assert!(!paths.versions.join("1.21.1").exists());
+    }
+
+    // --- Java réglé à la main (#71) : un faux `java` (script shell) exécuté pour de vrai ---------------------------
+
+    /// Écrit un exécutable qui imprime `output` sur stderr, comme `java -version`.
+    #[cfg(unix)]
+    fn fake_java(dir: &Path, name: &str, output: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let p = dir.join(name);
+        std::fs::write(&p, format!("#!/bin/sh\ncat >&2 <<'EOF'\n{output}\nEOF\n")).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p
+    }
+
+    #[cfg(unix)]
+    fn says(major: &str) -> String {
+        format!("openjdk version \"{major}\" 2024-01-16\nOpenJDK Runtime Environment Temurin")
+    }
+
+    #[test]
+    fn reglage_d_instance_prioritaire_sur_le_global() {
+        let g = || Some("/g/java".to_string());
+        assert_eq!(JavaSetting::for_instance(Some("/i/java"), g()), Some(JavaSetting::Instance("/i/java".into())));
+        assert_eq!(JavaSetting::for_instance(Some("  "), g()), Some(JavaSetting::Global("/g/java".into())));
+        assert_eq!(JavaSetting::for_instance(None, g()), Some(JavaSetting::Global("/g/java".into())));
+        assert_eq!(JavaSetting::for_instance(None, Some(" ".into())), None);
+        assert_eq!(JavaSetting::global(None), None);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn java_global_qui_ne_convient_pas_est_ignore_celui_de_l_instance_echoue() {
+        let dir = tempfile::tempdir().unwrap();
+        let j17 = fake_java(dir.path(), "j17", &says("17.0.9")).display().to_string();
+        // Global 17 pour Minecraft 1.21.1 (Java 21) : ignoré, on retombe sur la sélection automatique.
+        assert_eq!(resolve_setting(&JavaSetting::Global(j17.clone()), 21, "1.21.1").await.unwrap(), None);
+        // Instance : échec explicite, avec les deux versions et la version de Minecraft.
+        let err = resolve_setting(&JavaSetting::Instance(j17.clone()), 21, "1.21.1").await.unwrap_err();
+        let msg = err.to_string();
+        assert!(matches!(err, Error::Invalid(_)), "{err:?}");
+        assert!(msg.contains("Java 17") && msg.contains("Java 21") && msg.contains("1.21.1"), "{msg}");
+        // Un Java qui convient est gardé, dans les deux cas ; un Java 17 convient à un Minecraft 1.18 (Java 17).
+        assert_eq!(resolve_setting(&JavaSetting::Global(j17.clone()), 17, "1.18.2").await.unwrap(), Some(PathBuf::from(&j17)));
+        assert_eq!(resolve_setting(&JavaSetting::Instance(j17.clone()), 17, "1.18.2").await.unwrap(), Some(PathBuf::from(&j17)));
+        // Java 21 global pour un 1.12.2 (Java 8) : refusé.
+        let j21 = fake_java(dir.path(), "j21", &says("21.0.2")).display().to_string();
+        assert_eq!(resolve_setting(&JavaSetting::Global(j21.clone()), 8, "1.12.2").await.unwrap(), None);
+        // Java d'instance plus récent pour un vieux Minecraft : choix explicite, gardé ; plus ancien que requis : échec.
+        assert_eq!(resolve_setting(&JavaSetting::Instance(j17.clone()), 8, "1.16.5").await.unwrap(), Some(PathBuf::from(&j17)));
+        let j8 = fake_java(dir.path(), "j8", &says("1.8.0_392")).display().to_string();
+        assert!(matches!(resolve_setting(&JavaSetting::Instance(j8), 17, "1.18.2").await, Err(Error::Invalid(_))));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn java_illisible_ou_introuvable() {
+        let dir = tempfile::tempdir().unwrap();
+        // Sortie inhabituelle : on ne peut pas juger, le réglage est gardé tel quel (comportement d'avant).
+        let odd = fake_java(dir.path(), "odd", "version inconnue").display().to_string();
+        assert_eq!(resolve_setting(&JavaSetting::Global(odd.clone()), 21, "1.21.1").await.unwrap(), Some(PathBuf::from(&odd)));
+        // Introuvable : le global est ignoré, celui de l'instance fait échouer.
+        let gone = dir.path().join("absent").display().to_string();
+        assert_eq!(resolve_setting(&JavaSetting::Global(gone.clone()), 21, "1.21.1").await.unwrap(), None);
+        assert!(matches!(resolve_setting(&JavaSetting::Instance(gone), 21, "1.21.1").await, Err(Error::NotFound(_))));
+    }
+
+    /// De bout en bout dans `resolve_java` : un Java 17 global pour un Minecraft qui veut Java 21 n'est pas utilisé,
+    /// c'est le Java 21 présent dans le dossier de runtimes de Cubelink qui est retenu (aucun téléchargement).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resolve_java_prefere_le_java_installe_au_global_inadapte() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path());
+        let jre21 = paths.java.join("temurin-21");
+        std::fs::create_dir_all(jre21.join("bin")).unwrap();
+        let exe = fake_java(&jre21.join("bin"), "java", &says("21.0.2"));
+        std::fs::write(jre21.join("release"), "JAVA_VERSION=\"21.0.2\"\nIMPLEMENTOR=\"Eclipse Adoptium\"\n").unwrap();
+        let j17 = fake_java(dir.path(), "j17", &says("17.0.9")).display().to_string();
+        let cancel = Arc::new(AtomicBool::new(false));
+
+        let got = resolve_java(&paths, 21, "1.21.1", Some(&JavaSetting::Global(j17.clone())), &cancel).await.unwrap();
+        assert_eq!(got, exe);
+        // Le même Java 17, propre à l'instance : le lancement échoue au lieu de planter dans la JVM.
+        let err = resolve_java(&paths, 21, "1.21.1", Some(&JavaSetting::Instance(j17.clone())), &cancel).await.unwrap_err();
+        assert!(err.to_string().contains("Java 17"), "{err}");
+        // Et pour une version de Minecraft qui accepte Java 17, le global est bien utilisé.
+        let got = resolve_java(&paths, 17, "1.18.2", Some(&JavaSetting::Global(j17.clone())), &cancel).await.unwrap();
+        assert_eq!(got, PathBuf::from(j17));
+    }
 
     #[test]
     fn chemins_et_versions() {

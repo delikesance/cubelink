@@ -132,11 +132,20 @@ describe("fake : gestion des instances", () => {
     expect(await s.instancesLogs("inst-aeronautics")).toContain(lines[0]);
     await s.instancesKill("inst-aeronautics");
     expect(states).toEqual(["preparing", "exited"]);
-    const up = await s.instancesUpdate("inst-aeronautics", { name: "Neuf", ram_mb: 2048, java_path: null, jvm_args: "-Xss2m" });
+    const up = await s.instancesUpdate("inst-aeronautics", { name: "Neuf", ram_mb: 2048, java_path: "", jvm_args: "-Xss2m" });
     expect(up).toMatchObject({ name: "Neuf", ram_mb: 2048, jvm_args: "-Xss2m" });
     await s.instancesDelete("inst-aeronautics");
     expect((await s.instancesList()).map((x) => x.id)).not.toContain("inst-aeronautics");
     await expect(s.instancesKill("inst-aeronautics")).rejects.toThrow("Instance introuvable.");
+  });
+
+  it("java_path : absent = inchangé, chaîne vide = effacé (comme le vrai backend)", async () => {
+    const s = createFakeServices({ tickMs: 0 });
+    const java = "/usr/lib/jvm/java-17/bin/java";
+    expect((await s.instancesUpdate("inst-aeronautics", { java_path: java })).java_path).toBe(java);
+    expect((await s.instancesUpdate("inst-aeronautics", { name: "Autre" })).java_path).toBe(java);
+    expect((await s.instancesUpdate("inst-aeronautics", { java_path: "  " })).java_path).toBeNull();
+    expect((await s.instancesList()).find((x) => x.id === "inst-aeronautics")?.java_path).toBeNull();
   });
 
   it("signale les mods manquants à l'import", async () => {
@@ -145,6 +154,18 @@ describe("fake : gestion des instances", () => {
     s.onImportWarning((e) => got.push(e.missing));
     await s.instancesImportMrpack("pack-manquant.mrpack");
     expect(got).toEqual([["sodium", "iris"]]);
+  });
+
+  it("signale l'échec de préparation du jeu sans refuser l'import", async () => {
+    const s = createFakeServices({ tickMs: 0 });
+    const prog: string[] = [];
+    const got: { instance_id: string; message: string }[] = [];
+    s.onImportProgress((e) => prog.push(e.message));
+    s.onImportDeferred((e) => got.push(e));
+    const inst = await s.instancesImportMrpack("pack-differe.mrpack");
+    expect(prog.length).toBeGreaterThan(0);
+    expect(got).toEqual([{ instance_id: inst.id, message: "réseau indisponible" }]);
+    expect((await s.instancesList()).some((i) => i.id === inst.id)).toBe(true);
   });
 
   it("parcourir : pagination, filtre, non téléchargeables, versions", async () => {

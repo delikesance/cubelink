@@ -22,7 +22,7 @@ describe("Réglage « Jeu intégré »", () => {
     await openTab();
     const box = screen.getByLabelText(/Jeu intégré/, { selector: "input" }) as HTMLInputElement;
     expect(box.checked).toBe(true);
-    expect(screen.getByText(/^Le jeu s'affiche dans la fenêtre de Cubelink\. Désactive si le jeu ne s'affiche pas correctement\. Appliqué au prochain lancement du jeu, et sous Linux au prochain démarrage de Cubelink\.$/)).toBeTruthy();
+    expect(screen.getByText(/^Le jeu s'affiche dans la fenêtre de Cubelink\. Désactive si le jeu ne s'affiche pas correctement\. Appliqué au prochain lancement du jeu\. Sous Linux, il faut aussi quitter Cubelink \(clic droit sur son icône dans la zone de notification, puis « Quitter Cubelink »\) et le relancer : fermer la fenêtre ne suffit pas\.$/)).toBeTruthy();
     fireEvent.click(box);
     await waitFor(() => expect(set).toHaveBeenCalledTimes(1));
     expect(set.mock.calls[0][0]).toMatchObject({ embedded_game: false, overlay_enabled: true, lan_auto: true });

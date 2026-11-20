@@ -77,7 +77,7 @@ mod imp {
         }
         let mut ok = front(hwnd);
         if !ok {
-            eprintln!("[Cubelink] premier plan : AttachThreadInput refusé, repli sur la touche Alt");
+            tracing::warn!("premier plan : AttachThreadInput refusé, repli sur la touche Alt");
             unsafe {
                 keybd_event(VK_MENU as u8, 0, 0, 0);
                 keybd_event(VK_MENU as u8, 0, KEYEVENTF_KEYUP, 0);
@@ -100,7 +100,7 @@ mod imp {
                 let Some(hwnd) = game_window(pid) else { continue };
                 tries += 1;
                 let ok = front(hwnd);
-                eprintln!("[Cubelink] fenêtre du jeu (pid {pid}) amenée au premier plan : {}", if ok { "oui" } else { "refusé par Windows" });
+                tracing::info!("fenêtre du jeu (pid {pid}) amenée au premier plan : {}", if ok { "oui" } else { "refusé par Windows" });
                 if ok || tries >= 5 {
                     return;
                 }
@@ -187,7 +187,7 @@ mod imp_x11 {
                 let Some(w) = game_window(&c, root, pid) else { continue };
                 tries += 1;
                 let ok = front(&c, root, w);
-                eprintln!("[Cubelink] fenêtre du jeu (pid {pid}) amenée au premier plan : {}", if ok { "oui" } else { "refusé" });
+                tracing::info!("fenêtre du jeu (pid {pid}) amenée au premier plan : {}", if ok { "oui" } else { "refusé" });
                 if ok || tries >= 5 {
                     return;
                 }

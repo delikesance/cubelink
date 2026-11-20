@@ -75,6 +75,21 @@ pub struct Instance {
     /// Illustrations du modpack (icône, captures, couleur). Absent des anciens `instance.json`.
     #[serde(default)]
     pub art: Option<InstanceArt>,
+    /// Origine du modpack (projet et version du catalogue). Absent des anciens `instance.json`, des
+    /// instances créées à la main et des packs importés à la main que le catalogue ne reconnaît pas.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pack: Option<PackOrigin>,
+}
+
+/// Projet et version d'un modpack du catalogue, enregistrés à l'installation. Sert à retrouver
+/// l'illustration exacte (sans recherche par nom) et, plus tard, à proposer les mises à jour.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+pub struct PackOrigin {
+    /// "curseforge" ou "modrinth".
+    pub source: String,
+    pub project_id: String,
+    /// Identifiant de version du catalogue (Modrinth : id de version ; CurseForge : id de fichier).
+    pub version_id: String,
 }
 
 /// Illustrations d'une instance. Les fichiers sont dans `<dossier de l'instance>/art/`.

@@ -49,6 +49,7 @@ export type HostState = B.HostState_Serialize;
 export type Instance = B.Instance_Serialize;
 /** Illustration d'une instance. `source` : "curseforge", "modrinth" ou "custom". */
 export type InstanceArt = B.InstanceArt_Serialize;
+export type PackOrigin = B.PackOrigin;
 export type Invite = B.Invite_Serialize;
 export type JoinPlan = B.JoinPlan_Serialize;
 export type Manifest = B.Manifest_Serialize;

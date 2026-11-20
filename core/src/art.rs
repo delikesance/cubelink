@@ -438,12 +438,20 @@ pub async fn lookup_modpack(p: &Providers, name: &str, exact: bool) -> Result<(B
     }
 }
 
-/// Recherche par le nom de l'instance, puis récupération de l'art. `auto` (sans demande de l'utilisateur) : jamais
+/// Récupération de l'art du projet d'origine du modpack s'il est connu (`Instance::pack`), sinon recherche par le
+/// nom de l'instance. `auto` (sans demande de l'utilisateur) : jamais
 /// pour une instance créée à la main, et seulement sur un nom identique (« Test » ne doit pas devenir « Testro's… »).
 pub async fn lookup_and_apply(p: &Providers, store: &InstanceStore, instance_id: &str, auto: bool) -> Result<Instance> {
     let inst = store.get(instance_id)?;
     if auto && store.is_custom(instance_id) {
         return Err(Error::NotFound("instance créée à la main : pas d'illustration automatique".into()));
+    }
+    // Origine connue (installée depuis Parcourir, ou reconnue par empreinte) : le projet exact, sans recherche
+    // par nom, qui pourrait désigner un homonyme. Un échec réseau n'y change rien : pas de repli par nom.
+    if let Some(pack) = &inst.pack {
+        if let Ok(source) = BrowseSource::parse(&pack.source) {
+            return apply_art(p, store, instance_id, source, &pack.project_id).await;
+        }
     }
     let (source, id) = lookup_modpack(p, &inst.name, auto).await?;
     apply_art(p, store, instance_id, source, &id).await
@@ -788,7 +796,7 @@ mod tests {
     use super::*;
     use crate::providers::curseforge_api::CfApi;
     use crate::providers::modrinth_api::ModrinthClient;
-    use crate::types::{Loader, LoaderSpec};
+    use crate::types::{Loader, LoaderSpec, PackOrigin};
     use serde_json::json;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1214,6 +1222,57 @@ mod tests {
         let u = lookup_and_apply(&providers(&mr, &cf, true), &s, &i.id, false).await.unwrap();
         let a = u.art.unwrap();
         assert_eq!((a.source.as_str(), a.project_id.as_str()), ("curseforge", "7"));
+    }
+
+    #[tokio::test]
+    async fn lookup_uses_exact_pack_project_without_name_search() {
+        let (mr, cf) = (MockServer::start().await, MockServer::start().await);
+        // La recherche par nom désignerait un homonyme (« Mon Pack » -> HOMONYME) : elle ne doit pas être appelée.
+        Mock::given(method("GET"))
+            .and(path("/v2/search"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"hits": [
+                {"project_id": "HOMONYME", "slug": "h", "title": "Mon Pack", "author": "x"}], "total_hits": 1})))
+            .expect(0)
+            .mount(&mr)
+            .await;
+        modrinth_project(&mr, "VRAI", json!({"id": "VRAI", "title": "Le vrai pack"})).await;
+        let (_t, s, i) = store();
+        s.set_pack(&i.id, Some(PackOrigin { source: "modrinth".into(), project_id: "VRAI".into(), version_id: "V1".into() })).unwrap();
+        for auto in [true, false] {
+            let u = lookup_and_apply(&providers(&mr, &cf, true), &s, &i.id, auto).await.unwrap();
+            let a = u.art.unwrap();
+            assert_eq!((a.source.as_str(), a.project_id.as_str(), a.title.as_str()), ("modrinth", "VRAI", "Le vrai pack"));
+            // apply_art relit puis réécrit instance.json : l'origine reste.
+            assert_eq!(u.pack.unwrap().version_id, "V1");
+        }
+    }
+
+    #[tokio::test]
+    async fn lookup_with_pack_does_not_fall_back_to_name_on_network_error() {
+        let (mr, cf) = (MockServer::start().await, MockServer::start().await);
+        Mock::given(method("GET")).and(path("/v2/project/VRAI")).respond_with(ResponseTemplate::new(500)).mount(&mr).await;
+        Mock::given(method("GET")).and(path("/v2/search")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"hits": [
+            {"project_id": "HOMONYME", "slug": "h", "title": "Mon Pack", "author": "x"}], "total_hits": 1}))).expect(0).mount(&mr).await;
+        let (_t, s, i) = store();
+        s.set_pack(&i.id, Some(PackOrigin { source: "modrinth".into(), project_id: "VRAI".into(), version_id: "V1".into() })).unwrap();
+        assert!(lookup_and_apply(&providers(&mr, &cf, true), &s, &i.id, false).await.is_err());
+        assert_eq!(s.get(&i.id).unwrap().art, None);
+    }
+
+    #[tokio::test]
+    async fn lookup_without_pack_keeps_name_search() {
+        let (mr, cf) = (MockServer::start().await, MockServer::start().await);
+        Mock::given(method("GET"))
+            .and(path("/v2/search"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"hits": [
+                {"project_id": "B", "slug": "b", "title": "Mon Pack", "author": "x"}], "total_hits": 1})))
+            .expect(1)
+            .mount(&mr)
+            .await;
+        modrinth_project(&mr, "B", json!({"id": "B", "title": "Mon Pack"})).await;
+        let (_t, s, i) = store();
+        let a = lookup_and_apply(&providers(&mr, &cf, true), &s, &i.id, true).await.unwrap().art.unwrap();
+        assert_eq!(a.project_id, "B");
     }
 
     #[test]

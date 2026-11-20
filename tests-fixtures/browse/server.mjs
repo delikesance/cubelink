@@ -9,6 +9,7 @@
 //   GET  /v2/project/{id}/members          [{ role: 'Owner', user: { username } }]
 //   GET  /v2/team/{id}/members             idem (id = id du projet)
 //   GET  /v2/project/{id}/version, /v2/version/{id}
+//   GET  /v2/version_file/{sha1}?algorithm=sha1   version d'un fichier du catalogue (404 si inconnu)
 //   GET  /v1/mods/search                   recherche CurseForge (header x-api-key: test-key, sinon 403)
 //   GET  /v1/mods/{cfId}                   detail CurseForge (x-api-key requis) : logo, screenshots, authors
 //   GET  /v1/mods/{cfId}/files[/{fileId}], POST /v1/mods/files
@@ -143,6 +144,10 @@ const server = http.createServer((req, res) => {
   }
   if ((m = p.match(/^\/v2\/version\/(.+)$/))) {
     const x = projects.find((y) => `${y.id}-v1` === m[1]);
+    return x ? json(res, 200, mrVersion(x)) : json(res, 404, {});
+  }
+  if ((m = p.match(/^\/v2\/version_file\/([0-9a-f]{40})$/)) && q.get('algorithm') === 'sha1') {
+    const x = projects.find((y) => sha1(y.buf) === m[1]);
     return x ? json(res, 200, mrVersion(x)) : json(res, 404, {});
   }
   // ---- CurseForge ----

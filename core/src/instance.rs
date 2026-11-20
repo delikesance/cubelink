@@ -9,7 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::{Error, Instance, InstanceArt, LoaderSpec, Result};
+use crate::types::{Error, Instance, InstanceArt, LoaderSpec, PackOrigin, Result};
 
 const META_FILE: &str = "instance.json";
 const META_TMP: &str = "instance.json.tmp";
@@ -190,6 +190,7 @@ impl InstanceStore {
             jvm_args: String::new(),
             wrapper: String::new(),
             art: None,
+            pack: None,
         };
         let stored = StoredInstance { instance: instance.clone(), created_at: now_secs(), kind, custom: false };
         let res = fs::create_dir_all(self.root.join(&id).join(GAME_DIR))
@@ -342,6 +343,14 @@ impl InstanceStore {
     pub fn set_art(&self, id: &str, art: Option<InstanceArt>) -> Result<Instance> {
         let mut stored = self.read_meta(id)?;
         stored.instance.art = art;
+        self.write_meta(id, &stored)?;
+        Ok(self.with_live_mod_count(id, stored.instance))
+    }
+
+    /// Enregistre (ou efface) l'origine du modpack. Relit `instance.json` : les autres champs sont conservés.
+    pub fn set_pack(&self, id: &str, pack: Option<PackOrigin>) -> Result<Instance> {
+        let mut stored = self.read_meta(id)?;
+        stored.instance.pack = pack;
         self.write_meta(id, &stored)?;
         Ok(self.with_live_mod_count(id, stored.instance))
     }
@@ -836,7 +845,39 @@ b"), None).is_err());
         let i = s.get("vieux").unwrap();
         assert_eq!((i.java_path, i.jvm_args.as_str(), i.ram_mb), (None, "", 3072));
         assert_eq!(i.art, None);
+        assert_eq!(i.pack, None);
         assert_eq!(s.update("vieux", None, None, None, Some("-Xmx1G"), None).unwrap().jvm_args, "-Xmx1G");
+    }
+
+    #[test]
+    fn set_pack_persists_and_survives_other_writes() {
+        let (_t, s) = store();
+        let i = s.create("Pack", "1.21.1", spec(), 2048).unwrap();
+        assert_eq!(i.pack, None);
+        let pack = PackOrigin { source: "modrinth".into(), project_id: "PROJ".into(), version_id: "VER".into() };
+        assert_eq!(s.set_pack(&i.id, Some(pack.clone())).unwrap().pack, Some(pack.clone()));
+        // Les écritures voisines de instance.json ne perdent pas l'origine.
+        s.update_ram(&i.id, 4096).unwrap();
+        s.update(&i.id, Some("Renommé"), None, None, None, None).unwrap();
+        let art = InstanceArt {
+            source: "modrinth".into(),
+            project_id: "PROJ".into(),
+            title: "T".into(),
+            author: "a".into(),
+            summary: "s".into(),
+            color: None,
+            icon: None,
+            screenshots: vec![],
+            page_url: None,
+        };
+        s.set_art(&i.id, Some(art)).unwrap();
+        // Relecture sur le disque.
+        let raw = fs::read_to_string(s.root().join(&i.id).join(META_FILE)).unwrap();
+        assert!(raw.contains("\"project_id\": \"PROJ\"") && raw.contains("\"version_id\": \"VER\""), "{raw}");
+        let again = s.get(&i.id).unwrap();
+        assert_eq!((again.pack.clone(), again.ram_mb), (Some(pack), 4096));
+        assert_eq!(s.set_pack(&i.id, None).unwrap().pack, None);
+        assert!(matches!(s.set_pack("nope", None), Err(Error::NotFound(_))));
     }
 
     #[test]

@@ -21,7 +21,7 @@ use crate::providers::modrinth_api::{FileHashes, ModrinthClient, SearchFilters, 
 use crate::providers::modrinth_dl::{fetch_into_store, fetch_into_store_unverified, DlOptions};
 use crate::store::index::StoreIndex;
 use crate::store::link::link_into;
-use crate::types::{Error, Instance, Loader, Result};
+use crate::types::{Error, Instance, Loader, PackOrigin, Result};
 
 pub const MODRINTH_HOSTS: &[&str] = &["cdn.modrinth.com", "github.com", "raw.githubusercontent.com", "objects.githubusercontent.com"];
 pub const CURSEFORGE_HOSTS: &[&str] = &["edge.forgecdn.net", "mediafilez.forgecdn.net"];
@@ -243,6 +243,17 @@ fn mc_ok(versions: &[String], mc: Option<&str>) -> bool {
     mc.is_none_or(|m| versions.is_empty() || versions.iter().any(|v| v == m))
 }
 
+/// Loaders envoyés au catalogue pour une recherche. Pour les mods : tous les loaders acceptés
+/// (Quilt exécute aussi les mods Fabric, donc OU Quilt/Fabric). Pour les modpacks : le loader
+/// exact seulement (le pack crée sa propre instance, rien ne justifie d'élargir).
+fn search_loaders(kind: BrowseKind, loader: Option<Loader>) -> Vec<&'static str> {
+    let mut acc = accepted(loader);
+    if kind != BrowseKind::Mod {
+        acc.truncate(1); // le loader exact est toujours en tête de `accepted`
+    }
+    acc
+}
+
 /// Filtre loader pour les requêtes serveur : seulement s'il n'y a qu'un loader accepté.
 fn server_loader(acc: &[&str], l: Option<Loader>) -> Option<Loader> {
     if acc.len() == 1 {
@@ -283,11 +294,12 @@ pub async fn search(p: &Providers, q: &BrowseQuery) -> Result<BrowsePage> {
     if query.chars().count() > 200 {
         return Err(invalid("recherche trop longue"));
     }
+    let acc = search_loaders(q.kind, loader);
     match q.source {
         BrowseSource::Modrinth => {
             let f = SearchFilters {
                 minecraft_version: mc,
-                loader,
+                loaders: acc.iter().map(|s| s.to_string()).collect(),
                 project_type: Some(q.kind.as_str().to_string()),
                 limit: Some(limit),
                 offset: Some(q.offset),
@@ -313,9 +325,13 @@ pub async fn search(p: &Providers, q: &BrowseQuery) -> Result<BrowsePage> {
             Ok(BrowsePage { hits, total: r.total_hits.min(u32::MAX as u64) as u32 })
         }
         BrowseSource::Curseforge => {
+            // CurseForge n'accepte qu'un `modLoaderType` : sans filtre quand plusieurs loaders sont
+            // acceptés (Quilt), comme pour les versions. Les résultats incluent alors du bruit
+            // Forge/NeoForge, rejeté à l'installation (`loader_ok`). Deux requêtes fusionnées
+            // fausseraient `total` et la pagination.
             let r = p
                 .cf
-                .search(q.kind.cf_class(), query, mc.as_deref(), loader.and_then(cfapi::loader_type), cfapi::sort_field(sort), q.offset, limit)
+                .search(q.kind.cf_class(), query, mc.as_deref(), server_loader(&acc, loader).and_then(cfapi::loader_type), cfapi::sort_field(sort), q.offset, limit)
                 .await?;
             let total = r.pagination.map_or(r.data.len() as u64, |p| p.total_count).min(u32::MAX as u64) as u32;
             let hits = r
@@ -405,6 +421,8 @@ pub async fn versions(p: &Providers, source: &str, id: &str, kind: &str, minecra
 pub(crate) struct Planned {
     pub(crate) source: BrowseSource,
     pub(crate) project_id: String,
+    /// Identifiant de la version (Modrinth) ou du fichier (CurseForge) choisi.
+    pub(crate) version_id: String,
     pub(crate) name: String,
     pub(crate) url: String,
     pub(crate) size: u64,
@@ -432,6 +450,7 @@ pub(crate) fn plan_modrinth(p: &Providers, v: &Version, ext: &str) -> Result<Pla
     Ok(Planned {
         source: BrowseSource::Modrinth,
         project_id: v.project_id.clone(),
+        version_id: v.id.clone(),
         name: f.filename.clone(),
         url: f.url.clone(),
         size: f.size,
@@ -449,6 +468,7 @@ pub(crate) fn plan_cf(p: &Providers, f: &CfFile, mod_id: u64, ext: &str) -> Resu
     Ok(Planned {
         source: BrowseSource::Curseforge,
         project_id: if f.mod_id != 0 { f.mod_id } else { mod_id }.to_string(),
+        version_id: f.id.to_string(),
         name: f.file_name.clone(),
         url: url.to_string(),
         size: f.file_length,
@@ -569,6 +589,16 @@ async fn plan_deps(p: &Providers, first: Vec<DepRef>, mc: Option<&str>, loader: 
     out
 }
 
+/// État « installé » d'un pack de ressources ou d'un shader dans l'instance (fichiers encore présents, d'après la provenance).
+/// Modpack et mod : résultat vide (les mods passent par `mod_fix::check_content`).
+pub fn installed_check(game_dir: &Path, kind: BrowseKind, source: BrowseSource, id: &str) -> mod_fix::ContentCheck {
+    let mut out = mod_fix::ContentCheck::default();
+    if let Some((dir, _)) = kind.dir_and_ext().filter(|_| kind != BrowseKind::Mod) {
+        out.installed = mods::files_of_project_in(game_dir, dir, source.as_str(), id).into_iter().filter(|f| game_dir.join(dir).join(f).is_file()).collect();
+    }
+    out
+}
+
 pub(crate) fn installed_project(game_dir: &Path, source: &str, id: &str) -> bool {
     let dir = game_dir.join("mods");
     mods::files_of_project(game_dir, source, id).iter().any(|f| dir.join(f).is_file() || dir.join(format!("{f}.disabled")).is_file())
@@ -674,11 +704,15 @@ pub async fn install_content(
             return Err(e);
         }
         index.add_ref(&obj.sha256)?;
-        let recorded = if input.kind == BrowseKind::Mod {
-            mods::record_provenance(game_dir, &[(pl.name.clone(), Provenance { source: pl.source.as_str().into(), id: pl.project_id.clone() })])
-        } else {
-            Ok(())
-        };
+        if input.kind != BrowseKind::Mod {
+            // Pack de ressources / shader : l'ancienne version du même projet part, une fois la nouvelle posée
+            // (un échec de liaison laisse l'ancienne en place ; pas de sauvegarde : il se retélécharge).
+            mods::remove_old_versions_in(game_dir, dir, pl.source.as_str(), &pl.project_id, std::slice::from_ref(&pl.name))?;
+        }
+        let recorded = mods::record_provenance(
+            game_dir,
+            &[(mods::provenance_key(dir, &pl.name), Provenance { source: pl.source.as_str().into(), id: pl.project_id.clone() })],
+        );
         // Le jar est posé : on consigne la sauvegarde même si la provenance n'a pas pu être écrite (`undo` retire le jar posé).
         if let Some(b) = backup {
             report.replaced.extend(b.files());
@@ -700,7 +734,7 @@ pub async fn fetch_modpack(
     tmp_dir: &Path,
     dl: &DlOptions,
     progress: ProgressCb<'_>,
-) -> Result<PathBuf> {
+) -> Result<(PathBuf, PackOrigin)> {
     if input.kind != BrowseKind::Modpack {
         return Err(invalid("ce n'est pas un modpack"));
     }
@@ -715,7 +749,35 @@ pub async fn fetch_modpack(
     let dest = tmp_dir.join(&pl.name);
     std::fs::copy(store_root.join(&obj.rel_path), &dest)?;
     progress(1, 1, &pl.name);
-    Ok(dest)
+    // Projet et version réellement téléchargés (la plus récente compatible quand `version_id` est absent).
+    let origin = PackOrigin { source: pl.source.as_str().to_string(), project_id: pl.project_id.clone(), version_id: pl.version_id.clone() };
+    Ok((dest, origin))
+}
+
+/// Durée maximale de la recherche d'un `.mrpack` local dans le catalogue.
+const PACK_LOOKUP_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Retrouve le projet et la version Modrinth d'un `.mrpack` local par son SHA-1 (`/version_file/{sha1}`).
+/// Meilleur effort : `None` si Modrinth ne connaît pas le fichier (pack modifié ou non publié), hors ligne ou
+/// trop lent. Ne renvoie jamais d'erreur, l'import ne doit pas en dépendre.
+pub async fn resolve_pack_origin(p: &Providers, file: &Path) -> Option<PackOrigin> {
+    let path = file.to_path_buf();
+    let sha1 = match tokio::task::spawn_blocking(move || crate::unknown_mods::sha1_file(&path)).await {
+        Ok(Ok(h)) => h,
+        _ => return None,
+    };
+    match tokio::time::timeout(PACK_LOOKUP_BUDGET, p.modrinth.version_from_hash(&sha1)).await {
+        Ok(Ok(Some(v))) => Some(PackOrigin { source: BrowseSource::Modrinth.as_str().to_string(), project_id: v.project_id, version_id: v.id }),
+        Ok(Ok(None)) => None,
+        Ok(Err(e)) => {
+            tracing::warn!("origine du modpack : recherche par empreinte impossible : {e}");
+            None
+        }
+        Err(_) => {
+            tracing::warn!("origine du modpack : délai dépassé");
+            None
+        }
+    }
 }
 
 #[cfg(test)]
@@ -747,6 +809,7 @@ mod tests {
             jvm_args: String::new(),
             wrapper: String::new(),
             art: None,
+            pack: None,
         }
     }
 
@@ -858,6 +921,63 @@ mod tests {
         assert!(search(&providers(&mr, &cf), &bad).await.is_err());
         let bad = BrowseQuery { minecraft: Some("1.20/../x".into()), ..q };
         assert!(search(&providers(&mr, &cf), &bad).await.is_err());
+    }
+
+    fn quilt_query(source: BrowseSource, kind: BrowseKind, loader: &str) -> BrowseQuery {
+        BrowseQuery { source, kind, query: "sodium".into(), minecraft: Some("1.20.1".into()), loader: Some(loader.into()), sort: None, offset: 0, limit: 5 }
+    }
+
+    #[tokio::test]
+    async fn search_modrinth_quilt_includes_fabric_for_mods_but_not_modpacks() {
+        let (mr, cf) = (MockServer::start().await, MockServer::start().await);
+        let empty = || ResponseTemplate::new(200).set_body_json(json!({"hits": [], "total_hits": 0}));
+        Mock::given(method("GET"))
+            .and(path("/v2/search"))
+            .and(query_param("facets", r#"[["versions:1.20.1"],["categories:quilt","categories:fabric"],["project_type:mod"]]"#))
+            .respond_with(empty())
+            .expect(1)
+            .mount(&mr)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v2/search"))
+            .and(query_param("facets", r#"[["versions:1.20.1"],["categories:quilt"],["project_type:modpack"]]"#))
+            .respond_with(empty())
+            .expect(1)
+            .mount(&mr)
+            .await;
+        let p = providers(&mr, &cf);
+        search(&p, &quilt_query(BrowseSource::Modrinth, BrowseKind::Mod, "quilt")).await.unwrap();
+        search(&p, &quilt_query(BrowseSource::Modrinth, BrowseKind::Modpack, "quilt")).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn search_curseforge_quilt_sends_no_loader_filter_fabric_keeps_it() {
+        let (mr, cf) = (MockServer::start().await, MockServer::start().await);
+        let empty = || ResponseTemplate::new(200).set_body_json(json!({"data": [], "pagination": {"totalCount": 0}}));
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/search"))
+            .and(query_param("modLoaderType", "4"))
+            .respond_with(empty())
+            .expect(1)
+            .mount(&cf)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/search"))
+            .and(query_param("modLoaderType", "5"))
+            .respond_with(empty())
+            .expect(1)
+            .mount(&cf)
+            .await;
+        Mock::given(method("GET")).and(path("/v1/mods/search")).respond_with(empty()).expect(1).mount(&cf).await;
+        let p = providers(&mr, &cf);
+        search(&p, &quilt_query(BrowseSource::Curseforge, BrowseKind::Mod, "fabric")).await.unwrap();
+        // Modpack Quilt : loader exact (5).
+        search(&p, &quilt_query(BrowseSource::Curseforge, BrowseKind::Modpack, "quilt")).await.unwrap();
+        // Mod Quilt : aucun modLoaderType (reçu par le mock sans matcher).
+        search(&p, &quilt_query(BrowseSource::Curseforge, BrowseKind::Mod, "quilt")).await.unwrap();
+        let reqs = cf.received_requests().await.unwrap();
+        assert_eq!(reqs.len(), 3);
+        assert!(!reqs[2].url.query().unwrap_or("").contains("modLoaderType"), "{:?}", reqs[2].url);
     }
 
     #[tokio::test]
@@ -1015,7 +1135,7 @@ mod tests {
             .unwrap();
         assert_eq!(r.installed, vec!["pack.zip"]);
         assert!(e.game.join("resourcepacks/pack.zip").is_file());
-        assert!(mods::read_provenance(&e.game).is_empty());
+        assert_eq!(mods::read_provenance(&e.game)["resourcepacks/pack.zip"], Provenance { source: "modrinth".into(), id: "RP".into() });
 
         Mock::given(method("GET")).and(path("/v2/project/NONE/version")).respond_with(ResponseTemplate::new(200).set_body_json(json!([]))).mount(&mr).await;
         let err = install_content(&providers(&mr, &cf), &input(BrowseSource::Modrinth, "NONE", BrowseKind::Mod), &inst(Loader::Fabric), &e.game, &e.store, &e.index, &dlo(), &|_, _, _| {})
@@ -1023,6 +1143,60 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, Error::NotFound(_)), "{err}");
         assert!(install_content(&providers(&mr, &cf), &input(BrowseSource::Modrinth, "RP", BrowseKind::Modpack), &inst(Loader::Fabric), &e.game, &e.store, &e.index, &dlo(), &|_, _, _| {}).await.is_err());
+    }
+
+    /// Installe `file` (contenu `body`) comme version unique du projet `id` pour un pack de ressources ou un shader.
+    async fn install_pack(mr: &MockServer, cf: &MockServer, e: &Env, kind: BrowseKind, id: &str, file: &str, body: &[u8]) -> Result<InstallReport> {
+        let mut v = mr_version(mr, &format!("v-{file}"), id, file, body, json!([]), "2024-01-01T00:00:00Z");
+        v["loaders"] = json!(["minecraft"]);
+        mr.reset().await;
+        Mock::given(method("GET")).and(path(format!("/v2/project/{id}/version"))).respond_with(ResponseTemplate::new(200).set_body_json(json!([v]))).mount(mr).await;
+        serve(mr, &format!("/cdn/{file}"), body).await;
+        install_content(&providers(mr, cf), &input(BrowseSource::Modrinth, id, kind), &inst(Loader::Fabric), &e.game, &e.store, &e.index, &dlo(), &|_, _, _| {}).await
+    }
+
+    #[tokio::test]
+    async fn new_pack_version_replaces_old_and_is_tracked() {
+        let (mr, cf) = (MockServer::start().await, MockServer::start().await);
+        let e = env();
+        // Un mod du même projet (même id) et un autre shader ne doivent pas être touchés.
+        std::fs::create_dir_all(e.game.join("mods")).unwrap();
+        std::fs::write(e.game.join("mods/same-id.jar"), b"jar").unwrap();
+        mods::record_provenance(&e.game, &[("same-id.jar".into(), Provenance { source: "modrinth".into(), id: "SH".into() })]).unwrap();
+        install_pack(&mr, &cf, &e, BrowseKind::Shader, "OTHER", "other.zip", b"O").await.unwrap();
+
+        for (kind, dir) in [(BrowseKind::Shader, "shaderpacks"), (BrowseKind::Resourcepack, "resourcepacks")] {
+            install_pack(&mr, &cf, &e, kind, "SH", "pack-r5.1.zip", b"one").await.unwrap();
+            assert!(e.game.join(dir).join("pack-r5.1.zip").is_file());
+            assert_eq!(mods::files_of_project_in(&e.game, dir, "modrinth", "SH"), vec!["pack-r5.1.zip"]);
+            // Réinstaller le même fichier : un seul zip, pas d'erreur.
+            install_pack(&mr, &cf, &e, kind, "SH", "pack-r5.1.zip", b"one").await.unwrap();
+            assert_eq!(mods::files_of_project_in(&e.game, dir, "modrinth", "SH"), vec!["pack-r5.1.zip"]);
+            // Nouvelle version : l'ancienne disparaît, la provenance suit.
+            let r = install_pack(&mr, &cf, &e, kind, "SH", "pack-r5.2.zip", b"two").await.unwrap();
+            assert_eq!(r.installed, vec!["pack-r5.2.zip"]);
+            assert!(!e.game.join(dir).join("pack-r5.1.zip").exists());
+            assert_eq!(std::fs::read(e.game.join(dir).join("pack-r5.2.zip")).unwrap(), b"two");
+            assert_eq!(mods::files_of_project_in(&e.game, dir, "modrinth", "SH"), vec!["pack-r5.2.zip"]);
+        }
+        // Les deux dossiers sont indépendants, le mod et l'autre pack intacts.
+        assert!(e.game.join("shaderpacks/pack-r5.2.zip").is_file() && e.game.join("resourcepacks/pack-r5.2.zip").is_file());
+        assert!(e.game.join("shaderpacks/other.zip").is_file());
+        assert!(e.game.join("mods/same-id.jar").is_file());
+        assert_eq!(mods::files_of_project(&e.game, "modrinth", "SH"), vec!["same-id.jar"]);
+        // browse_check : l'état « installé » suit les fichiers réellement présents, par dossier et par type.
+        let chk = |k, id: &str| installed_check(&e.game, k, BrowseSource::Modrinth, id).installed;
+        assert_eq!(chk(BrowseKind::Shader, "SH"), vec!["pack-r5.2.zip"]);
+        assert_eq!(chk(BrowseKind::Resourcepack, "SH"), vec!["pack-r5.2.zip"]);
+        assert!(chk(BrowseKind::Modpack, "SH").is_empty() && chk(BrowseKind::Mod, "SH").is_empty());
+        assert!(chk(BrowseKind::Shader, "INCONNU").is_empty());
+        assert!(installed_check(&e.game, BrowseKind::Shader, BrowseSource::Curseforge, "SH").installed.is_empty());
+        std::fs::remove_file(e.game.join("shaderpacks/pack-r5.2.zip")).unwrap(); // supprimé à la main : plus « installé »
+        assert!(chk(BrowseKind::Shader, "SH").is_empty());
+        assert_eq!(chk(BrowseKind::Resourcepack, "SH"), vec!["pack-r5.2.zip"]);
+        std::fs::write(e.game.join("shaderpacks/pack-r5.2.zip"), b"two").unwrap();
+        let n = std::fs::read_dir(e.game.join("shaderpacks")).unwrap().count();
+        assert_eq!(n, 2, "pack-r5.2.zip et other.zip seulement");
     }
 
     #[tokio::test]
@@ -1066,7 +1240,8 @@ mod tests {
         let mut i = input(BrowseSource::Modrinth, "PACK", BrowseKind::Modpack);
         i.version_id = Some("pk1".into());
         i.instance_id = None;
-        let f = fetch_modpack(&providers(&mr, &cf), &i, &e.store, &e.index, &tmp, &dlo(), &|_, _, _| {}).await.unwrap();
+        let (f, origin) = fetch_modpack(&providers(&mr, &cf), &i, &e.store, &e.index, &tmp, &dlo(), &|_, _, _| {}).await.unwrap();
+        assert_eq!(origin, PackOrigin { source: "modrinth".into(), project_id: "PACK".into(), version_id: "pk1".into() });
         assert_eq!(f.file_name().unwrap(), "My Pack-1.mrpack");
         assert_eq!(std::fs::read(&f).unwrap(), body);
 
@@ -1079,8 +1254,57 @@ mod tests {
             .await;
         serve(&cf, "/dl/pack.zip", &zip_body).await;
         let ci = BrowseInstallInput { source: BrowseSource::Curseforge, id: "50".into(), kind: BrowseKind::Modpack, version_id: Some("7".into()), instance_id: None, ram_mb: None };
-        let f = fetch_modpack(&providers(&mr, &cf), &ci, &e.store, &e.index, &tmp, &dlo(), &|_, _, _| {}).await.unwrap();
+        let (f, origin) = fetch_modpack(&providers(&mr, &cf), &ci, &e.store, &e.index, &tmp, &dlo(), &|_, _, _| {}).await.unwrap();
+        assert_eq!(origin, PackOrigin { source: "curseforge".into(), project_id: "50".into(), version_id: "7".into() });
         assert_eq!(std::fs::read(f).unwrap(), zip_body);
+    }
+
+    #[tokio::test]
+    async fn fetch_modpack_reports_the_version_it_really_picked() {
+        let (mr, cf) = (MockServer::start().await, MockServer::start().await);
+        let body = b"PK mrpack".to_vec();
+        // Sans version demandée : la plus récente compatible, et c'est elle qu'on enregistre.
+        let old = mr_version(&mr, "old", "PACK", "p-1.mrpack", &body, json!([]), "2023-01-01T00:00:00Z");
+        let new = mr_version(&mr, "new", "PACK", "p-2.mrpack", &body, json!([]), "2024-06-01T00:00:00Z");
+        Mock::given(method("GET")).and(path("/v2/project/mon-pack/version")).respond_with(ResponseTemplate::new(200).set_body_json(json!([old, new]))).mount(&mr).await;
+        serve(&mr, "/cdn/p-2.mrpack", &body).await;
+        let e = env();
+        let mut i = input(BrowseSource::Modrinth, "mon-pack", BrowseKind::Modpack);
+        i.instance_id = None;
+        let (f, origin) = fetch_modpack(&providers(&mr, &cf), &i, &e.store, &e.index, &e.store.join("tmp-pick"), &dlo(), &|_, _, _| {}).await.unwrap();
+        assert_eq!(f.file_name().unwrap(), "p-2.mrpack");
+        // Le project_id est celui du projet (pas le slug saisi), la version celle du fichier téléchargé.
+        assert_eq!(origin, PackOrigin { source: "modrinth".into(), project_id: "PACK".into(), version_id: "new".into() });
+    }
+
+    #[tokio::test]
+    async fn resolve_pack_origin_by_hash() {
+        let (mr, cf) = (MockServer::start().await, MockServer::start().await);
+        let d = tempfile::tempdir().unwrap();
+        let file = d.path().join("pack.mrpack");
+        std::fs::write(&file, b"contenu du pack").unwrap();
+        let sha1 = crate::unknown_mods::sha1_hex(b"contenu du pack");
+        let v = mr_version(&mr, "VER9", "PROJ9", "pack.mrpack", b"x", json!([]), "2024-01-01T00:00:00Z");
+        Mock::given(method("GET")).and(path(format!("/v2/version_file/{sha1}"))).and(query_param("algorithm", "sha1")).respond_with(ResponseTemplate::new(200).set_body_json(v)).expect(1).mount(&mr).await;
+        let o = resolve_pack_origin(&providers(&mr, &cf), &file).await.unwrap();
+        assert_eq!(o, PackOrigin { source: "modrinth".into(), project_id: "PROJ9".into(), version_id: "VER9".into() });
+    }
+
+    #[tokio::test]
+    async fn resolve_pack_origin_is_none_when_unknown_or_failing() {
+        let (mr, cf) = (MockServer::start().await, MockServer::start().await);
+        let d = tempfile::tempdir().unwrap();
+        let file = d.path().join("pack.mrpack");
+        std::fs::write(&file, b"pack maison").unwrap();
+        // Inconnu de Modrinth (404) : pas d'origine, pas d'erreur.
+        Mock::given(method("GET")).respond_with(ResponseTemplate::new(404)).mount(&mr).await;
+        assert_eq!(resolve_pack_origin(&providers(&mr, &cf), &file).await, None);
+        // Erreur serveur : idem.
+        let mr2 = MockServer::start().await;
+        Mock::given(method("GET")).respond_with(ResponseTemplate::new(500)).mount(&mr2).await;
+        assert_eq!(resolve_pack_origin(&providers(&mr2, &cf), &file).await, None);
+        // Fichier illisible : idem.
+        assert_eq!(resolve_pack_origin(&providers(&mr, &cf), &d.path().join("absent.mrpack")).await, None);
     }
 
     #[test]
@@ -1122,6 +1346,11 @@ mod tests {
                 assert!(len > 1000, "{f} trop petit ({len} o)");
             }
         }
+        // Quilt 1.20.1 : les mods Fabric (Sodium) doivent apparaître (ticket #78).
+        let q = BrowseQuery { source: BrowseSource::Modrinth, kind: BrowseKind::Mod, query: "sodium".into(), minecraft: Some("1.20.1".into()), loader: Some("quilt".into()), sort: Some("downloads".into()), offset: 0, limit: 10 };
+        let page = search(&p, &q).await.expect("recherche Quilt");
+        println!("[Quilt] {} résultats : {:?}", page.total, page.hits.iter().map(|h| &h.name).collect::<Vec<_>>());
+        assert!(page.hits.iter().any(|h| h.name.to_lowercase().contains("sodium")), "Sodium (Fabric) absent sous Quilt");
         // modpacks : recherche + versions seulement (pas d'installation, fichiers volumineux)
         for source in [BrowseSource::Modrinth, BrowseSource::Curseforge] {
             let q = BrowseQuery { source, kind: BrowseKind::Modpack, query: "fabulously optimized".into(), minecraft: None, loader: None, sort: None, offset: 0, limit: 3 };

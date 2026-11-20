@@ -184,6 +184,8 @@ fn cached(file: &VersionFile, store_root: &Path, index: &StoreIndex) -> Result<O
         let ok = std::fs::metadata(&path).map(|m| m.is_file() && m.len() == entry.size).unwrap_or(false)
             && (file.size == 0 || file.size == entry.size);
         if ok {
+            // Réutilisé : rafraîchit l'âge pour qu'un balayage concurrent ne le retire pas avant sa liaison.
+            index.touch(&entry.sha256)?;
             return Ok(Some(StoredObject { sha256: entry.sha256, rel_path: entry.rel_path, size: entry.size, from_cache: true }));
         }
     }

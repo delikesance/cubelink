@@ -80,7 +80,7 @@ pub async fn instances_description(state: State<'_, Arc<AppState>>, instance_id:
     state.instances_description(&instance_id).await
 }
 
-/// Cherche l'illustration du modpack et l'applique. `auto` : recherche silencieuse de l'accueil (nom identique seulement).
+/// Cherche l'illustration du modpack et l'applique. Si l'instance a une origine (`Instance.pack`), c'est ce projet exact qui est utilisé, sans recherche par nom (et sans repli par nom en cas d'échec réseau). Sinon, `auto` : recherche silencieuse de l'accueil (nom identique seulement).
 #[tauri::command(rename_all = "snake_case")]
 #[specta::specta(rename_all = "snake_case")]
 pub async fn instances_art_lookup(state: State<'_, Arc<AppState>>, instance_id: String, auto: Option<bool>) -> Result<Instance, String> {

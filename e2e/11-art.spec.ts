@@ -29,7 +29,7 @@ const test = base.extend<{ appOptions: AppOptions }>({
 
 const shot = (page: import('@playwright/test').Page, name: string) => page.screenshot({ path: path.join(OUT, `${name}.png`) });
 
-interface Inst { id: string; name: string; art?: { color: string | null; icon: string | null; screenshots: string[]; author: string; source: string; project_id: string } | null }
+interface Inst { id: string; name: string; pack?: { source: string; project_id: string; version_id: string } | null; art?: { color: string | null; icon: string | null; screenshots: string[]; author: string; source: string; project_id: string } | null }
 
 test('Illustrations : recherche auto, image locale, installation Parcourir, galerie, captures', async ({ appA }) => {
   const page = appA.page;
@@ -117,6 +117,19 @@ test('Illustrations : recherche auto, image locale, installation Parcourir, gale
   await page.evaluate(() => { window.location.hash = '#/main'; });
   await waitForRoute(page, 'main');
   await shot(page, 'home-installed-modpack');
+  // l'origine du modpack est enregistree dans instance.json (projet exact et version telechargee)
+  const lith = (await invoke<Inst[]>(page, 'instances_list')).find((i) => /Lithium/.test(i.name))!;
+  expect(lith.pack).toEqual({ source: 'modrinth', project_id: 'modpack-1', version_id: 'modpack-1-v1' });
+  const lithJson = JSON.parse(fs.readFileSync(path.join(host.dir, '..', lith.id, 'instance.json'), 'utf8'));
+  expect(lithJson.pack).toEqual({ source: 'modrinth', project_id: 'modpack-1', version_id: 'modpack-1-v1' });
+
+  // --- import manuel d'un .mrpack du catalogue : reconnu par son SHA-1, origine et art du projet exact ---
+  const manualDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cubelink-mrpack-'));
+  const manualFile = path.join(manualDir, 'pack-manuel.mrpack');
+  fs.writeFileSync(manualFile, Buffer.from(await (await fetch(`${fakeBase}/files/modpack-5-1.0.0.mrpack`)).arrayBuffer()));
+  const imported = await invoke<Inst>(page, 'instances_import_mrpack', { path: manualFile, name: null, minecraft: null, loader: null, ram_mb: null });
+  expect(imported.pack).toEqual({ source: 'modrinth', project_id: 'modpack-5', version_id: 'modpack-5-v1' });
+  fs.rmSync(manualDir, { recursive: true, force: true });
 
   // --- captures a toutes les tailles ---
   for (const [w, h] of [[960, 600], [1440, 900], [1920, 1080], [2560, 1440]] as const) {

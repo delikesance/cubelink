@@ -10,7 +10,7 @@ use core_lib::launch_run::{self, LaunchEvent, LaunchPhase, LaunchStateEvent};
 use core_lib::mojang::libraries::{Arch, Os};
 use core_lib::mojang::versions::release_ids;
 use core_lib::mrpack::{self, ImportOptions, PackKind, PlainSpec};
-use core_lib::types::{Instance, Loader, LoaderSpec, Profile};
+use core_lib::types::{Instance, Loader, LoaderSpec, PackOrigin, Profile};
 use tauri::State;
 
 use crate::error::{sanitize, user_msg};
@@ -348,7 +348,7 @@ impl AppState {
         loader: Option<LoaderSpec>,
         ram_mb: Option<u32>,
     ) -> Result<Instance, String> {
-        let (inst, missing) = self.import_pack_file(path, name, minecraft, loader, ram_mb, None).await?;
+        let (inst, missing) = self.import_pack_file(path, name, minecraft, loader, ram_mb, None, None).await?;
         if !missing.is_empty() {
             self.emit_event("import://warning", &serde_json::json!({ "missing": missing }));
         }
@@ -356,6 +356,11 @@ impl AppState {
     }
 
     /// Cœur de l'import : renvoie l'instance et les mods CurseForge introuvables (sans émettre d'événement).
+    ///
+    /// `origin` : projet et version du catalogue quand l'appelant les connaît (installation depuis Parcourir).
+    /// Sans `origin`, un `.mrpack` est reconnu par son empreinte SHA-1 auprès de Modrinth (meilleur effort :
+    /// hors ligne, pack modifié ou non publié, l'import réussit quand même, sans origine).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn import_pack_file(
         &self,
         path: &str,
@@ -364,6 +369,7 @@ impl AppState {
         loader: Option<LoaderSpec>,
         ram_mb: Option<u32>,
         progress: Option<core_lib::mrpack::FilesProgress>,
+        origin: Option<PackOrigin>,
     ) -> Result<(Instance, Vec<String>), String> {
         let file = validate_mrpack_path(path)?;
         // Sans choix : « Par défaut » (la valeur globale, lue à chaque lancement).
@@ -384,6 +390,7 @@ impl AppState {
                 .map_err(|_| "import interrompu".to_string())?
                 .map_err(|e| user_msg(&e))?
         };
+        let hash_target = (origin.is_none() && kind == PackKind::Modrinth).then(|| file.clone());
         let (instances, index, store_root) = (self.instances.clone(), self.store.clone(), self.paths.store.clone());
         let cancel = Arc::new(AtomicBool::new(false));
         // Les futurs d'import ne sont pas prouvés `Send` par rustc : on les exécute sur un thread dédié.
@@ -425,7 +432,27 @@ impl AppState {
         let inst = result.map_err(|_| "import interrompu".to_string())?.map_err(|e| user_msg(&e))?;
         // Les mods sont déjà installés : un échec de préparation du jeu ne doit pas les effacer.
         self.prepare_game_best_effort(&inst).await;
+        let inst = self.attach_pack_origin(&crate::commands_browse::providers(), inst, origin, hash_target).await;
         Ok((inst, missing))
+    }
+
+    /// Enregistre l'origine du modpack sur l'instance importée : celle de l'appelant si elle est connue, sinon
+    /// (`.mrpack` local) celle que Modrinth reconnaît à l'empreinte du fichier. Meilleur effort : sans origine ou en cas
+    /// d'échec, l'instance est rendue telle quelle.
+    async fn attach_pack_origin(&self, p: &core_lib::browse::Providers, inst: Instance, origin: Option<PackOrigin>, hash_target: Option<PathBuf>) -> Instance {
+        let origin = match (origin, hash_target) {
+            (Some(o), _) => Some(o),
+            (None, Some(f)) => core_lib::browse::resolve_pack_origin(p, &f).await,
+            (None, None) => None,
+        };
+        let Some(o) = origin else { return inst };
+        match self.instances.set_pack(&inst.id, Some(o)) {
+            Ok(updated) => updated,
+            Err(e) => {
+                eprintln!("[Cubelink] origine du modpack non enregistrée pour {} : {e}", inst.id);
+                inst
+            }
+        }
     }
 
     pub async fn minecraft_versions(&self) -> Result<Vec<String>, String> {
@@ -780,7 +807,7 @@ pub async fn instances_create(
     state.instances_create(name, minecraft, loader, ram_mb).await
 }
 
-/// Importe un .mrpack, un zip CurseForge ou un zip brut (les champs facultatifs ne servent qu'au zip brut). Avertissements par `import://warning`. La préparation du jeu qui suit l'import est « au mieux » : progression `import://progress` ; si elle échoue, l'instance et ses mods sont conservés et `import://deferred` l'annonce (le jeu sera téléchargé au premier lancement). Seule une erreur d'import elle-même renvoie une erreur.
+/// Importe un .mrpack, un zip CurseForge ou un zip brut (les champs facultatifs ne servent qu'au zip brut). Avertissements par `import://warning`. La préparation du jeu qui suit l'import est « au mieux » : progression `import://progress` ; si elle échoue, l'instance et ses mods sont conservés et `import://deferred` l'annonce (le jeu sera téléchargé au premier lancement). Seule une erreur d'import elle-même renvoie une erreur. Un `.mrpack` est reconnu auprès de Modrinth par son SHA-1 (meilleur effort, borné à 20 s, silencieux hors ligne) : s'il est connu, `Instance.pack` reçoit son projet et sa version, sinon `pack` reste absent et l'import réussit quand même.
 #[tauri::command(rename_all = "snake_case")]
 #[specta::specta(rename_all = "snake_case")]
 pub async fn instances_import_mrpack(
@@ -812,6 +839,49 @@ pub async fn minecraft_versions(state: State<'_, Arc<AppState>>) -> Result<Vec<S
 mod tests {
     use super::*;
     use crate::state::test_support::test_state;
+
+    #[tokio::test]
+    async fn attach_pack_origin_known_hash_unknown_and_explicit() {
+        use core_lib::browse::Providers;
+        use core_lib::providers::curseforge_api::CfApi;
+        use core_lib::providers::modrinth_api::ModrinthClient;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let d = tempfile::tempdir().unwrap();
+        let (state, _ev) = test_state(d.path());
+        let mr = MockServer::start().await;
+        let cf = MockServer::start().await;
+        let p = Providers { modrinth: ModrinthClient::with_base_url(format!("{}/v2", mr.uri()), "test"), cf: CfApi::with_base(cf.uri(), "k"), allow_loopback: true };
+        let spec = LoaderSpec { loader: Loader::Fabric, version: "0.1".into() };
+        let file = d.path().join("pack.mrpack");
+        std::fs::write(&file, b"un mrpack").unwrap();
+        let sha1 = core_lib::unknown_mods::sha1_hex(b"un mrpack");
+        Mock::given(method("GET"))
+            .and(path(format!("/v2/version_file/{sha1}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "VER1", "project_id": "PROJ1", "version_number": "1.2", "files": [], "dependencies": []})))
+            .mount(&mr)
+            .await;
+        // 1. .mrpack local reconnu par son empreinte : origine écrite dans l'instance et dans instance.json.
+        let a = state.instances.create("A", "1.21.1", spec.clone(), 2048).unwrap();
+        let a = state.attach_pack_origin(&p, a, None, Some(file.clone())).await;
+        let want = PackOrigin { source: "modrinth".into(), project_id: "PROJ1".into(), version_id: "VER1".into() };
+        assert_eq!(a.pack, Some(want.clone()));
+        let raw = std::fs::read_to_string(d.path().join("instances").join(&a.id).join("instance.json")).unwrap();
+        assert!(raw.contains("PROJ1") && raw.contains("VER1"), "{raw}");
+        assert_eq!(state.instances.get(&a.id).unwrap().pack, Some(want));
+        // 2. Hash inconnu (404 par défaut du faux serveur) : pas d'origine, pas d'erreur.
+        std::fs::write(&file, b"pack modifie").unwrap();
+        let b = state.instances.create("B", "1.21.1", spec.clone(), 2048).unwrap();
+        let b = state.attach_pack_origin(&p, b, None, Some(file.clone())).await;
+        assert_eq!(b.pack, None);
+        assert_eq!(state.instances.get(&b.id).unwrap().pack, None);
+        // 3. Origine fournie (Parcourir) : posée telle quelle, sans interroger Modrinth (aucune cible de hash).
+        let c = state.instances.create("C", "1.21.1", spec, 2048).unwrap();
+        let given = PackOrigin { source: "curseforge".into(), project_id: "50".into(), version_id: "7".into() };
+        let c = state.attach_pack_origin(&p, c, Some(given.clone()), None).await;
+        assert_eq!(c.pack, Some(given));
+    }
 
     #[test]
     fn agent_supporte_selon_version_java_et_loader() {

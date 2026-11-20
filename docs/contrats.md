@@ -114,7 +114,7 @@ Arguments : clés JSON envoyées à Tauri (snake_case) et leur type TypeScript. 
 | `stage_supported` | — | `boolean` | La zone de jeu integree existe sur cette plateforme (l'interface n'affiche le reglage « Jeu integre » que dans ce cas). |
 | `update_state` | — | `UpdateState_Serialize` | État de la mise à jour automatique du launcher. |
 | `update_check` | — | `UpdateState_Serialize` | Vérifie s'il existe une mise à jour ; si oui, le téléchargement démarre en arrière-plan. |
-| `update_install` | — | — | Redémarre et installe la mise à jour téléchargée (refusé si une partie est en cours). |
+| `update_install` | — | — | Redémarre et installe la mise à jour téléchargée. Refusé si une partie, un téléchargement de monde ou un partage est en cours ; arrête proprement les serveurs de groupe actifs avant le redémarrage. |
 <!-- commandes : fin -->
 
 ### Précisions

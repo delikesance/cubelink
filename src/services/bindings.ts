@@ -222,7 +222,10 @@ export const commands = {
 	updateState: (options?: InvokeOptions) => __TAURI_INVOKE<UpdateState_Serialize>("update_state", undefined, options),
 	/**  Vérifie s'il existe une mise à jour ; si oui, le téléchargement démarre en arrière-plan. */
 	updateCheck: (options?: InvokeOptions) => __TAURI_INVOKE<UpdateState_Serialize>("update_check", undefined, options),
-	/**  Redémarre et installe la mise à jour téléchargée (refusé si une partie est en cours). */
+	/**
+	 *  Redémarre et installe la mise à jour téléchargée. Refusé si une partie, un téléchargement de monde ou un partage est en
+	 *  cours ; arrête proprement les serveurs de groupe actifs avant le redémarrage.
+	 */
 	updateInstall: (options?: InvokeOptions) => __TAURI_INVOKE<null>("update_install", undefined, options),
 };
 

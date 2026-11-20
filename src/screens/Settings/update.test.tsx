@@ -72,4 +72,22 @@ describe("bannière de mise à jour", () => {
     fireEvent.click(screen.getByRole("button", { name: "Plus tard" }));
     expect(screen.queryByRole("region", { name: "Mise à jour" })).toBeNull();
   });
+  it("serveur de groupe actif : la bannière prévient de l'arrêt propre, grise le bouton puis affiche le refus", async () => {
+    const fake = createFakeServices({ tickMs: 0 });
+    render(<Shell services={fake} />);
+    await waitFor(() => expect(screen.getByRole("main")).toBeTruthy());
+    act(() => fake.emitUpdateState({ phase: "ready", version: "0.2.0" }));
+    const banner = () => screen.getByRole("region", { name: "Mise à jour" });
+    expect(banner().textContent).toMatch(/Rien n'est perdu/);
+    expect(banner().textContent).not.toMatch(/serveur/i);
+    act(() => { fake.seedHearth({ id: "g1", name: "Les copains", state: "hosting" }); });
+    await waitFor(() => expect(banner().textContent).toMatch(/serveur de ton groupe sera arrêté proprement/));
+    vi.spyOn(fake, "updateInstall").mockRejectedValueOnce("Un téléchargement de monde est en cours : attends sa fin.");
+    const btn = screen.getByRole("button", { name: "Redémarrer et installer" });
+    fireEvent.click(btn);
+    expect(btn.getAttribute("aria-busy")).toBe("true");
+    expect(banner().textContent).toMatch(/Arrêt du serveur de groupe/);
+    await waitFor(() => expect(banner().textContent).toMatch(/Un téléchargement de monde est en cours/));
+    expect(btn.getAttribute("aria-busy")).toBeNull();
+  });
 });

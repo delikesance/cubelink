@@ -835,6 +835,71 @@ async fn bail_concurrent_serveur_occupe_continue() {
     }
 }
 
+/// « Redémarrer et installer » avec un serveur de groupe actif (#108) : le serveur est arrêté proprement AVANT
+/// l'installation (sous Windows l'installeur ferme le processus) : monde publié, bail relâché, partage
+/// fermé. Son partage ne compte pas comme un partage à fermer à la main. Un second appel ne refait rien.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn mise_a_jour_arrete_le_serveur_de_groupe_et_publie_le_monde() {
+    let (peers, g, _lease) = alice_heberge_et_bob_a_un_bail_plus_fort(true).await;
+    let (a, b) = (&peers[0], &peers[1]);
+    let before = a.rt().heads_of(&g).unwrap().len();
+    assert!(a.node.be.shared_instance().is_some(), "le serveur partage son monde");
+    // Tant que le joueur est dans la partie, l'installation est refusée ; le jeu fermé, le serveur reste en arrière-plan.
+    assert!(a.node.st.update_blocker().is_some_and(|m| m.contains("partie est en cours")));
+    *lock(&a.node.st.game) = None;
+    assert_eq!(a.node.st.update_blocker(), None, "un serveur de groupe seul ne bloque pas");
+    a.node.st.prepare_update_install().await.unwrap();
+    assert!(a.rt().active(&g).is_none(), "serveur arrêté");
+    assert!(a.node.be.shared_instance().is_none(), "partage fermé");
+    assert_eq!(a.runner.calls.lock().unwrap().clone(), ["start", "stop"], "un arrêt propre, une seule fois");
+    wait_for("bail relâché chez Bob", 20, || b.rt().lease_of_holder(&g, &a.key()).is_none()).await;
+    a.rt().probe_all().await;
+    assert!(a.rt().heads_of(&g).unwrap().len() > before, "la session est publiée");
+    // Idempotent : rien de plus à arrêter.
+    a.node.st.prepare_update_install().await.unwrap();
+    assert_eq!(a.runner.calls.lock().unwrap().iter().filter(|c| **c == "stop").count(), 1);
+    for p in &peers {
+        p.stop().await;
+    }
+}
+
+/// Une partie ou un téléchargement de monde en cours : l'installation est refusée AVANT de toucher au serveur de groupe.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn mise_a_jour_refusee_sans_rien_arreter_pendant_une_partie_ou_un_transfert() {
+    let (peers, g, id) = group_of(&["Alice", "Bob"]).await;
+    let a = &peers[0];
+    a.node.st.hearth_play(&id).await.unwrap();
+    assert!(a.rt().active(&g).is_some());
+    *lock(&a.node.st.game) = Some(a.instance.clone());
+    let e = a.node.st.prepare_update_install().await.unwrap_err();
+    assert!(e.contains("partie est en cours"), "{e}");
+    *lock(&a.node.st.game) = None;
+    *lock(&a.node.st.join) = Some(cubelink_app::state::JoinSession { control: Arc::default(), last: Arc::default() });
+    let e = a.node.st.prepare_update_install().await.unwrap_err();
+    assert!(e.contains("téléchargement de monde"), "{e}");
+    assert!(a.rt().active(&g).is_some(), "le serveur n'a pas été arrêté");
+    assert!(!a.runner.calls.lock().unwrap().contains(&"stop"));
+    *lock(&a.node.st.join) = None;
+    a.node.st.prepare_update_install().await.unwrap();
+    assert!(a.rt().active(&g).is_none());
+    for p in &peers {
+        p.stop().await;
+    }
+}
+
+/// Un partage ouvert à la main (hors serveur de groupe) : l'installation est refusée tant qu'il dure.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn mise_a_jour_refusee_pendant_un_partage_manuel() {
+    let a = Peer::start("Alice").await;
+    assert_eq!(a.node.st.update_blocker(), None);
+    a.node.st.host_start_sharing(&a.instance, 0).await.unwrap();
+    let e = a.node.st.prepare_update_install().await.unwrap_err();
+    assert!(e.contains("partages"), "{e}");
+    a.node.st.host_stop_sharing();
+    a.node.st.prepare_update_install().await.unwrap();
+    a.stop().await;
+}
+
 /// Interrupteur de sécurité : coupé, les commandes refusent avec un message clair, la lecture d'état reste possible, et le
 /// protocole `cubelink/hearth/1` ne reconnaît plus ni amis ni membres.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

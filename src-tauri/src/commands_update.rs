@@ -3,7 +3,8 @@
 //! Au démarrage (après quelques secondes) puis toutes les 6 h, on cherche une version plus récente ; si elle existe,
 //! elle est TÉLÉCHARGÉE en arrière-plan et l'état passe à `ready` : l'utilisateur n'a plus qu'à cliquer « Redémarrer
 //! et installer ». Le bouton « Chercher une mise à jour » (`update_check`) fait la même chose à la demande.
-//! L'installation est refusée tant qu'une partie est en cours. État publié par `update://state`, relu par `update_state`.
+//! L'installation est refusée tant qu'une partie, un téléchargement de monde ou un partage est en cours ; un serveur de
+//! groupe actif est arrêté proprement (monde publié, bail relâché) juste avant. État publié par `update://state`, relu par `update_state`.
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -121,6 +122,8 @@ pub struct UpdateCtl {
     update: Mutex<Option<Update>>,
     bytes: Mutex<Option<Vec<u8>>>,
     busy: AtomicBool,
+    /// Une installation est en cours (l'arrêt d'un serveur de groupe peut durer) : un second clic est refusé.
+    installing: AtomicBool,
     /// Mode test : aucune requête réseau, l'état reste `idle` / `up_to_date`.
     disabled: bool,
     /// Paquet géré ailleurs : on vérifie, on ne télécharge pas.
@@ -129,7 +132,7 @@ pub struct UpdateCtl {
 
 impl UpdateCtl {
     pub fn new(current: String, disabled: bool, packaged: Option<Packager>) -> Self {
-        Self { state: Mutex::new(UpdateState::new(current)), update: Mutex::new(None), bytes: Mutex::new(None), busy: AtomicBool::new(false), disabled, packaged }
+        Self { state: Mutex::new(UpdateState::new(current)), update: Mutex::new(None), bytes: Mutex::new(None), busy: AtomicBool::new(false), installing: AtomicBool::new(false), disabled, packaged }
     }
 
     fn snapshot(&self) -> UpdateState {
@@ -297,13 +300,59 @@ pub async fn update_check(app: AppHandle, ctl: State<'_, Arc<UpdateCtl>>) -> Res
     Ok(check(&app, ctl.inner(), true).await)
 }
 
-/// Redémarre et installe la mise à jour téléchargée (refusé si une partie est en cours).
+/// Libère `installing` à la sortie de `update_install` (succès ou refus).
+struct InstallingGuard<'a>(&'a AtomicBool);
+
+impl Drop for InstallingGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+impl AppState {
+    /// Ce qui interdit d'installer maintenant (message affichable), `None` si rien ne s'y oppose. Un partage lié à un serveur
+    /// de groupe actif ne compte pas : il est fermé avec le serveur par `hearth_stop_all`.
+    pub fn update_blocker(&self) -> Option<&'static str> {
+        if lock(&self.game).is_some() {
+            return Some("Une partie est en cours : ferme Minecraft avant d'installer la mise à jour.");
+        }
+        if lock(&self.join).is_some() {
+            return Some("Un téléchargement de monde est en cours : attends sa fin ou annule-le avant d'installer la mise à jour.");
+        }
+        if self.hearth.active_groups().is_empty() && self.host_state().is_some() {
+            return Some("Tu partages ta partie : arrête le partage avant d'installer la mise à jour.");
+        }
+        None
+    }
+
+    /// Avant `update.install` (sous Windows l'installeur ferme le processus) : refuse si `update_blocker`, puis arrête
+    /// proprement les serveurs de groupe actifs (monde publié, bail relâché, partage fermé), comme « Quitter ».
+    pub async fn prepare_update_install(self: &Arc<Self>) -> Result<(), String> {
+        if let Some(m) = self.update_blocker() {
+            return Err(m.into());
+        }
+        self.hearth_stop_all().await;
+        // Un jeu ou un transfert a pu démarrer pendant l'arrêt (qui peut durer).
+        match self.update_blocker() {
+            Some(m) => Err(m.into()),
+            None => Ok(()),
+        }
+    }
+}
+
+/// Redémarre et installe la mise à jour téléchargée. Refusé si une partie, un téléchargement de monde ou un partage est en
+/// cours ; arrête proprement les serveurs de groupe actifs avant le redémarrage.
 #[tauri::command(rename_all = "snake_case")]
 #[specta::specta(rename_all = "snake_case")]
 pub async fn update_install(app: AppHandle, ctl: State<'_, Arc<UpdateCtl>>, st: State<'_, Arc<AppState>>) -> Result<(), String> {
-    if lock(&st.game).is_some() {
-        return Err("Une partie est en cours : ferme Minecraft avant d'installer la mise à jour.".into());
+    if lock(&ctl.update).is_none() || lock(&ctl.bytes).is_none() {
+        return Err("Aucune mise à jour prête à installer.".into());
     }
+    if ctl.installing.swap(true, Ordering::SeqCst) {
+        return Err("L'installation est déjà en cours.".into());
+    }
+    let _installing = InstallingGuard(&ctl.installing);
+    st.prepare_update_install().await?;
     let (Some(update), Some(bytes)) = (lock(&ctl.update).take(), lock(&ctl.bytes).take()) else {
         return Err("Aucune mise à jour prête à installer.".into());
     };

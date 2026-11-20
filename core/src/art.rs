@@ -77,9 +77,10 @@ fn client() -> &'static reqwest::Client {
     })
 }
 
-/// Écriture atomique : fichier temporaire puis renommage.
+/// Écriture atomique : fichier temporaire puis renommage. Le temporaire est unique : deux écritures simultanées du
+/// même fichier (miniature demandée par deux composants à la fois) ne se marchent pas dessus.
 fn write_atomic(dir: &Path, name: &str, bytes: &[u8]) -> Result<()> {
-    let tmp = dir.join(format!("{name}.tmp"));
+    let tmp = dir.join(format!("{name}.{}.tmp", uuid::Uuid::new_v4().simple()));
     let res = std::fs::write(&tmp, bytes).and_then(|_| std::fs::rename(&tmp, dir.join(name)));
     if let Err(e) = res {
         let _ = std::fs::remove_file(&tmp);
@@ -218,8 +219,9 @@ pub async fn fetch_art(p: &Providers, source: BrowseSource, project_id: &str, st
 /// en cours sont abandonnés et seules les captures complètes sont gardées.
 async fn download_screenshots(urls: &[String], allow_loopback: bool, stage: &Path, deadline: Instant) -> Vec<String> {
     // Le nom (`shot-<rang>`) est fixé d'avance : pas de collision entre téléchargements parallèles.
-    let mut stream = futures_util::stream::iter(urls.iter().take(MAX_SCREENSHOTS).enumerate())
-        .map(|(i, url)| async move { (i, download_image(url, allow_loopback, stage, &format!("shot-{}", i + 1)).await) })
+    let mut stream = futures_util::stream::iter(urls.iter().take(MAX_SCREENSHOTS).cloned().enumerate())
+        // URL possédée : un `&String` dans le future le rendait non `Send` pour le compilateur (commande Tauri async).
+        .map(|(i, url)| async move { (i, download_image(&url, allow_loopback, stage, &format!("shot-{}", i + 1)).await) })
         .buffer_unordered(SHOT_PARALLELISM);
     let mut got: Vec<(usize, String)> = Vec::new();
     let mut take = |(i, res): (usize, Result<String>)| match res {
@@ -531,7 +533,8 @@ pub fn image_data_url_sized(store: &InstanceStore, instance_id: &str, file: &str
             if let Ok(rd) = std::fs::read_dir(&thumbs) {
                 for e in rd.flatten() {
                     let n = e.file_name().to_string_lossy().into_owned();
-                    if n.starts_with(&prefix) && n != format!("{cached}.jpg") && n != format!("{cached}.png") {
+                    // Les `.tmp` sont des écritures en cours d'un appel concurrent : on n'y touche pas.
+                    if n.starts_with(&prefix) && !n.ends_with(".tmp") && n != format!("{cached}.jpg") && n != format!("{cached}.png") {
                         let _ = std::fs::remove_file(e.path());
                     }
                 }
@@ -1256,6 +1259,26 @@ mod tests {
         let p = dir.join(name);
         std::fs::write(&p, bytes).unwrap();
         set_custom_image(s, id, &p.display().to_string(), role).unwrap();
+    }
+
+    /// Les commandes tournent en parallèle (`spawn_blocking`) : la même miniature demandée par plusieurs threads à la
+    /// fois doit réussir partout, ne laisser qu'un fichier et aucun `.tmp`.
+    #[test]
+    fn thumbnail_concurrent_requests_leave_one_file() {
+        let (t, s, i) = store();
+        custom(&s, &i.id, t.path(), "big.jpg", &encode_img(1600, 900, false, image::ImageFormat::Jpeg), "icon");
+        let urls: Vec<String> = std::thread::scope(|sc| {
+            let hs: Vec<_> = (0..8).map(|_| sc.spawn(|| image_data_url(&s, &i.id, "icon.jpg").unwrap())).collect();
+            hs.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        assert!(urls.iter().all(|u| u.starts_with("data:image/jpeg;base64,")));
+        let names: Vec<String> = std::fs::read_dir(s.art_dir(&i.id).unwrap().join(".thumbs"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names.len(), 1, "une seule miniature, aucun .tmp : {names:?}");
+        assert!(!names[0].ends_with(".tmp"));
     }
 
     #[test]

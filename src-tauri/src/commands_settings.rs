@@ -74,10 +74,6 @@ fn sanitize(mut s: Settings, test_mode: bool) -> (Settings, Vec<String>) {
             s.java_path = None;
         }
     }
-    if s.relay_only && !s.allow_relay {
-        w.push("« toujours le relais » sans relais autorisé : relais seul désactivé".to_string());
-        s.relay_only = false;
-    }
     (s, w)
 }
 
@@ -316,7 +312,7 @@ mod tests {
 
     fn verifie_prives(s: &Settings) {
         assert_eq!(s.trust_default, TrustLevel::Always);
-        assert!(!s.allow_relay && !s.relay_only && !s.share_mods && !s.discovery && !s.lan_auto);
+        assert!(!s.share_mods && !s.lan_auto);
         assert!(!s.overlay_enabled && !s.embedded_game && !s.start_with_os && s.close_on_launch);
     }
 
@@ -388,23 +384,13 @@ mod tests {
     }
 
     #[test]
-    fn relais_seul_sans_relais_coupe_seulement_relais_seul() {
-        let dir = tempfile::tempdir().unwrap();
-        let json = r#"{"language":"fr","default_ram_mb":4096,"java_path":null,"trust_default":"ask","allow_relay":false,"close_on_launch":false,"relay_only":true,"share_mods":true,"discovery":false}"#;
-        let s = load_settings(&ecrire(dir.path(), json));
-        assert!(!s.relay_only);
-        assert!(!s.allow_relay, "l'interdiction explicite du relais est respectée");
-        assert!(!s.discovery);
-    }
-
-    #[test]
     fn champ_de_mauvais_type_ne_reinitialise_que_ce_champ() {
         let dir = tempfile::tempdir().unwrap();
         let json = r#"{"language":"fr","default_ram_mb":"abc","java_path":null,"trust_default":"inconnu","allow_relay":false,"close_on_launch":false,"relay_only":false,"share_mods":true,"discovery":false,"start_with_os":false}"#;
         let s = load_settings(&ecrire(dir.path(), json));
         assert_eq!(s.default_ram_mb, 4096);
         assert_eq!(s.trust_default, TrustLevel::Ask);
-        assert!(!s.discovery && !s.start_with_os && !s.allow_relay);
+        assert!(!s.start_with_os);
     }
 
     #[test]
@@ -421,7 +407,7 @@ mod tests {
         ecrire(dir.path(), &json);
         let (st, _) = test_state(dir.path());
         let s = st.settings_get();
-        assert!(!s.discovery && !s.start_with_os);
+        assert!(!s.start_with_os);
         assert_eq!(s.java_path, None);
         // Ce que renvoie le front après ouverture des Réglages s'enregistre sans erreur.
         assert_eq!(st.settings_set(s.clone()).unwrap(), s);

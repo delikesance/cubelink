@@ -40,7 +40,10 @@ test('serveur de groupe : A le cree depuis un monde, B recoit l\'invitation et l
   // Creation.
   const card = await invoke<Card>(appA.page, 'hearth_create', { name: 'Les copains', instance_id: host.id, world: 'Monde Hearth', members: [keyB] });
   expect(card).toMatchObject({ name: 'Les copains', is_creator: true, can_host: true, members_total: 2 });
-  expect(card.state).toBe('idle');
+  // L'etat de la carte vient du cache des sondages (HearthRuntime::decision) : tant qu'aucun autre membre n'a repondu a une
+  // ronde, un groupe a plusieurs membres est « blocked » (« Aucun membre en ligne », regle « pas de jeu hors ligne »).
+  // B n'a meme pas encore accepte l'invitation ici : `idle` n'est attendu qu'une fois B sonde en ligne (plus bas).
+  expect(['idle', 'blocked']).toContain(card.state);
   const detail = await invoke<Detail>(appA.page, 'hearth_detail', { id: card.id });
   expect(detail.members.map((m) => m.name).sort()).toHaveLength(2);
   expect(detail.versions).toHaveLength(1);
@@ -68,6 +71,9 @@ test('serveur de groupe : A le cree depuis un monde, B recoit l\'invitation et l
   // B n'a pas le modpack : la carte le dit, au lieu de proposer Jouer.
   const cardB = await until('carte du groupe chez B', async () => (await invoke<Card[]>(appB.page, 'hearth_list')).find((c) => c.id === card.id));
   expect(cardB).toMatchObject({ is_creator: false });
+
+  // A : B a accepte, la sonde suivante le voit en ligne : la carte passe de « blocked » a « idle » (Personne ne joue).
+  await until('carte du groupe chez A : B sonde en ligne', async () => (await invoke<Card[]>(appA.page, 'hearth_list')).find((c) => c.id === card.id)?.state === 'idle', 90_000);
 
   // A : carte sur l'accueil et page du serveur.
   await appA.page.reload();

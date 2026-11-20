@@ -1,6 +1,7 @@
-# Vérifications à chaque pull request et à chaque push vers `canary` et `main` (aucune release ici).
+# Vérifications à chaque pull request et à chaque push vers `canary` et `main`.
 # Les jobs tournent EN PARALLÈLE (le front est rapide, le Rust est la partie longue).
-# Sur un push vers `canary`, la pré-version canary (canary.yml) n'est publiée que si les vérifications passent.
+# Sur un push vers `canary`, la pré-version canary (canary.yml) n'est publiée que si les vérifications passent ;
+# sur un push vers `main`, c'est la release (release.yml) : rien n'est publié tant qu'une vérification est rouge.
 # Actions épinglées par SHA (le commentaire donne la version) : dependabot.yml les tient à jour.
 name: ci
 
@@ -189,8 +190,10 @@ jobs:
           command: check advisories
 
   # Pré-version canary : seulement après un push sur `canary` et si les vérifications ont réussi.
-  # `e2e-windows` n'en fait pas (encore) partie, par décision du mainteneur (2026-11-14) : 19 scénarios ne suivent plus
-  # l'interface actuelle. Le job tourne toujours ; le remettre dans `needs` dès que la suite repasse au vert.
+  # `e2e-windows` n'en fait pas (encore) partie, par décision du mainteneur (2026-11-14) : des scénarios ne suivaient plus
+  # l'interface actuelle (ticket #66, specs remises à jour ; pas de nombre en dur, `playwright test --list` donne le compte).
+  # Le job tourne toujours ; le remettre dans `needs` dès qu'un run Windows complet est vert (ici et dans `release`, qui a la
+  # même liste), sur confirmation du mainteneur.
   canary:
     needs: [front, agent-lan-java8, clippy-windows, tests-windows, clippy-linux, tests-linux, deny]
     if: github.event_name == 'push' && github.ref == 'refs/heads/canary'
@@ -200,3 +203,20 @@ jobs:
     secrets:
       TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
       TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+  # Release : seulement après un push sur `main` et si les vérifications ont réussi (mêmes jobs que canary, mêmes
+  # exceptions : `e2e-windows` et `advisories` ne bloquent pas). release.yml n'a plus de déclencheur `push` propre.
+  # Le job appelant doit porter `contents: write` : un workflow appelé ne peut pas élargir les permissions de l'appelant.
+  release:
+    needs: [front, agent-lan-java8, clippy-windows, tests-windows, clippy-linux, tests-linux, deny]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release.yml
+    with:
+      publish: true
+    secrets:
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+      CUBELINK_CF_API_KEY: ${{ secrets.CUBELINK_CF_API_KEY }}
+      CUBELINK_MS_CLIENT_ID: ${{ secrets.CUBELINK_MS_CLIENT_ID }}

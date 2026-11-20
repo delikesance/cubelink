@@ -7,6 +7,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { routeOf } from './routes';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const ROOT = path.resolve(HERE, '..', '..');
@@ -193,7 +194,8 @@ export async function testState(page: Page): Promise<any> { return invoke(page, 
 
 /** Attend que le routeur (hash) affiche la route : `<main data-route=...>`. */
 export async function waitForRoute(page: Page, route: string, timeout = 15_000): Promise<void> {
-  await page.waitForSelector(`main[data-route="${route}"]`, { timeout });
+  // `friends` est un alias (Paramètres > Amis) : voir harness/routes.ts.
+  await page.waitForSelector(`main[data-route="${routeOf(route).route}"]`, { timeout });
 }
 
 /** Connexion hors ligne via la commande (le mode test l'autorise), puis navigue vers `main` si demande. */

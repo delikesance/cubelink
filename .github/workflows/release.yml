@@ -1,20 +1,31 @@
-# Build + release automatiques : chaque merge dans `main` produit un nouveau tag `vMAJEUR.MINEUR.<run>` et une release GitHub
+# Build + release : chaque merge dans `main` produit un nouveau tag `vMAJEUR.MINEUR.<run>` et une release GitHub
 # avec l'installeur Windows (.msi), l'AppImage Linux, le paquet .rpm (Fedora) et latest.json (lu par l'updater du launcher).
+# Ce workflow n'est PAS déclenché par un push : `ci.yml` l'appelle (job `release`) sur un push vers `main`, une fois toutes
+# les vérifications réussies. Le n° de run du tag est donc celui du run `ci`. Une relance après publication échoue sur
+# « le tag existe déjà » (voulu : pas de double publication).
 # Flux de travail : les PR sont fusionnées dans `canary`, puis `canary` est fusionnée dans `main` (voir docs/release.md).
-# `workflow_dispatch` (depuis n'importe quelle branche) construit tout SANS publier, pour vérifier les builds.
+# `workflow_dispatch` (depuis n'importe quelle branche) construit tout SANS jamais publier, pour vérifier les builds.
 # Windows : .msi (updater) + paquet .msix à téléverser dans le Microsoft Store (qui le signe).
 name: release
 
 on:
-  push:
-    branches: [main]
-    paths-ignore: ['docs/**', '**/*.md', 'LICENSE']   # une simple doc ne produit pas de release
-  workflow_dispatch:
+  # Appelé par ci.yml (le filtre paths-ignore d'une simple doc s'y trouve : pas de ci, donc pas de release).
+  # Sans `secrets: inherit`, un workflow appelé ne reçoit que les secrets passés explicitement : on déclare les quatre.
+  workflow_call:
     inputs:
       publish:
         description: 'Publier la release (tag + fichiers) ; sinon build seul'
         type: boolean
         default: false
+    secrets:
+      TAURI_SIGNING_PRIVATE_KEY: { required: false }
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: { required: false }
+      CUBELINK_CF_API_KEY: { required: false }
+      CUBELINK_MS_CLIENT_ID: { required: false }
+  # Pas d'input `publish` sur workflow_dispatch : une publication manuelle contournerait les vérifications de ci et,
+  # avec le n° de run de ce workflow (compteur propre, petit), publierait un patch plus ancien que la dernière release
+  # (l'updater ne proposerait rien). Seul l'appel de ci.yml publie.
+  workflow_dispatch:
 
 concurrency:
   group: release
@@ -52,8 +63,13 @@ jobs:
           version=$(node scripts/release-version.mjs "$GITHUB_RUN_NUMBER")
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=v$version" >> "$GITHUB_OUTPUT"
-          if [ "$GITHUB_EVENT_NAME" = "push" ] || [ "${{ inputs.publish }}" = "true" ]; then publish=true; else publish=false; fi
+          # Dans un workflow appelé, github.event_name est celui de l'appelant (push) : on ne s'y fie pas, seul l'input décide.
+          if [ "$PUBLISH_INPUT" = "true" ]; then publish=true; else publish=false; fi
           echo "publish=$publish" >> "$GITHUB_OUTPUT"
+          # Jamais de release d'une branche non fusionnée dans main.
+          if [ "$publish" = "true" ] && [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::error::publication refusée hors de main (ref : $GITHUB_REF)"; exit 1
+          fi
           if [ "$publish" = "true" ] && git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
             echo "Le tag v$version existe déjà" >&2; exit 1
           fi
@@ -64,6 +80,7 @@ jobs:
             echo "::warning::secret CUBELINK_CF_API_KEY absent : build sans CurseForge"
           fi
         env:
+          PUBLISH_INPUT: ${{ inputs.publish }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           CUBELINK_CF_API_KEY: ${{ secrets.CUBELINK_CF_API_KEY }}
 

@@ -22,7 +22,7 @@ export async function gotoHash(app: App, hash: string, route: string): Promise<v
 /** Amitie A <-> B par commandes (B demande, A accepte). Renvoie les cles publiques. */
 export async function befriend(world: Pick<World, 'appA' | 'appB' | 'servers' | 'binary'>): Promise<{ keyA: string; keyB: string }> {
   const { appA: a, appB: b } = world;
-  await Promise.all([a.page.waitForSelector('main[data-route="login"]'), b.page.waitForSelector('main[data-route="login"]')]);
+  await Promise.all([a.page.waitForSelector('main[data-route="login"]', { timeout: 30_000 }), b.page.waitForSelector('main[data-route="login"]', { timeout: 30_000 })]);
   await loginOffline(a.page, NAME_A);
   await loginOffline(b.page, NAME_B);
   // Le code ne porte les adresses directes qu'une fois le point d'acces lie : on reessaie un court instant.

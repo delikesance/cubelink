@@ -1,19 +1,21 @@
 // Helpers E2E-4 (T7/T8/T9) : navigation, mesures DOM, arbre d'accessibilite CDP, contraste.
 import type { Page } from '@playwright/test';
 import { invoke, waitForRoute, loginOffline, makeHostInstance, type App } from '../harness/fixtures';
+import { ROUTE_ALIASES } from '../harness/routes';
 
 export type Screen = { id: string; hash: string; route: string; ready?: string };
 
 const NO_FRIEND = '0000000000000000000000000000000000000000000000000000000000000000';
 
-/** Ecrans testes. `ready` = selecteur CSS qui doit etre visible avant mesure. */
+/** Ecrans testes. `ready` = selecteur CSS qui doit etre visible avant mesure. Accueil et Amis viennent de harness/routes.ts
+ *  (l'ecran Amis est l'onglet Amis des Parametres : trois entrees, une seule page, pour garder les identifiants des mesures). */
 export const SCREENS: Screen[] = [
   { id: 'login', hash: '#/login', route: 'login', ready: 'button:has-text("Se connecter avec Microsoft")' },
-  { id: 'main', hash: '#/main', route: 'main', ready: '.home-play' },
+  { id: 'main', ...ROUTE_ALIASES.main },
   { id: 'create', hash: '#/create', route: 'create', ready: 'main h1' },
-  { id: 'friends-list', hash: '#/friends', route: 'friends', ready: '[role=tab]' },
-  { id: 'friends-requests', hash: '#/friends', route: 'friends', ready: '[role=tab]' },
-  { id: 'friends-add', hash: '#/friends', route: 'friends', ready: '[role=tab]' },
+  { id: 'friends-list', ...ROUTE_ALIASES.friends },
+  { id: 'friends-requests', ...ROUTE_ALIASES.friends },
+  { id: 'friends-add', ...ROUTE_ALIASES.friends },
   { id: 'join', hash: `#/join?friend=${NO_FRIEND}`, route: 'join', ready: 'main h1' },
   { id: 'install', hash: '#/install?friend=abcd', route: 'install', ready: '.inst-card' },
   { id: 'settings', hash: '#/settings', route: 'settings', ready: '[role=tablist]' },
@@ -34,7 +36,6 @@ export async function gotoScreen(page: Page, s: Screen): Promise<void> {
   await page.evaluate((h) => { window.location.hash = h; }, s.hash);
   await waitForRoute(page, s.route);
   if (s.ready) await page.locator(s.ready).first().waitFor({ state: 'visible', timeout: 15_000 });
-  if (s.id === 'friends-requests') await page.getByRole('tab', { name: /Demandes/ }).click();
   await page.waitForTimeout(300); // fin des transitions/chargements
 }
 

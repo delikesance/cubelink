@@ -101,7 +101,7 @@ test('2. multi-comptes hors ligne : formulaire libre, ajout, 2 clics barre de ti
   // Changer de compte via Reglages ("Utiliser").
   await card.getByRole('button', { name: 'Utiliser Alice_1' }).click();
   await expect.poll(async () => activeName(await accounts(app.page))).toBe('Alice_1');
-  await expect(card.locator('.acc-row[data-active] .name')).toHaveText('Alice_1');
+  await expect(card.locator('.acc-row[data-active] .acc-nm')).toHaveText('Alice_1');
 
   // Changer de compte via la barre de titre : 2 clics (ouvrir le menu, choisir).
   await expect(app.page.locator('.acc-trigger')).toContainText('Alice_1');

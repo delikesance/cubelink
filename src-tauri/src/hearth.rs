@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
@@ -360,16 +360,30 @@ struct Meta {
     groups: BTreeMap<String, GroupMeta>,
 }
 
+/// Écrit `data` dans `path` d'un coup : un fichier temporaire PROPRE À CET APPEL (deux écritures concurrentes ne se
+/// partagent jamais le même : sinon la première à renommer fait disparaître le temporaire de l'autre, « fichier
+/// introuvable »), puis un remplacement. Le temporaire est supprimé si l'écriture échoue.
 fn write_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
+    static SEQ: AtomicU64 = AtomicU64::new(0);
     if let Some(p) = path.parent() {
         std::fs::create_dir_all(p)?;
     }
-    let tmp = path.with_extension("tmp");
-    let mut f = std::fs::File::create(&tmp)?;
-    f.write_all(data)?;
-    f.sync_all()?;
-    std::fs::rename(&tmp, path)
+    let mut name = path.file_name().map(std::ffi::OsStr::to_os_string).unwrap_or_default();
+    name.push(format!(".{}-{}.tmp", std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed)));
+    let tmp = path.with_file_name(name);
+    let write = || -> std::io::Result<()> {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(data)?;
+        f.sync_all()?;
+        drop(f);
+        std::fs::rename(&tmp, path)
+    };
+    let r = write();
+    if r.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    r
 }
 
 /// Dernier état connu d'un membre.
@@ -508,6 +522,9 @@ pub struct HearthRuntime {
     /// Têtes inconnues qu'on a déjà tenté de rattraper auprès de chaque pair : le rattrapage complet n'est pas relancé à chaque `Hello`.
     unknown_tried: Mutex<UnknownMemo>,
     meta: Mutex<Meta>,
+    /// Sérialise les enregistrements de `meta.json` : l'instantané est pris sous ce verrou, donc le dernier écrit est
+    /// toujours le plus récent.
+    meta_io: Mutex<()>,
     invites: Mutex<Vec<PendingInvite>>,
     /// Invitations reçues (ami, secondes Unix) sur les dernières 24 h : quota par ami, même si elles sont écartées.
     invite_log: Mutex<Vec<(PeerKey, i64)>>,
@@ -692,6 +709,7 @@ impl HearthRuntime {
             status: Mutex::new(HashMap::new()),
             unknown_tried: Mutex::new(UnknownMemo::default()),
             meta: Mutex::new(meta),
+            meta_io: Mutex::new(()),
             invites: Mutex::new(Vec::new()),
             invite_log: Mutex::new(Vec::new()),
             outbox,
@@ -884,6 +902,7 @@ impl HearthRuntime {
     }
 
     fn save_meta(&self) {
+        let _io = lock(&self.meta_io);
         let data = serde_json::to_vec_pretty(&*lock(&self.meta)).unwrap_or_default();
         if let Err(e) = write_atomic(&self.root.join("meta.json"), &data) {
             eprintln!("[cubelink] métadonnées Hearth non enregistrées : {e}");

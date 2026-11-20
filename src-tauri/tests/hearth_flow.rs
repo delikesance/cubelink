@@ -913,7 +913,8 @@ async fn en_tete_sans_contenu_jouer_propose_la_version_precedente() {
     // Fin de partie : la session de Bob est une nouvelle version fille de la n° 1, face à la n° 2 d'Alice : fourche visible.
     b.close_game();
     wait_for("serveur de Bob arrêté", 30, || b.state_of(&g) != HearthStateKind::Hosting).await;
-    assert!(b.rt().is_fork(&g), "deux versions du monde : la n° 2 d'Alice et la reprise de Bob");
+    // Même course : la reprise de Bob est publiée un peu après la sortie de l'état « Hosting ».
+    wait_for("fourche chez Bob : la n° 2 d'Alice et sa reprise", 30, || b.rt().is_fork(&g)).await;
     let d = b.node.st.hearth.detail(&g).unwrap();
     assert_eq!(d.fork.len(), 2, "la page du serveur propose de choisir entre les deux branches");
     for p in &peers {
@@ -996,8 +997,10 @@ async fn partie_mal_terminee_le_monde_est_mis_de_cote_puis_publie() {
     // Fin propre de la nouvelle partie : le marqueur disparaît, la fin de partie reste gardée.
     a.close_game();
     wait_for("serveur arrêté", 30, || a.state_of(&g) != HearthStateKind::Hosting).await;
-    assert!(!a.rt().has_session_marker(&g), "la fin propre retire le marqueur");
+    // La carte quitte « Hosting » au tout début de la fin de partie, avant la publication et le retrait du marqueur.
+    wait_for("marqueur de session retiré", 30, || !a.rt().has_session_marker(&g)).await;
     assert_eq!(orphan_files(a, &g).len(), 1);
+    wait_for("version de fin publiée", 30, || a.rt().head(&g).is_some_and(|h| h.id() != v2.id())).await;
     let head_after = a.rt().head(&g).unwrap();
     assert_eq!((head_after.header.kind, head_after.header.parent), (VersionKind::Session, Some(v2.id())));
 

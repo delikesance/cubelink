@@ -10,7 +10,7 @@ Lanceur Minecraft pour jouer entre amis (Tauri 2 + Rust + React/TypeScript). Ces
 - Réponses courtes, en français : 2 à 3 lignes, plus de détail seulement si demandé.
 
 ### S'arrêter et demander (liste complète)
-1. Action irréversible ou visible des autres : merge, push forcé, suppression de branche distante, release, message à un ami.
+1. Action irréversible ou visible des autres : fusion dans `main`, push forcé, suppression de branche distante, release, message à un ami.
 2. Secrets, comptes, paiement, signature, Partner Center.
 3. Test réel impossible seul (deux machines, ami en ligne) : le dire dans la PR, ne pas bloquer le reste.
 4. Ambiguïté réelle dont l'erreur coûterait cher, après lecture du code et des docs.
@@ -28,11 +28,11 @@ Lanceur Minecraft pour jouer entre amis (Tauri 2 + Rust + React/TypeScript). Ces
 
 ## Git
 1. Début de chantier : `git fetch`, puis `git switch -c <type>/<sujet-court> origin/canary` (types : `feat`, `fix`, `chore`, `docs`, `refactor`). Si l'arbre est propre et que la branche courante porte déjà le chantier, continuer dessus.
-2. Jamais de commit ni de push sur `canary` ou `main` (le hook `block-unsafe.sh` le bloque aussi). `canary` reçoit les PR ; chaque fusion publie une pré-version si `ci` passe.
+2. Jamais de commit direct sur `canary` ni sur `main`, jamais de push vers `main` (le hook `block-unsafe.sh` le bloque). `canary` reçoit les PR ; chaque fusion publie une pré-version si `ci` passe.
 3. Commits petits et systématiques : un commit dès qu'une étape est vérifiée. Messages en français, au format `type: sujet`.
 4. Jamais de mention de l'IA dans un commit, une PR ou le code : ni `Co-Authored-By`, ni « généré par », ni emoji de robot.
-5. Fin de chantier, sans attendre : `git push -u origin <branche>`, puis `gh pr create --base canary` (titre et description en français : ce qui change, test réel fait et résultat, ce qui reste).
-6. Ne jamais merger ni forcer un push : seul l'utilisateur fusionne `canary` dans `main`. Si `canary` a avancé et que la PR est en conflit, fusionner `canary` dans la branche, re-tester, sans push forcé.
+5. Fin de chantier, sans attendre : `git push -u origin <branche>`, `gh pr create --base canary` (titre et description en français : ce qui change, test réel fait et résultat, ce qui reste), puis, une fois `ci` verte, `gh pr merge --merge` : Claude fusionne seul dans `canary`. Si `canary` a avancé et que la PR est en conflit, fusionner `canary` dans la branche, re-tester.
+6. Pousser sur `canary` (sans force) et fusionner vers `canary` sont autorisés. Jamais de push forcé, jamais de push ni de fusion vers `main` : quand `canary` contient ce qu'il faut, ouvrir une PR `canary` vers `main` (`gh pr create --base main --head canary`) et s'arrêter là, l'utilisateur l'accepte.
 
 ## Vérification
 - Le plus ciblé d'abord : `cargo test -p <crate> --lib <module>`, `npx vitest run <fichier>`.

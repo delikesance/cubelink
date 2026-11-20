@@ -64,6 +64,16 @@ test('T2 : plan affiche, mod maison inconnu, confiance requise, non-ami refuse, 
   await trust.uncheck();
   await expect(join).toBeDisabled();
 
+  // B joue avec un compte hors ligne : avertissement non bloquant (le disque de test a assez de place : pas d'avertissement disque).
+  const heads = dialog.getByTestId('join-warnings');
+  await expect(heads.getByText(/compte hors ligne/)).toBeVisible();
+  await expect(heads.getByText(/Il te faut/)).toHaveCount(0);
+  const plan = await invoke<{ warnings: { kind: string }[] }>(appB.page, 'join_plan', { friend_public_key: keyA });
+  expect(plan.warnings.map((w) => w.kind)).toEqual(['offline_account']);
+  await trust.check();
+  await expect(join).toBeEnabled();
+  await trust.uncheck();
+
   // Annuler : retour a l'ecran precedent (Amis), rien telecharge ni installe.
   await dialog.getByRole('button', { name: 'Annuler' }).click();
   await appB.page.waitForSelector('main[data-route="friends"]');

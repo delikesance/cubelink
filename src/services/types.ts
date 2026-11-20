@@ -35,6 +35,7 @@ export type Instance = B.Instance_Serialize;
 export type InstanceArt = B.InstanceArt_Serialize;
 export type Invite = B.Invite_Serialize;
 export type JoinPlan = B.JoinPlan_Serialize;
+export type JoinWarning = B.JoinWarning;
 export type Manifest = B.Manifest_Serialize;
 export type ManifestFile = B.ManifestFile_Serialize;
 export type ModCheck = B.ModCheck_Serialize;

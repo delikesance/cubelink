@@ -62,13 +62,13 @@ export const commands = {
 	instancesDescription: (instanceId: string, options?: InvokeOptions) => __TAURI_INVOKE<string | null>("instances_description", { instance_id: instanceId }, options),
 	/**  Test de connexion réseau (Paramètres → « Tester ma connexion »). */
 	netTest: (options?: InvokeOptions) => __TAURI_INVOKE<NetTest_Serialize>("net_test", undefined, options),
-	/**  Mon code ami (`mcl1-…`). */
+	/**  Mon code ami (`mcl1-…`, format v2) : clé publique, **jeton aléatoire de 16 octets** (fichier `p2p/friend_code_token`, créé au premier appel), indices de connexion. Ce n'est pas un secret d'authentification (le code se partage) : le jeton sert à couper les anciens codes. */
 	friendMyCode: (options?: InvokeOptions) => __TAURI_INVOKE<FriendCode>("friend_my_code", undefined, options),
-	/**  Génère un nouveau code ami (l'ancien ne marche plus). */
+	/**  Génère un nouveau jeton (écrit sur disque avant tout changement, puis pris en compte tout de suite par le réseau) et renvoie le nouveau code. L'ancien code est refusé pour les **nouvelles** demandes d'ami ; les amis déjà acceptés et les demandes déjà reçues ne sont pas touchés. La clé publique ne change pas : l'appareil reste joignable par la connexion de base (présence). L'ancien fichier `friend_code_epoch` est ignoré et supprimé : les codes `mcl1-` d'avant le jeton (version 1) sont périmés. */
 	friendRegenerateCode: (options?: InvokeOptions) => __TAURI_INVOKE<FriendCode>("friend_regenerate_code", undefined, options),
 	/**  Amis, avec leur présence, `in_game` (un jeu tourne chez l'ami : seul cas où « Demander à rejoindre » est proposé ; faux hors ligne et pour un ami d'une ancienne version) et la dernière fois vus en ligne. */
 	friendList: (options?: InvokeOptions) => __TAURI_INVOKE<FriendWithPresence_Serialize[]>("friend_list", undefined, options),
-	/**  Envoie une demande d'ami à partir de son code ; renvoie le code de vérification à comparer. */
+	/**  Envoie une demande d'ami à partir de son code ; renvoie le code de vérification à comparer. Erreurs propres au jeton : code d'une ancienne version (sans jeton, refusé sans connexion : « Ce code ami vient d'une ancienne version de Cubelink… »), code d'une version plus récente, code révoqué par l'hôte (« Ce code ami n'est plus valide : demande à ton ami de te renvoyer son code actuel. »). */
 	friendSendRequest: (code: string, options?: InvokeOptions) => __TAURI_INVOKE<VerifyCode>("friend_send_request", { code }, options),
 	/**  Demandes d'amis reçues, par page, filtrées par nom. */
 	friendRequests: (offset: number, limit: number, query: string | null, options?: InvokeOptions) => __TAURI_INVOKE<RequestsPage>("friend_requests", { offset, limit, query }, options),

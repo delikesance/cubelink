@@ -91,10 +91,14 @@ impl AppState {
 
     pub fn friend_regenerate_code(&self) -> Result<FriendCode, String> {
         let next = friend_code::new_token();
+        // Le verrou est pris avant l'écriture : un `code_token()` concurrent (premier lancement) ne peut pas
+        // écraser le fichier avec un autre jeton que celui de la mémoire.
+        let mut cur = lock(&self.code_token);
         // Écrit d'abord : si le disque refuse, ni le code affiché ni le jeton accepté ne changent.
         write_token(&self.paths.code_token_file, &next).map_err(|_| "impossible d'enregistrer le nouveau code".to_string())?;
         let _ = std::fs::remove_file(&self.paths.legacy_epoch_file);
-        *lock(&self.code_token) = Some(next);
+        *cur = Some(next);
+        drop(cur);
         // Effet immédiat sur le réseau : l'ancien code ne permet plus de NOUVELLE demande. Les amis déjà
         // acceptés et les demandes déjà admises ne sont pas touchés.
         self.backend().set_code_token(next);
@@ -216,14 +220,14 @@ pub async fn net_test(state: State<'_, Arc<AppState>>) -> Result<crate::p2p_back
     state.backend().net_test().await
 }
 
-/// Mon code ami (`mcl1-…`).
+/// Mon code ami (`mcl1-…`, format v2) : clé publique, **jeton aléatoire de 16 octets** (fichier `p2p/friend_code_token`, créé au premier appel), indices de connexion. Ce n'est pas un secret d'authentification (le code se partage) : le jeton sert à couper les anciens codes.
 #[tauri::command(rename_all = "snake_case")]
 #[specta::specta(rename_all = "snake_case")]
 pub fn friend_my_code(state: State<'_, Arc<AppState>>) -> Result<FriendCode, String> {
     Ok(state.friend_my_code())
 }
 
-/// Génère un nouveau code ami (l'ancien ne marche plus).
+/// Génère un nouveau jeton (écrit sur disque avant tout changement, puis pris en compte tout de suite par le réseau) et renvoie le nouveau code. L'ancien code est refusé pour les **nouvelles** demandes d'ami ; les amis déjà acceptés et les demandes déjà reçues ne sont pas touchés. La clé publique ne change pas : l'appareil reste joignable par la connexion de base (présence). L'ancien fichier `friend_code_epoch` est ignoré et supprimé : les codes `mcl1-` d'avant le jeton (version 1) sont périmés.
 #[tauri::command(rename_all = "snake_case")]
 #[specta::specta(rename_all = "snake_case")]
 pub fn friend_regenerate_code(state: State<'_, Arc<AppState>>) -> Result<FriendCode, String> {
@@ -237,7 +241,7 @@ pub fn friend_list(state: State<'_, Arc<AppState>>) -> Result<Vec<FriendWithPres
     state.friend_list()
 }
 
-/// Envoie une demande d'ami à partir de son code ; renvoie le code de vérification à comparer.
+/// Envoie une demande d'ami à partir de son code ; renvoie le code de vérification à comparer. Erreurs propres au jeton : code d'une ancienne version (sans jeton, refusé sans connexion : « Ce code ami vient d'une ancienne version de Cubelink… »), code d'une version plus récente, code révoqué par l'hôte (« Ce code ami n'est plus valide : demande à ton ami de te renvoyer son code actuel. »).
 #[tauri::command(rename_all = "snake_case")]
 #[specta::specta(rename_all = "snake_case")]
 pub async fn friend_send_request(state: State<'_, Arc<AppState>>, code: String) -> Result<VerifyCode, String> {

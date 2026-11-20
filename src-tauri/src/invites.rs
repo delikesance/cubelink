@@ -11,8 +11,9 @@
 //! `friend://join_request` (JoinRequest) puis `friend://join_requests` (Vec<JoinRequest>, à chaque changement) ;
 //! décision par `friend_join_request_answer`. Demande envoyée (invité) : `friend_join_request` attend la décision.
 //!
-//! Notification système : `hotkey.rs` écoute `friend://invite` (payload `Invite`, émis une fois par invitation reçue) et
-//! `friend://join_request` (payload `JoinRequest`, une fois par demande reçue) ; les files complètes sont dans
+//! Notification système : `hotkey.rs` écoute `friend://invite` (payload `Invite`, émis une fois par invitation reçue),
+//! `friend://request` (demande d'ami) et `friend://join_request` (payload `JoinRequest`, une fois par demande reçue),
+//! une notification par pair et par minute au plus ; un clic rouvre la fenêtre (le panneau « en jeu » avec la Scène) ; les files complètes sont dans
 //! `friend_invites` / `friend://invites` et `friend_join_requests` / `friend://join_requests`. À l'écran, les demandes
 //! sont affichées par le bandeau de la coque et par le panneau « en jeu ».
 

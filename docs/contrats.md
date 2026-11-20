@@ -132,7 +132,7 @@ Les types nommés (`Profile`, `TransferProgress`, `HostState`, `StageState`…) 
 | `transfer://progress` | `TransferProgress` (champ optionnel `error` en phase `failed`) |
 | `friend://presence` | `{ public_key, presence, in_game }` : émis quand la présence OU `in_game` change (au plus une sonde, ~30 s, après le changement) |
 | `tunnel://state` | `{ state: "ok" \| "reconnecting" \| "lost" \| "closed", friend_public_key? }` : liaison du tunnel invité. `reconnecting` : connexion à l'hôte coupée, reconnexion automatique en cours (10 s max, le port local `127.0.0.1:<port>` reste le même : Minecraft peut se reconnecter sans relancer le jeu) ; `lost` : hôte parti ou refus, le tunnel est inutilisable (terminal : aucun `ok` ne suit) ; `closed` : le tunnel vient d'être fermé (fin de partie, `join_close_tunnel`, tunnel remplacé), sans `friend_public_key`. `friend_public_key` (hôte, hex) accompagne `ok`, `reconnecting` et `lost`. Émis seulement pendant un tunnel ouvert (`join_open_tunnel` / `join_play`). Consommé par la coquille (`TunnelNotice`) : bandeau non bloquant « Connexion à Alex perdue, reconnexion… » (retiré à `ok` ou `closed`), « Alex a fermé son monde » (`lost`, bouton Fermer) ; le pseudo vient de `friend_list`, repli « ton ami ». |
-| `friend://request` | `FriendRequest` |
+| `friend://request` | `FriendRequest`. Rust en fait une notification système (« Demande d'ami », hors mode test ; jamais le code de vérification) |
 | `friend://invite` / `friend://invites` | `Invite` (une invitation reçue) / `Invite[]` (file complète à chaque changement) |
 | `friend://join_request` | `JoinRequest` `{ public_key, name, received_at, expires_at }` : un ami demande à rejoindre ma partie (hôte). Rust en fait une notification système (« Demande à rejoindre », hors mode test) |
 | `friend://join_requests` | `JoinRequest[]` : demandes en attente, à chaque changement (décidée, expirée, retirée, partage arrêté). Affichées par le bandeau de la coque (masqué tant que le panneau « en jeu » est ouvert) et par le panneau « en jeu » |
@@ -150,6 +150,8 @@ Les types nommés (`Profile`, `TransferProgress`, `HostState`, `StageState`…) 
 | `stage://state` | `StageState` (`{ attached, game, panel }`) : zone de jeu intégrée (jeu rattaché, jeu visible, panneau « en jeu » ouvert) |
 | `stage://fallback` | `{ reason, session_off }` : le jeu n'a pas pu être affiché dans Cubelink et garde sa fenêtre ; `reason` va au journal `stage.log`, jamais au joueur ; `session_off` : repli jusqu'au redémarrage de Cubelink |
 | `stage://fullscreen` | `boolean` : le jeu demande (F11) ou quitte le plein écran ; le launcher passe la fenêtre en plein écran tant que le jeu est rattaché et visible |
+
+Notifications système des amis (`hotkey.rs`, `friend://invite`, `friend://request`, `friend://join_request`) : limitées à une par pair et par type par minute, et 5 par minute en tout (seul le popup est limité, les événements arrivent toujours à la webview). Un clic sur une notification de Cubelink montre la fenêtre principale ; pour une invitation ou une demande à rejoindre avec la Scène active, il ouvre aussi le panneau « en jeu » (suivi du clic selon la plateforme : Windows seulement tant que le toast est affiché).
 
 ## Règles
 - Le front n'accède ni au disque ni au réseau : tout passe par ces commandes.

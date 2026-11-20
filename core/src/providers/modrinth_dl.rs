@@ -188,6 +188,9 @@ fn cached(file: &VersionFile, store_root: &Path, index: &StoreIndex) -> Result<O
         let ok = std::fs::metadata(&path).map(|m| m.is_file() && m.len() == entry.size).unwrap_or(false)
             && (file.size == 0 || file.size == entry.size);
         if ok {
+            // Réutilisation : rafraîchir `last_used`, pour que « Vider le cache » (qui épargne les objets récents) ne
+            // supprime pas l'objet entre ici et son placement dans l'instance.
+            index.insert(&entry.sha256, &entry.rel_path, entry.size)?;
             return Ok(Some(StoredObject { sha256: entry.sha256, rel_path: entry.rel_path, size: entry.size, from_cache: true }));
         }
     }

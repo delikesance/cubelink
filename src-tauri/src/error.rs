@@ -83,6 +83,11 @@ fn path_start(c: &[char], i: usize, prefixes: &[String]) -> Option<(usize, bool)
         return Some((i + 3, false));
     }
     if at(0) == Some('\\') && at(1) == Some('\\') {
+        // Préfixe verbatim (`\\?\C:\...`, produit par `canonicalize`) : sauter aussi la lettre de lecteur.
+        if matches!(at(2), Some('?' | '.')) && at(3) == Some('\\') {
+            let drive = at(4).is_some_and(|x| x.is_ascii_alphabetic()) && at(5) == Some(':') && at(6).is_some_and(is_sep);
+            return Some((i + if drive { 7 } else { 4 }, false));
+        }
         return Some((i + 2, false));
     }
     if at(0) == Some('/') && at(1).is_some_and(|x| !x.is_whitespace() && x != '/') {
@@ -101,24 +106,52 @@ fn path_end(c: &[char], from: usize, unix: bool) -> usize {
         let s: String = w.iter().collect();
         !s.contains("://") && w.iter().any(|&x| if unix { x == '/' } else { is_sep(x) })
     };
+    let word_end = |k: usize| c[k..].iter().position(|x| x.is_whitespace()).map_or(c.len(), |p| k + p);
     let mut j = from;
+    let mut parens = 0usize;
     while j < c.len() {
         let x = c[j];
-        if matches!(x, '"' | '\'' | ')' | ']' | ',' | ';' | '»' | '\n' | '\r' | ':') {
-            break;
+        match x {
+            '(' => parens += 1,
+            // Une parenthèse ouverte dans le chemin (`Jean (perso)`) se referme dedans.
+            ')' if parens > 0 => parens -= 1,
+            '"' | '\'' | ')' | ']' | ',' | ';' | '»' | '\n' | '\r' | ':' => break,
+            _ => {}
         }
         if x.is_whitespace() {
             let mut k = j;
             while k < c.len() && c[k].is_whitespace() && c[k] != '\n' && c[k] != '\r' {
                 k += 1;
             }
-            let mut e = k;
-            while e < c.len() && !c[e].is_whitespace() {
-                e += 1;
-            }
-            if k < c.len() && c[k] != '\n' && has_sep(&c[k..e]) {
-                j = k;
-                continue;
+            if k < c.len() && c[k] != '\n' && c[k] != '\r' {
+                // Le mot suivant porte un séparateur : le chemin continue. Sous Windows, jusqu'à deux mots
+                // intermédiaires à majuscule (`Jean Marie Dupont\...`) sont aussi absorbés.
+                let mut w = k;
+                let mut extra = 0;
+                loop {
+                    let e = word_end(w);
+                    if has_sep(&c[w..e]) {
+                        j = w;
+                        break;
+                    }
+                    let plain = !unix
+                        && extra < 2
+                        && c[w].is_uppercase()
+                        && !c[w..e].iter().any(|&y| "\"',;:)]»".contains(y))
+                        && e < c.len()
+                        && c[e] == ' ';
+                    if !plain {
+                        break;
+                    }
+                    extra += 1;
+                    w = e + 1;
+                    if w >= c.len() {
+                        break;
+                    }
+                }
+                if j == w && has_sep(&c[w..word_end(w)]) {
+                    continue;
+                }
             }
             break;
         }
@@ -210,6 +243,14 @@ mod tests {
         assert_eq!(sanitize("échec (\"C:\\Users\\Jean Dupont\\a.json\"), puis"), "échec (\"<chemin>\"), puis");
         assert_eq!(sanitize("C:\\Users\\bob et ok"), "<chemin> et ok");
         assert_eq!(sanitize("voir /home/bob/a. Suite"), "voir <chemin>. Suite");
+    }
+
+    #[test]
+    fn masque_prefixe_verbatim_noms_multiples_et_parentheses() {
+        assert_eq!(sanitize("introuvable : \\\\?\\C:\\Users\\Jean Dupont\\AppData\\Roaming\\x.json"), "introuvable : <chemin>");
+        assert_eq!(sanitize("C:\\Users\\Jean Marie Dupont\\AppData\\x.json ok"), "<chemin> ok");
+        assert_eq!(sanitize("C:\\Users\\Jean (perso)\\x"), "<chemin>");
+        assert_eq!(sanitize("fichier C:\\a\\b Introuvable dans le dossier"), "fichier <chemin> Introuvable dans le dossier");
     }
 
     #[test]

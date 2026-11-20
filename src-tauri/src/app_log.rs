@@ -38,9 +38,59 @@ pub fn filter_from(spec: Option<&str>) -> EnvFilter {
         .unwrap_or_else(|| EnvFilter::new(DEFAULT_FILTER))
 }
 
-/// Pur : le texte d'une ligne (`message champ=valeur ...`), masque par `sanitize`.
+/// Pur : remplace les adresses IPv4 (avec leur port éventuel) par `<ip>` : le journal est fait pour être copié dans un
+/// ticket public, et les avertissements d'Iroh peuvent citer l'adresse d'un ami ou la sienne.
+fn mask_ipv4(s: &str) -> String {
+    let c: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < c.len() {
+        // Une adresse commence à une frontière (pas au milieu d'un nombre ou d'une version `1.2.3.4.5`).
+        let boundary = i == 0 || !(c[i - 1].is_ascii_alphanumeric() || c[i - 1] == '.');
+        if boundary && c[i].is_ascii_digit() {
+            let mut j = i;
+            let mut groups = 0;
+            loop {
+                let st = j;
+                while j < c.len() && c[j].is_ascii_digit() && j - st < 3 {
+                    j += 1;
+                }
+                if j == st {
+                    break;
+                }
+                groups += 1;
+                if groups < 4 && j + 1 < c.len() && c[j] == '.' && c[j + 1].is_ascii_digit() {
+                    j += 1;
+                } else {
+                    break;
+                }
+            }
+            let octets_ok = c[i..j].iter().collect::<String>().split('.').all(|g| g.parse::<u16>().is_ok_and(|n| n <= 255));
+            let after_ok = j >= c.len() || !(c[j].is_ascii_alphanumeric() || (c[j] == '.' && c.get(j + 1).is_some_and(|x| x.is_ascii_digit())));
+            if groups == 4 && octets_ok && after_ok {
+                if c.get(j) == Some(&':') {
+                    let mut k = j + 1;
+                    while k < c.len() && c[k].is_ascii_digit() {
+                        k += 1;
+                    }
+                    if k > j + 1 {
+                        j = k;
+                    }
+                }
+                out.push_str("<ip>");
+                i = j;
+                continue;
+            }
+        }
+        out.push(c[i]);
+        i += 1;
+    }
+    out
+}
+
+/// Pur : le texte d'une ligne (`message champ=valeur ...`), masque par `sanitize` puis sans adresse IPv4.
 pub fn format_event(message: &str, fields: &str) -> String {
-    crate::error::sanitize(&format!("{message}{fields}"))
+    mask_ipv4(&crate::error::sanitize(&format!("{message}{fields}")))
 }
 
 /// Recolte le message et les champs structures d'un evenement `tracing`.
@@ -130,6 +180,13 @@ mod tests {
         tracing::subscriber::with_default(subscriber(out.clone(), filter), f);
         out.flush(Duration::from_secs(5));
         std::fs::read_to_string(path).unwrap_or_default()
+    }
+
+    #[test]
+    fn masque_les_adresses_ipv4() {
+        assert_eq!(format_event("pair 192.168.1.20:4433 injoignable", ""), "pair <ip> injoignable");
+        assert_eq!(format_event("", " addr=203.0.113.7"), " addr=<ip>");
+        assert_eq!(format_event("version 1.2.3.4.5 et 999.1.1.1 et 1.2.3", ""), "version 1.2.3.4.5 et 999.1.1.1 et 1.2.3");
     }
 
     #[test]

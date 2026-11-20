@@ -1229,6 +1229,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tiny-skia",
+ "tracing",
  "windows-sys 0.61.2",
  "x11rb",
 ]

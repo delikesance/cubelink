@@ -17,8 +17,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use same_file::Handle;
-
 use crate::store::gc::{prune_empty_dirs, safe_join};
 use crate::store::index::{object_rel_path, StoreIndex};
 use crate::types::{Error, Result};
@@ -26,6 +24,25 @@ use crate::types::{Error, Result};
 /// Dossiers jamais parcourus sous une instance : les mondes, les journaux et les rapports de plantage ne contiennent
 /// pas de lien vers le magasin (gain de temps seulement : un lien manqué ne fait jamais supprimer un fichier d'instance).
 const SKIPPED_DIRS: [&str; 3] = ["saves", "logs", "crash-reports"];
+
+/// Identité d'un fichier. Sous Unix, `(périphérique, inode)` : aucun descripteur n'est gardé ouvert (un magasin de
+/// plusieurs milliers d'objets dépasserait sinon la limite `ulimit -n`). Ailleurs, `same_file::Handle`.
+#[cfg(unix)]
+type FileId = (u64, u64);
+#[cfg(not(unix))]
+type FileId = same_file::Handle;
+
+#[cfg(unix)]
+fn file_id(path: &Path) -> std::io::Result<FileId> {
+    use std::os::unix::fs::MetadataExt;
+    let md = fs::metadata(path)?;
+    Ok((md.dev(), md.ino()))
+}
+
+#[cfg(not(unix))]
+fn file_id(path: &Path) -> std::io::Result<FileId> {
+    same_file::Handle::from_path(path)
+}
 
 /// Options du vidage.
 #[derive(Debug, Clone, Default)]
@@ -58,7 +75,7 @@ fn now_secs() -> i64 {
 /// fichiers dont l'identité n'a pas pu être lue. Un dossier illisible est une erreur : on ne devine pas.
 type Scan = (HashSet<usize>, HashSet<u64>);
 
-fn scan_instances(roots: &[PathBuf], store: &HashMap<Handle, usize>, sizes: &HashSet<u64>) -> Result<Scan> {
+fn scan_instances(roots: &[PathBuf], store: &HashMap<FileId, usize>, sizes: &HashSet<u64>) -> Result<Scan> {
     let mut used = HashSet::new();
     let mut unsure = HashSet::new();
     let mut stack: Vec<PathBuf> = roots.to_vec();
@@ -85,7 +102,7 @@ fn scan_instances(roots: &[PathBuf], store: &HashMap<Handle, usize>, sizes: &Has
                 if !sizes.contains(&md.len()) {
                     continue;
                 }
-                match Handle::from_path(&path) {
+                match file_id(&path) {
                     Ok(h) => {
                         if let Some(&i) = store.get(&h) {
                             used.insert(i);
@@ -110,7 +127,7 @@ pub fn purge_unused(store_root: &Path, index: &StoreIndex, instance_roots: &[Pat
 
     // Identité de chaque objet présent sur disque. Une entrée sans fichier est un reste d'index : elle est retirée,
     // sans rien libérer.
-    let mut handles: HashMap<Handle, usize> = HashMap::new();
+    let mut handles: HashMap<FileId, usize> = HashMap::new();
     let mut paths: Vec<Option<PathBuf>> = Vec::with_capacity(entries.len());
     let mut stale: Vec<usize> = Vec::new();
     for (i, e) in entries.iter().enumerate() {
@@ -123,7 +140,7 @@ pub fn purge_unused(store_root: &Path, index: &StoreIndex, instance_roots: &[Pat
                 continue;
             }
         };
-        match Handle::from_path(&path) {
+        match file_id(&path) {
             Ok(h) => {
                 handles.insert(h, i);
             }
@@ -138,6 +155,8 @@ pub fn purge_unused(store_root: &Path, index: &StoreIndex, instance_roots: &[Pat
 
     let mut present: Vec<usize> = handles.values().copied().collect();
     present.sort_unstable();
+    // Sous Windows, les identités tiennent des fichiers ouverts : les relâcher avant de supprimer.
+    drop(handles);
     for i in present {
         let e = &entries[i];
         if used.contains(&i) || unsure.contains(&e.size) {

@@ -13,6 +13,7 @@ path = "src/lib.rs"
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+tracing.workspace = true
 tiny-skia = "0.12"
 ab_glyph = "0.2"
 

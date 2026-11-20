@@ -494,7 +494,7 @@ export default function Settings({ testConnection }: SettingsProps = {}) {
       <div {...panel("stockage")}>
         <Card className="set-list">
           <div className="set-row">
-            <div className="set-txt"><b>Cache de mods</b><span>{cacheBytes === null ? "Fichiers partagés entre tes instances." : cacheBytes > 0 ? `Fichiers partagés entre tes instances. Libère ${formatBytes(cacheBytes)}.` : "Rien à libérer : tous les fichiers du cache servent à tes instances."}</span></div>
+            <div className="set-txt"><b>Cache de mods</b><span>{cacheBytes === null ? "Fichiers partagés entre tes instances." : cacheBytes > 0 ? `Fichiers partagés entre tes instances. Libère ${formatBytes(cacheBytes)}.` : "Rien à libérer pour l’instant : le cache sert à tes instances ou vient d’être téléchargé."}</span></div>
             <Button variant="secondary" aria-expanded={confirmClear} disabled={cacheBytes === 0} onClick={() => setConfirmClear(true)}>Vider le cache…</Button>
           </div>
           <label className="set-row" style={{ cursor: "pointer" }}>

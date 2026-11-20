@@ -138,6 +138,74 @@ pub fn settings_set(state: State<'_, Arc<AppState>>, settings: SettingsInput, ap
     Ok(saved)
 }
 
+/// Un objet du cache plus récent que ça n'est jamais supprimé : entre son téléchargement et son placement dans une
+/// instance, il n'est pas encore lié et ne doit pas disparaître sous un téléchargement en cours.
+const CACHE_MIN_AGE: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// Remet `cache_busy` à faux quand le vidage se termine, quelle que soit la sortie.
+struct CacheBusy<'a>(&'a std::sync::atomic::AtomicBool);
+
+impl Drop for CacheBusy<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl AppState {
+    fn cache_run(&self, dry_run: bool, min_age: std::time::Duration) -> Result<core_lib::store::purge::PurgeReport, String> {
+        let roots = [self.paths.instances.clone()];
+        let opts = core_lib::store::purge::PurgeOptions { dry_run, min_age };
+        core_lib::store::purge::purge_unused(&self.paths.store, &self.store, &roots, &opts).map_err(|e| crate::error::user_msg(&e))
+    }
+
+    /// Octets que « Vider le cache » libérerait réellement (objets qu'aucune instance n'utilise). Ne supprime rien.
+    pub fn cache_size(&self) -> Result<u64, String> {
+        Ok(self.cache_run(true, CACHE_MIN_AGE)?.bytes_freed)
+    }
+
+    /// Vide le cache (objets qu'aucune instance n'utilise) ; renvoie les octets libérés.
+    pub fn cache_clear(&self) -> Result<u64, String> {
+        self.cache_clear_aged(CACHE_MIN_AGE)
+    }
+
+    fn cache_clear_aged(&self, min_age: std::time::Duration) -> Result<u64, String> {
+        use std::sync::atomic::Ordering;
+        if lock(&self.game).is_some() || lock(&self.join).is_some() {
+            return Err("Une installation, un transfert ou une partie est en cours. Réessaie quand c'est terminé.".into());
+        }
+        if self.cache_busy.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+            return Err("Le cache est déjà en train d'être vidé.".into());
+        }
+        let _busy = CacheBusy(&self.cache_busy);
+        let rep = self.cache_run(false, min_age)?;
+        if rep.bytes_freed == 0 && !rep.errors.is_empty() {
+            tracing::warn!("vidage du cache : {}", rep.errors.join(" ; "));
+            return Err("Impossible de vider le cache : certains fichiers sont utilisés. Ferme le jeu et réessaie.".into());
+        }
+        if !rep.errors.is_empty() {
+            tracing::warn!("vidage du cache : {}", rep.errors.join(" ; "));
+        }
+        tracing::info!("cache vidé : {} objets, {} octets", rep.removed.len(), rep.bytes_freed);
+        Ok(rep.bytes_freed)
+    }
+}
+
+/// Taille du cache de mods que « Vider le cache » libérerait (octets) : fichiers du cache qu'aucune instance n'utilise, de plus de 15 min.
+#[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
+pub async fn cache_size(state: State<'_, Arc<AppState>>) -> Result<u64, String> {
+    let st = state.inner().clone();
+    tokio::task::spawn_blocking(move || st.cache_size()).await.map_err(|_| "Le calcul de la taille du cache a échoué.".to_string())?
+}
+
+/// Vide le cache de mods (fichiers qu'aucune instance n'utilise, de plus de 15 min) ; renvoie les octets libérés. Erreur lisible pendant un lancement, un transfert ou un autre vidage.
+#[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
+pub async fn cache_clear(state: State<'_, Arc<AppState>>) -> Result<u64, String> {
+    let st = state.inner().clone();
+    tokio::task::spawn_blocking(move || st.cache_clear()).await.map_err(|_| "Le vidage du cache a échoué.".to_string())?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -292,72 +360,4 @@ mod tests {
         *lock(&st.game) = None;
         assert!(!st.cache_busy.load(std::sync::atomic::Ordering::SeqCst), "le drapeau est relâché");
     }
-}
-
-/// Un objet du cache plus récent que ça n'est jamais supprimé : entre son téléchargement et son placement dans une
-/// instance, il n'est pas encore lié et ne doit pas disparaître sous un téléchargement en cours.
-const CACHE_MIN_AGE: std::time::Duration = std::time::Duration::from_secs(15 * 60);
-
-/// Remet `cache_busy` à faux quand le vidage se termine, quelle que soit la sortie.
-struct CacheBusy<'a>(&'a std::sync::atomic::AtomicBool);
-
-impl Drop for CacheBusy<'_> {
-    fn drop(&mut self) {
-        self.0.store(false, std::sync::atomic::Ordering::SeqCst);
-    }
-}
-
-impl AppState {
-    fn cache_run(&self, dry_run: bool, min_age: std::time::Duration) -> Result<core_lib::store::purge::PurgeReport, String> {
-        let roots = [self.paths.instances.clone()];
-        let opts = core_lib::store::purge::PurgeOptions { dry_run, min_age };
-        core_lib::store::purge::purge_unused(&self.paths.store, &self.store, &roots, &opts).map_err(|e| crate::error::user_msg(&e))
-    }
-
-    /// Octets que « Vider le cache » libérerait réellement (objets qu'aucune instance n'utilise). Ne supprime rien.
-    pub fn cache_size(&self) -> Result<u64, String> {
-        Ok(self.cache_run(true, CACHE_MIN_AGE)?.bytes_freed)
-    }
-
-    /// Vide le cache (objets qu'aucune instance n'utilise) ; renvoie les octets libérés.
-    pub fn cache_clear(&self) -> Result<u64, String> {
-        self.cache_clear_aged(CACHE_MIN_AGE)
-    }
-
-    fn cache_clear_aged(&self, min_age: std::time::Duration) -> Result<u64, String> {
-        use std::sync::atomic::Ordering;
-        if lock(&self.game).is_some() || lock(&self.join).is_some() {
-            return Err("Une installation, un transfert ou une partie est en cours. Réessaie quand c'est terminé.".into());
-        }
-        if self.cache_busy.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
-            return Err("Le cache est déjà en train d'être vidé.".into());
-        }
-        let _busy = CacheBusy(&self.cache_busy);
-        let rep = self.cache_run(false, min_age)?;
-        if rep.bytes_freed == 0 && !rep.errors.is_empty() {
-            tracing::warn!("vidage du cache : {}", rep.errors.join(" ; "));
-            return Err("Impossible de vider le cache : certains fichiers sont utilisés. Ferme le jeu et réessaie.".into());
-        }
-        if !rep.errors.is_empty() {
-            tracing::warn!("vidage du cache : {}", rep.errors.join(" ; "));
-        }
-        tracing::info!("cache vidé : {} objets, {} octets", rep.removed.len(), rep.bytes_freed);
-        Ok(rep.bytes_freed)
-    }
-}
-
-/// Taille du cache de mods que « Vider le cache » libérerait (octets) : fichiers du cache qu'aucune instance n'utilise, de plus de 15 min.
-#[tauri::command(rename_all = "snake_case")]
-#[specta::specta(rename_all = "snake_case")]
-pub async fn cache_size(state: State<'_, Arc<AppState>>) -> Result<u64, String> {
-    let st = state.inner().clone();
-    tokio::task::spawn_blocking(move || st.cache_size()).await.map_err(|_| "Le calcul de la taille du cache a échoué.".to_string())?
-}
-
-/// Vide le cache de mods (fichiers qu'aucune instance n'utilise, de plus de 15 min) ; renvoie les octets libérés. Erreur lisible pendant un lancement, un transfert ou un autre vidage.
-#[tauri::command(rename_all = "snake_case")]
-#[specta::specta(rename_all = "snake_case")]
-pub async fn cache_clear(state: State<'_, Arc<AppState>>) -> Result<u64, String> {
-    let st = state.inner().clone();
-    tokio::task::spawn_blocking(move || st.cache_clear()).await.map_err(|_| "Le vidage du cache a échoué.".to_string())?
 }

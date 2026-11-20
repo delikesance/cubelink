@@ -149,4 +149,4 @@ Tests : `npm test` (clippy `-D warnings`, `cargo test --workspace`, `tsc`, vites
 
 Refonte d'interface « clay doux » (fond `#131116`, accent cyan unique `#4FC3E8`) : tokens dans `src/styles/tokens.css`, composants dans `src/ui/`, écrans refaits dans `src/screens/`. Corrigés dans le même lot : fenêtres de terminal (`CREATE_NO_WINDOW`), démarrage non bloquant du backend P2P, miniatures d'instance au lieu du base64.
 
-Limites connues : polices Inter et Space Grotesk non embarquées (repli système) ; pas de progression chiffrée pendant la préparation du jeu ; « amis ayant joué au modpack » non implémenté  ; Échap depuis Mentions légales revient à l'accueil.
+Limites connues : polices Inter et Space Grotesk non embarquées (repli système) ; pas de progression chiffrée pendant la préparation du jeu ; « amis ayant joué au modpack » non implémenté ; Échap depuis Mentions légales revient à l'accueil.

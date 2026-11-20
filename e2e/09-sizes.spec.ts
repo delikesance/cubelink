@@ -134,6 +134,26 @@ test.describe('T9 tailles de fenetre', () => {
     expect(fs.readdirSync(OUT).length).toBe(VARIANTS.length * SIZES.length);
   });
 
+  test('Accueil a 960x600 et 1280x720 : noms de modpacks longs lisibles (une colonne a 960, deux a 1280)', async ({ appA }) => {
+    const page = appA.page;
+    await prepare(appA);
+    const names = ['Create: Astral Odyssey', 'All the Mods 10', 'Prominence II Hasturian Era'];
+    for (const [n, name] of names.entries()) await makeHostInstance(appA, { id: `long-${n}`, name, minecraft: '1.21.1' });
+    await page.reload();
+    for (const [w, h, cols] of [[960, 600, 1], [1280, 720, 2]] as const) {
+      await setWindowSize(page, w, h);
+      await page.evaluate(() => { window.location.hash = '#/main'; });
+      await waitForRoute(page, 'main');
+      await page.locator('.home-tile-txt .n').first().waitFor();
+      const r = await page.evaluate(() => ({
+        cols: getComputedStyle(document.querySelector('.home-grid')!).gridTemplateColumns.split(' ').length,
+        cut: [...document.querySelectorAll('.home-tile-txt .n, .home-tile-txt .m')].filter((e) => e.scrollWidth > e.clientWidth).map((e) => e.textContent),
+      }));
+      expect(r.cols, `${w}x${h} colonnes de la grille de modpacks`).toBe(cols);
+      expect(r.cut, `${w}x${h} textes de tuile coupes`).toEqual([]);
+    }
+  });
+
   test('Amis a 960x600 : cartes en haut, onglets dessous, la page defile verticalement sans defilement horizontal', async ({ appA }) => {
     const page = appA.page;
     await prepare(appA);

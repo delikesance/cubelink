@@ -318,7 +318,7 @@ export default function Main() {
                     <button type="button" className="home-tile" aria-label={i.name} onClick={() => navigate("instance", { id: i.id })}>
                       <Avatar services={services} inst={i} className="home-av home-tile-av" />
                       <span className="home-tile-txt">
-                        <span className="n">{i.name}</span>
+                        <span className="n" title={i.name}>{i.name}</span>
                         <span className="m">{shortMeta(i)}{n > 0 && <span className="there"> · {friendsHere(n)}</span>}</span>
                       </span>
                     </button>

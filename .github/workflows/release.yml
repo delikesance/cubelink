@@ -5,7 +5,8 @@
 # « le tag existe déjà » (voulu : pas de double publication).
 # Flux de travail : les PR sont fusionnées dans `canary`, puis `canary` est fusionnée dans `main` (voir docs/release.md).
 # `workflow_dispatch` (depuis n'importe quelle branche) construit tout SANS jamais publier, pour vérifier les builds.
-# Windows : .msi (updater) + paquet .msix à téléverser dans le Microsoft Store (qui le signe).
+# Windows : .msi (updater). Le paquet .msix (Microsoft Store) n'est PAS joint à la release GitHub : non signé, il ne s'installe
+# pas d'un double-clic. Il reste un artefact du run (`windows-msix`), à téléverser à la main dans le Partner Center (qui le signe).
 name: release
 
 on:
@@ -122,7 +123,8 @@ jobs:
           name: windows-msi
           path: target/release/bundle/msi/*.msi
       # Paquet MSIX pour le Microsoft Store (non signé : le Store le signe). Les valeurs d'identité viennent du Partner Center
-      # (variables de dépôt MSIX_IDENTITY_NAME, MSIX_PUBLISHER, MSIX_PUBLISHER_DISPLAY_NAME) ; sans elles, paquet de test.
+      # (variables de dépôt MSIX_IDENTITY_NAME, MSIX_PUBLISHER, MSIX_PUBLISHER_DISPLAY_NAME) ; sans elles, identité Placeholder :
+      # paquet de test, à ne pas téléverser. Cet artefact n'est volontairement jamais ajouté à `gh release create` (public).
       - name: Paquet MSIX (Microsoft Store)
         shell: pwsh
         run: >
@@ -224,7 +226,6 @@ jobs:
           tag="${{ needs.version.outputs.tag }}"
           gh release create "$tag" --target "$GITHUB_SHA" --title "Cubelink ${{ needs.version.outputs.version }}" --notes-file notes.md \
             artifacts/windows-msi/*.msi artifacts/windows-msi/*.msi.sig \
-            artifacts/windows-msix/*.msix \
             artifacts/linux-appimage/*.AppImage artifacts/linux-appimage/*.AppImage.sig \
             artifacts/linux-rpm/*.rpm \
             artifacts/latest.json

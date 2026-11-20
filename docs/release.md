@@ -21,7 +21,7 @@ Majeur/mineur : champ `version` de `src-tauri/tauri.conf.json` (changer à la ma
 | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | secret (optionnel) | mot de passe de la clé (vide aujourd'hui) |
 | `CUBELINK_CF_API_KEY` | secret (**obligatoire pour publier**) | clé de développeur CurseForge embarquée dans l'app (reconnaissance des mods au « Rejoindre », import et parcours CurseForge). Sans elle, la release refuse de publier |
 | `CUBELINK_MS_CLIENT_ID` | secret (optionnel) | identifiant d'application Azure embarqué ; à défaut, la valeur par défaut de l'app |
-| `MSIX_IDENTITY_NAME` | variable | Package/Identity/Name donné par le Partner Center (Microsoft Store) |
+| `MSIX_IDENTITY_NAME` | variable | Package/Identity/Name donné par le Partner Center (Microsoft Store). Sans les trois variables `MSIX_*`, le .msix porte l'identité Placeholder et ne sert qu'à tester |
 | `MSIX_PUBLISHER` | variable | Package/Identity/Publisher du Partner Center (`CN=...`) |
 | `MSIX_PUBLISHER_DISPLAY_NAME` | variable | nom d'éditeur affiché dans le Store |
 
@@ -40,4 +40,4 @@ Les secrets ne sont donnés qu'aux étapes `tauri build` (jamais dans l'environn
 - MSI : installation « par machine » (demande les droits administrateur) ; l'ancien NSIS s'installait par utilisateur.
 - Linux (.rpm) : construit en CI avec l'AppImage, puis installé par `dnf` dans un conteneur Fedora où le launcher doit tenir 20 s sous Xvfb (`scripts/rpm-smoke.sh`). Installation : `sudo dnf install ./Cubelink-<version>-1.x86_64.rpm`. Le launcher installé ainsi ne se met pas à jour seul : il signale la nouvelle version, on réinstalle le .rpm suivant.
 - Linux : l'AppImage est construite en CI ; non testée sur une vraie machine Linux (l'agent LAN, le lancement du jeu et la mise à jour y sont non éprouvés).
-- Le .msi des releases GitHub n'est pas signé Authenticode : SmartScreen avertit. La voie sans alerte est le paquet MSIX du Store, que Microsoft signe ; il se téléverse à la main dans le Partner Center (artefact `windows-msix`). Installé via le Store, le launcher coupe son updater interne.
+- Le .msi des releases GitHub n'est pas signé Authenticode : SmartScreen avertit. La voie sans alerte est le paquet MSIX du Store, que Microsoft signe ; il se téléverse à la main dans le Partner Center. Le .msix n'est **pas** joint à la release GitHub (non signé, il ne s'installe pas d'un double-clic) : on le récupère dans les artefacts du run `ci` (artefact `windows-msix`, conservé 90 jours par défaut par GitHub Actions), et il n'est valable que si les trois variables `MSIX_*` sont définies. Pour installer hors Store, prendre le .msi. Installé via le Store, le launcher coupe son updater interne.

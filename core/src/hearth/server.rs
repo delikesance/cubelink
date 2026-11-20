@@ -159,6 +159,8 @@ pub fn eula_accepted(dir: &Path) -> bool {
 /// le tunnel), port choisi, monde `world`, et ni RCON ni `query` (deux ports que le pilotage par l'entrée standard rend
 /// inutiles, et qui écoutent sur toutes les interfaces quand ils sont activés).
 pub fn render_server_properties(existing: &str, port: u16) -> String {
+    // `white-list` et `enforce-whitelist` sont volontairement absents (#97) : sans `whitelist.json` alimenté depuis des
+    // profils Minecraft réclamés par les membres (non codé, docs/hearth.md § 10.1), les forcer refuserait tout le monde.
     let forced: [(&str, String); 6] = [
         ("online-mode", "true".into()),
         ("server-ip", "127.0.0.1".into()),
@@ -1482,6 +1484,11 @@ mod tests {
         let out = render_server_properties("enable-rcon=true\nrcon.port=25575\nenable-query=true\n", 4242);
         assert!(out.contains("enable-rcon=false\n") && out.contains("enable-query=false\n") && out.contains("rcon.port=25575\n"));
         assert!(!out.contains("=true\nrcon") && !out.contains("enable-rcon=true"));
+        // La liste blanche n'est pas imposée (pas de correspondance membre vers UUID, #97) : un pack qui l'active à la main
+        // garde sa valeur, et rien n'est ajouté d'office.
+        let out = render_server_properties("white-list=true\nenforce-whitelist=true\n", 4242);
+        assert!(out.contains("white-list=true\n") && out.contains("enforce-whitelist=true\n"));
+        assert!(!render_server_properties("", 4242).contains("white-list"));
         // Idempotent.
         assert_eq!(render_server_properties(&out, 4242), out);
     }

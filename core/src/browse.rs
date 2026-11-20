@@ -25,8 +25,13 @@ use crate::types::{Error, Instance, Loader, PackOrigin, Result};
 
 pub const MODRINTH_HOSTS: &[&str] = &["cdn.modrinth.com", "github.com", "raw.githubusercontent.com", "objects.githubusercontent.com"];
 pub const CURSEFORGE_HOSTS: &[&str] = &["edge.forgecdn.net", "mediafilez.forgecdn.net"];
-/// Nombre maximal de fichiers (dépendances comprises) installés en une fois.
+/// Nombre maximal de fichiers (dépendances comprises) installés en une fois. Ce qui dépasse n'est jamais perdu en silence :
+/// chaque dépendance écartée est listée dans `InstallReport::missing`.
 const MAX_FILES: usize = 40;
+/// Suffixe du libellé d'une dépendance écartée pour cause de limite.
+fn over_limit(label: &str) -> String {
+    format!("{label} (ignorée : limite de {MAX_FILES} fichiers)")
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "lowercase")]
@@ -524,31 +529,51 @@ enum DepRef {
     Curseforge(u64),
 }
 
-/// Dépendances obligatoires, de proche en proche (profondeur et nombre bornés). Les échecs vont dans `missing`.
+/// Clé de dédoublonnage et libellé d'une dépendance (`None` : Modrinth sans identifiant, ignorée).
+fn dep_key_label(dep: &DepRef) -> Option<(String, String)> {
+    match dep {
+        DepRef::Modrinth { project_id: Some(pid), .. } => Some((format!("modrinth:{pid}"), format!("dépendance Modrinth {pid}"))),
+        DepRef::Modrinth { version_id: Some(vid), .. } => Some((format!("modrinth-v:{vid}"), format!("dépendance Modrinth (version {vid})"))),
+        DepRef::Modrinth { .. } => None,
+        DepRef::Curseforge(id) => Some((format!("curseforge:{id}"), format!("dépendance CurseForge {id}"))),
+    }
+}
+
+fn dep_installed(dep: &DepRef, game_dir: &Path) -> bool {
+    match dep {
+        DepRef::Modrinth { project_id: Some(pid), .. } => installed_project(game_dir, "modrinth", pid),
+        DepRef::Curseforge(id) => installed_project(game_dir, "curseforge", &id.to_string()),
+        _ => false,
+    }
+}
+
+/// Dépendances obligatoires, de proche en proche (profondeur et nombre bornés). Les échecs vont dans `missing`,
+/// ainsi que toute dépendance écartée par la limite de fichiers (le jar principal occupe une place) ou de tentatives.
 async fn plan_deps(p: &Providers, first: Vec<DepRef>, mc: Option<&str>, loader: Option<Loader>, game_dir: &Path, seen: &mut HashSet<String>, missing: &mut Vec<String>) -> Vec<Planned> {
     let mut out = Vec::new();
+    let mut attempts = 0usize;
     let mut queue: Vec<(DepRef, u32)> = first.into_iter().map(|d| (d, 0)).collect();
     while let Some((dep, depth)) = queue.pop() {
-        if out.len() + seen.len() > MAX_FILES * 2 {
+        if out.len() >= MAX_FILES - 1 || attempts >= MAX_FILES * 2 {
+            // Budget épuisé : la dépendance courante et le reste de la file sont signalés, pas abandonnés en silence.
+            queue.push((dep, depth));
+            for (d, _) in queue.drain(..) {
+                if let Some((key, label)) = dep_key_label(&d) {
+                    if seen.insert(key) && !dep_installed(&d, game_dir) {
+                        missing.push(over_limit(&label));
+                    }
+                }
+            }
             break;
         }
-        let (key, label) = match &dep {
-            DepRef::Modrinth { project_id: Some(pid), .. } => (format!("modrinth:{pid}"), format!("dépendance Modrinth {pid}")),
-            DepRef::Modrinth { version_id: Some(vid), .. } => (format!("modrinth-v:{vid}"), format!("dépendance Modrinth (version {vid})")),
-            DepRef::Modrinth { .. } => continue,
-            DepRef::Curseforge(id) => (format!("curseforge:{id}"), format!("dépendance CurseForge {id}")),
-        };
+        let Some((key, label)) = dep_key_label(&dep) else { continue };
         if !seen.insert(key) {
             continue;
         }
-        let already = match &dep {
-            DepRef::Modrinth { project_id: Some(pid), .. } => installed_project(game_dir, "modrinth", pid),
-            DepRef::Curseforge(id) => installed_project(game_dir, "curseforge", &id.to_string()),
-            _ => false,
-        };
-        if already {
+        if dep_installed(&dep, game_dir) {
             continue;
         }
+        attempts += 1;
         let r: Result<(Planned, Vec<DepRef>)> = async {
             match &dep {
                 DepRef::Modrinth { project_id, version_id } => {
@@ -655,7 +680,10 @@ pub async fn install_content(
             }
         }
     }
-    files.truncate(MAX_FILES);
+    // Filet de sécurité (le dédoublonnage par nom peut encore dépasser le budget par clé) : le mod principal reste en tête.
+    for (pl, _) in files.drain(MAX_FILES.min(files.len())..) {
+        report.missing.push(over_limit(&pl.name));
+    }
     let total = files.len() as u32;
     progress(0, total, &files[0].0.name);
     // 1) tout télécharger (et vérifier) avant de modifier l'instance.
@@ -1063,6 +1091,91 @@ mod tests {
             .unwrap();
         assert!(!e.game.join("mods/main-1.0.jar").exists() && e.game.join("mods/main-2.0.jar").is_file());
         assert!(e.game.join("mods/dep-2.jar").is_file());
+    }
+
+    /// Monte le projet `id` (un jar `<id>.jar`) dont la version requiert les projets `deps`.
+    async fn mount_project(mr: &MockServer, id: &str, deps: &[String]) {
+        let body = format!("JAR {id}").into_bytes();
+        let d: Vec<_> = deps.iter().map(|p| json!({"project_id": p, "version_id": null, "dependency_type": "required"})).collect();
+        let v = mr_version(mr, &format!("v-{id}"), id, &format!("{id}.jar"), &body, json!(d), "2024-01-01T00:00:00Z");
+        Mock::given(method("GET")).and(path(format!("/v2/project/{id}/version"))).respond_with(ResponseTemplate::new(200).set_body_json(json!([v]))).mount(mr).await;
+        serve(mr, &format!("/cdn/{id}.jar"), &body).await;
+    }
+
+    fn jars(e: &Env) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(e.game.join("mods")).unwrap().map(|f| f.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        v.sort();
+        v
+    }
+
+    async fn install_main(mr: &MockServer, cf: &MockServer, e: &Env) -> InstallReport {
+        install_content(&providers(mr, cf), &input(BrowseSource::Modrinth, "MAIN", BrowseKind::Mod), &inst(Loader::Fabric), &e.game, &e.store, &e.index, &dlo(), &|_, _, _| {}).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn deps_over_limit_are_reported_in_missing() {
+        let (mr, cf) = (MockServer::start().await, MockServer::start().await);
+        let ids: Vec<String> = (0..45).map(|i| format!("D{i}")).collect();
+        mount_project(&mr, "MAIN", &ids).await;
+        for id in &ids {
+            mount_project(&mr, id, &[]).await;
+        }
+        let e = env();
+        let r = install_main(&mr, &cf, &e).await;
+        assert_eq!(r.installed.len(), MAX_FILES);
+        assert!(r.installed.contains(&"MAIN.jar".to_string()), "le mod principal est toujours posé");
+        assert_eq!(jars(&e).len(), MAX_FILES);
+        // Les 45 dépendances sont toutes comptées : posées ou signalées, sans doublon.
+        assert_eq!(r.missing.len(), 46 - MAX_FILES);
+        assert!(r.missing.iter().all(|m| m.contains("limite de 40 fichiers")), "{:?}", r.missing);
+        let uniq: HashSet<_> = r.missing.iter().collect();
+        assert_eq!(uniq.len(), r.missing.len());
+        for id in &ids {
+            let posee = e.game.join(format!("mods/{id}.jar")).is_file();
+            let signalee = r.missing.iter().any(|m| m.contains(&format!("Modrinth {id} ")));
+            assert!(posee ^ signalee, "{id} : posée={posee} signalée={signalee}");
+        }
+    }
+
+    #[tokio::test]
+    async fn cascade_over_limit_drains_the_queue_into_missing() {
+        let (mr, cf) = (MockServer::start().await, MockServer::start().await);
+        let tops: Vec<String> = (0..3).map(|i| format!("T{i}")).collect();
+        mount_project(&mr, "MAIN", &tops).await;
+        let mut all_leaves = Vec::new();
+        for (i, t) in tops.iter().enumerate() {
+            let leaves: Vec<String> = (0..20).map(|j| format!("L{i}x{j}")).collect();
+            mount_project(&mr, t, &leaves).await;
+            for l in &leaves {
+                mount_project(&mr, l, &[]).await;
+            }
+            all_leaves.extend(leaves);
+        }
+        let e = env();
+        let r = install_main(&mr, &cf, &e).await;
+        assert_eq!(r.installed.len(), MAX_FILES);
+        // Pile LIFO : T2 et T1 sont résolues (leurs 40 feuilles découvertes), T0 ne l'est jamais. 39 dépendances sont posées ;
+        // restent T0 (jamais résolue, donc ses feuilles sont inconnues) et 3 feuilles de T1, toutes signalées.
+        assert_eq!(r.missing.len(), 4, "{:?}", r.missing);
+        assert!(r.missing.iter().all(|m| m.contains("limite de 40 fichiers")));
+        assert!(r.missing.iter().any(|m| m.contains("Modrinth T0 ")));
+        for id in tops.iter().chain(all_leaves.iter().filter(|l| !l.starts_with("L0"))) {
+            let posee = e.game.join(format!("mods/{id}.jar")).is_file();
+            let signalee = r.missing.iter().any(|m| m.contains(&format!("Modrinth {id} ")));
+            assert!(posee ^ signalee, "{id} : posée={posee} signalée={signalee}");
+        }
+    }
+
+    #[tokio::test]
+    async fn failing_deps_are_bounded_and_the_rest_reported() {
+        let (mr, cf) = (MockServer::start().await, MockServer::start().await);
+        let ids: Vec<String> = (0..90).map(|i| format!("F{i}")).collect();
+        mount_project(&mr, "MAIN", &ids).await; // aucune des 90 dépendances n'est servie : 404
+        let e = env();
+        let r = install_main(&mr, &cf, &e).await;
+        assert_eq!(r.installed, vec!["MAIN.jar".to_string()]);
+        assert_eq!(r.missing.len(), 90, "{:?}", r.missing);
+        assert_eq!(r.missing.iter().filter(|m| m.contains("limite de 40 fichiers")).count(), 90 - MAX_FILES * 2);
     }
 
     #[tokio::test]

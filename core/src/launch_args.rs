@@ -30,6 +30,8 @@ pub struct LaunchSpec {
     pub java_path: PathBuf,
     pub game_dir: PathBuf,
     pub assets_dir: PathBuf,
+    /// Valeur de `${game_assets}` : `assets/virtual/<id>` pour les index legacy (1.6 à 1.7.2), sinon `assets_dir`.
+    pub game_assets_dir: PathBuf,
     pub libs_dir: PathBuf,
     pub natives_dir: PathBuf,
     pub client_jar: PathBuf,
@@ -312,7 +314,7 @@ pub fn build_command(spec: &LaunchSpec) -> Result<LaunchCommand> {
         ("version_type", spec.version_type.clone()),
         ("game_directory", s(&spec.game_dir)),
         ("assets_root", s(&spec.assets_dir)),
-        ("game_assets", s(&spec.assets_dir)),
+        ("game_assets", s(&spec.game_assets_dir)),
         ("assets_index_name", norm.asset_id.to_string()),
         ("natives_directory", s(&spec.natives_dir)),
         ("library_directory", s(&spec.libs_dir)),
@@ -410,6 +412,7 @@ mod tests {
             java_path: "java".into(),
             game_dir: "gd".into(),
             assets_dir: "assets".into(),
+            game_assets_dir: "assets".into(),
             libs_dir: "libs".into(),
             natives_dir: "nat".into(),
             client_jar: "client.jar".into(),
@@ -521,6 +524,33 @@ mod tests {
             "--userType", "msa", "--versionType", "release",
         ]);
         assert_eq!(cmd.args, expected);
+    }
+
+    #[test]
+    fn legacy_172_game_assets_vise_le_dossier_virtual() {
+        let v = vanilla(json!({
+            "id": "1.7.2",
+            "assetIndex": {"id":"legacy","url":"u","sha1":"a","size":1},
+            "libraries": [{"name":"a:one:1"}],
+            "minecraftArguments": "--username ${auth_player_name} --session ${auth_session} --version ${version_name} --gameDir ${game_directory} --assetsDir ${game_assets}"
+        }));
+        let mut sp = spec(LaunchVersion::Vanilla(v), online(), Os::Linux);
+        sp.game_assets_dir = "assets/virtual/legacy".into();
+        let args = build_command(&sp).unwrap().args;
+        let i = args.iter().position(|a| a == "--assetsDir").unwrap();
+        assert_eq!(args[i + 1], "assets/virtual/legacy");
+        // `${assets_root}` reste la racine (objects/) : les versions modernes en dépendent.
+        let v2 = vanilla(json!({
+            "id": "1.7.10", "libraries": [],
+            "minecraftArguments": "--assetsDir ${assets_root} --x ${game_assets}"
+        }));
+        let mut sp = spec(LaunchVersion::Vanilla(v2), online(), Os::Linux);
+        sp.game_assets_dir = "assets/virtual/legacy".into();
+        let args = build_command(&sp).unwrap().args;
+        let i = args.iter().position(|a| a == "--assetsDir").unwrap();
+        assert_eq!(args[i + 1], "assets");
+        let j = args.iter().position(|a| a == "--x").unwrap();
+        assert_eq!(args[j + 1], "assets/virtual/legacy");
     }
 
     #[test]

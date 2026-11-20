@@ -603,6 +603,7 @@ impl AppState {
             java_path: prepared.java,
             game_dir,
             assets_dir: prepared.assets_dir,
+            game_assets_dir: prepared.game_assets_dir,
             libs_dir: prepared.libs_dir,
             natives_dir: prepared.natives_dir,
             client_jar: prepared.client_jar,

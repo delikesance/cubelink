@@ -131,6 +131,7 @@ Workspace Rust `core` (logique), `p2p` (réseau), `src-tauri` (commandes et int�
 |---|---|---|
 | Auth Microsoft/Xbox/Minecraft (code d'appareil) | fait | `core/src/auth/` |
 | Manifestes Mojang, libraries, natives, Java, lancement | fait | `core/src/mojang/`, `java*.rs`, `launch_*.rs` |
+| Assets des vieux clients (index `legacy` : copie par nom dans `assets/virtual/<id>`, `${game_assets}` ; `pre-1.6` : `<game_dir>/resources`) | fait, non vérifié en jeu réel | `core/src/mojang/assets.rs` |
 | Loaders | fait | `core/src/loader/` |
 | Cache par hash | fait | `core/src/store/` |
 | Modrinth, import `.mrpack`, parcours du catalogue | fait | `core/src/providers/`, `mrpack.rs`, `browse.rs` |

@@ -101,6 +101,89 @@ async fn write_atomic(dest: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// Nom d'asset sûr : chemin relatif sans `..`, `\\`, `:` ni segment vide (un index corrompu ne doit pas sortir du dossier).
+fn safe_asset_name(name: &str) -> Result<()> {
+    let bad = name.is_empty()
+        || name.starts_with('/')
+        || name.contains('\\')
+        || name.contains(':')
+        || name.split('/').any(|s| s.is_empty() || s == "..");
+    if bad {
+        Err(Error::Invalid(format!("nom d'asset {name}")))
+    } else {
+        Ok(())
+    }
+}
+
+/// Copie `src` vers `dest` (atomique via `.part`), sauf si `dest` a déjà la bonne taille.
+fn copy_named(src: &Path, dest: &Path, size: u64) -> Result<()> {
+    if let Ok(meta) = std::fs::metadata(dest) {
+        if meta.is_file() && meta.len() == size {
+            return Ok(());
+        }
+    }
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut part = dest.as_os_str().to_owned();
+    part.push(".part");
+    let part = PathBuf::from(part);
+    if let Err(e) = std::fs::copy(src, &part).and_then(|_| std::fs::rename(&part, dest)) {
+        let _ = std::fs::remove_file(&part);
+        return Err(e.into());
+    }
+    Ok(())
+}
+
+fn copy_all(index: &AssetIndex, assets_dir: &Path, dest_root: &Path, cancel: &AtomicBool) -> Result<()> {
+    for (name, obj) in &index.objects {
+        if cancel.load(Ordering::SeqCst) {
+            return Err(Error::Cancelled);
+        }
+        safe_asset_name(name)?;
+        let h = obj.hash.to_ascii_lowercase();
+        if h.len() != 40 || !h.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(Error::Invalid(format!("hash d'asset {}", obj.hash)));
+        }
+        let src = assets_dir.join("objects").join(&h[..2]).join(&h);
+        if !src.is_file() {
+            return Err(Error::NotFound(format!("objet d'asset {name} ({h})")));
+        }
+        let dest = name.split('/').fold(dest_root.to_path_buf(), |p, seg| p.join(seg));
+        copy_named(&src, &dest, obj.size)?;
+    }
+    Ok(())
+}
+
+/// Les vieux clients lisent les sons par nom, pas par hash. Une fois les objets téléchargés :
+/// - `virtual` (1.6 à 1.7.2, index `legacy`) : copie vers `<assets>/virtual/<index_id>/<nom>` ; renvoie ce dossier,
+///   à passer en `${game_assets}` ;
+/// - `map_to_resources` (avant 1.6, index `pre-1.6`) : copie vers `<game_dir>/resources/<nom>`.
+///
+/// Sans ces drapeaux, ne fait rien et renvoie `None`. Idempotent (taille vérifiée), annulable entre les fichiers.
+/// Bloquant : à lancer dans `spawn_blocking`.
+pub fn materialize_legacy_assets(
+    index: &AssetIndex,
+    index_id: &str,
+    assets_dir: &Path,
+    game_dir: &Path,
+    cancel: &AtomicBool,
+) -> Result<Option<PathBuf>> {
+    if index_id.is_empty() || index_id.contains(['/', '\\']) || index_id.contains("..") {
+        return Err(Error::Invalid(format!("identifiant d'index {index_id}")));
+    }
+    let mut virtual_dir = None;
+    if index.virtual_ {
+        let dir = assets_dir.join("virtual").join(index_id);
+        copy_all(index, assets_dir, &dir, cancel)?;
+        virtual_dir = Some(dir);
+    }
+    if index.map_to_resources {
+        copy_all(index, assets_dir, &game_dir.join("resources"), cancel)?;
+    }
+    Ok(virtual_dir)
+}
+
 /// Télécharge tous les objets avec les réglages par défaut (hors concurrence).
 pub async fn download_assets<F>(
     index: &AssetIndex,
@@ -472,5 +555,140 @@ mod tests {
         let err = download_assets_client(&client, &index_of(&cs), dir.path(), Some(&server.uri()), |_| {}, &o).await.unwrap_err();
         assert!(t.elapsed() < Duration::from_secs(3), "{:?}", t.elapsed());
         assert!(matches!(&err, Error::Network(m) if m.contains("délai dépassé")), "{err:?}");
+    }
+
+    fn fake_store(dir: &Path, files: &[(&str, &[u8])]) -> AssetIndex {
+        let mut objects = BTreeMap::new();
+        for (name, c) in files {
+            let (h, o) = obj(c);
+            let d = dir.join("objects").join(&h[..2]);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join(&h), c).unwrap();
+            objects.insert(name.to_string(), o);
+        }
+        AssetIndex { objects, map_to_resources: false, virtual_: false }
+    }
+
+    fn no_cancel() -> AtomicBool {
+        AtomicBool::new(false)
+    }
+
+    #[test]
+    fn virtual_copie_les_objets_par_nom() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, g) = (dir.path().join("assets"), dir.path().join("game"));
+        let mut idx = fake_store(&a, &[("minecraft/sounds/x.ogg", b"son"), ("alias.ogg", b"son"), ("lang/fr.lang", b"fr")]);
+        idx.virtual_ = true;
+        let r = materialize_legacy_assets(&idx, "legacy", &a, &g, &no_cancel()).unwrap();
+        assert_eq!(r, Some(a.join("virtual/legacy")));
+        assert_eq!(std::fs::read(a.join("virtual/legacy/minecraft/sounds/x.ogg")).unwrap(), b"son");
+        assert_eq!(std::fs::read(a.join("virtual/legacy/alias.ogg")).unwrap(), b"son");
+        assert_eq!(std::fs::read(a.join("virtual/legacy/lang/fr.lang")).unwrap(), b"fr");
+        assert!(!g.join("resources").exists());
+    }
+
+    #[test]
+    fn map_to_resources_copie_dans_le_dossier_de_jeu() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, g) = (dir.path().join("assets"), dir.path().join("game"));
+        let mut idx = fake_store(&a, &[("newsound/step/grass1.ogg", b"pas")]);
+        idx.map_to_resources = true;
+        assert_eq!(materialize_legacy_assets(&idx, "pre-1.6", &a, &g, &no_cancel()).unwrap(), None);
+        assert_eq!(std::fs::read(g.join("resources/newsound/step/grass1.ogg")).unwrap(), b"pas");
+        assert!(!a.join("virtual").exists());
+    }
+
+    #[test]
+    fn index_moderne_ne_cree_rien() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, g) = (dir.path().join("assets"), dir.path().join("game"));
+        let idx = fake_store(&a, &[("x.ogg", b"x")]);
+        assert_eq!(materialize_legacy_assets(&idx, "17", &a, &g, &no_cancel()).unwrap(), None);
+        assert!(!a.join("virtual").exists() && !g.exists());
+    }
+
+    #[test]
+    fn copie_idempotente_et_repare_une_taille_fausse() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, g) = (dir.path().join("assets"), dir.path().join("game"));
+        let mut idx = fake_store(&a, &[("a.ogg", b"contenu")]);
+        idx.virtual_ = true;
+        let d = a.join("virtual/legacy/a.ogg");
+        materialize_legacy_assets(&idx, "legacy", &a, &g, &no_cancel()).unwrap();
+        // Même taille : conservé tel quel (non réécrit).
+        std::fs::write(&d, b"CONTENU").unwrap();
+        materialize_legacy_assets(&idx, "legacy", &a, &g, &no_cancel()).unwrap();
+        assert_eq!(std::fs::read(&d).unwrap(), b"CONTENU");
+        // Taille fausse : réparé, sans reste de .part.
+        std::fs::write(&d, b"tronq").unwrap();
+        materialize_legacy_assets(&idx, "legacy", &a, &g, &no_cancel()).unwrap();
+        assert_eq!(std::fs::read(&d).unwrap(), b"contenu");
+        assert!(!part_of(&d).exists());
+    }
+
+    #[test]
+    fn nom_piege_refuse_sans_rien_ecrire() {
+        for bad in ["../evade.ogg", "/abs.ogg", "a\\b.ogg", "c:x", "a//b", "a/../b"] {
+            let dir = tempfile::tempdir().unwrap();
+            let (a, g) = (dir.path().join("assets"), dir.path().join("game"));
+            let mut idx = fake_store(&a, &[(bad, b"x")]);
+            idx.virtual_ = true;
+            idx.map_to_resources = true;
+            let err = materialize_legacy_assets(&idx, "legacy", &a, &g, &no_cancel()).unwrap_err();
+            assert!(matches!(err, Error::Invalid(_)), "{bad} : {err:?}");
+            assert!(!dir.path().join("evade.ogg").exists());
+            assert!(!g.exists());
+        }
+    }
+
+    #[test]
+    fn identifiant_d_index_piege_refuse() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut idx = fake_store(dir.path(), &[("a", b"x")]);
+        idx.virtual_ = true;
+        for bad in ["", "../x", "a/b", "a\\b"] {
+            let err = materialize_legacy_assets(&idx, bad, dir.path(), dir.path(), &no_cancel()).unwrap_err();
+            assert!(matches!(err, Error::Invalid(_)), "{bad}");
+        }
+    }
+
+    #[test]
+    fn objet_manquant_donne_une_erreur_claire() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut idx = fake_store(dir.path(), &[("a.ogg", b"x")]);
+        idx.virtual_ = true;
+        let h = &idx.objects["a.ogg"].hash;
+        std::fs::remove_file(dir.path().join("objects").join(&h[..2]).join(h)).unwrap();
+        let err = materialize_legacy_assets(&idx, "legacy", dir.path(), dir.path(), &no_cancel()).unwrap_err();
+        assert!(matches!(err, Error::NotFound(_)), "{err:?}");
+    }
+
+    #[test]
+    fn annulation_entre_les_fichiers() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut idx = fake_store(dir.path(), &[("a.ogg", b"x")]);
+        idx.virtual_ = true;
+        let c = AtomicBool::new(true);
+        let err = materialize_legacy_assets(&idx, "legacy", dir.path(), dir.path(), &c).unwrap_err();
+        assert!(matches!(err, Error::Cancelled));
+    }
+
+    /// Bout en bout sur vrai disque et vrai HTTP (loopback) : index servi, objets téléchargés, puis rangés par nom.
+    #[tokio::test]
+    async fn telechargement_puis_arborescence_legacy() {
+        let server = MockServer::start().await;
+        let cs: Vec<Vec<u8>> = vec![b"un".to_vec(), b"deux".to_vec()];
+        for c in &cs {
+            serve(&server, c).await;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut idx = index_of(&cs);
+        idx.virtual_ = true;
+        idx.map_to_resources = true;
+        download_assets_with(&idx, dir.path(), Some(&server.uri()), |_| {}, &opts()).await.unwrap();
+        let g = dir.path().join("game");
+        let v = materialize_legacy_assets(&idx, "legacy", dir.path(), &g, &no_cancel()).unwrap().unwrap();
+        assert_eq!(std::fs::read(v.join("f1")).unwrap(), b"deux");
+        assert_eq!(std::fs::read(g.join("resources/f0")).unwrap(), b"un");
     }
 }

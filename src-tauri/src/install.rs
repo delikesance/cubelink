@@ -27,6 +27,8 @@ pub struct Prepared {
     pub version: LaunchVersion,
     pub libs_dir: PathBuf,
     pub assets_dir: PathBuf,
+    /// `${game_assets}` : `assets/virtual/<id>` pour un index legacy, sinon `assets_dir`.
+    pub game_assets_dir: PathBuf,
     pub natives_dir: PathBuf,
     pub client_jar: PathBuf,
 }
@@ -502,11 +504,22 @@ pub async fn ensure_game_with(
     let opts = DownloadOptions { cancel: cancel.clone(), ..DownloadOptions::default() };
     cancellable(&cancel, download_assets_with(&index, &paths.assets, resources.as_deref(), |_| {}, &opts)).await?;
 
+
+    // Vieux clients (index legacy / pre-1.6) : les sons sont lus par nom, pas par hash.
+    let game_dir = core_lib::instance::InstanceStore::new(paths.instances.clone()).game_dir(&inst.id)?;
+    let (idx, id, assets, cancel_flag) = (index, vanilla.asset_index.id.clone(), paths.assets.clone(), cancel.clone());
+    let virtual_dir = tokio::task::spawn_blocking(move || {
+        core_lib::mojang::assets::materialize_legacy_assets(&idx, &id, &assets, &game_dir, &cancel_flag)
+    })
+    .await
+    .map_err(|_| Error::Other("préparation des ressources interrompue".into()))??;
+
     Ok(Prepared {
         java,
         version,
         libs_dir: paths.libraries.clone(),
         assets_dir: paths.assets.clone(),
+        game_assets_dir: virtual_dir.unwrap_or_else(|| paths.assets.clone()),
         natives_dir,
         client_jar,
     })

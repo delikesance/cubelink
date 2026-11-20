@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { navigate } from "../../app/router";
 import type { BrowseHit, BrowseInstallResult, BrowseVersion, ContentCheck, Instance, Services } from "../../services/types";
-import { BackButton, Select, RAM_DEFAULT, RamPicker, useDefaultRam } from "../../ui";
+import { BackButton, Select, RAM_DEFAULT, RamPicker, useDefaultRam, useSystemRam } from "../../ui";
 
 export const SOURCE_LABEL = { curseforge: "CurseForge", modrinth: "Modrinth" } as const;
 
@@ -63,6 +63,7 @@ export function Detail({ hit, services, minecraft, loader, instance, installed, 
   const modpack = hit.kind === "modpack";
   const [ram, setRam] = useState(RAM_DEFAULT);
   const defaultRam = useDefaultRam(services);
+  const systemRam = useSystemRam(services);
   useEffect(() => {
     let cancelled = false;
     setVersions(null);
@@ -232,7 +233,7 @@ export function Detail({ hit, services, minecraft, loader, instance, installed, 
         {modpack && <p className="br-muted">Une nouvelle instance sera créée à partir de ce modpack.</p>}
         {modpack && !openTarget && (
           <div className="br-field">
-            <RamPicker value={ram} onChange={setRam} defaultMb={defaultRam} disabled={busy}
+            <RamPicker value={ram} onChange={setRam} defaultMb={defaultRam} systemMb={systemRam} disabled={busy}
               hint="Les gros modpacks (plus de 200 mods) demandent souvent 8 Go ou plus." />
           </div>
         )}

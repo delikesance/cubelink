@@ -262,6 +262,8 @@ export interface Services {
   joinCancel(): Promise<void>;
 
   settingsGet(): Promise<Settings>;
+  /** Mémoire physique du PC en Mo, `null` si illisible. */
+  systemRamMb(): Promise<number | null>;
   settingsSet(settings: Settings): Promise<Settings>;
 
   /** Sauvegarde l'identité et la liste d'amis dans un fichier `.cubelink-id` chiffré par la phrase de passe (8 caractères minimum). Renvoie la clé publique. */

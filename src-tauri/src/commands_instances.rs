@@ -293,6 +293,13 @@ impl Drop for GameGuard {
 }
 
 impl AppState {
+    /// Mémoire donnée au jeu (Mo) : réglage de l'instance, sinon réglage global, sinon « Automatique ». Les mods sont
+    /// comptés sur le disque à l'instant du lancement : ceux d'un monde d'ami viennent d'être synchronisés.
+    pub(crate) fn launch_ram_mb(&self, inst: &Instance) -> u32 {
+        let mods = self.instances.mod_count(&inst.id).unwrap_or(inst.mod_count);
+        core_lib::instance::effective_ram_mb(inst.ram_mb, self.settings_get().default_ram_mb, mods, core_lib::sysmem::physical_ram_mb())
+    }
+
     pub fn instances_list(&self) -> Vec<Instance> {
         self.instances.list()
     }
@@ -598,7 +605,7 @@ impl AppState {
         });
         let agent_on = agent_arg.is_some();
         let lan_map = if agent_on && join_server.is_none() { lan_map_path(self, &inst, &prepared.version, &prepared.libs_dir).await } else { None };
-        let ram_mb_eff = core_lib::instance::effective_ram_mb(inst.ram_mb, self.settings_get().default_ram_mb);
+        let ram_mb_eff = self.launch_ram_mb(&inst);
         let spec = LaunchSpec {
             java_path: prepared.java,
             game_dir,
@@ -964,6 +971,46 @@ mod tests {
 
     fn vanilla() -> LoaderSpec {
         LoaderSpec { loader: Loader::Vanilla, version: String::new() }
+    }
+
+    /// Réel (disque, vraie RAM de la machine, vrai java) : la mémoire « Automatique » suit le nombre de jars de `mods/`,
+    /// l'instance et le réglage manuel l'emportent, et la JVM accepte vraiment le `-Xmx` calculé.
+    #[test]
+    fn memoire_automatique_au_lancement() {
+        let dir = tempfile::tempdir().unwrap();
+        let (st, _) = test_state(dir.path());
+        assert_eq!(st.settings_get().default_ram_mb, 0, "Automatique par défaut");
+        let phys = core_lib::sysmem::physical_ram_mb();
+        let mut inst = st.instances.create("Auto", "1.21.1", vanilla(), core_lib::instance::RAM_DEFAULT).unwrap();
+        assert_eq!(st.launch_ram_mb(&inst), core_lib::instance::auto_ram_mb(0, phys));
+        let mods = st.instances.game_dir(&inst.id).unwrap().join("mods");
+        std::fs::create_dir_all(&mods).unwrap();
+        for n in 0..120 {
+            std::fs::write(mods.join(format!("m{n}.jar")), b"x").unwrap();
+        }
+        // `inst` est l'ancienne copie (0 mod) : le lancement recompte sur le disque.
+        let auto = st.launch_ram_mb(&inst);
+        assert_eq!(auto, core_lib::instance::auto_ram_mb(120, phys));
+        assert!(auto >= core_lib::instance::auto_ram_mb(0, phys) && auto.is_multiple_of(256) && auto >= 1024, "{auto}");
+        if phys.is_some_and(|p| p >= 10 * 1024) {
+            assert_eq!(auto, 6144, "120 mods sur un PC de 10 Go ou plus");
+        }
+        // Réglage global manuel, puis réglage de l'instance.
+        lock(&st.settings).default_ram_mb = 3072;
+        assert_eq!(st.launch_ram_mb(&inst), 3072);
+        inst.ram_mb = 2048;
+        assert_eq!(st.launch_ram_mb(&inst), 2048);
+
+        // Vrai java : le tas maximal obtenu est bien celui demandé.
+        let Ok(out) = std::process::Command::new("java").args([format!("-Xmx{auto}M"), "-XX:+PrintFlagsFinal".into(), "-version".into()]).output() else {
+            return; // pas de java sur cette machine
+        };
+        let text = String::from_utf8_lossy(&out.stdout);
+        let heap: u64 = text.lines().find(|l| l.contains(" MaxHeapSize "))
+            .and_then(|l| l.split('=').nth(1)).and_then(|v| v.split_whitespace().next()).and_then(|v| v.parse().ok())
+            .unwrap_or_else(|| panic!("MaxHeapSize introuvable : {text}"));
+        let want = u64::from(auto) * 1024 * 1024;
+        assert!(heap.abs_diff(want) <= want / 50, "java a pris {heap} octets au lieu de {want}");
     }
 
     /// Réel (disque, sockets, tâche de lancement) : le jeu à télécharger ne répond jamais ; « Annuler le lancement »

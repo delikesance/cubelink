@@ -4,7 +4,7 @@ import { useBack, useScreenTitle, useServices } from "../../app/context";
 import { navigate } from "../../app/router";
 import { peekPrepareDeferred, setImportWarning, setPrepareDeferred } from "../../app/importWarning";
 import type { Loader } from "../../services/types";
-import { Button, Field, Input, RAM_DEFAULT, Select, RamPicker, useDefaultRam } from "../../ui";
+import { Button, Field, Input, RAM_DEFAULT, Select, RamPicker, useDefaultRam, useSystemRam } from "../../ui";
 import { ICONS, Icon } from "../../ui";
 
 export const RECOMMENDED_VERSION = "1.21.1";
@@ -62,6 +62,7 @@ export default function Create({ pickMrpack }: CreateProps = {}) {
   const [loader, setLoader] = useState<Loader>("neoforge");
   const [ram, setRam] = useState(RAM_DEFAULT);
   const defaultRam = useDefaultRam(services);
+  const systemRam = useSystemRam(services);
   const [advanced, setAdvanced] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -277,7 +278,7 @@ export default function Create({ pickMrpack }: CreateProps = {}) {
             </button>
             {advanced && (
               <div id={`${uid}-adv`} className="create-adv-body enter">
-                <RamPicker value={ram} onChange={setRam} defaultMb={defaultRam} disabled={busy} />
+                <RamPicker value={ram} onChange={setRam} defaultMb={defaultRam} systemMb={systemRam} disabled={busy} />
               </div>
             )}
           </div>

@@ -22,9 +22,55 @@ pub const MAX_RAM_MB: u32 = 65536;
 /// RAM d'une instance « Par défaut » : la valeur globale des paramètres, lue au lancement.
 pub const RAM_DEFAULT: u32 = 0;
 
-/// RAM réellement donnée au jeu : celle de l'instance, ou la valeur globale si l'instance suit le défaut.
-pub fn effective_ram_mb(instance_mb: u32, global_mb: u32) -> u32 {
-    if instance_mb == RAM_DEFAULT { global_mb } else { instance_mb }
+/// Valeur globale « Automatique » : la mémoire se calcule au lancement (`auto_ram_mb`) selon le PC et le nombre de mods.
+pub const RAM_AUTO: u32 = 0;
+/// RAM physique laissée à Windows et aux autres programmes dans le calcul automatique.
+const AUTO_RESERVE_MB: u64 = 4096;
+/// Plancher du calcul automatique, même sur un PC très juste.
+const AUTO_FLOOR_MB: u32 = 1024;
+
+/// Mémoire « Automatique » (Mo) : 2 Go sans mod, 4 Go sous 100 mods, 6 Go sous 250, 8 Go au-delà ; plafonnée à la RAM
+/// physique moins 4 Go (plancher 1 Go : un petit PC garde de quoi lancer le jeu), arrondie à 256 Mo. RAM inconnue :
+/// pas de plafond. Rien n'est enregistré : le calcul suit le PC et le modpack à chaque lancement.
+pub fn auto_ram_mb(mod_count: u32, physical_mb: Option<u64>) -> u32 {
+    let tier: u32 = match mod_count {
+        0 => 2048,
+        1..=99 => 4096,
+        100..=249 => 6144,
+        _ => 8192,
+    };
+    let capped = match physical_mb {
+        Some(p) => u64::from(tier).min(p.saturating_sub(AUTO_RESERVE_MB)) as u32,
+        None => tier,
+    };
+    (capped.max(AUTO_FLOOR_MB) / 256 * 256).clamp(MIN_RAM_MB, MAX_RAM_MB)
+}
+
+/// RAM réellement donnée au jeu : celle de l'instance si elle en a une ; sinon la valeur globale des paramètres ; sinon
+/// (global « Automatique », `RAM_AUTO`) le calcul `auto_ram_mb` sur le nombre de mods et la RAM physique.
+pub fn effective_ram_mb(instance_mb: u32, global_mb: u32, mod_count: u32, physical_mb: Option<u64>) -> u32 {
+    if instance_mb != RAM_DEFAULT {
+        instance_mb
+    } else if global_mb != RAM_AUTO {
+        global_mb
+    } else {
+        auto_ram_mb(mod_count, physical_mb)
+    }
+}
+
+/// Réserve laissée au système quand l'hôte Hearth fait tourner le serveur ET le client sur le même PC.
+const HOST_RESERVE_MB: u64 = 3072;
+
+/// Mémoire du serveur Hearth (Mo) : la valeur voulue bornée de 1 à 8 Go, puis réduite pour que serveur + client tiennent
+/// dans la RAM physique moins 3 Go (docs/hearth.md § 6.6). Le client garde sa part ; plancher 1 Go, arrondi à 256 Mo.
+/// RAM illisible : pas de réduction.
+pub fn hearth_server_ram_mb(wanted_mb: u32, client_mb: u32, physical_mb: Option<u64>) -> u32 {
+    let wanted = wanted_mb.clamp(1024, 8192);
+    let capped = match physical_mb {
+        Some(p) => u64::from(wanted).min(p.saturating_sub(u64::from(client_mb) + HOST_RESERVE_MB)) as u32,
+        None => wanted,
+    };
+    capped.max(1024) / 256 * 256
 }
 
 /// Avant de rejoindre un ami : désactive l'écran d'accueil « accessibilité » de Minecraft (1.19.4+).
@@ -665,11 +711,80 @@ mod tests {
         let s = InstanceStore::new(d.path().to_path_buf());
         let i = s.create("Défaut", "1.21.1", LoaderSpec { loader: Loader::Vanilla, version: String::new() }, RAM_DEFAULT).unwrap();
         assert_eq!(i.ram_mb, RAM_DEFAULT);
-        assert_eq!(effective_ram_mb(i.ram_mb, 10240), 10240);
+        assert_eq!(effective_ram_mb(i.ram_mb, 10240, 0, Some(32768)), 10240);
         // Valeur propre à l'instance, puis retour au défaut.
-        assert_eq!(effective_ram_mb(s.update_ram(&i.id, 6144).unwrap().ram_mb, 10240), 6144);
+        assert_eq!(effective_ram_mb(s.update_ram(&i.id, 6144).unwrap().ram_mb, 10240, 0, Some(32768)), 6144);
         assert_eq!(s.update(&i.id, None, Some(RAM_DEFAULT), None, None, None).unwrap().ram_mb, RAM_DEFAULT);
         assert!(s.update_ram(&i.id, 100).is_err());
+    }
+
+    #[test]
+    fn ram_auto_paliers_selon_les_mods() {
+        let big = Some(64 * 1024);
+        assert_eq!(auto_ram_mb(0, big), 2048);
+        assert_eq!(auto_ram_mb(1, big), 4096);
+        assert_eq!(auto_ram_mb(50, big), 4096);
+        assert_eq!(auto_ram_mb(99, big), 4096);
+        assert_eq!(auto_ram_mb(100, big), 6144);
+        assert_eq!(auto_ram_mb(150, big), 6144);
+        assert_eq!(auto_ram_mb(249, big), 6144);
+        assert_eq!(auto_ram_mb(250, big), 8192);
+        assert_eq!(auto_ram_mb(400, big), 8192);
+    }
+
+    #[test]
+    fn ram_auto_plafonnee_par_le_pc() {
+        // RAM physique moins 4 Go.
+        assert_eq!(auto_ram_mb(400, Some(8 * 1024)), 4096);
+        assert_eq!(auto_ram_mb(400, Some(12 * 1024)), 8192);
+        assert_eq!(auto_ram_mb(150, Some(16 * 1024)), 6144);
+        assert_eq!(auto_ram_mb(50, Some(6 * 1024)), 2048);
+        // Plancher 1 Go : un PC de 4 Go ou moins ne descend pas plus bas, même sans aucun mod.
+        assert_eq!(auto_ram_mb(0, Some(4 * 1024)), 1024);
+        assert_eq!(auto_ram_mb(400, Some(5 * 1024)), 1024);
+        assert_eq!(auto_ram_mb(400, Some(2 * 1024)), 1024);
+        assert_eq!(auto_ram_mb(400, Some(0)), 1024);
+        // RAM inconnue : pas de plafond.
+        assert_eq!(auto_ram_mb(400, None), 8192);
+        assert_eq!(auto_ram_mb(0, None), 2048);
+    }
+
+    #[test]
+    fn ram_auto_arrondie_a_256_mo() {
+        // 7,3 Go physiques : 3,3 Go de plafond, arrondis au multiple de 256 inférieur.
+        let v = auto_ram_mb(400, Some(7 * 1024 + 300));
+        assert_eq!(v % 256, 0);
+        assert_eq!(v, 3328);
+        for p in (0..40_000u64).step_by(137) {
+            for m in [0, 1, 120, 300] {
+                let v = auto_ram_mb(m, Some(p));
+                assert!(v.is_multiple_of(256) && (1024..=8192).contains(&v), "{m} mods, {p} Mo : {v}");
+            }
+        }
+    }
+
+    #[test]
+    fn serveur_hearth_cede_de_la_ram_au_client_de_l_hote() {
+        // 16 Go, client 8 Go : le serveur ne garde que 16 - 8 - 3 = 5 Go (jamais 8 + 8 sur 16).
+        assert_eq!(hearth_server_ram_mb(8192, 8192, Some(16384)), 5120);
+        // Gros PC : borné à 8 Go.
+        assert_eq!(hearth_server_ram_mb(12288, 8192, Some(65536)), 8192);
+        // Petit PC : plancher 1 Go ; RAM illisible : pas de réduction, mais borné 1 à 8 Go.
+        assert_eq!(hearth_server_ram_mb(4096, 4096, Some(8192)), 1024);
+        assert_eq!(hearth_server_ram_mb(16384, 16384, None), 8192);
+        assert_eq!(hearth_server_ram_mb(512, 512, None), 1024);
+    }
+
+    #[test]
+    fn ram_effective_instance_puis_global_puis_auto() {
+        let p = Some(32 * 1024);
+        // L'instance gagne, puis le réglage global manuel ; global « Automatique » : calcul sur les mods.
+        assert_eq!(effective_ram_mb(3072, 10240, 300, p), 3072);
+        assert_eq!(effective_ram_mb(RAM_DEFAULT, 10240, 300, p), 10240);
+        assert_eq!(effective_ram_mb(RAM_DEFAULT, RAM_AUTO, 300, p), 8192);
+        assert_eq!(effective_ram_mb(RAM_DEFAULT, RAM_AUTO, 0, p), 2048);
+        assert_eq!(effective_ram_mb(RAM_DEFAULT, RAM_AUTO, 300, Some(8 * 1024)), 4096);
+        assert_eq!(effective_ram_mb(2048, RAM_AUTO, 300, p), 2048);
     }
 
     #[test]

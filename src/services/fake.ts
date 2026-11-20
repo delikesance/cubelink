@@ -231,7 +231,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
   ];
   let codeN = 1;
   let settings: Settings = {
-    language: "fr", default_ram_mb: 4096, java_path: null,
+    language: "fr", default_ram_mb: 0, java_path: null, ram_auto_migrated: true,
     trust_default: "ask", close_on_launch: false, share_mods: true, lan_auto: true,
     overlay_enabled: true, overlay_hotkey: "Ctrl+Shift+C", embedded_game: true, start_with_os: true, open_to_all_friends: false,
   };
@@ -926,6 +926,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     joinCancel: async () => { stopTimer(); step = 0; emit(listeners.transfer, progress("failed")); },
 
     settingsGet: async () => ({ ...settings }),
+    systemRamMb: async () => 16384,
     settingsSet: async (s) => { settings = { ...s }; return { ...settings }; },
 
     browseSearch: async (q) => {

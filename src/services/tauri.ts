@@ -97,6 +97,7 @@ export function createTauriServices(): Services {
     identityImport: (path, passphrase) => commands.identityImport(path, passphrase),
     identityRestart: () => done(commands.identityRestart()),
     settingsGet: () => commands.settingsGet(),
+    systemRamMb: () => commands.systemRamMb(),
     settingsSet: (settings) => commands.settingsSet(settings),
 
     browseSearch: (query) => commands.browseSearch(query),

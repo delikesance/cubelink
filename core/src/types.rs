@@ -434,6 +434,8 @@ pub struct TransferProgress {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct Settings {
     pub language: String,
+    /// Mémoire par défaut des instances (Mo). `0` : « Automatique », calculée au lancement selon le PC et le nombre de
+    /// mods (`instance::auto_ram_mb`). Valeur par défaut : `0`.
     pub default_ram_mb: u32,
     pub java_path: Option<String>,
     pub trust_default: TrustLevel,
@@ -462,6 +464,10 @@ pub struct Settings {
     /// `true` par défaut (fichiers de réglages anciens : `true`).
     #[serde(default = "default_start_with_os")]
     pub start_with_os: bool,
+    /// Interne : vrai une fois la migration « 4096 Mo (ancienne valeur d'usine) devient Automatique » faite. Absent des
+    /// anciens fichiers (`false`) ; le front ne le modifie pas (`settings_set` garde la valeur actuelle).
+    #[serde(default)]
+    pub ram_auto_migrated: bool,
 }
 
 pub const DEFAULT_OVERLAY_HOTKEY: &str = "Ctrl+Shift+C";
@@ -500,6 +506,8 @@ mod tests {
         assert!(s.lan_auto);
         assert!(s.embedded_game);
         assert!(s.start_with_os);
+        assert!(!s.ram_auto_migrated, "ancien fichier : la migration de la mémoire reste à faire");
+        assert_eq!(s.default_ram_mb, 4096, "la valeur lue n'est pas touchée par la désérialisation");
     }
 
     /// #55 : les réglages `discovery`, `allow_relay` et `relay_only` (n0) n'existent plus ; un ancien fichier qui les

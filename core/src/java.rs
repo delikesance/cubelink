@@ -12,6 +12,29 @@ pub struct JavaInstall {
     pub major: u32,
     /// Éditeur si connu (champ IMPLEMENTOR du fichier `release`).
     pub vendor: Option<String>,
+    /// Architecture de la JVM (champ OS_ARCH du fichier `release`, en minuscules) ;
+    /// `None` si absente : l'installation est alors acceptée.
+    pub arch: Option<String>,
+}
+
+/// Vrai pour une valeur `OS_ARCH` de JVM 32 bits (liste blanche : tout le reste est accepté).
+fn is_32bit_arch(arch: &str) -> bool {
+    let a = arch.trim().trim_matches('"').to_lowercase();
+    matches!(a.as_str(), "x86" | "i386" | "i486" | "i586" | "i686" | "arm" | "aarch32")
+}
+
+impl JavaInstall {
+    /// Vrai si la JVM est connue comme 32 bits.
+    pub fn is_32bit(&self) -> bool {
+        self.arch.as_deref().is_some_and(is_32bit_arch)
+    }
+
+    /// Une JVM 32 bits ne peut pas réserver un grand tas (`-Xmx` > ~1,5 Go) : elle est
+    /// inutilisable sur un hôte 64 bits. Sur un hôte 32 bits, elle reste la seule option.
+    /// Un Java x64 émulé (Windows ARM, Rosetta) annonce `amd64`/`x86_64` et reste accepté.
+    pub fn usable_on_host(&self) -> bool {
+        !(cfg!(target_pointer_width = "64") && self.is_32bit())
+    }
 }
 
 /// Analyse un numéro de version de Minecraft ("1.20.4", "1.21", "1.16.5-rc1").
@@ -60,20 +83,22 @@ pub fn parse_java_major(version: &str) -> Option<u32> {
 }
 
 /// Lit (major, vendor) depuis le fichier `release` d'un dossier de JRE/JDK.
-fn read_release(home: &Path) -> Option<(u32, Option<String>)> {
+fn read_release(home: &Path) -> Option<(u32, Option<String>, Option<String>)> {
     let text = fs::read_to_string(home.join("release")).ok()?;
     let mut version = None;
     let mut vendor = None;
+    let mut arch = None;
     for line in text.lines() {
         let Some((k, val)) = line.split_once('=') else { continue };
         let val = val.trim().trim_matches('"').trim();
         match k.trim() {
             "JAVA_VERSION" => version = Some(val.to_string()),
             "IMPLEMENTOR" if !val.is_empty() => vendor = Some(val.to_string()),
+            "OS_ARCH" if !val.is_empty() => arch = Some(val.to_lowercase()),
             _ => {}
         }
     }
-    Some((parse_java_major(&version?)?, vendor))
+    Some((parse_java_major(&version?)?, vendor, arch))
 }
 
 fn java_binary(home: &Path) -> Option<PathBuf> {
@@ -86,8 +111,8 @@ fn java_binary(home: &Path) -> Option<PathBuf> {
 /// Examine un dossier candidat (racine du JRE) ; gère aussi le layout macOS `Contents/Home`.
 fn inspect_home(dir: &Path) -> Option<JavaInstall> {
     for home in [dir.to_path_buf(), dir.join("Contents").join("Home")] {
-        if let (Some(path), Some((major, vendor))) = (java_binary(&home), read_release(&home)) {
-            return Some(JavaInstall { path, major, vendor });
+        if let (Some(path), Some((major, vendor, arch))) = (java_binary(&home), read_release(&home)) {
+            return Some(JavaInstall { path, major, vendor, arch });
         }
     }
     None
@@ -127,7 +152,7 @@ where
     let start = output.find('"')? + 1;
     let end = start + output[start..].find('"')?;
     let major = parse_java_major(&output[start..end])?;
-    Some(JavaInstall { path: java.to_path_buf(), major, vendor: None })
+    Some(JavaInstall { path: java.to_path_buf(), major, vendor: None, arch: None })
 }
 
 /// Empêche Windows d'ouvrir une fenêtre de console pour un sous-processus (`CREATE_NO_WINDOW`).
@@ -192,15 +217,16 @@ fn path_java_homes(path: Option<&std::ffi::OsStr>) -> Vec<PathBuf> {
 
 /// Choisit l'installation : version exacte préférée ; sinon la plus petite version
 /// supérieure compatible pour >= 17 ; pour 8, exige 8 ; pour 16, 16 ou >= 17.
+/// Les JVM 32 bits sont écartées sur un hôte 64 bits (voir [`JavaInstall::usable_on_host`]).
 pub fn select_for(required_major: u32, installs: &[JavaInstall]) -> Option<&JavaInstall> {
-    if let Some(i) = installs.iter().find(|i| i.major == required_major) {
+    let usable = || installs.iter().filter(|i| i.usable_on_host());
+    if let Some(i) = usable().find(|i| i.major == required_major) {
         return Some(i);
     }
     if required_major < 16 {
         return None;
     }
-    installs
-        .iter()
+    usable()
         .filter(|i| i.major > required_major && i.major >= 17)
         .min_by_key(|i| i.major)
 }
@@ -287,7 +313,7 @@ mod tests {
     }
 
     fn inst(major: u32) -> JavaInstall {
-        JavaInstall { path: PathBuf::from(format!("j{major}")), major, vendor: None }
+        JavaInstall { path: PathBuf::from(format!("j{major}")), major, vendor: None, arch: None }
     }
 
     #[test]
@@ -300,6 +326,79 @@ mod tests {
         assert!(select_for(21, &[inst(17), inst(8)]).is_none());
         assert_eq!(select_for(16, &[inst(8), inst(17)]).unwrap().major, 17);
         assert!(select_for(21, &[]).is_none());
+    }
+
+    fn inst_arch(major: u32, name: &str, arch: Option<&str>) -> JavaInstall {
+        JavaInstall {
+            path: PathBuf::from(name),
+            major,
+            vendor: None,
+            arch: arch.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn arch_32_bits_reconnue() {
+        for a in ["x86", "i386", "i486", "i586", "i686", "arm", "aarch32", "X86", "\"i586\""] {
+            assert!(is_32bit_arch(a), "{a}");
+        }
+        for a in ["amd64", "x86_64", "aarch64", "arm64", "", "riscv64", "inconnu"] {
+            assert!(!is_32bit_arch(a), "{a}");
+        }
+    }
+
+    #[test]
+    fn release_os_arch_est_lu() {
+        let t = tempfile::tempdir().unwrap();
+        fake_jre(t.path(), "a", Some("JAVA_VERSION=\"1.8.0_401\"\nOS_ARCH=\"I586\"\n"), false);
+        fake_jre(t.path(), "b", Some("JAVA_VERSION=\"17.0.9\"\nOS_ARCH=\"amd64\"\n"), false);
+        fake_jre(t.path(), "c", Some("JAVA_VERSION=\"21.0.2\"\n"), false);
+        let found = find_installed(&[t.path().to_path_buf()]);
+        let arch = |m| found.iter().find(|i| i.major == m).unwrap().arch.clone();
+        assert_eq!(arch(8).as_deref(), Some("i586"));
+        assert_eq!(arch(17).as_deref(), Some("amd64"));
+        assert_eq!(arch(21), None);
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn java_32_bits_ecarte_sur_hote_64_bits() {
+        let t = tempfile::tempdir().unwrap();
+        fake_jre(t.path(), "jre8-x86", Some("JAVA_VERSION=\"1.8.0_401\"\nOS_ARCH=\"i586\"\n"), false);
+        // Un seul Java 8, en 32 bits : rien de sélectionnable, l'appelant installe le JRE Adoptium.
+        let found = find_installed(&[t.path().to_path_buf()]);
+        assert_eq!(found.len(), 1);
+        assert!(select_for(8, &found).is_none());
+
+        // Avec un Java 8 64 bits à côté : lui seul est choisi, quel que soit l'ordre.
+        fake_jre(t.path(), "jre8-x64", Some("JAVA_VERSION=\"1.8.0_401\"\nOS_ARCH=\"amd64\"\n"), false);
+        let mut found = find_installed(&[t.path().to_path_buf()]);
+        for _ in 0..2 {
+            let sel = select_for(8, &found).unwrap();
+            assert!(sel.path.to_string_lossy().contains("jre8-x64"));
+            found.reverse();
+        }
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn java_32_bits_ne_sert_pas_de_repli() {
+        // 17 en 32 bits ne remplace pas le Java 16 demandé ; un 21 64 bits reste admis.
+        let x86_17 = inst_arch(17, "j17-x86", Some("x86"));
+        assert!(select_for(16, std::slice::from_ref(&x86_17)).is_none());
+        assert!(select_for(17, std::slice::from_ref(&x86_17)).is_none());
+        let all = [x86_17, inst_arch(21, "j21", Some("x86_64"))];
+        assert_eq!(select_for(17, &all).unwrap().major, 21);
+        assert_eq!(select_for(16, &all).unwrap().major, 21);
+    }
+
+    #[test]
+    fn java_64_bits_ou_arch_inconnue_accepte() {
+        for a in [Some("amd64"), Some("x86_64"), Some("aarch64"), None] {
+            let i = inst_arch(8, "j8", a);
+            assert!(i.usable_on_host(), "{a:?}");
+            assert!(select_for(8, std::slice::from_ref(&i)).is_some());
+        }
     }
 
     #[test]

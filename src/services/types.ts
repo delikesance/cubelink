@@ -10,15 +10,17 @@ import type * as B from "./bindings";
 // Le front reçoit la première et envoie la seconde.
 export type {
   AccountInfo, AccountKind, BrowseKind, BrowseSource, BrowseVersion, FixFailure, Friend, FriendCode, FriendRequest,
-  LaunchPhase, Loader, LoaderSpec, ModEntry, Presence, Profile, StageState, TransferPhase, TrustLevel, UpdatePhase,
+  Launcher, LaunchPhase, Loader, LoaderSpec, ModEntry, Presence, Profile, StageState, TransferPhase, TrustLevel, UpdatePhase,
   VerifyCode, VersionVerdict,
 } from "./bindings";
 import type {
-  BrowseKind, BrowseSource, BrowseVersion, FriendCode, FriendRequest, LoaderSpec, ModEntry, Presence, Profile, StageState,
+  BrowseKind, BrowseSource, BrowseVersion, FriendCode, FriendRequest, Launcher, LoaderSpec, ModEntry, Presence, Profile, StageState,
   VerifyCode,
 } from "./bindings";
 
 export type AccountsState = B.AccountsState_Serialize;
+/** Instance trouvée chez Prism, la CurseForge App ou la Modrinth App. `unsupported` : raison du refus (loader inconnu). */
+export type DetectedInstance = B.DetectedInstance_Serialize;
 export type BrowseHit = B.BrowseHit_Serialize;
 export type BrowseInstallResult = B.BrowseInstallResult_Serialize;
 export type BrowsePage = B.BrowsePage_Serialize;
@@ -103,6 +105,8 @@ export interface StageFallback {
 /** Rectangle de la zone de jeu et largeur du panneau, en pixels physiques (origine : coin haut-gauche de la zone cliente). */
 export interface StageLayout { x: number; y: number; w: number; h: number; panel_w: number }
 
+/** Réglages facultatifs de `launcherImportRun`. */
+export interface LauncherImportOptions { name?: string; ram_mb?: number }
 export interface PickFilesOptions { extensions: string[]; multiple?: boolean }
 
 export type Unsubscribe = () => void;
@@ -177,6 +181,10 @@ export interface Services {
   instancesCreate(input: CreateInstanceInput): Promise<Instance>;
   /** Importe un .mrpack, un zip CurseForge ou un zip brut. `target` ne sert que pour un zip sans métadonnées. */
   instancesImportMrpack(path: string, target?: ImportTarget): Promise<Instance>;
+  /** Instances des autres lanceurs (Prism, CurseForge, Modrinth) : dossiers habituels, ou `path` choisi à la main. Lecture seule. */
+  launcherImportScan(path?: string | null): Promise<DetectedInstance[]>;
+  /** Importe l'instance du dossier `path` ; progression par `onBrowseProgress`. La source n'est jamais modifiée. */
+  launcherImportRun(path: string, launcher: Launcher, opts?: LauncherImportOptions): Promise<Instance>;
   instancesLaunch(id: string): Promise<void>;
   instancesKill(id: string): Promise<void>;
   instancesDelete(id: string): Promise<void>;
@@ -264,6 +272,8 @@ export interface Services {
   modsAdd(instanceId: string, path: string): Promise<ModEntry>;
   /** Sélecteur de fichiers natif ; renvoie les chemins choisis ([] si annulé). */
   pickFiles(opts: PickFilesOptions): Promise<string[]>;
+  /** Sélecteur de dossier natif ; renvoie null si annulé. */
+  pickFolder(): Promise<string | null>;
 
   onAuthState(cb: (p: Profile | null) => void): Unsubscribe;
   /** Changements de la liste des comptes ou du compte actif. */

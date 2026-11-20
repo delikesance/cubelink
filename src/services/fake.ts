@@ -2,7 +2,7 @@ import { validateOfflineName } from "./accounts";
 import { HEARTH_EULA_REQUIRED } from "./types";
 import type {
   AccountInfo, AccountsState, BrowseHit, BrowseInstallResult, BrowseKind, BrowseProgressEvent, BrowseSource, BrowseVersion, FixPlan, FixProgressEvent, FixResult, ModCheck, ModEntry, ModIssue, ModpackUpdate,
-  CreateInstanceInput, DeviceCode, HostState, Invite, JoinAnswer, JoinRequest, ImportWarningEvent, LaunchLogEvent, FriendRequest, FriendWithPresence, Instance, InstanceArt,
+  CreateInstanceInput, DetectedInstance, DeviceCode, HostState, Invite, JoinAnswer, JoinRequest, ImportWarningEvent, LaunchLogEvent, FriendRequest, FriendWithPresence, Instance, InstanceArt,
   JoinPlan, LaunchState, Manifest, PresenceEvent, UnknownModsEvent, Profile, Services, Settings,
   StageFallback, StageState, TransferProgress, Unsubscribe, UpdateState,
   HearthCard, HearthDetail, HearthHandover, HearthHostPrompt, HearthInvite, HearthMember, HearthMemberLite,
@@ -17,6 +17,10 @@ export interface FakeOptions {
   requestCount?: number;
   /** Valeur renvoyée par pickFiles (configurable aussi via setPickedFiles). */
   pickedFiles?: string[];
+  /** Instances « trouvées » chez les autres lanceurs (défaut : un Prism, un CurseForge, un Modrinth et un loader non géré). `[]` : rien de détecté. */
+  detectedInstances?: DetectedInstance[];
+  /** Instances que `launcherImportScan` ne renvoie qu'avec un chemin choisi à la main. */
+  manualInstances?: DetectedInstance[];
   /** Comptes présents au départ (le premier est actif). Vide par défaut : écran Connexion. */
   accounts?: AccountInfo[];
   /** Réponse de `stageSupported` (zone de jeu intégrée). Faux par défaut : comme dans un navigateur. */
@@ -26,6 +30,8 @@ export interface FakeOptions {
 /** Commandes de test exposées par le faux service. */
 export interface FakeControls {
   setPickedFiles(paths: string[]): void;
+  /** Valeur renvoyée par pickFolder (null : le sélecteur est annulé). */
+  setPickedFolder(path: string | null): void;
   /** Simule un glisser-déposer natif de fichiers sur la fenêtre. */
   dropFiles(paths: string[]): void;
   /** Test : émet un événement host://state. */
@@ -209,6 +215,18 @@ function makeManifest(): Manifest {
     files,
   };
 }
+
+/** Instances « trouvées » par défaut chez les autres lanceurs. */
+const DEFAULT_DETECTED: DetectedInstance[] = [
+  { launcher: "prism", name: "Aventure entre amis", path: "C:\\Users\\Alex\\AppData\\Roaming\\PrismLauncher\\instances\\Aventure", minecraft: "1.21.1",
+    loader: { loader: "fabric", version: "0.16.5" }, mod_count: 42, has_saves: true, unsupported: null },
+  { launcher: "curseforge", name: "All the Mods 10", path: "C:\\Users\\Alex\\curseforge\\minecraft\\Instances\\ATM10", minecraft: "1.21.1",
+    loader: { loader: "neoforge", version: "21.1.77" }, mod_count: 380, has_saves: false, unsupported: null },
+  { launcher: "modrinth", name: "Survie vanilla", path: "C:\\Users\\Alex\\AppData\\Roaming\\ModrinthApp\\profiles\\Survie", minecraft: "1.20.4",
+    loader: { loader: "vanilla", version: "" }, mod_count: 0, has_saves: true, unsupported: null },
+  { launcher: "prism", name: "Vieux pack", path: "C:\\Users\\Alex\\AppData\\Roaming\\PrismLauncher\\instances\\Vieux", minecraft: "1.8.9",
+    loader: { loader: "vanilla", version: "" }, mod_count: 12, has_saves: false, unsupported: "le loader « liteloader » n'est pas géré par Cubelink" },
+];
 
 export function createFakeServices(opts: FakeOptions = {}): Services & FakeControls {
   const tickMs = opts.tickMs ?? 250;
@@ -404,6 +422,8 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
 
   // --- mods en mémoire ---
   let picked = opts.pickedFiles ?? [];
+  let pickedFolder: string | null = null;
+  const detected = opts.detectedInstances ?? DEFAULT_DETECTED;
   const mods = new Map<string, ModEntry[]>();
   mods.set("inst-aeronautics", [
     ...["create", "sodium", "iris", "lithium", "jade", "xaero-minimap", "waystones", "farmers-delight"].map((n, i) => (
@@ -542,6 +562,24 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
       const inst: Instance = {
         ...noExtras, id: `inst-${instances.length + 1}`, name: "Pack importé", minecraft: "1.21.1",
         loader: { loader: "fabric", version: "0.16.5" }, ram_mb: 4096, mod_count: 12,
+      };
+      instances.push(inst);
+      return { ...inst };
+    },
+    launcherImportScan: async (path) => {
+      if (path && path.trim()) return (opts.manualInstances ?? (/rien|empty|vide/i.test(path) ? [] : detected.slice(0, 1))).map((d) => ({ ...d }));
+      return detected.map((d) => ({ ...d }));
+    },
+    launcherImportRun: async (path, _launcher, o) => {
+      const d = [...detected, ...(opts.manualInstances ?? [])].find((x) => x.path === path);
+      if (!d) throw new Error("Ce dossier n'est pas une instance lisible de ce lanceur.");
+      if (d.unsupported) throw new Error(d.unsupported);
+      const total = Math.max(1, d.mod_count + 2);
+      for (const done of [Math.ceil(total / 2), total]) emit(listeners.browse, { done, total, label: "Import de l'instance" });
+      const inst: Instance = {
+        ...noExtras, id: `inst-${instances.length + 1}`, name: o?.name?.trim() || d.name, minecraft: d.minecraft,
+        loader: d.loader.loader !== "vanilla" && !d.loader.version ? { ...d.loader, version: "0.16.5" } : { ...d.loader },
+        ram_mb: o?.ram_mb ?? 4096, mod_count: d.mod_count,
       };
       instances.push(inst);
       return { ...inst };
@@ -1011,6 +1049,8 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
       return multiple ? ok : ok.slice(0, 1);
     },
     setPickedFiles: (paths) => { picked = paths; },
+    pickFolder: async () => pickedFolder,
+    setPickedFolder: (path) => { pickedFolder = path; },
     dropFiles: (paths) => emit(listeners.drop, paths),
     emitHostState: (e) => emit(listeners.host, e),
     emitInvite: (p) => {

@@ -42,6 +42,8 @@ export function createTauriServices(): Services {
     instancesCreate: (i) => commands.instancesCreate(i.name, i.minecraft, i.loader, i.ram_mb),
     instancesImportMrpack: (path, t) =>
       commands.instancesImportMrpack(path, t?.name ?? null, t?.minecraft ?? null, t?.loader ?? null, t?.ram_mb ?? null),
+    launcherImportScan: (path) => commands.launcherImportScan(path ?? null),
+    launcherImportRun: (path, launcher, o) => commands.launcherImportRun(path, launcher, o?.name ?? null, o?.ram_mb ?? null),
     instancesLaunch: (id) => done(commands.instancesLaunch(id)),
     instancesKill: (id) => done(commands.instancesKill(id)),
     instancesDelete: (id) => done(commands.instancesDelete(id)),
@@ -108,6 +110,12 @@ export function createTauriServices(): Services {
       const { open } = await import("@tauri-apps/plugin-dialog");
       const r = await open({ multiple: !!multiple, directory: false, filters: [{ name: "Fichiers", extensions }] });
       return r == null ? [] : Array.isArray(r) ? r : [r];
+    },
+
+    pickFolder: async () => {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const r = await open({ multiple: false, directory: true });
+      return typeof r === "string" ? r : null;
     },
 
     onAuthState: (cb) => on("auth://state", cb),

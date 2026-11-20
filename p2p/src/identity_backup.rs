@@ -386,6 +386,12 @@ const APPLY_RETRIES: u32 = 20;
 const APPLY_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// Fichiers `friends.db*` de `dir` encore ouverts par ce processus (Linux : `/proc/self/fd`).
+/// Ailleurs que sous Linux, aucune mesure n'est possible : la liste est vide (la CI Windows vérifie le renommage pour de vrai).
+#[cfg(all(test, not(target_os = "linux")))]
+fn open_db_files(_dir: &Path) -> Vec<PathBuf> {
+    Vec::new()
+}
+
 #[cfg(all(test, target_os = "linux"))]
 fn open_db_files(dir: &Path) -> Vec<PathBuf> {
     std::fs::read_dir("/proc/self/fd")

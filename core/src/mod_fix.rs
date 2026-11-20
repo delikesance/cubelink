@@ -101,7 +101,7 @@ enum Op {
     /// Nom activé du jar.
     Enable(String),
     Disable(String),
-    Install { pl: Planned, obj: StoredObject, replace: Vec<String> },
+    Install { pl: Box<Planned>, obj: StoredObject, replace: Vec<String> },
 }
 
 #[derive(Clone)]
@@ -761,7 +761,7 @@ fn stage_found(ctx: &Ctx<'_>, st: &mut State, f: &Found, kind: &str, file: Optio
         file: file.map(str::to_string),
         issue_files: issue_files.to_vec(),
     };
-    let idx = st.push(action, Op::Install { pl: f.cand.pl.clone(), obj: f.obj.clone(), replace });
+    let idx = st.push(action, Op::Install { pl: Box::new(f.cand.pl.clone()), obj: f.obj.clone(), replace });
     st.installs += 1;
     for m in mod_check::selected(&f.meta, ctx.loader_s) {
         st.provided.push((m.id.clone(), m.version.clone(), idx));
@@ -2126,6 +2126,7 @@ mod tests {
             jvm_args: String::new(),
             wrapper: String::new(),
             art: None,
+            pack: None,
         }
     }
 

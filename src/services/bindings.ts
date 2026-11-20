@@ -36,7 +36,7 @@ export const commands = {
 	instancesList: (options?: InvokeOptions) => __TAURI_INVOKE<Instance_Serialize[]>("instances_list", undefined, options),
 	/**  Crée une instance vide. */
 	instancesCreate: (name: string, minecraft: string, loader: LoaderSpec, ramMb: number, options?: InvokeOptions) => __TAURI_INVOKE<Instance_Serialize>("instances_create", { name, minecraft, loader, ram_mb: ramMb }, options),
-	/**  Importe un .mrpack, un zip CurseForge ou un zip brut (les champs facultatifs ne servent qu'au zip brut). Avertissements par `import://warning`. */
+	/**  Importe un .mrpack, un zip CurseForge ou un zip brut (les champs facultatifs ne servent qu'au zip brut). Avertissements par `import://warning`. Un `.mrpack` est reconnu auprès de Modrinth par son SHA-1 (meilleur effort, borné à 20 s, silencieux hors ligne) : s'il est connu, `Instance.pack` reçoit son projet et sa version, sinon `pack` reste absent et l'import réussit quand même. */
 	instancesImportMrpack: (path: string, name: string | null, minecraft: string | null, loader: LoaderSpec | null, ramMb: number | null, options?: InvokeOptions) => __TAURI_INVOKE<Instance_Serialize>("instances_import_mrpack", { path, name, minecraft, loader, ram_mb: ramMb }, options),
 	/**  Lance l'instance. Progression par `launch://state`, sortie du jeu par `launch://log`. */
 	instancesLaunch: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("instances_launch", { id }, options),
@@ -56,7 +56,7 @@ export const commands = {
 	instancesArtImage: (instanceId: string, file: string, maxPx: number | null, options?: InvokeOptions) => __TAURI_INVOKE<string>("instances_art_image", { instance_id: instanceId, file, max_px: maxPx }, options),
 	/**  Remplace l'icône ou la bannière (`role` : "icon" ou "banner") par une image choisie par le joueur. */
 	instancesArtSet: (instanceId: string, path: string, role: string, options?: InvokeOptions) => __TAURI_INVOKE<Instance_Serialize>("instances_art_set", { instance_id: instanceId, path, role }, options),
-	/**  Cherche l'illustration du modpack et l'applique. `auto` : recherche silencieuse de l'accueil (nom identique seulement). */
+	/**  Cherche l'illustration du modpack et l'applique. Si l'instance a une origine (`Instance.pack`), c'est ce projet exact qui est utilisé, sans recherche par nom (et sans repli par nom en cas d'échec réseau). Sinon, `auto` : recherche silencieuse de l'accueil (nom identique seulement). */
 	instancesArtLookup: (instanceId: string, auto: boolean | null, options?: InvokeOptions) => __TAURI_INVOKE<Instance_Serialize>("instances_art_lookup", { instance_id: instanceId, auto }, options),
 	/**  Description longue du modpack, en HTML déjà nettoyé ; `None` sans projet d'origine. */
 	instancesDescription: (instanceId: string, options?: InvokeOptions) => __TAURI_INVOKE<string | null>("instances_description", { instance_id: instanceId }, options),
@@ -98,11 +98,11 @@ export const commands = {
 	settingsGet: (options?: InvokeOptions) => __TAURI_INVOKE<Settings_Serialize>("settings_get", undefined, options),
 	/**  Le front envoie les réglages dans `{ settings }`. */
 	settingsSet: (settings: SettingsInput_Deserialize, options?: InvokeOptions) => __TAURI_INVOKE<Settings_Serialize>("settings_set", { settings }, options),
-	/**  Recherche dans le catalogue (Modrinth ou CurseForge). */
+	/**  Recherche dans le catalogue (Modrinth ou CurseForge). Pour une instance Quilt, la recherche de mods inclut aussi les mods Fabric (OU de facettes sur Modrinth, pas de `modLoaderType` sur CurseForge). */
 	browseSearch: (query: BrowseQuery_Deserialize, options?: InvokeOptions) => __TAURI_INVOKE<BrowsePage_Serialize>("browse_search", { query }, options),
 	/**  Versions d'un projet du catalogue, filtrées par version de Minecraft et loader. */
 	browseVersions: (source: string, id: string, kind: string, minecraft: string | null, loader: string | null, options?: InvokeOptions) => __TAURI_INVOKE<BrowseVersion[]>("browse_versions", { source, id, kind, minecraft, loader }, options),
-	/**  Installe un projet du catalogue (nouvelle instance pour un modpack). Un mod remplace les jars du même mod déjà présents sous un autre nom (modpack, ajout manuel) : ils vont dans `mods/.cubelink-backup/<id>/` (restaurables avec `mods_fix_undo` sur cet id ; le résultat de `browse_install` ne le renvoie pas encore, donc l'interface n'offre pas d'annulation). Une dépendance déjà fournie par un jar activé sous un autre nom est ignorée. Progression par `browse://progress`. */
+	/**  Installe un projet du catalogue (nouvelle instance pour un modpack). Un mod remplace les jars du même mod déjà présents sous un autre nom (modpack, ajout manuel) : ils vont dans `mods/.cubelink-backup/<id>/` (restaurables avec `mods_fix_undo` sur cet id ; le résultat de `browse_install` ne le renvoie pas encore, donc l'interface n'offre pas d'annulation). Une dépendance déjà fournie par un jar activé sous un autre nom est ignorée. Un pack de ressources ou un shader remplace les anciennes versions du même projet (sans sauvegarde : il se retélécharge) ; sa provenance est consignée dans `.cubelink-mods.json` sous la clé `dossier/fichier` (`shaderpacks/x.zip`), les mods gardent leur clé nue. Un pack posé avant ce correctif n'a pas de provenance. Pour un modpack, l'origine installée (`Instance.pack` : `source`, `project_id`, `version_id` de la version réellement téléchargée ; pour CurseForge, l'id du fichier) est enregistrée dans `instance.json` avant la récupération de l'illustration. Progression par `browse://progress`. */
 	browseInstall: (input: BrowseInstallInput_Deserialize, options?: InvokeOptions) => __TAURI_INVOKE<BrowseInstallResult_Serialize>("browse_install", { input }, options),
 	/**  Mods d'une instance (activés ou non). */
 	modsList: (instanceId: string, options?: InvokeOptions) => __TAURI_INVOKE<ModEntry[]>("mods_list", { instance_id: instanceId }, options),
@@ -110,7 +110,7 @@ export const commands = {
 	modsIcon: (instanceId: string, file: string, options?: InvokeOptions) => __TAURI_INVOKE<string | null>("mods_icon", { instance_id: instanceId, file }, options),
 	/**  Vérifie la compatibilité des mods installés (dépendances, incompatibilités, version, loader, doublons). */
 	modsCheck: (instanceId: string, options?: InvokeOptions) => __TAURI_INVOKE<ModCheck_Serialize>("mods_check", { instance_id: instanceId }, options),
-	/**  Compatibilité d'un mod du catalogue avec une instance (mods seulement ; autres types : résultat vide). */
+	/**  Mod : compatibilité avec une instance (déjà installé, version recommandée, verdicts, blocages). Pack de ressources et shader : seulement `installed` (fichiers du projet encore présents dans `resourcepacks/` ou `shaderpacks/`, d'après la provenance ; pas de verdicts). Modpack : résultat vide. */
 	browseCheck: (source: string, id: string, kind: string, instanceId: string, versionId: string | null, options?: InvokeOptions) => __TAURI_INVOKE<ContentCheck_Serialize>("browse_check", { source, id, kind, instance_id: instanceId, version_id: versionId }, options),
 	/**  Calcule les corrections possibles des problèmes de mods, sans rien modifier. */
 	modsFixPlan: (instanceId: string, options?: InvokeOptions) => __TAURI_INVOKE<FixPlan_Serialize>("mods_fix_plan", { instance_id: instanceId }, options),
@@ -862,6 +862,11 @@ export type Instance_Deserialize = {
 	wrapper?: string,
 	/**  Illustrations du modpack (icône, captures, couleur). Absent des anciens `instance.json`. */
 	art?: InstanceArt_Deserialize | null,
+	/**
+	 *  Origine du modpack (projet et version du catalogue). Absent des anciens `instance.json`, des
+	 *  instances créées à la main et des packs importés à la main que le catalogue ne reconnaît pas.
+	 */
+	pack?: PackOrigin | null,
 };
 
 export type Instance_Serialize = {
@@ -882,6 +887,11 @@ export type Instance_Serialize = {
 	wrapper: string,
 	/**  Illustrations du modpack (icône, captures, couleur). Absent des anciens `instance.json`. */
 	art: InstanceArt_Serialize | null,
+	/**
+	 *  Origine du modpack (projet et version du catalogue). Absent des anciens `instance.json`, des
+	 *  instances créées à la main et des packs importés à la main que le catalogue ne reconnaît pas.
+	 */
+	pack?: PackOrigin,
 };
 
 /**
@@ -1152,6 +1162,18 @@ export type NetTest_Serialize = {
 	relay_only: boolean,
 	/**  Le rapport réseau n'est pas arrivé à temps : `udp` et `direct` ne sont pas fiables. */
 	partial: boolean,
+};
+
+/**
+ *  Projet et version d'un modpack du catalogue, enregistrés à l'installation. Sert à retrouver
+ *  l'illustration exacte (sans recherche par nom) et, plus tard, à proposer les mises à jour.
+ */
+export type PackOrigin = {
+	/**  "curseforge" ou "modrinth". */
+	source: string,
+	project_id: string,
+	/**  Identifiant de version du catalogue (Modrinth : id de version ; CurseForge : id de fichier). */
+	version_id: string,
 };
 
 export type Presence = "online" | "offline";

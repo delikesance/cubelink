@@ -21,7 +21,7 @@ use crate::providers::modrinth_api::{FileHashes, ModrinthClient, SearchFilters, 
 use crate::providers::modrinth_dl::{fetch_into_store, fetch_into_store_unverified, DlOptions};
 use crate::store::index::StoreIndex;
 use crate::store::link::link_into;
-use crate::types::{Error, Instance, Loader, Result};
+use crate::types::{Error, Instance, Loader, PackOrigin, Result};
 
 pub const MODRINTH_HOSTS: &[&str] = &["cdn.modrinth.com", "github.com", "raw.githubusercontent.com", "objects.githubusercontent.com"];
 pub const CURSEFORGE_HOSTS: &[&str] = &["edge.forgecdn.net", "mediafilez.forgecdn.net"];
@@ -421,6 +421,8 @@ pub async fn versions(p: &Providers, source: &str, id: &str, kind: &str, minecra
 pub(crate) struct Planned {
     pub(crate) source: BrowseSource,
     pub(crate) project_id: String,
+    /// Identifiant de la version (Modrinth) ou du fichier (CurseForge) choisi.
+    pub(crate) version_id: String,
     pub(crate) name: String,
     pub(crate) url: String,
     pub(crate) size: u64,
@@ -448,6 +450,7 @@ pub(crate) fn plan_modrinth(p: &Providers, v: &Version, ext: &str) -> Result<Pla
     Ok(Planned {
         source: BrowseSource::Modrinth,
         project_id: v.project_id.clone(),
+        version_id: v.id.clone(),
         name: f.filename.clone(),
         url: f.url.clone(),
         size: f.size,
@@ -465,6 +468,7 @@ pub(crate) fn plan_cf(p: &Providers, f: &CfFile, mod_id: u64, ext: &str) -> Resu
     Ok(Planned {
         source: BrowseSource::Curseforge,
         project_id: if f.mod_id != 0 { f.mod_id } else { mod_id }.to_string(),
+        version_id: f.id.to_string(),
         name: f.file_name.clone(),
         url: url.to_string(),
         size: f.file_length,
@@ -729,7 +733,7 @@ pub async fn fetch_modpack(
     tmp_dir: &Path,
     dl: &DlOptions,
     progress: ProgressCb<'_>,
-) -> Result<PathBuf> {
+) -> Result<(PathBuf, PackOrigin)> {
     if input.kind != BrowseKind::Modpack {
         return Err(invalid("ce n'est pas un modpack"));
     }
@@ -744,7 +748,35 @@ pub async fn fetch_modpack(
     let dest = tmp_dir.join(&pl.name);
     std::fs::copy(store_root.join(&obj.rel_path), &dest)?;
     progress(1, 1, &pl.name);
-    Ok(dest)
+    // Projet et version réellement téléchargés (la plus récente compatible quand `version_id` est absent).
+    let origin = PackOrigin { source: pl.source.as_str().to_string(), project_id: pl.project_id.clone(), version_id: pl.version_id.clone() };
+    Ok((dest, origin))
+}
+
+/// Durée maximale de la recherche d'un `.mrpack` local dans le catalogue.
+const PACK_LOOKUP_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Retrouve le projet et la version Modrinth d'un `.mrpack` local par son SHA-1 (`/version_file/{sha1}`).
+/// Meilleur effort : `None` si Modrinth ne connaît pas le fichier (pack modifié ou non publié), hors ligne ou
+/// trop lent. Ne renvoie jamais d'erreur, l'import ne doit pas en dépendre.
+pub async fn resolve_pack_origin(p: &Providers, file: &Path) -> Option<PackOrigin> {
+    let path = file.to_path_buf();
+    let sha1 = match tokio::task::spawn_blocking(move || crate::unknown_mods::sha1_file(&path)).await {
+        Ok(Ok(h)) => h,
+        _ => return None,
+    };
+    match tokio::time::timeout(PACK_LOOKUP_BUDGET, p.modrinth.version_from_hash(&sha1)).await {
+        Ok(Ok(Some(v))) => Some(PackOrigin { source: BrowseSource::Modrinth.as_str().to_string(), project_id: v.project_id, version_id: v.id }),
+        Ok(Ok(None)) => None,
+        Ok(Err(e)) => {
+            tracing::warn!("origine du modpack : recherche par empreinte impossible : {e}");
+            None
+        }
+        Err(_) => {
+            tracing::warn!("origine du modpack : délai dépassé");
+            None
+        }
+    }
 }
 
 #[cfg(test)]
@@ -776,6 +808,7 @@ mod tests {
             jvm_args: String::new(),
             wrapper: String::new(),
             art: None,
+            pack: None,
         }
     }
 
@@ -1206,7 +1239,8 @@ mod tests {
         let mut i = input(BrowseSource::Modrinth, "PACK", BrowseKind::Modpack);
         i.version_id = Some("pk1".into());
         i.instance_id = None;
-        let f = fetch_modpack(&providers(&mr, &cf), &i, &e.store, &e.index, &tmp, &dlo(), &|_, _, _| {}).await.unwrap();
+        let (f, origin) = fetch_modpack(&providers(&mr, &cf), &i, &e.store, &e.index, &tmp, &dlo(), &|_, _, _| {}).await.unwrap();
+        assert_eq!(origin, PackOrigin { source: "modrinth".into(), project_id: "PACK".into(), version_id: "pk1".into() });
         assert_eq!(f.file_name().unwrap(), "My Pack-1.mrpack");
         assert_eq!(std::fs::read(&f).unwrap(), body);
 
@@ -1219,8 +1253,57 @@ mod tests {
             .await;
         serve(&cf, "/dl/pack.zip", &zip_body).await;
         let ci = BrowseInstallInput { source: BrowseSource::Curseforge, id: "50".into(), kind: BrowseKind::Modpack, version_id: Some("7".into()), instance_id: None, ram_mb: None };
-        let f = fetch_modpack(&providers(&mr, &cf), &ci, &e.store, &e.index, &tmp, &dlo(), &|_, _, _| {}).await.unwrap();
+        let (f, origin) = fetch_modpack(&providers(&mr, &cf), &ci, &e.store, &e.index, &tmp, &dlo(), &|_, _, _| {}).await.unwrap();
+        assert_eq!(origin, PackOrigin { source: "curseforge".into(), project_id: "50".into(), version_id: "7".into() });
         assert_eq!(std::fs::read(f).unwrap(), zip_body);
+    }
+
+    #[tokio::test]
+    async fn fetch_modpack_reports_the_version_it_really_picked() {
+        let (mr, cf) = (MockServer::start().await, MockServer::start().await);
+        let body = b"PK mrpack".to_vec();
+        // Sans version demandée : la plus récente compatible, et c'est elle qu'on enregistre.
+        let old = mr_version(&mr, "old", "PACK", "p-1.mrpack", &body, json!([]), "2023-01-01T00:00:00Z");
+        let new = mr_version(&mr, "new", "PACK", "p-2.mrpack", &body, json!([]), "2024-06-01T00:00:00Z");
+        Mock::given(method("GET")).and(path("/v2/project/mon-pack/version")).respond_with(ResponseTemplate::new(200).set_body_json(json!([old, new]))).mount(&mr).await;
+        serve(&mr, "/cdn/p-2.mrpack", &body).await;
+        let e = env();
+        let mut i = input(BrowseSource::Modrinth, "mon-pack", BrowseKind::Modpack);
+        i.instance_id = None;
+        let (f, origin) = fetch_modpack(&providers(&mr, &cf), &i, &e.store, &e.index, &e.store.join("tmp-pick"), &dlo(), &|_, _, _| {}).await.unwrap();
+        assert_eq!(f.file_name().unwrap(), "p-2.mrpack");
+        // Le project_id est celui du projet (pas le slug saisi), la version celle du fichier téléchargé.
+        assert_eq!(origin, PackOrigin { source: "modrinth".into(), project_id: "PACK".into(), version_id: "new".into() });
+    }
+
+    #[tokio::test]
+    async fn resolve_pack_origin_by_hash() {
+        let (mr, cf) = (MockServer::start().await, MockServer::start().await);
+        let d = tempfile::tempdir().unwrap();
+        let file = d.path().join("pack.mrpack");
+        std::fs::write(&file, b"contenu du pack").unwrap();
+        let sha1 = crate::unknown_mods::sha1_hex(b"contenu du pack");
+        let v = mr_version(&mr, "VER9", "PROJ9", "pack.mrpack", b"x", json!([]), "2024-01-01T00:00:00Z");
+        Mock::given(method("GET")).and(path(format!("/v2/version_file/{sha1}"))).and(query_param("algorithm", "sha1")).respond_with(ResponseTemplate::new(200).set_body_json(v)).expect(1).mount(&mr).await;
+        let o = resolve_pack_origin(&providers(&mr, &cf), &file).await.unwrap();
+        assert_eq!(o, PackOrigin { source: "modrinth".into(), project_id: "PROJ9".into(), version_id: "VER9".into() });
+    }
+
+    #[tokio::test]
+    async fn resolve_pack_origin_is_none_when_unknown_or_failing() {
+        let (mr, cf) = (MockServer::start().await, MockServer::start().await);
+        let d = tempfile::tempdir().unwrap();
+        let file = d.path().join("pack.mrpack");
+        std::fs::write(&file, b"pack maison").unwrap();
+        // Inconnu de Modrinth (404) : pas d'origine, pas d'erreur.
+        Mock::given(method("GET")).respond_with(ResponseTemplate::new(404)).mount(&mr).await;
+        assert_eq!(resolve_pack_origin(&providers(&mr, &cf), &file).await, None);
+        // Erreur serveur : idem.
+        let mr2 = MockServer::start().await;
+        Mock::given(method("GET")).respond_with(ResponseTemplate::new(500)).mount(&mr2).await;
+        assert_eq!(resolve_pack_origin(&providers(&mr2, &cf), &file).await, None);
+        // Fichier illisible : idem.
+        assert_eq!(resolve_pack_origin(&providers(&mr, &cf), &d.path().join("absent.mrpack")).await, None);
     }
 
     #[test]

@@ -583,6 +583,7 @@ pub fn two_monitors(width: u16, height: u16) -> Option<[(i32, i32, i32, i32); 2]
     use x11rb::protocol::randr;
     let (c, root) = x();
     let skip = |why: String| {
+        assert!(std::env::var_os("CUBELINK_REQUIRE_MULTIHEAD").is_none(), "deux moniteurs impossibles alors que CUBELINK_REQUIRE_MULTIHEAD est pose : {why}");
         eprintln!("test X11 multi-moniteurs ignore : {why}");
         None
     };

@@ -596,11 +596,25 @@ pub(super) fn shown(s: &Shared, win: u32) {
 /// Le jeu a deplace ou redimensionne SA fenetre (`e` : sa geometrie dans la scene). Ce qui n'est pas notre calage est une
 /// correction a refaire, et peut etre un plein ecran : fenetre de la taille de l'ecran alors que la zone n'est pas l'ecran.
 pub(super) fn game_moved(s: &Shared, win: u32, got: (i32, i32, i32, i32)) {
-    let (zone, current, closing, fullscreen, placed, known) = {
+    let (zone, current, closing, fullscreen, placed, known, transient) = {
         let st = s.lock();
-        (st.view, st.current == Some(win), st.close_asked, st.fullscreen, st.machine.flow().placed() && !st.pose_pending, st.origin.contains_key(&win) && st.adopted.contains(&win))
+        (
+            st.view,
+            st.current == Some(win),
+            st.close_asked,
+            st.fullscreen,
+            st.machine.flow().placed() && !st.pose_pending,
+            st.origin.contains_key(&win) && st.adopted.contains(&win),
+            st.origin.get(&win).is_some_and(|o| o.transient),
+        )
     };
-    if !known || got == (0, 0, zone.2, zone.3) {
+    if !known {
+        return;
+    }
+    // notre propre calage : (0, 0) dans la scene ; en transitoire, le jeu est enfant de la racine et son ConfigureNotify est en
+    // coordonnees ecran. Sans ce second cas, l'echo de notre recalage serait pris pour un mouvement du jeu (plein ecran quitte aussitot).
+    let ours = if transient { to_screen(s, zone) } else { Some((0, 0, zone.2, zone.3)) };
+    if ours == Some(got) {
         return;
     }
     if got.0 <= -30000 {

@@ -1,4 +1,5 @@
-//! Test de connexion (Paramètres → Réseau) sur le vrai réseau : relais n0, rapport iroh. Réseau requis.
+//! Test de connexion (Paramètres → Réseau) sur le vrai réseau : IPv6 publique, port ouvert sur la box (UPnP). Aucun
+//! serveur tiers contacté ; le résultat dépend de la box de la machine de test.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -16,6 +17,7 @@ async fn net_test_reel() {
     let t0 = Instant::now();
     let r = be.net_test().await.unwrap();
     println!("{:?} en {:?}", r, t0.elapsed());
-    assert!(r.relay_connected || r.udp, "ni relais ni UDP : {r:?}");
+    // Le résultat dépend de la box : on vérifie seulement que le test se termine dans le délai (5 s de mappage au plus).
+    assert!(t0.elapsed() < std::time::Duration::from_secs(15), "test trop long : {r:?}");
     be.shutdown().await;
 }

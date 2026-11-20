@@ -8,7 +8,6 @@ use cubelink_app::iroh_backend::{start_app, IrohBackend, IrohOptions, ManifestUn
 use cubelink_app::p2p_backend::P2pBackend;
 use cubelink_app::state::{AppState, EventSink};
 use p2p_lib::presence::PresenceConfig;
-use p2p_lib::relay::RelayChoice;
 use p2p_lib::transfer::resume::{ResumeConfig, RetryPolicy};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -50,8 +49,7 @@ impl Node {
         });
         let opts = IrohOptions {
             manifest_unknown_finder: pre,
-            relay: RelayChoice::Disabled,
-            advertise_addrs: Some(true),
+            portmap: false,
             unknown_finder: unknown,
             resume: ResumeConfig {
                 retry: RetryPolicy { max_retries: 5, base: Duration::from_millis(20), cap: Duration::from_millis(100), jitter: 0.0 },
@@ -166,7 +164,6 @@ async fn amis_presence_partage_join_coupure_et_refus() {
     assert_eq!(last.phase, TransferPhase::Done, "{last:?}");
     assert!(a.be.cut_consumed(), "la coupure injectée a eu lieu, puis reprise");
     assert!(prog.iter().any(|p| p.phase == TransferPhase::Receiving && p.bytes_done > 0));
-    assert!(!last.via_relay);
     assert_eq!(last.files_done, 3);
     // Avertissement fiable calculé côté invité après réception.
     let um = a.events("transfer://unknown_mods");

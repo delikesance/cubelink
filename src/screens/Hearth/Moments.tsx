@@ -50,7 +50,7 @@ function HandoverMoment({ services, e, onClose }: { services: Services; e: Heart
       </div>
       <div className="home-modal-foot">
         <Button variant="secondary" onClick={onClose}>Fermer</Button>
-        <Button loading={busy} data-autofocus onClick={() => { void run(async () => { await services.hearthPlay(e.group_id); onClose(); }); }}>Reprendre le serveur</Button>
+        <Button loading={busy} data-autofocus onClick={() => { void run(async () => { await services.hearthPlay(e.group_id); onClose(); }, e.group_id); }}>Reprendre le serveur</Button>
       </div>
       {eula}
     </Modal>

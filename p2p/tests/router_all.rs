@@ -127,7 +127,7 @@ async fn one_router_carries_every_protocol() {
         .spawn();
 
     // Adresse de l'hôte via le code ami (EndpointAddrInfo -> payload -> EndpointAddr).
-    let payload = endpoint_addr_info(&host.ep.addr()).into_payload(host.ident.public_key().to_bytes(), host.friends.code_token());
+    let payload = endpoint_addr_info(&host.ep.addr(), None).into_payload(host.ident.public_key().to_bytes(), host.friends.code_token());
     assert!(!payload.addrs.is_empty());
     let code = friend_code::encode(&payload);
     let parsed = friend_code::parse(&code).unwrap();

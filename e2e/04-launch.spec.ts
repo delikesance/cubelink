@@ -9,6 +9,8 @@ import {
 
 test.describe.configure({ mode: 'serial' });
 test.setTimeout(180_000);
+// Ecrit un settings.json de test (default_ram_mb: 4096, sans drapeau ram_auto_migrated) : la migration le passe en Automatique.
+test.use({ appOptions: { settings: {} } });
 
 const WITNESS = '.cubelink-fake-launch.json';
 const STOP = '.cubelink-fake-stop';
@@ -27,7 +29,7 @@ async function installed(world: any, env: Record<string, string> = {}) {
   await appB.page.evaluate(() => { window.location.hash = '#/friends'; });
   await sleep(300);
   await appB.page.evaluate(() => { window.location.hash = '#/main'; });
-  await appB.page.waitForSelector('main[data-route="main"]');
+  await appB.page.waitForSelector('main[data-route="main"]', { timeout: 15_000 });
   return { ...ctx, guest: g! };
 }
 
@@ -69,6 +71,19 @@ test('lancement : preparation puis en cours, temoin correct, jeton jamais en cla
   expect(w.main_class).toBeTruthy();
   const arg = (flag: string) => { const i = w.args.indexOf(flag); return i >= 0 ? w.args[i + 1] : undefined; };
   expect(arg('--username')).toBe('Invite');
+  // Memoire « Automatique » : le fichier de reglages de test dit 4096 sans drapeau de migration -> passe a 0 au chargement ;
+  // le -Xmx de la ligne de lancement vient alors de auto_ram_mb (multiple de 256 Mo, entre 1 et 8 Go, plafonne par la RAM du PC).
+  const settings = await invoke<{ default_ram_mb: number }>(page, 'settings_get');
+  expect(settings.default_ram_mb).toBe(0);
+  const sysRam = await invoke<number | null>(page, 'system_ram_mb');
+  expect(sysRam).toBeGreaterThan(256);
+  const xmx = w.args.find((a: string) => /^-Xmx\d+M$/.test(a));
+  expect(xmx, `-Xmx absent : ${JSON.stringify(w.args)}`).toBeTruthy();
+  const xmxMb = Number(xmx.slice(4, -1));
+  expect(xmxMb % 256).toBe(0);
+  expect(xmxMb).toBeGreaterThanOrEqual(1024);
+  expect(xmxMb).toBeLessThanOrEqual(8192);
+  if (sysRam! >= 12 * 1024) expect(xmxMb).toBeGreaterThanOrEqual(2048);
   // jeton : masque dans le temoin, absent des journaux
   const token = arg('--accessToken');
   expect(token === '***' || token === undefined || token === '0').toBe(true);

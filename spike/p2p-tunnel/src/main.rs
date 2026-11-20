@@ -1,6 +1,6 @@
 //! Spike N1 : validation d'Iroh (tunnel QUIC <-> TCP echo, transfert par hash, reprise).
 //! Usage : cargo run --release -- <mode> <test> [taille_Mo]
-//!   mode : direct (relais desactive) | relay (relais local, IP desactive) | n0 (relais publics n0, Internet requis)
+//!   mode : direct (relais desactive) | relay (relais local, IP desactive)
 //!   test : tunnel | blobs | resume | all
 use std::{
     net::SocketAddr,
@@ -29,7 +29,6 @@ const TUNNEL_ALPN: &[u8] = b"cubelink/tunnel/0";
 enum Mode {
     Direct,
     Relay,
-    N0,
 }
 
 struct Ctx {
@@ -44,8 +43,6 @@ async fn make_endpoint(ctx: &Ctx, alpns: Vec<Vec<u8>>) -> Result<Endpoint> {
             .relay_mode(RelayMode::Custom(ctx.relay.clone().unwrap()))
             .ca_tls_config(CaTlsConfig::insecure_skip_verify())
             .clear_ip_transports(), // relais uniquement
-        Mode::N0 if std::env::var("RELAY_ONLY").is_ok() => Endpoint::builder(presets::N0).clear_ip_transports(),
-        Mode::N0 => Endpoint::builder(presets::N0),
     };
     Ok(b.alpns(alpns).bind().await?)
 }
@@ -407,7 +404,6 @@ async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let mode = match args.get(1).map(String::as_str) {
         Some("relay") => Mode::Relay,
-        Some("n0") => Mode::N0,
         _ => Mode::Direct,
     };
     let test = args.get(2).map(String::as_str).unwrap_or("all");

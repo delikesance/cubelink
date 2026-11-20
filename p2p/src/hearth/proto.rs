@@ -16,9 +16,9 @@
 //!
 //! | Requête | Réponse | Usage |
 //! |---|---|---|
-//! | `Hello { group_id, op_seq, heads }` | `Status { op_seq, heads, lease? }` | état d'un membre (sonde, 60 s) |
+//! | `Hello { group_id, op_seq, heads, complete_heads? }` | `Status { op_seq, heads, complete_heads?, lease? }` | état d'un membre (sonde, 60 s) |
 //! | `GetOps { group_id, after }` | `Ops { ops, more }` | rattraper la chaîne (par pages) |
-//! | `GetVersions { group_id, after_number }` | `Versions { versions, more }` | rattraper les en-têtes (par pages) |
+//! | `GetVersions { group_id, after_number }` | `Versions { versions, more }` | rattraper les en-têtes (par pages ; repli depuis 0 si une tête annoncée reste hors d'atteinte, voir `fetch_versions_reaching`) |
 //! | `LeaseClaim { claim }` | `ClaimAck` ou `ClaimConflict { conflict }` | première phase de la prise du bail |
 //! | `Lease { lease }` (signé) | `Ack` | annonce ou renouvellement du bail |
 //! | `LeaseRelease { group_id, lease_id, last_seq, reason, version? }` | `Ack` | fin de partie (pierre tombale) |
@@ -98,7 +98,17 @@ const CLOSE_BUSY: u32 = 3;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Request {
-    Hello { group_id: GroupId, op_seq: u64, heads: Vec<VersionId> },
+    /// `heads` : les têtes du graphe d'en-têtes (elles servent à rattraper les en-têtes manquants). `complete_heads` :
+    /// les versions dont l'émetteur a **le contenu en entier**, seules à annoncer comme « ma version » (une version dont
+    /// personne n'a le contenu ne doit pas faire croire à un membre à jour). Absent chez un nœud plus ancien : on se
+    /// rabat alors sur `heads`.
+    Hello {
+        group_id: GroupId,
+        op_seq: u64,
+        heads: Vec<VersionId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        complete_heads: Option<Vec<VersionId>>,
+    },
     GetOps { group_id: GroupId, after: u64 },
     GetVersions { group_id: GroupId, after_number: u64 },
     Lease { lease: Lease },
@@ -130,7 +140,13 @@ pub enum Request {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Response {
-    Status { op_seq: u64, heads: Vec<VersionId>, lease: Option<Lease> },
+    Status {
+        op_seq: u64,
+        heads: Vec<VersionId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        complete_heads: Option<Vec<VersionId>>,
+        lease: Option<Lease>,
+    },
     Ops { ops: Vec<SignedOp>, more: bool },
     Versions { versions: Vec<SignedVersion>, more: bool },
     Ack,
@@ -145,7 +161,16 @@ pub enum Response {
 pub struct Status {
     pub op_seq: u64,
     pub heads: Vec<VersionId>,
+    /// Versions dont le membre a le contenu en entier ; `None` chez un nœud plus ancien qui ne le dit pas.
+    pub complete_heads: Option<Vec<VersionId>>,
     pub lease: Option<Lease>,
+}
+
+impl Status {
+    /// Les versions que le membre dit pouvoir servir : ses têtes complètes, ou à défaut (nœud ancien) toutes ses têtes.
+    pub fn announced(&self) -> &[VersionId] {
+        self.complete_heads.as_deref().unwrap_or(&self.heads)
+    }
 }
 
 /// Une page d'opérations ou de versions.
@@ -175,6 +200,11 @@ pub trait HearthDelegate: Send + Sync + 'static {
     fn versions_after(&self, group: &GroupId, after_number: u64, limit: usize) -> Vec<SignedVersion>;
     /// Têtes du groupe.
     fn heads(&self, group: &GroupId) -> Vec<VersionId>;
+    /// Versions que ce nœud peut servir en entier : chaque tête dont le contenu est là, ou à défaut son plus proche
+    /// ancêtre complet. Par défaut, les têtes.
+    fn complete_heads(&self, group: &GroupId) -> Vec<VersionId> {
+        self.heads(group)
+    }
     /// Notre propre bail signé (partie hébergée ou en préparation), tel qu'annoncé : il est signé, donc inchangé. Le
     /// bail d'un tiers n'est pas relayé (le récepteur ne croit que le bail annoncé par son titulaire).
     fn lease(&self, group: &GroupId) -> Option<Lease>;
@@ -182,7 +212,8 @@ pub trait HearthDelegate: Send + Sync + 'static {
     fn have_version(&self, group: &GroupId, version: &VersionId) -> bool;
 
     /// Un membre a répondu à notre sonde ou nous a sondés (état annoncé). Sans effet par défaut.
-    fn on_status(&self, _from: PeerKey, _group: &GroupId, _op_seq: u64, _heads: &[VersionId]) {}
+    /// `heads` : têtes du graphe de l'émetteur ; `complete_heads` : ses versions complètes (`None` : nœud ancien).
+    fn on_status(&self, _from: PeerKey, _group: &GroupId, _op_seq: u64, _heads: &[VersionId], _complete_heads: Option<&[VersionId]>) {}
     /// Bail annoncé par son titulaire (déjà contrôlé : groupe, titulaire = émetteur, membre, durée).
     fn on_lease(&self, from: PeerKey, lease: Lease);
     /// Un membre veut prendre le bail (première phase) : le témoin répond `Ack` ou `Conflict` (voir
@@ -262,15 +293,17 @@ impl HearthHandler {
         let d = &self.inner.delegate;
         match req {
             Request::GroupInvite { ops, total_ops, group_key } => self.handle_invite(from, addr, ops, total_ops, group_key).await,
-            Request::Hello { group_id, op_seq, heads } => {
+            Request::Hello { group_id, op_seq, heads, complete_heads } => {
                 let Some(state) = self.member_state(&group_id, &from) else { return Served::Deny };
-                if heads.len() > MAX_HEADS {
+                if heads.len() > MAX_HEADS || complete_heads.as_ref().is_some_and(|c| c.len() > MAX_HEADS) {
                     return rejected("trop de têtes");
                 }
-                d.on_status(from, &group_id, op_seq, &heads);
+                d.on_status(from, &group_id, op_seq, &heads, complete_heads.as_deref());
                 let mut mine = d.heads(&group_id);
                 mine.truncate(MAX_HEADS);
-                Served::Reply(Response::Status { op_seq: state.op_seq, heads: mine, lease: d.lease(&group_id) })
+                let mut complete = d.complete_heads(&group_id);
+                complete.truncate(MAX_HEADS);
+                Served::Reply(Response::Status { op_seq: state.op_seq, heads: mine, complete_heads: Some(complete), lease: d.lease(&group_id) })
             }
             Request::GetOps { group_id, after } => {
                 if self.member_state(&group_id, &from).is_none() {
@@ -611,9 +644,25 @@ impl HearthConn {
 
     /// `Hello` : état du membre (au plus [`MAX_HEADS`] têtes sont envoyées).
     pub async fn hello(&self, group: &GroupId, op_seq: u64, heads: &[VersionId]) -> Result<Status, NetError> {
+        self.hello_with(group, op_seq, heads, None).await
+    }
+
+    /// `Hello` qui annonce aussi les versions dont on a le contenu en entier (`complete_heads`).
+    pub async fn hello_with(
+        &self,
+        group: &GroupId,
+        op_seq: u64,
+        heads: &[VersionId],
+        complete_heads: Option<&[VersionId]>,
+    ) -> Result<Status, NetError> {
         let heads = heads.iter().take(MAX_HEADS).copied().collect();
-        match self.call(&Request::Hello { group_id: *group, op_seq, heads }, IO_TIMEOUT).await? {
-            Response::Status { op_seq, heads, lease } if heads.len() <= MAX_HEADS => Ok(Status { op_seq, heads, lease }),
+        let complete_heads = complete_heads.map(|c| c.iter().take(MAX_HEADS).copied().collect());
+        match self.call(&Request::Hello { group_id: *group, op_seq, heads, complete_heads }, IO_TIMEOUT).await? {
+            Response::Status { op_seq, heads, complete_heads, lease }
+                if heads.len() <= MAX_HEADS && complete_heads.as_ref().is_none_or(|c| c.len() <= MAX_HEADS) =>
+            {
+                Ok(Status { op_seq, heads, complete_heads, lease })
+            }
             _ => Err(NetError::Protocol("réponse inattendue".into())),
         }
     }
@@ -682,6 +731,27 @@ impl HearthConn {
             }
             last = tail;
         }
+    }
+
+    /// Comme [`Self::fetch_versions`], mais jusqu'aux têtes `wanted` : le seuil `after_number` vient de NOS numéros, or une
+    /// branche courte et basse (n° 31 à 33 pendant que le groupe est à la n° 50) a des numéros sous ce seuil et ne serait
+    /// jamais servie. Si, une fois le lot reçu, une tête voulue ne remonte toujours pas à une version qu'on connaît
+    /// (`known`), on redemande tous les en-têtes depuis 0 (borné par `MAX_VERSIONS`) : c'est le « on remonte les
+    /// parents jusqu'à un ancêtre connu » de `hearth-et-si`, sans nouveau message réseau (un ancien pair répond pareil).
+    /// `full` à `false` : pas de repli (déjà tenté pour ces têtes). Si le repli échoue, le premier lot est rendu.
+    pub async fn fetch_versions_reaching(
+        &self,
+        group: &GroupId,
+        after_number: u64,
+        wanted: &[VersionId],
+        known: impl Fn(&VersionId) -> bool + Sync,
+        full: bool,
+    ) -> Result<Vec<SignedVersion>, NetError> {
+        let batch = self.fetch_versions(group, after_number).await?;
+        if !full || after_number == 0 || unresolved_heads(&known, &batch, wanted).is_empty() {
+            return Ok(batch);
+        }
+        Ok(self.fetch_versions(group, 0).await.unwrap_or(batch))
     }
 
     /// Annonce ou renouvelle le bail.
@@ -764,6 +834,28 @@ impl HearthConn {
     }
 }
 
+/// Parmi `wanted`, les têtes qui ne remontent pas à une version connue (`known`) en suivant les parents dans `batch` :
+/// les insérer telles quelles échouerait (parent inconnu) ou ne les trouverait pas du tout.
+pub fn unresolved_heads(known: &dyn Fn(&VersionId) -> bool, batch: &[SignedVersion], wanted: &[VersionId]) -> Vec<VersionId> {
+    let by_id: std::collections::HashMap<VersionId, &SignedVersion> = batch.iter().map(|v| (v.id(), v)).collect();
+    let resolves = |head: &VersionId| {
+        let mut cur = Some(*head);
+        // Les identifiants sont des empreintes (pas de cycle) ; la borne protège d'un lot absurde.
+        for _ in 0..=by_id.len() {
+            let Some(id) = cur else { return true };
+            if known(&id) {
+                return true;
+            }
+            match by_id.get(&id) {
+                Some(v) => cur = v.header.parent,
+                None => return false,
+            }
+        }
+        false
+    };
+    wanted.iter().filter(|h| !resolves(h)).copied().collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::model::{testutil, GroupOp, HearthSigner};
@@ -788,11 +880,66 @@ mod tests {
         SignedVersion::sign(&k, header).unwrap()
     }
 
+    /// Une chaîne de versions numérotées `from..=to` dont la première a pour parent `parent`.
+    fn chain(from: u64, to: u64, parent: Option<VersionId>, tag: u8) -> Vec<SignedVersion> {
+        let k = testutil::key(1);
+        let mut out: Vec<SignedVersion> = Vec::new();
+        let mut parent = parent;
+        for n in from..=to {
+            let header = VersionHeader {
+                group_id: GroupId([1; 16]),
+                number: n,
+                parent,
+                epoch: 0,
+                author: k.peer_key(),
+                pack_hash: "a".repeat(64),
+                created_at: 1,
+                played_secs: 1,
+                kind: VersionKind::Session,
+                collection: [tag; 32],
+                total_size: 1,
+            };
+            let v = SignedVersion::sign(&k, header).unwrap();
+            parent = Some(v.id());
+            out.push(v);
+        }
+        out
+    }
+
+    #[test]
+    fn unresolved_heads_follow_parents_to_a_known_ancestor() {
+        let main = chain(1, 50, None, 1);
+        let low = chain(31, 33, Some(main[29].id()), 2); // n° 31 à 33, parent n° 30
+        let known: std::collections::HashSet<VersionId> = main.iter().map(SignedVersion::id).collect();
+        let known = |id: &VersionId| known.contains(id);
+        let (head_main, head_low) = (main[49].id(), low[2].id());
+        let wanted = [head_main, head_low];
+
+        // Le lot « après 49 » ne contient pas la branche basse : sa tête reste à résoudre.
+        assert_eq!(unresolved_heads(&known, &[], &wanted), vec![head_low]);
+        // Le lot complet la contient, et son parent (n° 30) est connu : tout est résolu.
+        assert!(unresolved_heads(&known, &low, &wanted).is_empty());
+        // Tête présente mais sa lignée est coupée (n° 32 seule, parent n° 31 absent) : non résolue.
+        assert_eq!(unresolved_heads(&known, &low[1..], &wanted), vec![head_low]);
+        // Rien à chercher.
+        assert!(unresolved_heads(&known, &[], &[head_main]).is_empty());
+        assert!(unresolved_heads(&known, &[], &[]).is_empty());
+    }
+
+    #[test]
+    fn unresolved_heads_accept_a_root_chain_in_the_batch() {
+        let all = chain(1, 3, None, 1);
+        let none = |_: &VersionId| false;
+        assert!(unresolved_heads(&none, &all, &[all[2].id()]).is_empty());
+        assert_eq!(unresolved_heads(&none, &all[1..], &[all[2].id()]).len(), 1);
+    }
+
     #[test]
     fn messages_roundtrip_in_json() {
         let g = GroupId([7; 16]);
         let reqs = vec![
-            Request::Hello { group_id: g, op_seq: 3, heads: vec![VersionId([1; 32])] },
+            Request::Hello { group_id: g, op_seq: 3, heads: vec![VersionId([1; 32])], complete_heads: Some(vec![VersionId([2; 32])]) },
+            Request::Hello { group_id: g, op_seq: 3, heads: vec![VersionId([1; 32])], complete_heads: None },
             Request::GetOps { group_id: g, after: 2 },
             Request::GetVersions { group_id: g, after_number: 0 },
             Request::LeaseRelease { group_id: g, lease_id: [4; 16], last_seq: 7, reason: ReleaseReason::Crashed { mod_hint: Some("x".into()) }, version: None },
@@ -825,8 +972,19 @@ mod tests {
         for r in [Response::ClaimAck, Response::ClaimConflict { conflict }] {
             assert_eq!(serde_json::from_slice::<Response>(&serde_json::to_vec(&r).unwrap()).unwrap(), r);
         }
-        let resp = Response::Status { op_seq: 1, heads: vec![], lease: None };
+        let resp = Response::Status { op_seq: 1, heads: vec![], complete_heads: Some(vec![]), lease: None };
         assert_eq!(serde_json::from_slice::<Response>(&serde_json::to_vec(&resp).unwrap()).unwrap(), resp);
+        // Compatibilité : un nœud plus ancien n'envoie pas `complete_heads` (on se rabat sur `heads`), et ignore le champ
+        // quand on le lui envoie.
+        let old = br#"{"type":"status","op_seq":1,"heads":[],"lease":null}"#;
+        let Response::Status { complete_heads, .. } = serde_json::from_slice::<Response>(old).unwrap() else { panic!("status attendu") };
+        assert_eq!(complete_heads, None);
+        let st = Status { op_seq: 1, heads: vec![VersionId([1; 32])], complete_heads: None, lease: None };
+        assert_eq!(st.announced(), &[VersionId([1; 32])]);
+        let st = Status { complete_heads: Some(vec![VersionId([2; 32])]), ..st };
+        assert_eq!(st.announced(), &[VersionId([2; 32])]);
+        let none = serde_json::to_string(&Request::Hello { group_id: g, op_seq: 1, heads: vec![], complete_heads: None }).unwrap();
+        assert!(!none.contains("complete_heads"), "un Hello sans version complète garde l'ancien format : {none}");
         // Le type est une étiquette lisible, la clé de groupe ne sort pas en `Debug`.
         let inv = Request::GroupInvite { ops: vec![], total_ops: 0, group_key: GroupKey::random() };
         assert!(!format!("{inv:?}").contains("group_key: GroupKey(["));

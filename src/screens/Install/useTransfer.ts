@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Services } from "../../services";
 import type { TransferErrorDetails, TransferProgress } from "../../services/types";
-import { classifyFailure, smoothSpeed, type FailureKind } from "./format";
+import { smoothSpeed } from "./format";
 
 /** Étape (0..4) correspondant à une phase ; en pause/échec on reste sur la dernière étape atteinte. */
 export function stepIndex(phase: TransferProgress["phase"], resumeAt: number): number {
@@ -15,15 +15,11 @@ export function stepIndex(phase: TransferProgress["phase"], resumeAt: number): n
   }
 }
 
-/** Retour `true` : l'échec est pris en charge par l'appelant (l'état n'est pas mis à jour). */
-export type FailureHandler = (kind: FailureKind, file: string | undefined) => boolean | void;
-
 /**
- * État partagé d'un transfert (Install et Join) : progression, vitesse lissée, détails d'erreur,
+ * État partagé d'un transfert (écran Rejoindre) : progression, vitesse lissée, détails d'erreur,
  * mods inconnus, et actions asynchrones protégées (occupé + message d'erreur).
- * N'appelle que les services déjà utilisés par l'ancien écran Install.
  */
-export function useTransfer(services: Services, onFailure?: FailureHandler) {
+export function useTransfer(services: Services) {
   const [p, setP] = useState<TransferProgress | null>(null);
   const [speed, setSpeed] = useState<number | null>(null);
   const [errDetails, setErrDetails] = useState<TransferErrorDetails | null>(null);
@@ -32,21 +28,12 @@ export function useTransfer(services: Services, onFailure?: FailureHandler) {
   const [actionError, setActionError] = useState<string | null>(null);
   const resumeAt = useRef(0);
   const cancelled = useRef(false);
-  const failureRef = useRef(onFailure);
-  failureRef.current = onFailure;
 
   useEffect(() => {
     return services.onTransferProgress((next) => {
       if (cancelled.current) return;
       if (next.phase !== "paused" && next.phase !== "failed") {
         resumeAt.current = Math.min(stepIndex(next.phase, resumeAt.current), 3);
-      }
-      if (next.phase === "failed" && failureRef.current) {
-        const kind = classifyFailure((next as { error?: string }).error);
-        if (kind) {
-          const file = /[\w.+-]+\.jar/i.exec(next.error ?? "")?.[0];
-          if (failureRef.current(kind, file)) return;
-        }
       }
       if (next.phase === "receiving") setSpeed((s) => smoothSpeed(s, next.speed_bps));
       setP(next);

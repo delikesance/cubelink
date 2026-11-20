@@ -1,14 +1,14 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 380" width="1280" height="380" font-family="Inter,'Segoe UI',system-ui,sans-serif">
-<title>Cubelink : connexion directe entre amis, relais en secours</title>
+<title>Cubelink : connexion directe entre amis, sans relais</title>
 <defs><radialGradient id="glow" cx="50%" cy="60%" r="50%"><stop offset="0" stop-color="#4FC3E8" stop-opacity=".18"/><stop offset="1" stop-color="#4FC3E8" stop-opacity="0"/></radialGradient></defs>
 <rect width="1280" height="380" rx="28" fill="#131116"/><rect width="1280" height="380" rx="28" fill="url(#glow)"/>
 <!-- relais -->
-<g transform="translate(540 36)"><rect width="200" height="64" rx="18" fill="#1B181F" stroke="#332E3A" stroke-dasharray="6 6"/><text x="100" y="31" text-anchor="middle" font-size="16" font-weight="700" fill="#B0A8B4">Relais sans état</text><text x="100" y="50" text-anchor="middle" font-size="12" fill="#7d7582">secours uniquement</text></g>
+<g transform="translate(540 36)"><rect width="200" height="64" rx="18" fill="#1B181F" stroke="#332E3A" stroke-dasharray="6 6"/><text x="100" y="31" text-anchor="middle" font-size="16" font-weight="700" fill="#B0A8B4">Aucun relais</text><text x="100" y="50" text-anchor="middle" font-size="12" fill="#7d7582">connexion directe seule</text></g>
 <g stroke="#7d7582" stroke-width="2" stroke-dasharray="4 8" fill="none"><path d="M200 190C230 120 420 80 540 70"/><path d="M1080 190C1050 120 860 80 740 70"/></g>
 <!-- lien direct -->
 <path d="M300 250H980" stroke="#4FC3E8" stroke-width="6" stroke-linecap="round" stroke-dasharray="1 16" />
 <path d="M300 250H980" stroke="#4FC3E8" stroke-width="2" opacity=".45"/>
-<g transform="translate(640 250)"><rect x="-130" y="-22" width="260" height="44" rx="22" fill="#0e3442" stroke="#4FC3E8"/><text y="6" text-anchor="middle" font-size="16" font-weight="700" fill="#6FD3F0">QUIC direct · hole punching</text></g>
+<g transform="translate(640 250)"><rect x="-130" y="-22" width="260" height="44" rx="22" fill="#0e3442" stroke="#4FC3E8"/><text y="6" text-anchor="middle" font-size="16" font-weight="700" fill="#6FD3F0">QUIC direct · IPv6 ou port ouvert</text></g>
 <!-- mods qui circulent -->
 <g><rect x="400" y="190" width="30" height="30" rx="8" fill="#6FD3F0"/><rect x="470" y="190" width="30" height="30" rx="8" fill="#4FC3E8"/><rect x="540" y="190" width="30" height="30" rx="8" fill="#2B9CC4"/><rect x="710" y="190" width="30" height="30" rx="8" fill="#6FD3F0"/><rect x="780" y="190" width="30" height="30" rx="8" fill="#4FC3E8"/><rect x="850" y="190" width="30" height="30" rx="8" fill="#2B9CC4"/></g>
 <text x="640" y="206" text-anchor="middle" font-size="13" fill="#B0A8B4">SHA-256 ✓</text>

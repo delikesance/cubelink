@@ -1,31 +1,26 @@
 // T9 : tailles de fenetre 960x600 et 1280x720 (redimensionnement de la VRAIE fenetre WebView2 par CDP
 // Browser.setWindowBounds). Pour chaque ecran/etat : pas de defilement horizontal de la page, tous les
-// boutons/liens/champs sont visibles ou atteignables par defilement (rien de coupe), bandeau « Mon code ami »
-// sans chevauchement avec les onglets ; capture dans e2e/artifacts/sizes/.
+// boutons/liens/champs sont visibles ou atteignables par defilement (rien de coupe) ; capture dans e2e/artifacts/sizes/.
+// Les « ecrans » Amis sont l'onglet Amis des Parametres (harness/routes.ts).
 import fs from 'node:fs';
 import path from 'node:path';
 import type { Page } from '@playwright/test';
-import { test, expect, ARTIFACTS, makeHostInstance, invoke, waitForRoute } from './harness/fixtures';
+import { test, expect, ARTIFACTS, makeHostInstance, waitForRoute } from './harness/fixtures';
 import { SCREENS, prepare, gotoScreen, setWindowSize, type Screen } from './helpers/e2e4-lib';
 
 const SIZES: [number, number][] = [[960, 600], [1280, 720]];
 const OUT = path.join(ARTIFACTS, 'sizes');
 const byId = (id: string) => SCREENS.find((s) => s.id === id)!;
-const progress = (p: Record<string, unknown>) => ({ phase: 'receiving', files_done: 12, files_total: 40, bytes_done: 340e6, bytes_total: 1.2e9, speed_bps: 800_000, via_relay: true, ...p });
 
 interface Variant { id: string; screen: Screen; setup?: (page: Page) => Promise<void> }
 const VARIANTS: Variant[] = [
   ...SCREENS.map((screen) => ({ id: screen.id, screen })),
   { id: 'create-advanced', screen: byId('create'), setup: async (p) => { await p.getByRole('button', { name: /Créer une instance vide/ }).click(); await p.getByRole('button', { name: 'Options avancées' }).click(); } },
   { id: 'friends-code-confirm', screen: byId('friends-requests'), setup: async (p) => { await p.getByRole('button', { name: /Générer un nouveau code/ }).click(); } },
-  { id: 'install-relay', screen: byId('install'), setup: async (p) => { await invoke(p, 'plugin:event|emit', { event: 'transfer://progress', payload: progress({}) }); await p.locator('.inst-note').waitFor(); } },
-  { id: 'install-done', screen: byId('install'), setup: async (p) => { await invoke(p, 'plugin:event|emit', { event: 'transfer://progress', payload: progress({ phase: 'done', files_done: 40, bytes_done: 1.2e9 }) }); await p.getByRole('button', { name: 'Jouer' }).or(p.getByRole('button', { name: 'Réessayer' })).first().waitFor(); } },
-  { id: 'install-cancel-confirm', screen: byId('install'), setup: async (p) => { await p.getByRole('button', { name: 'Annuler' }).click(); await p.getByRole('group', { name: /Confirmer/ }).waitFor(); } },
   { id: 'settings-network', screen: byId('settings'), setup: async (p) => { await p.getByRole('tab', { name: 'Réseau' }).click(); } },
   { id: 'settings-java', screen: byId('settings'), setup: async (p) => { await p.getByRole('tab', { name: 'Java' }).click(); } },
   { id: 'settings-storage-confirm', screen: byId('settings'), setup: async (p) => { await p.getByRole('tab', { name: 'Stockage' }).click(); await p.getByRole('button', { name: /Vider le cache/ }).click(); } },
   { id: 'settings-about', screen: byId('settings'), setup: async (p) => { await p.getByRole('tab', { name: 'À propos' }).click(); } },
-  { id: 'error-waiting', screen: { ...byId('error'), hash: '#/error?state=waiting' } },
   { id: 'error-no-license', screen: { ...byId('error'), hash: '#/error?state=no-license' } },
   { id: 'legal-last-section', screen: byId('legal'), setup: async (p) => { await p.locator('article section, main section').last().scrollIntoViewIfNeeded(); } },
 ];
@@ -74,28 +69,6 @@ async function layout(page: Page) {
   });
 }
 
-/** Bandeau « Mon code ami » (sticky) vs onglets : rectangles disjoints, au repos et apres defilement. */
-async function bannerVsTabs(page: Page) {
-  return page.evaluate(async () => {
-    const banner = document.querySelector('section.mycode') as HTMLElement | null;
-    const tabs = document.querySelector('[role=tablist][aria-label="Amis"]') as HTMLElement | null;
-    if (!banner || !tabs) return { found: false, overlaps: [] as string[] };
-    const overlap = (a: DOMRect, b: DOMRect) => Math.min(a.right, b.right) - Math.max(a.left, b.left) > 0.5 && Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top) > 0.5;
-    const out: string[] = [];
-    const scrollers = [...document.querySelectorAll('*')].filter((e) => e.scrollHeight > e.clientHeight + 1 && /(auto|scroll)/.test(getComputedStyle(e).overflowY));
-    const check = (tag: string) => {
-      const b = banner.getBoundingClientRect(), t = tabs.getBoundingClientRect();
-      if (overlap(b, t)) out.push(`${tag} : bandeau [${Math.round(b.top)},${Math.round(b.bottom)}] chevauche onglets [${Math.round(t.top)},${Math.round(t.bottom)}]`);
-      const pn = document.querySelector('[role=tabpanel]')?.getBoundingClientRect();
-      if (pn && overlap(b, pn)) out.push(`${tag} : bandeau chevauche le panneau [${Math.round(pn.top)},${Math.round(pn.bottom)}]`);
-    };
-    check('repos');
-    for (const s of scrollers) { s.scrollTop = s.scrollHeight; await new Promise((r) => requestAnimationFrame(() => r(null))); check(`defile ${s.tagName.toLowerCase()}`); s.scrollTop = 0; }
-    const b = banner.getBoundingClientRect();
-    return { found: true, overlaps: out, banner: [Math.round(b.top), Math.round(b.bottom)], scrollers: scrollers.length };
-  });
-}
-
 test.describe('T9 tailles de fenetre', () => {
   test('960x600 et 1280x720 : aucun defilement horizontal, controles atteignables, rien de coupe', async ({ appA }) => {
     test.setTimeout(480_000);
@@ -124,48 +97,49 @@ test.describe('T9 tailles de fenetre', () => {
         expect.soft(l.interactive, `${tag} controles trouves`).toBeGreaterThan(0);
         expect.soft(l.unreachable, `${tag} elements coupes / hors zone meme apres defilement`).toEqual([]);
         if (process.env.E2E_VERBOSE) console.log(`${tag} ${Date.now() - t0} ms, ${l.interactive} controles`);
-        if (v.id.startsWith('friends')) {
-          const bt = await bannerVsTabs(page);
-          expect.soft(bt.found, `${tag} bandeau et onglets presents`).toBe(true);
-          expect.soft(bt.overlaps, `${tag} chevauchement bandeau « Mon code ami » / onglets`).toEqual([]);
-        }
       }
     }
     expect(fs.readdirSync(OUT).length).toBe(VARIANTS.length * SIZES.length);
   });
 
-  test('Amis a 960x600 : cartes en haut, onglets dessous, la page defile verticalement sans defilement horizontal', async ({ appA }) => {
+  test('Accueil a 960x600 et 1280x720 : noms de modpacks longs lisibles (une colonne a 960, deux a 1280)', async ({ appA }) => {
+    const page = appA.page;
+    await prepare(appA);
+    const names = ['Create: Astral Odyssey', 'All the Mods 10', 'Prominence II Hasturian Era'];
+    for (const [n, name] of names.entries()) await makeHostInstance(appA, { id: `long-${n}`, name, minecraft: '1.21.1' });
+    await page.reload();
+    for (const [w, h, cols] of [[960, 600, 1], [1280, 720, 2]] as const) {
+      await setWindowSize(page, w, h);
+      await page.evaluate(() => { window.location.hash = '#/main'; });
+      await waitForRoute(page, 'main');
+      await page.locator('.home-tile-txt .n').first().waitFor();
+      const r = await page.evaluate(() => ({
+        cols: getComputedStyle(document.querySelector('.home-grid')!).gridTemplateColumns.split(' ').length,
+        cut: [...document.querySelectorAll('.home-tile-txt .n, .home-tile-txt .m')].filter((e) => e.scrollWidth > e.clientWidth).map((e) => e.textContent),
+      }));
+      expect(r.cols, `${w}x${h} colonnes de la grille de modpacks`).toBe(cols);
+      expect(r.cut, `${w}x${h} textes de tuile coupes`).toEqual([]);
+    }
+  });
+
+  test('Amis a 960x600 : les cartes Ajouter / Mon code restent dans la fenetre, la page defile verticalement sans defilement horizontal', async ({ appA }) => {
     const page = appA.page;
     await prepare(appA);
     await setWindowSize(page, 960, 600);
     await gotoScreen(page, byId('friends-add'));
     const pos = await page.evaluate(() => {
-      const r = (q: string) => document.querySelector(q)!.getBoundingClientRect();
       const cards = [...document.querySelectorAll('.fr-card')].map((c) => c.getBoundingClientRect());
-      const t = r('[role=tablist][aria-label="Amis"]');
-      const p = r('[role=tabpanel]');
       const doc = document.documentElement;
       const scrollers = [...document.querySelectorAll('*')].filter((e) => /(auto|scroll)/.test(getComputedStyle(e).overflowX) && e.scrollWidth > e.clientWidth + 1).map((e) => e.className || e.tagName);
-      return {
-        cards: cards.map((c) => ({ top: c.top, bottom: c.bottom, left: c.left, right: c.right })),
-        tabsTop: t.top, tabsBottom: t.bottom, panelTop: p.top, vw: innerWidth,
-        hDoc: doc.scrollWidth - doc.clientWidth, hScrollers: scrollers,
-      };
+      return { cards: cards.map((c) => ({ left: c.left, right: c.right })), vw: innerWidth, hDoc: doc.scrollWidth - doc.clientWidth, hScrollers: scrollers };
     });
     expect(pos.cards).toHaveLength(2);
-    // deux cartes cote a cote, dans la fenetre
-    expect(Math.abs(pos.cards[0].top - pos.cards[1].top)).toBeLessThan(2);
-    expect(pos.cards[0].right).toBeLessThanOrEqual(pos.cards[1].left + 1);
-    expect(pos.cards[1].right).toBeLessThanOrEqual(pos.vw + 1);
-    // onglets sous les cartes, panneau sous les onglets
-    expect(pos.tabsTop).toBeGreaterThanOrEqual(Math.max(pos.cards[0].bottom, pos.cards[1].bottom) - 0.5);
-    expect(pos.panelTop).toBeGreaterThanOrEqual(pos.tabsBottom - 0.5);
+    for (const c of pos.cards) { expect(c.left).toBeGreaterThanOrEqual(-1); expect(c.right).toBeLessThanOrEqual(pos.vw + 1); }
     // aucun defilement horizontal (page ni conteneur)
     expect(pos.hDoc).toBeLessThanOrEqual(0);
     expect(pos.hScrollers).toEqual([]);
-    // le contenu defile verticalement : le panneau devient atteignable
-    await page.evaluate(() => { const c = document.querySelector('.content') as HTMLElement | null; if (c) c.scrollTop = c.scrollHeight; });
-    const bottom = await page.evaluate(() => document.querySelector('[role=tabpanel]')!.getBoundingClientRect().top < innerHeight);
-    expect(bottom).toBe(true);
+    // le contenu defile verticalement : « Mon code ami » devient atteignable
+    await page.getByLabel(/^Mon code ami : /).scrollIntoViewIfNeeded();
+    await expect(page.getByLabel(/^Mon code ami : /)).toBeInViewport();
   });
 });

@@ -3,6 +3,7 @@ import "./hearth.css";
 import { useShell } from "../../app/context";
 import { useHearthDetail } from "../../app/useHearth";
 import { useAccounts } from "../../app/useAccounts";
+import { HearthLeaveError } from "../../services/types";
 import type { FriendWithPresence, HearthDetail, HearthProposal, Instance, Services } from "../../services/types";
 import { Select, BackButton, Badge, Button, Card, Icon, ICONS, StatusDot } from "../../ui";
 import { Avatar } from "../Friends/Avatar";
@@ -27,23 +28,24 @@ const PROPOSAL_LABEL = (p: HearthProposal): string => {
 
 const SYNC_LABEL = { ok: "À jour", behind: "En retard", unknown: "Pas encore vérifié" } as const;
 
-interface Confirm { title: string; text: string; action: string; danger?: boolean; run: () => Promise<void> }
+/** `run` peut rendre une seconde confirmation à enchaîner (elle remplace celle-ci au lieu de la fermer). */
+interface Confirm { title: string; text: string; action: string; danger?: boolean; busyText?: string; run: () => Promise<void | Confirm> }
 
 /** Boîte de confirmation d'une action qu'on ne peut pas défaire d'un clic. */
-function ConfirmDialog({ c, onClose }: { c: Confirm; onClose: () => void }) {
+function ConfirmDialog({ c, onClose }: { c: Confirm; onClose: (next?: Confirm) => void }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const go = async () => {
     setBusy(true);
-    try { await c.run(); onClose(); }
+    try { const next = await c.run(); setBusy(false); setError(null); onClose(next ?? undefined); }
     catch (e) { setError(errText(e)); setBusy(false); }
   };
   return (
-    <Modal title={c.title} role="alertdialog" onClose={onClose}>
-      <p className="home-modal-text">{c.text}</p>
+    <Modal title={c.title} role="alertdialog" onClose={() => onClose()}>
+      <p className="home-modal-text" role={busy && c.busyText ? "status" : undefined}>{busy && c.busyText ? c.busyText : c.text}</p>
       {error && <p className="hearth-err" role="alert">{error}</p>}
       <div className="home-modal-foot">
-        <Button variant="secondary" data-autofocus onClick={onClose}>Annuler</Button>
+        <Button variant="secondary" data-autofocus onClick={() => onClose()}>Annuler</Button>
         <Button variant={c.danger ? "danger" : "primary"} loading={busy} onClick={() => { void go(); }}>{c.action}</Button>
       </div>
     </Modal>
@@ -250,19 +252,63 @@ export default function ServerPage({ id }: { id: string }) {
   const c = detail.card;
   const act = mainAction(c);
   const hint = stateHint(c, detail.members.filter((m) => !m.is_me && !m.online).map((m) => m.name));
-  const ask = (x: Confirm) => setConfirm({ ...x, run: async () => { await x.run(); reload(); } });
-  const leave = () => ask({
-    title: `Quitter « ${c.name} » ?`, action: "Quitter", danger: true,
-    text: "Le monde copié sur ce PC est supprimé. Le serveur continue pour les autres membres, même si c'est toi qui l'as créé. Tu pourras être réinvité plus tard.",
-    run: async () => {
-      try { await services.hearthLeave(c.id); } catch {
-        // Aucun autre membre joignable : le départ ne peut pas leur être annoncé. On supprime quand même ce PC ; ils te
-        // compteront dans le groupe jusqu'à ce que ton départ leur parvienne (ou que tu sois réinvité).
-        await services.hearthForget(c.id);
-      }
-      navigate("main");
-    },
+  const wrap = (x: Confirm): Confirm => ({ ...x, run: async () => { const next = await x.run(); if (!next) reload(); return next; } });
+  const ask = (x: Confirm) => setConfirm(wrap(x));
+  // Suppression locale : seul choix explicite de l'utilisateur, jamais un repli automatique (#57). Rien n'est annoncé au groupe.
+  const deleteWorld = (title: string, text: string, action: string): Confirm => wrap({
+    title, text, action, danger: true,
+    run: async () => { await services.hearthForget(c.id); navigate("main"); },
   });
+  const lastMember = () => deleteWorld(
+    `Tu es le dernier membre de « ${c.name} »`,
+    "Personne d'autre n'a une copie du monde : quitter est impossible, et le supprimer efface la seule copie, sans retour possible.",
+    "Supprimer le monde",
+  );
+  const unreachable = () => deleteWorld(
+    "Personne n'est joignable",
+    "Aucun ami du groupe n'est connecté : ton départ ne leur sera pas annoncé, et ils te compteront encore dans le groupe. "
+      + (detail.settings.outbox_pending > 0 ? `${plural(detail.settings.outbox_pending, "partie n'a pas été envoyée et sera perdue", "parties n'ont pas été envoyées et seront perdues")}. ` : "")
+      + "Supprimer quand même le monde de ce PC ? Tu pourras être réinvité plus tard.",
+    "Supprimer quand même",
+  );
+  // Ma dernière partie n'a été remise à personne : quitter maintenant la perd pour le groupe (#56). Le serveur est déjà arrêté.
+  const notSent = (): Confirm => wrap({
+    title: "Ta dernière partie n'est pas encore partie",
+    text: "Aucun ami ne l'a reçue : si tu quittes maintenant, elle sera perdue pour le groupe. Tu peux attendre qu'un ami soit connecté et réessayer.",
+    action: "Quitter quand même", danger: true,
+    busyText: "Quitter le groupe…",
+    run: () => leaveNow(true),
+  });
+  // Une fin de partie non publiée, gardée de côté, part avec le monde : on le dit avant (#61). Le serveur est déjà arrêté.
+  const unpublished = (): Confirm => wrap({
+    title: "Une partie n'a pas été publiée",
+    text: "Tu as une fin de partie gardée de côté sur ce PC, que personne d'autre n'a reçue. Si tu quittes maintenant, elle est supprimée avec le monde. Tu peux d'abord la publier ou la supprimer depuis cette page.",
+    action: "Quitter quand même", danger: true,
+    busyText: "Quitter le groupe…",
+    run: () => leaveNow(true),
+  });
+  const leaveNow = async (force: boolean): Promise<void | Confirm> => {
+    try { await services.hearthLeave(c.id, force); } catch (e) {
+      // Seuls ces codes mènent à autre chose qu'une erreur affichée, et la suppression n'arrive qu'après une nouvelle
+      // confirmation. Toute autre erreur est relancée : la boîte l'affiche et le monde reste en place.
+      if (e instanceof HearthLeaveError && e.code === "last_member") return lastMember();
+      if (e instanceof HearthLeaveError && e.code === "unreachable") return unreachable();
+      if (e instanceof HearthLeaveError && e.code === "outbox_pending" && !force) return notSent();
+      if (e instanceof HearthLeaveError && e.code === "orphan_pending" && !force) return unpublished();
+      throw e;
+    }
+    navigate("main");
+  };
+  const leave = () => {
+    // Seul dans le groupe : le texte « le serveur continue pour les autres » serait faux, et Quitter serait refusé.
+    if (detail.members.length <= 1) { setConfirm(lastMember()); return; }
+    ask({
+      title: `Quitter « ${c.name} » ?`, action: "Quitter", danger: true,
+      text: "Le monde copié sur ce PC est supprimé. Le serveur continue pour les autres membres, même si c'est toi qui l'as créé. Tu pourras être réinvité plus tard.",
+      busyText: "Envoi de ta dernière partie aux autres membres avant de quitter… Ça peut prendre quelques minutes.",
+      run: () => leaveNow(false),
+    });
+  };
   const shownError = error ?? runError;
 
   return (
@@ -276,7 +322,7 @@ export default function ServerPage({ id }: { id: string }) {
             <StatusDot tone={c.state === "hosting" ? "ok" : c.state === "idle" ? "neutral" : c.state === "hosted" ? "accent" : "warn"} label={stateText(c)} />
           </div>
           <div className="hearth-hero-cta">
-            {act.kind === "play" && <Button size="lg" loading={busy} icon={<Icon d={ICONS.play} fill />} onClick={() => { void run(() => services.hearthPlay(c.id)); }}>{act.label}</Button>}
+            {act.kind === "play" && <Button size="lg" loading={busy} icon={<Icon d={ICONS.play} fill />} onClick={() => { void run(() => services.hearthPlay(c.id), c.id); }}>{act.label}</Button>}
             {act.kind === "stop" && <Button variant="secondary" loading={busy} onClick={() => { void run(() => services.hearthStop(c.id)); }}>{act.label}</Button>}
           </div>
           {hint && <p className="hearth-hint">{hint}</p>}
@@ -291,9 +337,43 @@ export default function ServerPage({ id }: { id: string }) {
             <strong>La partie de {c.unclean.holder.name} s'est mal terminée.</strong>
             <span className="hearth-meta">{c.unclean.checkpoint_at != null ? `Dernier point de reprise : ${fmtDate(c.unclean.checkpoint_at)}.` : "Aucun point de reprise connu."}</span>
           </span>
-          <Button loading={busy} onClick={() => { const r = resumeLabel(c); void run(() => services.hearthUncleanChoice(c.id, r.choice)); }}>{resumeLabel(c).label}</Button>
+          <Button loading={busy} onClick={() => { const r = resumeLabel(c); void run(() => services.hearthUncleanChoice(c.id, r.choice), c.id); }}>{resumeLabel(c).label}</Button>
           <Button variant="secondary" onClick={() => { void run(() => services.hearthUncleanChoice(c.id, "wait")); }}>Attendre</Button>
         </div>
+      )}
+
+      {detail.orphans.length > 0 && (
+        <section className="hearth-block hearth-fork hearth-orphans" aria-label="Fin de partie non publiée">
+          <h2>Une fin de partie n'a pas été publiée</h2>
+          <p className="hearth-meta">
+            Une de tes parties ne s'est pas terminée proprement (plantage, arrêt du PC ou fermeture trop longue). Elle est gardée de côté sur ce PC : personne d'autre ne l'a reçue, et rien n'est publié sans ton accord.
+            Si le groupe a joué depuis, la publier crée deux versions du monde et tu choisiras laquelle garder.
+          </p>
+          <ul className="hearth-rows">
+            {detail.orphans.map((o) => (
+              <li key={o.id} className="hearth-row">
+                <span className="hearth-row-txt">
+                  <strong>Partie du {fmtDate(o.at)}</strong>
+                  <span className="hearth-meta">
+                    {o.played_secs > 0 ? `${fmtPlayed(o.played_secs)} de jeu · ` : ""}{fmtSize(o.size_bytes)}
+                    {o.base_number != null ? ` · partie de la version ${o.base_number}` : ""}
+                  </span>
+                </span>
+                <Button aria-label={`Publier la fin de partie du ${fmtDate(o.at)}`} onClick={() => { services.hearthOrphanPublish(c.id, o.id).then(reload, (e: unknown) => setError(errText(e))); }}>Publier la fin de partie</Button>
+                <Button
+                  variant="secondary"
+                  aria-label={`Supprimer la fin de partie du ${fmtDate(o.at)}`}
+                  onClick={() => ask({
+                    title: "Supprimer cette fin de partie ?", action: "Supprimer", danger: true,
+                    text: "Ces minutes de jeu ne sont plus nulle part ailleurs : une fois supprimées, il n'y a pas de retour possible.",
+                    run: () => services.hearthOrphanDiscard(c.id, o.id),
+                  })}
+                >Supprimer</Button>
+              </li>
+            ))}
+          </ul>
+          <p className="hearth-meta">« La mettre de côté » ne demande rien : laisse-la là, elle reste gardée tant que tu ne choisis pas.</p>
+        </section>
       )}
 
       {c.state === "pack_missing" && (
@@ -339,7 +419,7 @@ export default function ServerPage({ id }: { id: string }) {
           {tab === "reglages" && <Settings d={detail} services={services} instances={instances} ask={ask} onError={setError} />}
         </div>
       </Card>
-      {confirm && <ConfirmDialog c={confirm} onClose={() => setConfirm(null)} />}
+      {confirm && <ConfirmDialog c={confirm} onClose={(next) => setConfirm(next ?? null)} />}
       {eula}
     </div>
   );

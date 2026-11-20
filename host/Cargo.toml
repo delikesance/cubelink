@@ -13,6 +13,7 @@ path = "src/lib.rs"
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+tracing.workspace = true
 tiny-skia = "0.12"
 ab_glyph = "0.2"
 
@@ -33,5 +34,6 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 # Linux : la Scene passe par X11 (ou XWayland), en Rust pur (pas de libxcb a l'execution). `shape` : fenetre du rideau traversee par la souris.
+# `randr` : moniteurs (RandR 1.5), pour le plein ecran et la restitution sur le moniteur du launcher.
 [target.'cfg(target_os = "linux")'.dependencies]
-x11rb = { version = "0.13", features = ["shape"] }
+x11rb = { version = "0.13", features = ["shape", "randr"] }

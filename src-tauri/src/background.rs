@@ -6,7 +6,10 @@
 //! masquer cacherait aussi le jeu), puis masque Cubelink au lieu de le quitter.
 //!
 //! Exceptions, où fermer quitte comme avant : le mode test (les E2E ferment l'application par WM_CLOSE) et l'absence
-//! d'icône (Linux sans bibliothèque d'icône : la fenêtre masquée serait introuvable).
+//! d'icône visible (Linux sans bibliothèque d'icône, ou sans hôte StatusNotifier comme GNOME sans extension
+//! AppIndicator : la fenêtre masquée serait introuvable). Dans ce cas le démarrage `--background` ne masque pas non plus.
+//! La présence de l'hôte est re-testée à chaque fois (démarrage, fermeture) : une extension activée plus tard est prise
+//! en compte à la fermeture suivante.
 //!
 //! Rien ici ne doit empêcher l'application de démarrer : une icône ou un démarrage automatique impossible est seulement
 //! noté dans la console.
@@ -36,8 +39,14 @@ const MENU_QUIT: &str = "cubelink-quit";
 static CLOSING: AtomicBool = AtomicBool::new(false);
 /// « Quitter Cubelink » demandé pendant un masquage en cours : la sortie a lieu à la fin de celui-ci.
 static EXIT_PENDING: AtomicBool = AtomicBool::new(false);
-/// L'icône de notification existe. Sans elle, masquer la fenêtre la rendrait introuvable : fermer quitte alors.
-static TRAY_OK: AtomicBool = AtomicBool::new(false);
+/// L'icône de notification a été construite. Elle n'est utile que si un hôte la montre (voir [`tray_host_present`]) :
+/// sans icône visible, masquer la fenêtre la rendrait introuvable et fermer quitte alors.
+static TRAY_BUILT: AtomicBool = AtomicBool::new(false);
+
+/// Noms D-Bus du StatusNotifierWatcher : les extensions GNOME et KDE publient le nom `kde`, la spécification le nom
+/// `freedesktop`.
+#[cfg(any(target_os = "linux", test))]
+const WATCHER_NAMES: [&str; 2] = ["org.kde.StatusNotifierWatcher", "org.freedesktop.StatusNotifierWatcher"];
 
 /// Attente maximale de la fin d'un lancement abandonné (préparation, création du processus) avant de rouvrir les lancements.
 const SETTLE_MAX: Duration = Duration::from_secs(30 * 60);
@@ -70,6 +79,7 @@ fn hide_main(app: &AppHandle, st: &AppState) {
         let _ = w.hide();
     }
     st.stage.flush_log();
+    crate::app_log::flush();
     if !crate::test_hooks::hooks().test_mode && take_first_notice(&st.paths.root) {
         let _ = app
             .notification()
@@ -83,7 +93,7 @@ fn hide_main(app: &AppHandle, st: &AppState) {
 /// Fermeture de la fenêtre (croix, Alt+F4, barre de titre) : masque au lieu de quitter. Appelée sur `CloseRequested`,
 /// après `prevent_close`. En mode test (les E2E ferment l'application par WM_CLOSE) ou sans icône : quitte, comme avant.
 pub fn on_close_requested(app: &AppHandle, st: &Arc<AppState>) {
-    if crate::test_hooks::hooks().test_mode || !TRAY_OK.load(Ordering::SeqCst) {
+    if crate::test_hooks::hooks().test_mode || !tray_ok() {
         return quit_app(app, st);
     }
     if CLOSING.load(Ordering::SeqCst) {
@@ -113,6 +123,7 @@ pub fn on_close_requested(app: &AppHandle, st: &Arc<AppState>) {
         if EXIT_PENDING.load(Ordering::SeqCst) {
             // Un serveur de groupe encore actif est arrêté proprement (monde publié, bail relâché).
             st.hearth_stop_all().await;
+            crate::app_log::flush();
             app.exit(0);
         }
     });
@@ -134,6 +145,7 @@ pub fn quit_app(app: &AppHandle, st: &Arc<AppState>) {
         }
         // Un serveur de groupe encore actif est arrêté proprement (monde publié, bail relâché).
         st.hearth_stop_all().await;
+        crate::app_log::flush();
         app.exit(0);
     });
 }
@@ -161,13 +173,60 @@ pub fn setup_tray(app: &AppHandle, st: Arc<AppState>) -> tauri::Result<()> {
         b = b.icon(icon.clone());
     }
     b.build(app)?;
-    TRAY_OK.store(true, Ordering::SeqCst);
+    TRAY_BUILT.store(true, Ordering::SeqCst);
+    if !tray_host_present() {
+        tracing::warn!("aucun hote StatusNotifier (GNOME sans extension AppIndicator ?) : fermer la fenetre quittera Cubelink");
+    }
     Ok(())
 }
 
-/// L'icône de notification existe (la fenêtre masquée peut être rouverte depuis elle).
+/// L'icône de notification existe ET un hôte la montre : la fenêtre masquée peut être rouverte depuis elle. Évalué à
+/// chaque appel (démarrage, fermeture), pas figé : un hôte apparu ou disparu depuis est pris en compte.
 pub fn tray_ok() -> bool {
-    TRAY_OK.load(Ordering::SeqCst)
+    TRAY_BUILT.load(Ordering::SeqCst) && tray_host_present()
+}
+
+/// Pur : un hôte de zone de notification est-il présent ? `probe(nom)` renvoie `None` si le nom D-Bus n'a pas de
+/// propriétaire, sinon `Some(hôte_enregistré)`. Un watcher sans hôte enregistré (démarrage de KDE, watcher orphelin)
+/// n'affiche rien : il compte comme absent.
+#[cfg(any(target_os = "linux", test))]
+fn watcher_with_host<F: Fn(&str) -> Option<bool>>(probe: F) -> bool {
+    WATCHER_NAMES.iter().any(|n| probe(n) == Some(true))
+}
+
+/// Sonde réelle d'un nom (bus de session), bornée à 1 s dans un thread à part (jamais bloquant dans un contexte async).
+/// Toute erreur (pas de bus de session, refus du bac à sable) vaut « absent » : fermer quitte, ce qui est sûr.
+#[cfg(target_os = "linux")]
+fn dbus_probe(name: &str) -> Option<bool> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let owned = name.to_string();
+    std::thread::spawn(move || {
+        let _ = tx.send(dbus_probe_blocking(&owned));
+    });
+    rx.recv_timeout(Duration::from_secs(1)).ok().flatten()
+}
+
+#[cfg(target_os = "linux")]
+fn dbus_probe_blocking(name: &str) -> Option<bool> {
+    let conn = zbus::blocking::Connection::session().ok()?;
+    let bus_name = zbus::names::BusName::try_from(name).ok()?;
+    if !zbus::blocking::fdo::DBusProxy::new(&conn).ok()?.name_has_owner(bus_name).ok()? {
+        return None;
+    }
+    let proxy = zbus::blocking::Proxy::new(&conn, name.to_string(), "/StatusNotifierWatcher", name.to_string()).ok()?;
+    // Propriété illisible alors que le nom est possédé : un watcher ancien, supposé muni d'un hôte.
+    Some(proxy.get_property::<bool>("IsStatusNotifierHostRegistered").unwrap_or(true))
+}
+
+#[cfg(target_os = "linux")]
+fn tray_host_present() -> bool {
+    watcher_with_host(dbus_probe)
+}
+
+/// Hors Linux (Windows : zone de notification toujours là) : inchangé.
+#[cfg(not(target_os = "linux"))]
+fn tray_host_present() -> bool {
+    true
 }
 
 /// Comme [`setup_tray`], mais une bibliothèque d'icône absente (Linux sans `libayatana-appindicator`) fait paniquer le
@@ -176,8 +235,8 @@ pub fn try_setup_tray(app: &AppHandle, st: Arc<AppState>) {
     let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| setup_tray(app, st)));
     match res {
         Ok(Ok(())) => {}
-        Ok(Err(e)) => eprintln!("[Cubelink] icone de la zone de notification : {e}"),
-        Err(_) => eprintln!("[Cubelink] icone de la zone de notification indisponible : fermer la fenetre quittera Cubelink"),
+        Ok(Err(e)) => tracing::warn!("icone de la zone de notification : {e}"),
+        Err(_) => tracing::warn!("icone de la zone de notification indisponible : fermer la fenetre quittera Cubelink"),
     }
 }
 
@@ -197,7 +256,7 @@ pub fn apply_autostart(app: &AppHandle) {
         _ => Ok(()),
     };
     if let Err(e) = res {
-        eprintln!("[Cubelink] démarrage avec la session : {e}");
+        tracing::warn!("démarrage avec la session : {e}");
     }
 }
 
@@ -210,6 +269,62 @@ mod tests {
         assert!(started_in_background(["cubelink.exe", "--background"]));
         assert!(!started_in_background(["cubelink.exe"]));
         assert!(!started_in_background(["cubelink.exe", "--backgroundx"]));
+    }
+
+    /// Sonde factice : `(nom, hôte_enregistré)` des noms possédés ; les autres n'ont pas de propriétaire.
+    fn probe<'a>(owned: &'a [(&'a str, bool)]) -> impl Fn(&str) -> Option<bool> + 'a {
+        move |n| owned.iter().find(|(o, _)| *o == n).map(|(_, h)| *h)
+    }
+
+    #[test]
+    fn hote_absent_sans_watcher() {
+        assert!(!watcher_with_host(probe(&[])));
+    }
+
+    #[test]
+    fn hote_present_avec_watcher_kde_ou_freedesktop() {
+        assert!(watcher_with_host(probe(&[("org.kde.StatusNotifierWatcher", true)])));
+        assert!(watcher_with_host(probe(&[("org.freedesktop.StatusNotifierWatcher", true)])));
+    }
+
+    #[test]
+    fn watcher_sans_hote_enregistre_compte_comme_absent() {
+        assert!(!watcher_with_host(probe(&[("org.kde.StatusNotifierWatcher", false)])));
+        // Un autre watcher avec hôte suffit.
+        assert!(watcher_with_host(probe(&[
+            ("org.kde.StatusNotifierWatcher", false),
+            ("org.freedesktop.StatusNotifierWatcher", true),
+        ])));
+    }
+
+    /// Réel : vrai bus de session, faux watcher. Lancé sous `dbus-run-session` (voir la PR) ; ignoré sinon.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "exige un bus de session D-Bus : dbus-run-session -- cargo test -p cubelink --lib sonde_reelle -- --ignored"]
+    fn sonde_reelle_du_bus_de_session() {
+        // Sans watcher : absent.
+        assert!(!tray_host_present());
+        // Faux watcher avec hôte enregistré.
+        struct W(bool);
+        #[zbus::interface(name = "org.kde.StatusNotifierWatcher")]
+        impl W {
+            #[zbus(property)]
+            fn is_status_notifier_host_registered(&self) -> bool {
+                self.0
+            }
+        }
+        for (registered, want) in [(false, false), (true, true)] {
+            let conn = zbus::blocking::connection::Builder::session()
+                .unwrap()
+                .name("org.kde.StatusNotifierWatcher")
+                .unwrap()
+                .serve_at("/StatusNotifierWatcher", W(registered))
+                .unwrap()
+                .build()
+                .unwrap();
+            assert_eq!(tray_host_present(), want, "hôte enregistré = {registered}");
+            drop(conn);
+        }
     }
 
     #[test]

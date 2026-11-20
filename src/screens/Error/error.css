@@ -11,14 +11,8 @@
 .err-actions{display:flex;flex-wrap:wrap;justify-content:center;gap:var(--sp-3)}
 .err-actions a.cl-btn{text-decoration:none}
 .err-actions a.cl-btn-secondary{color:var(--text)}
-.err-note{margin:0;color:var(--danger);font-size:14px}
 .err-more{width:100%;text-align:left;padding:0}
 .err-more>button{width:100%;min-height:52px;padding:0 20px;border:0;background:transparent;color:var(--text);font:500 14px var(--font-ui);display:flex;align-items:center;justify-content:space-between;cursor:pointer;border-radius:var(--r-lg)}
 .err-more>button span{color:var(--muted);font-size:12px}
 .err-more-in{padding:0 20px 20px;display:flex;flex-direction:column;gap:var(--sp-3)}
 .err-more-in p{margin:0;color:var(--muted);line-height:1.5}
-.err-pre{margin:0;padding:14px 16px;border-radius:var(--r-md);background:var(--bg);border:1px solid var(--line);color:var(--muted);font:12px/1.6 ui-monospace,Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere;max-height:240px;overflow:auto}
-.err-more-in .cl-btn{align-self:flex-start}
-.err-spin{display:block;animation:err-rot 1s linear infinite}
-@keyframes err-rot{to{transform:rotate(360deg)}}
-@media (prefers-reduced-motion:reduce){.err-spin{animation:none}}

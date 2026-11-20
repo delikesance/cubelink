@@ -24,10 +24,10 @@ cmd=$(jq -r '.tool_input.command // ""' <<<"$input")
 cwd=$(jq -r '.cwd // ""' <<<"$input")
 [ -n "$cwd" ] || cwd=$PWD
 
-# Contrôle explicite de la branche courante : main et canary sont protégées.
+# Contrôle explicite de la branche courante : main est protégée (canary reçoit pushs et merges de PR).
 branch=$(git -C "$cwd" symbolic-ref --short -q HEAD 2>/dev/null || true)
 on_protected=0
-if [ "$branch" = "main" ] || [ "$branch" = "canary" ]; then
+if [ "$branch" = "main" ]; then
   on_protected=1
 fi
 
@@ -40,7 +40,7 @@ if mi 'java' "$cmd"; then
 fi
 
 GIT='(^|[[:space:]])git([[:space:]]+(-C|-c)[[:space:]]+[^[:space:]]+)*[[:space:]]+'
-REFSPEC='(^|[[:space:]])\+?([^[:space:]]*:)?(refs/heads/)?(main|canary)([[:space:]]|$)'
+REFSPEC='(^|[[:space:]])\+?([^[:space:]]*:)?(refs/heads/)?main([[:space:]]|$)'
 
 check_segment() {
   local s=$1
@@ -51,9 +51,9 @@ check_segment() {
     m '(^|[[:space:]])\+[^[:space:]]' "$s" \
       && block "push forcé (refspec +) interdit."
     m '(^|[[:space:]])--(all|mirror)([[:space:]]|$)' "$s" \
-      && block "push --all/--mirror interdit : il pousserait main et canary."
+      && block "push --all/--mirror interdit : il pousserait main."
     m "$REFSPEC" "$s" \
-      && block "push vers main/canary interdit : passer par une PR vers canary."
+      && block "push vers main interdit : pousser sur canary, puis PR canary vers main."
     [ "$on_protected" = 1 ] \
       && block "push depuis $branch interdit : travailler sur une branche <type>/<sujet>."
   fi
@@ -62,8 +62,14 @@ check_segment() {
     block "commit sur $branch interdit : créer une branche <type>/<sujet> depuis origin/canary."
   fi
 
-  m '(^|[[:space:]])gh[[:space:]]+pr[[:space:]]+merge([[:space:]]|$)' "$s" \
-    && block "gh pr merge interdit : seul l'utilisateur fusionne."
+  if m '(^|[[:space:]])gh[[:space:]]+pr[[:space:]]+merge([[:space:]]|$)' "$s"; then
+    # Fusion autorisée seulement si la PR vise canary ; main reste à l'utilisateur.
+    local target base
+    target=$(sed -E 's/.*gh[[:space:]]+pr[[:space:]]+merge//' <<<"$s" | tr ' ' '\n' | grep -Ev '^(-.*)?$' | head -1)
+    base=$(cd "$cwd" 2>/dev/null && gh pr view ${target:+"$target"} --json baseRefName -q .baseRefName 2>/dev/null || true)
+    [ "$base" = "canary" ] \
+      || block "gh pr merge autorisé seulement vers canary (base lue : '${base:-inconnue}'). La PR vers main est fusionnée par l'utilisateur."
+  fi
   m '(^|[[:space:]])gh[[:space:]]+release[[:space:]]+(create|delete)([[:space:]]|$)' "$s" \
     && block "gh release create/delete interdit : publication réservée à l'utilisateur."
   m '(^|[[:space:]])cargo([[:space:]]+\+[^[:space:]]+)?[[:space:]]+publish([[:space:]]|$)' "$s" \

@@ -184,8 +184,10 @@ pub async fn find_unknown_from_manifest(
 }
 
 async fn query_hashed(hashed: &[(String, String)], client: &ModrinthClient, report: &mut UnknownReport) {
+    // Après un échec réseau, les lots suivants échoueraient aussi (30 s chacun) : on les marque tous « non vérifiés ».
+    let mut offline = false;
     for (i, batch) in hashed.chunks(BATCH_SIZE).enumerate() {
-        if i >= MAX_BATCHES {
+        if i >= MAX_BATCHES || offline {
             report.unchecked.extend(batch.iter().map(|(p, _)| p.clone()));
             continue;
         }
@@ -196,7 +198,10 @@ async fn query_hashed(hashed: &[(String, String)], client: &ModrinthClient, repo
                 report.known.extend(k);
                 report.unknown.extend(u);
             }
-            Err(_) => report.unchecked.extend(batch.iter().map(|(p, _)| p.clone())),
+            Err(e) => {
+                offline = matches!(e, Error::Network(_));
+                report.unchecked.extend(batch.iter().map(|(p, _)| p.clone()));
+            }
         }
     }
 }

@@ -80,13 +80,13 @@ fn modrinth_project_from_url(urls: &[String]) -> Option<Provenance> {
 }
 
 /// Nom du jar si `path` est de la forme `mods/<nom>.jar` (un seul niveau).
-fn mod_jar_name(path: &str) -> Option<&str> {
+pub(crate) fn mod_jar_name(path: &str) -> Option<&str> {
     let name = path.strip_prefix("mods/")?;
     (!name.contains('/') && name.to_ascii_lowercase().ends_with(".jar")).then_some(name)
 }
 
 impl MrpackFile {
-    fn client_unsupported(&self) -> bool {
+    pub(crate) fn client_unsupported(&self) -> bool {
         self.env.as_ref().and_then(|e| e.client.as_deref()) == Some("unsupported")
     }
 }
@@ -184,7 +184,7 @@ pub fn has_dangerous_ext(name: &str) -> bool {
 }
 
 /// Valide un chemin relatif du pack (séparateur `/` uniquement). Retourne le premier segment.
-fn validate_rel(path: &str) -> Result<&str> {
+pub(crate) fn validate_rel(path: &str) -> Result<&str> {
     let bad = |why: &str| invalid(format!("chemin du pack refusé ({why}) : {path:?}"));
     if path.is_empty() {
         return Err(bad("vide"));
@@ -223,7 +223,7 @@ fn validate_file_path(path: &str) -> Result<()> {
     Ok(())
 }
 
-fn check_url(url: &str, opts: &ImportOptions) -> Result<()> {
+pub(crate) fn check_url(url: &str, opts: &ImportOptions) -> Result<()> {
     let u = url::Url::parse(url).map_err(|e| invalid(format!("URL invalide {url:?} : {e}")))?;
     match u.scheme() {
         "https" => {}
@@ -252,7 +252,7 @@ fn read_index_json(archive: &mut ZipArchive<File>) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
-fn open_zip(zip_path: &Path) -> Result<ZipArchive<File>> {
+pub(crate) fn open_zip(zip_path: &Path) -> Result<ZipArchive<File>> {
     let f = File::open(zip_path)?;
     let a = ZipArchive::new(f).map_err(|e| invalid(format!("archive de modpack invalide : {e}")))?;
     if a.len() > MAX_ENTRIES {
@@ -335,25 +335,25 @@ pub fn parse_index(zip_path: &Path) -> Result<MrpackIndex> {
 // ---------- Overrides ----------
 
 /// Préfixes des dossiers du zip copiés tels quels dans l'instance.
-struct Layout {
+pub(crate) struct Layout {
     common: String,
     client: Option<String>,
 }
 
 impl Layout {
-    fn mrpack() -> Self {
+    pub(crate) fn mrpack() -> Self {
         Self { common: "overrides/".into(), client: Some("client-overrides/".into()) }
     }
 }
 
-struct OverrideEntry {
-    index: usize,
-    rel: String,
+pub(crate) struct OverrideEntry {
+    pub(crate) index: usize,
+    pub(crate) rel: String,
 }
 
 /// Valide toutes les entrées d'overrides (zip-slip, extensions, bombe) sans rien écrire.
 /// Retourne les entrées dans l'ordre d'application (`overrides/` puis `client-overrides/`).
-fn plan_overrides(archive: &mut ZipArchive<File>, opts: &ImportOptions, layout: &Layout) -> Result<Vec<OverrideEntry>> {
+pub(crate) fn plan_overrides(archive: &mut ZipArchive<File>, opts: &ImportOptions, layout: &Layout) -> Result<Vec<OverrideEntry>> {
     let mut common = Vec::new();
     let mut client = Vec::new();
     let mut total: u64 = 0;
@@ -404,7 +404,7 @@ fn plan_overrides(archive: &mut ZipArchive<File>, opts: &ImportOptions, layout: 
     Ok(common)
 }
 
-fn extract_overrides(
+pub(crate) fn extract_overrides(
     archive: &mut ZipArchive<File>,
     plan: &[OverrideEntry],
     game_dir: &Path,
@@ -469,7 +469,7 @@ fn with_file_ctx(path: &str, e: Error) -> Error {
     }
 }
 
-async fn fetch_file(file: &MrpackFile, store_root: &Path, index: &StoreIndex, dl: &DlOptions) -> Result<StoredObject> {
+pub(crate) async fn fetch_file(file: &MrpackFile, store_root: &Path, index: &StoreIndex, dl: &DlOptions) -> Result<StoredObject> {
     if file.unverified {
         let Some(url) = file.downloads.first() else { return Err(with_file_ctx(&file.path, Error::Network("aucune URL".into()))) };
         return fetch_into_store_unverified(url, MAX_FILE_BYTES, store_root, index, dl).await.map_err(|e| with_file_ctx(&file.path, e));

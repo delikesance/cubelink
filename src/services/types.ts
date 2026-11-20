@@ -34,6 +34,10 @@ export type Instance = B.Instance_Serialize;
 /** Illustration d'une instance. `source` : "curseforge", "modrinth" ou "custom". */
 export type InstanceArt = B.InstanceArt_Serialize;
 export type PackOrigin = B.PackOrigin;
+/** Mise à jour proposée pour un modpack installé depuis Modrinth. */
+export type ModpackUpdate = B.ModpackUpdate;
+/** Résumé d'une mise à jour appliquée : `kept` = fichiers du joueur gardés, `backup_id` pour l'annuler. */
+export type ModpackUpdateResult = B.ModpackUpdateResult;
 export type Invite = B.Invite_Serialize;
 export type JoinPlan = B.JoinPlan_Serialize;
 export type Manifest = B.Manifest_Serialize;
@@ -250,6 +254,12 @@ export interface Services {
   /** Applique les actions choisies du plan ; sauvegarde les fichiers remplacés (annulable). */
   modsFixApply(instanceId: string, planId: string, actionIds: string[]): Promise<FixResult>;
   modsFixUndo(instanceId: string, backupId: string): Promise<ModCheck>;
+  /** Mise à jour disponible pour le modpack installé (Modrinth) ; null si à jour ou origine inconnue. Échoue hors ligne : l'appelant l'ignore. */
+  modpackUpdateCheck(instanceId: string): Promise<ModpackUpdate | null>;
+  /** Passe le modpack à `versionId` en gardant ce qui est au joueur ; l'ancien état est sauvegardé. */
+  modpackUpdateApply(instanceId: string, versionId: string): Promise<ModpackUpdateResult>;
+  /** Annule la mise à jour de `backupId` ; renvoie l'instance. */
+  modpackUpdateUndo(instanceId: string, backupId: string): Promise<Instance>;
   modsRemove(instanceId: string, file: string): Promise<void>;
   modsAdd(instanceId: string, path: string): Promise<ModEntry>;
   /** Sélecteur de fichiers natif ; renvoie les chemins choisis ([] si annulé). */

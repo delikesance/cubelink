@@ -1,7 +1,7 @@
 import { validateOfflineName } from "./accounts";
 import { HEARTH_EULA_REQUIRED } from "./types";
 import type {
-  AccountInfo, AccountsState, BrowseHit, BrowseInstallResult, BrowseKind, BrowseProgressEvent, BrowseSource, BrowseVersion, FixPlan, FixProgressEvent, FixResult, ModCheck, ModEntry, ModIssue,
+  AccountInfo, AccountsState, BrowseHit, BrowseInstallResult, BrowseKind, BrowseProgressEvent, BrowseSource, BrowseVersion, FixPlan, FixProgressEvent, FixResult, ModCheck, ModEntry, ModIssue, ModpackUpdate,
   CreateInstanceInput, DeviceCode, HostState, Invite, JoinAnswer, JoinRequest, ImportWarningEvent, LaunchLogEvent, FriendRequest, FriendWithPresence, Instance, InstanceArt,
   JoinPlan, LaunchState, Manifest, PresenceEvent, UnknownModsEvent, Profile, Services, Settings,
   StageFallback, StageState, TransferProgress, Unsubscribe, UpdateState,
@@ -60,6 +60,10 @@ export interface FakeControls {
   emitHearthHostPrompt(e: HearthHostPrompt): void;
   /** Test : le contrat d'utilisation de Minecraft est déjà accepté (ou non). Défaut : non. */
   setHearthEula(accepted: boolean): void;
+  /** Test : mise à jour de modpack que `modpackUpdateCheck` renverra pour cette instance (`"offline"` : la détection échoue). */
+  setPackUpdate(instanceId: string, u: ModpackUpdate | null | "offline"): void;
+  /** Test : appels `modpackUpdateApply` / `modpackUpdateUndo`, dans l'ordre. */
+  readonly packUpdateCalls: Array<{ kind: "apply" | "undo"; args: string[] }>;
   /** Test : commandes Hearth reçues, dans l'ordre (nom sans préfixe `hearth`, arguments). */
   readonly hearthCalls: Array<{ kind: string; args: unknown[] }>;
   /** Test : fusionne `patch` dans l'état de la zone de jeu et émet stage://state. */
@@ -312,6 +316,8 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
   let hearthOn = true;
   let hearthN = 0;
   const hearthCalls: Array<{ kind: string; args: unknown[] }> = [];
+  const packUpdates = new Map<string, ModpackUpdate | null | "offline">();
+  const packUpdateCalls: Array<{ kind: "apply" | "undo"; args: string[] }> = [];
   const liteOf = (pk: string): HearthMemberLite => {
     const f = friends.find((x) => x.friend.public_key === pk);
     return { public_key: pk, name: f?.friend.name ?? "Ami", online: f?.presence === "online" };
@@ -796,6 +802,8 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     emitHearthHostPrompt: (e) => emit(listeners.hearthHostPrompt, e),
     setHearthEula: (a) => { hearthEula = a; },
     hearthCalls,
+    packUpdateCalls,
+    setPackUpdate: (id, u) => { packUpdates.set(id, u); },
     friendInvites: async () => invites.map((i) => ({ ...i })),
     friendInviteDismiss: async (id) => {
       invites = invites.filter((i) => i.id !== id);
@@ -965,6 +973,22 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
       if (k >= 0) list.splice(k, 1);
       syncCount(id);
       return checkOf(id);
+    },
+    modpackUpdateCheck: async (id) => {
+      need(id);
+      const u = packUpdates.get(id) ?? null;
+      if (u === "offline") throw new Error("réseau : hors ligne");
+      return u;
+    },
+    modpackUpdateApply: async (id, versionId) => {
+      packUpdateCalls.push({ kind: "apply", args: [id, versionId] });
+      need(id);
+      packUpdates.set(id, null);
+      return { added: 3, removed: 1, replaced: 12, kept: ["config/sodium-options.json"], backup_id: "pack-backup-demo" };
+    },
+    modpackUpdateUndo: async (id, backupId) => {
+      packUpdateCalls.push({ kind: "undo", args: [id, backupId] });
+      return { ...need(id) };
     },
     modsRemove: async (id, file) => {
       const m = modFile(id, file);

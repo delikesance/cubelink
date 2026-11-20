@@ -99,6 +99,9 @@ export function createTauriServices(): Services {
     modsFixPlan: (instanceId) => commands.modsFixPlan(instanceId),
     modsFixApply: (instanceId, planId, actionIds) => commands.modsFixApply(instanceId, planId, actionIds),
     modsFixUndo: (instanceId, backupId) => commands.modsFixUndo(instanceId, backupId),
+    modpackUpdateCheck: (instanceId) => commands.modpackUpdateCheck(instanceId),
+    modpackUpdateApply: (instanceId, versionId) => commands.modpackUpdateApply(instanceId, versionId),
+    modpackUpdateUndo: (instanceId, backupId) => commands.modpackUpdateUndo(instanceId, backupId),
     modsRemove: (instanceId, file) => done(commands.modsRemove(instanceId, file)),
     modsAdd: (instanceId, path) => commands.modsAdd(instanceId, path),
     pickFiles: async ({ extensions, multiple }) => {

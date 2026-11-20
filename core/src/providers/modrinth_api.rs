@@ -86,6 +86,9 @@ pub struct Version {
     /// Date de publication ISO 8601.
     #[serde(default)]
     pub date_published: String,
+    /// `release`, `beta` ou `alpha` (vide si l'API ne le dit pas).
+    #[serde(default)]
+    pub version_type: String,
     #[serde(default)]
     pub game_versions: Vec<String>,
     #[serde(default)]

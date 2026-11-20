@@ -466,6 +466,9 @@ impl AppState {
         if !valid_id(id) {
             return Err("identifiant d'instance invalide".into());
         }
+        if crate::commands_browse::pack_update_running(id) {
+            return Err("une mise à jour du modpack est en cours : attends qu'elle se termine avant de jouer".into());
+        }
         let inst = self.instances.get(id).map_err(|e| user_msg(&e))?;
         let profile = self.auth_status_refresh().await.ok_or("connectez-vous avant de lancer le jeu")?;
         let token = match &profile {

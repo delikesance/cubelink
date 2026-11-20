@@ -152,6 +152,9 @@ Workspace Rust `core` (logique), `p2p` (réseau), `host` (la Scène, §6.1), `sr
 | Manifeste hôte, transfert par hash, reprise | fait | `core/src/manifest.rs`, `p2p/src/transfer/`, `manifest_channel.rs` |
 | Profil invité, mods inconnus | fait | `core/src/guest.rs`, `unknown_mods.rs` |
 | Tunnel de jeu | fait | `p2p/src/tunnel.rs` |
+| Relais (réglages, indices du code) | fait | `p2p/src/relay.rs` |
+| Journal applicatif (`logs/cubelink.log`) | fait : tout ce que Cubelink, le coeur, le P2P et Iroh disent par `tracing` ; 1 Mo puis `cubelink.log.1` (~2 Mo au plus) ; chaque ligne passe par `sanitize` ; `CUBELINK_LOG=debug` (syntaxe `EnvFilter`) pour diagnostiquer ; les panics y vont aussi | `src-tauri/src/app_log.rs` |
+| Installeur Windows | NSIS + CLI Tauri (`target/release/bundle/nsis/`) | |
 | Endpoint sans relais ni découverte, indices du code (IP) | fait | `p2p/src/relay.rs` |
 | La Scène (jeu dans la fenêtre du launcher) | fait (Windows et Linux X11) | `host/`, `src-tauri/src/stage/` |
 | Invitations « rejoins mon monde », demandes à rejoindre | fait | `src-tauri/src/invites.rs`, `p2p/src/join_request.rs` |
@@ -165,6 +168,7 @@ Tests : `npm test` (clippy `-D warnings`, `cargo test --workspace`, `tsc`, vites
 
 Refonte d'interface « clay doux » appliquée (fond `#131116`, accent cyan `#4FC3E8`) : tokens dans `src/styles/tokens.css` (polices Inter et Space Grotesk embarquées), composants dans `src/ui/`, écrans dans `src/screens/` ; le design Hearth la prolonge (`docs/hearth.md`).
 
+Limites connues : polices Inter et Space Grotesk non embarquées (repli système) ; pas de progression chiffrée pendant la préparation du jeu ; « amis ayant joué au modpack » non implémenté ; Échap depuis Mentions légales revient à l'accueil.
 Limites connues : « amis ayant joué au modpack » non implémenté ; « Vider le cache » (Réglages) n'est pas branché sur une commande (le bouton dit que le vidage n'est pas encore disponible) ; Échap depuis Mentions légales revient à l'accueil.
 
 ## 9. Annexe : cadrage initial (archive, 2026-11-09)

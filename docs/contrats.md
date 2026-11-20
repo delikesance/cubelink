@@ -54,6 +54,8 @@ Arguments : clés JSON envoyées à Tauri (snake_case) et leur type TypeScript. 
 | `settings_get` | — | `Settings_Serialize` | Réglages. |
 | `system_ram_mb` | — | `number \| null` | Mémoire physique de l'ordinateur en Mo, `None` si elle est illisible : Paramètres affiche « Automatique (≈ X Go sur ce PC) » et prévient quand une valeur manuelle dépasse 75 % de cette mémoire. |
 | `settings_set` | `settings: SettingsInput_Deserialize` | `Settings_Serialize` | Le front envoie les réglages dans `{ settings }`. |
+| `cache_size` | — | `number` | Taille du cache de mods que « Vider le cache » libérerait (octets) : fichiers du cache qu'aucune instance n'utilise, de plus de 15 min. |
+| `cache_clear` | — | `number` | Vide le cache de mods (fichiers qu'aucune instance n'utilise, de plus de 15 min) ; renvoie les octets libérés. Erreur lisible pendant un lancement, un transfert ou un autre vidage. |
 | `identity_export` | `path: string`, `passphrase: string` | `string` | Sauvegarde l'identité et la liste d'amis dans un fichier `.cubelink-id` chiffré. Renvoie la clé publique. |
 | `identity_import` | `path: string`, `passphrase: string` | `string` | Valide une sauvegarde et la prépare ; elle s'applique au redémarrage (`identity_restart`). Renvoie la clé publique. |
 | `identity_restart` | — | — | Redémarre Cubelink pour appliquer la restauration préparée par `identity_import`. |

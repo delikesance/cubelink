@@ -139,7 +139,7 @@ impl AppState {
         let base = failure_message(e, stage);
         let short = if base == user_msg(e) { format!("{step} : {base}") } else { base };
         let details = technical_details(step, detail, e);
-        eprintln!("[Cubelink] join échoué ({step}) : {e:?} ({detail})");
+        tracing::warn!("join échoué ({step}) : {e:?} ({detail})");
         let log = self.paths.logs.join("join-errors.log");
         let _ = std::fs::create_dir_all(&self.paths.logs);
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&log) {
@@ -329,7 +329,7 @@ impl AppState {
         let missing = compute_plan(&manifest, &DiskCache { index: &self.store, root: &self.paths.store })
             .map_err(|e| self.join_fail("Contrôle du cache", "plan après réception", &e, Stage::Install))?;
         if missing.to_receive_count > 0 {
-            eprintln!("[Cubelink] join : {} objet(s) manquant(s) dans le cache après réception, nouvelle réception", missing.to_receive_count);
+            tracing::warn!("join : {} objet(s) manquant(s) dans le cache après réception, nouvelle réception", missing.to_receive_count);
             let again = self.backend().receive_files(key.to_string(), format!("{id}-r"), missing, cb, control.clone()).await;
             if control.is_cancelled() {
                 return Err(failure_message(&Error::Cancelled, Stage::Receive));

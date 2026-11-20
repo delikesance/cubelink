@@ -289,10 +289,10 @@ pub fn apply_settings(app: &AppHandle) {
             });
             match res {
                 Ok(()) => *reg = Some(sc),
-                Err(e) => eprintln!("[Cubelink] raccourci « {hotkey} » non enregistré : {e}"),
+                Err(e) => tracing::warn!("raccourci « {hotkey} » non enregistré : {e}"),
             }
         }
-        Err(e) => eprintln!("[Cubelink] raccourci « {hotkey} » invalide : {e}"),
+        Err(e) => tracing::warn!("raccourci « {hotkey} » invalide : {e}"),
     }
 }
 
@@ -344,7 +344,7 @@ pub fn setup(app: &AppHandle, test_mode: bool) {
                 return;
             };
             if let Err(e) = h.notification().builder().title(title).body(body).show() {
-                eprintln!("[Cubelink] notification ({}) : {e}", kind.event());
+                tracing::warn!("notification ({}) : {e}", kind.event());
             }
         });
     }

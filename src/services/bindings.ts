@@ -105,6 +105,10 @@ export const commands = {
 	systemRamMb: (options?: InvokeOptions) => __TAURI_INVOKE<number | null>("system_ram_mb", undefined, options),
 	/**  Le front envoie les réglages dans `{ settings }`. */
 	settingsSet: (settings: SettingsInput_Deserialize, options?: InvokeOptions) => __TAURI_INVOKE<Settings_Serialize>("settings_set", { settings }, options),
+	/**  Taille du cache de mods que « Vider le cache » libérerait (octets) : fichiers du cache qu'aucune instance n'utilise, de plus de 15 min. */
+	cacheSize: (options?: InvokeOptions) => __TAURI_INVOKE<number>("cache_size", undefined, options),
+	/**  Vide le cache de mods (fichiers qu'aucune instance n'utilise, de plus de 15 min) ; renvoie les octets libérés. Erreur lisible pendant un lancement, un transfert ou un autre vidage. */
+	cacheClear: (options?: InvokeOptions) => __TAURI_INVOKE<number>("cache_clear", undefined, options),
 	/**  Sauvegarde l'identité et la liste d'amis dans un fichier `.cubelink-id` chiffré. Renvoie la clé publique. */
 	identityExport: (path: string, passphrase: string, options?: InvokeOptions) => __TAURI_INVOKE<string>("identity_export", { path, passphrase }, options),
 	/**  Valide une sauvegarde et la prépare ; elle s'applique au redémarrage (`identity_restart`). Renvoie la clé publique. */

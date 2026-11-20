@@ -147,6 +147,8 @@ pub struct AppState {
     pub quit: QuitGate,
     /// Test : saute l'installation du jeu (Mojang, loader, Java) après un transfert d'invité.
     pub skip_game_install: AtomicBool,
+    /// Un vidage du cache est en cours (deux ne se croisent jamais, voir `commands_settings`).
+    pub cache_busy: AtomicBool,
     pub emit: EventSink,
 }
 
@@ -444,6 +446,7 @@ impl AppState {
             backend: RwLock::new(backend),
             quit: QuitGate::default(),
             skip_game_install: AtomicBool::new(false),
+            cache_busy: AtomicBool::new(false),
             emit,
             paths,
         })

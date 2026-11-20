@@ -21,6 +21,8 @@ export interface FakeOptions {
   accounts?: AccountInfo[];
   /** Réponse de `stageSupported` (zone de jeu intégrée). Faux par défaut : comme dans un navigateur. */
   stageSupported?: boolean;
+  /** Taille du faux cache de mods, en octets (12,4 Go par défaut). */
+  cacheBytes?: number;
   /** Espace libre simulé (octets) pour l'avertissement disque de `joinPlan` ; absent = mesure impossible, pas d'avertissement. */
   freeDiskBytes?: number;
 }
@@ -234,6 +236,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     { name: "Efe", uuid: "61699b2e-d327-4a01-9f1e-0ea8c3f06bc6" },
   ];
   let codeN = 1;
+  let cacheBytes = opts.cacheBytes ?? 12_400_000_000;
   let settings: Settings = {
     language: "fr", default_ram_mb: 0, java_path: null, ram_auto_migrated: true,
     trust_default: "ask", close_on_launch: false, share_mods: true, lan_auto: true,
@@ -639,6 +642,8 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     minecraftVersions: async () => ["1.21.4", "1.21.1", "1.20.6", "1.20.1", "1.19.4", "1.18.2"],
 
     netTest: async () => ({ ipv6: false, ipv4_public: false, port_mapped: true }),
+    cacheSize: async () => cacheBytes,
+    cacheClear: async () => { const freed = cacheBytes; cacheBytes = 0; return freed; },
     friendMyCode: async () => `mcl1-${hex(codeN * 7, 24)}`,
     friendRegenerateCode: async () => { codeN += 1; return `mcl1-${hex(codeN * 7, 24)}`; },
     friendList: async () => friends.map((f) => ({ friend: { ...f.friend }, presence: f.presence, in_game: f.in_game, last_seen: f.last_seen })),

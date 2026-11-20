@@ -230,7 +230,7 @@ async fn lan_map_path(st: &AppState, inst: &Instance, version: &LaunchVersion, l
         return match ensure_srg_map(&dir, &inst.minecraft) {
             Ok(p) => p,
             Err(e) => {
-                eprintln!("[Cubelink] LAN: table SRG illisible ({e})");
+                tracing::warn!("LAN: table SRG illisible ({e})");
                 None
             }
         };
@@ -246,7 +246,7 @@ async fn lan_map_path(st: &AppState, inst: &Instance, version: &LaunchVersion, l
             match jar {
                 Some(j) if j.is_file() => (Runtime::Intermediary, Some(j)),
                 _ => {
-                    eprintln!("[Cubelink] LAN: jar intermediary introuvable, noms Fabric non traduits");
+                    tracing::warn!("LAN: jar intermediary introuvable, noms Fabric non traduits");
                     return None;
                 }
             }
@@ -257,7 +257,7 @@ async fn lan_map_path(st: &AppState, inst: &Instance, version: &LaunchVersion, l
     match ensure_lanmap(&dir, &core_lib::http::client(), &inst.minecraft, runtime, mappings, inter.as_deref()).await {
         Ok(p) => Some(p),
         Err(e) => {
-            eprintln!("[Cubelink] LAN: correspondance de noms indisponible ({e}), l'ouverture auto peut échouer");
+            tracing::warn!("LAN: correspondance de noms indisponible ({e}), l'ouverture auto peut échouer");
             None
         }
     }
@@ -520,7 +520,7 @@ impl AppState {
                 };
                 if let Some(on) = early {
                     if let Err(e) = set_early_window(&dir.join("config").join("fml.toml"), on) {
-                        eprintln!("[Cubelink] fml.toml : {e}");
+                        tracing::warn!("fml.toml : {e}");
                     }
                 }
                 self.stage.begin(&inst.name, &dir.join("mods"), &self.paths.logs.join(&inst.id).join("launch-profile.json"));
@@ -580,7 +580,7 @@ impl AppState {
         }
         if crashed {
             self.lan_agent_off.store(true, std::sync::atomic::Ordering::SeqCst);
-            eprintln!("[Cubelink] LAN: l'agent a fait planter la JVM, relance sans agent");
+            tracing::warn!("LAN: l'agent a fait planter la JVM, relance sans agent");
             return self.run_game_once(inst, profile, token, join_server, &mut false, &cancel).await;
         }
         false
@@ -614,7 +614,7 @@ impl AppState {
         // Rejoindre : l'écran d'accueil « accessibilité » d'un dossier neuf bloquerait la connexion directe.
         if join_server.is_some() {
             if let Err(e) = core_lib::instance::skip_accessibility_onboarding(&game_dir) {
-                eprintln!("[Cubelink] options.txt : accueil accessibilité non désactivé ({e})");
+                tracing::warn!("options.txt : accueil accessibilité non désactivé ({e})");
             }
         }
         // Partage / agent LAN : seulement pour nos propres instances, jamais en rejoignant un ami.
@@ -625,7 +625,7 @@ impl AppState {
             match agent_supported(java, core_lib::lan_map::jar_min_java(&jar), &inst.minecraft, inst.loader.loader, join_server.is_some(), has_srg) {
                 Ok(()) => Some(lan_agent_arg(&jar, join_server.as_ref())),
                 Err(why) => {
-                    eprintln!("[Cubelink] LAN: agent non injecté ({why}) : {} {:?}, Java {java:?}", inst.minecraft, inst.loader.loader);
+                    tracing::warn!("LAN: agent non injecté ({why}) : {} {:?}, Java {java:?}", inst.minecraft, inst.loader.loader);
                     None
                 }
             }

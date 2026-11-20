@@ -691,7 +691,7 @@ impl HearthRuntime {
                 Ok(g) => {
                     groups.insert(id, Arc::new(Mutex::new(g)));
                 }
-                Err(e) => eprintln!("[cubelink] groupe {id} ignoré : {e}"),
+                Err(e) => tracing::warn!("groupe {id} ignoré : {e}"),
             }
         }
         let me = identity.public_key().to_bytes();
@@ -905,7 +905,7 @@ impl HearthRuntime {
         let _io = lock(&self.meta_io);
         let data = serde_json::to_vec_pretty(&*lock(&self.meta)).unwrap_or_default();
         if let Err(e) = write_atomic(&self.root.join("meta.json"), &data) {
-            eprintln!("[cubelink] métadonnées Hearth non enregistrées : {e}");
+            tracing::warn!("métadonnées Hearth non enregistrées : {e}");
         }
     }
 
@@ -1358,7 +1358,7 @@ impl HearthRuntime {
         let Some(heads) = self.heads_of(&gid) else { return };
         for v in heads {
             if let Err(e) = self.fetch_version(gid, &v, prefer).await {
-                eprintln!("[cubelink] synchro du groupe {gid} : {e}");
+                tracing::warn!("synchro du groupe {gid} : {e}");
                 break;
             }
         }
@@ -1790,7 +1790,7 @@ impl HearthDelegate for HearthRuntime {
         if matches!(r, Ok(Observed::Accepted)) {
             // Je suis moi-même en train d'héberger : si ce bail gagne et que personne ne joue sur mon serveur, je cède.
             if self.active(&gid).is_some_and(|a| a.players() == 0) && self.arbitrate_now(&gid).is_some() {
-                eprintln!("[cubelink] un autre bail l'emporte sur celui du groupe {gid} : ce serveur s'arrête");
+                tracing::warn!("un autre bail l'emporte sur celui du groupe {gid} : ce serveur s'arrête");
                 let rt = self.arc();
                 spawn(async move { rt.abort_hosting(gid).await });
             }
@@ -2070,7 +2070,7 @@ impl HearthRuntime {
         let gid = *gid;
         spawn(async move {
             if let Err(e) = rt.forget_tail(gid, tail).await {
-                eprintln!("[cubelink] groupe {gid} : suppression incomplète : {e}");
+                tracing::warn!("groupe {gid} : suppression incomplète : {e}");
             }
         });
         Ok(())
@@ -2672,7 +2672,7 @@ impl HearthRuntime {
         let others = lock(&self.leases).active(gid, Instant::now());
         let (verdict, fork) = self.with_group(gid, |g| arbitrate_marked(&mine, &others, g.graph())).ok()?;
         if fork {
-            eprintln!("[cubelink] le groupe {gid} a deux parties sur des branches différentes : la fourche sera visible");
+            tracing::warn!("le groupe {gid} a deux parties sur des branches différentes : la fourche sera visible");
         }
         match verdict {
             Arbitration::Yield { to } => Some(to),
@@ -2822,7 +2822,7 @@ impl HearthRuntime {
             let base = lock(&e.lease).base_version;
             if self.fence_stops(gid, base).await {
                 e.fenced.store(true, Ordering::SeqCst);
-                eprintln!("[cubelink] groupe {gid} : un autre bail ou une version plus récente existe, la préparation du serveur est abandonnée");
+                tracing::warn!("groupe {gid} : un autre bail ou une version plus récente existe, la préparation du serveur est abandonnée");
                 return false;
             }
             // Rien ne contredit : on reprend la préparation avec une nouvelle partie (`lease_id`).
@@ -2849,10 +2849,10 @@ impl HearthRuntime {
     fn log_fence(&self, gid: &GroupId, reason: FenceReason) {
         match reason {
             FenceReason::ClockSkew { skew_secs } => {
-                eprintln!("[cubelink] groupe {gid} : écart de {skew_secs} s entre les horloges depuis le dernier renouvellement (veille ?) : bail non renouvelé");
+                tracing::warn!("groupe {gid} : écart de {skew_secs} s entre les horloges depuis le dernier renouvellement (veille ?) : bail non renouvelé");
             }
             FenceReason::Stale { elapsed_secs } => {
-                eprintln!("[cubelink] groupe {gid} : {elapsed_secs} s depuis le dernier renouvellement du bail : bail non renouvelé");
+                tracing::warn!("groupe {gid} : {elapsed_secs} s depuis le dernier renouvellement du bail : bail non renouvelé");
             }
         }
     }
@@ -2888,7 +2888,7 @@ impl HearthRuntime {
         self.log_fence(&gid, reason);
         let tip = lock(&host.tip).map(|t| t.0);
         if self.fence_stops(gid, tip).await {
-            eprintln!("[cubelink] groupe {gid} : un autre bail ou une version plus récente existe, ce serveur s'arrête et publie sa session comme branche");
+            tracing::warn!("groupe {gid} : un autre bail ou une version plus récente existe, ce serveur s'arrête et publie sa session comme branche");
             host.fenced.store(true, Ordering::SeqCst);
             // `save-all flush`, puis `save-on` : l'arrêt qui suit enregistre le monde (`save-off` l'en empêcherait).
             if host.server.flush_begin().await.is_ok() {
@@ -2960,7 +2960,7 @@ impl HearthRuntime {
     /// ignoré quinze minutes (« Héberger quand même » devient possible).
     pub fn service_failed(&self, gid: &GroupId, holder: &PeerKey) {
         if lock(&self.leases).report_unreachable(gid, holder, Instant::now()) {
-            eprintln!("[cubelink] le serveur annoncé par {} ne répond pas : son bail est ignoré", self.name_of(holder));
+            tracing::warn!("le serveur annoncé par {} ne répond pas : son bail est ignoré", self.name_of(holder));
         }
         self.emit_state();
     }
@@ -2986,7 +2986,7 @@ impl HearthRuntime {
             loop {
                 tokio::time::sleep(CHECKPOINT_INTERVAL).await;
                 if let Err(e) = rt.checkpoint(&h).await {
-                    eprintln!("[cubelink] point de reprise du groupe {} : {e}", h.group);
+                    tracing::warn!("point de reprise du groupe {} : {e}", h.group);
                 }
             }
         });
@@ -2994,7 +2994,7 @@ impl HearthRuntime {
         let watch = spawn(async move {
             h.server.wait_exit().await;
             if !h.stopping.load(Ordering::SeqCst) {
-                eprintln!("[cubelink] le serveur du groupe {} s'est arrêté seul", h.group);
+                tracing::warn!("le serveur du groupe {} s'est arrêté seul", h.group);
                 // Tâche détachée : la fin de partie abandonne les tâches de l'hôte, dont celle-ci. Lancée d'ici, elle serait
                 // annulée à son premier point d'attente (la publication) et le plantage ne serait jamais traité jusqu'au bout.
                 let gid = h.group;

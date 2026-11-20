@@ -577,7 +577,7 @@ impl AppState {
         rt.run_hosting(&active);
         // Les membres atteignent le serveur par le tunnel, et le manifeste du modpack par le même accès.
         if let Err(e) = self.backend().host_start_sharing(instance.to_string(), port).await {
-            eprintln!("[cubelink] partage du modpack du groupe : {e}");
+            tracing::warn!("partage du modpack du groupe : {e}");
         }
         rt.set_play(&g, Some(Play::Launching { steps: HOST_STEPS, index: 2 }));
         if let Err(e) = rt.launcher().launch(self, instance, port).await {
@@ -652,7 +652,7 @@ impl AppState {
         let _one_at_a_time = self.hearth.stop_all_guard().await;
         for g in self.hearth.active_groups() {
             if tokio::time::timeout(Duration::from_secs(150), self.hearth_stop_inner(g)).await.is_err() {
-                eprintln!("[cubelink] l'arrêt du serveur du groupe {g} a pris trop de temps à la fermeture");
+                tracing::warn!("l'arrêt du serveur du groupe {g} a pris trop de temps à la fermeture");
             }
         }
     }
@@ -664,7 +664,7 @@ impl AppState {
         if self.hearth.active(&g).is_some() {
             match self.hearth.finish_hosting(g).await {
                 Ok(_) => {}
-                Err(e) => eprintln!("[cubelink] arrêt du serveur du groupe {g} : {e}"),
+                Err(e) => tracing::warn!("arrêt du serveur du groupe {g} : {e}"),
             }
         }
         self.backend().host_stop_sharing();

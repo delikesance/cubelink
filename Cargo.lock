@@ -1215,7 +1215,10 @@ dependencies = [
  "tauri-specta",
  "tempfile",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
  "wiremock",
+ "zbus 5.19.0",
  "zip",
 ]
 
@@ -1264,6 +1267,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tiny-skia",
+ "tracing",
  "windows-sys 0.61.2",
  "x11rb",
 ]

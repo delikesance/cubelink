@@ -198,6 +198,55 @@ describe("écran Paramètres", () => {
     expect(screen.queryByRole("alertdialog")).toBeNull();
   });
 
+describe("cache de mods", () => {
+  const openStorage = () => { goTab("Stockage"); };
+
+  it("affiche la taille, confirme avec le chiffre puis vide pour de bon", async () => {
+    const services = createFakeServices({ tickMs: 0, cacheBytes: 12_400_000_000 });
+    const clear = vi.spyOn(services, "cacheClear");
+    render(<Shell services={services} />);
+    openStorage();
+    expect(await screen.findByText(/Libère 12,4 Go/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /Vider le cache…/ }));
+    expect(within(screen.getByRole("alertdialog")).getByText(/Libère 12,4 Go/)).toBeTruthy();
+    fireEvent.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Vider le cache" }));
+    expect(await screen.findByText("Cache vidé : 12,4 Go libérés.")).toBeTruthy();
+    expect(clear).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText(/pas encore disponible/)).toBeNull();
+    // La taille retombe à zéro : plus rien à libérer, le bouton est désactivé.
+    await waitFor(() => expect((screen.getByRole("button", { name: /Vider le cache…/ }) as HTMLButtonElement).disabled).toBe(true));
+    expect(screen.getByText(/Rien à libérer/)).toBeTruthy();
+  });
+
+  it("cache vide à l'ouverture : rien à libérer, bouton désactivé", async () => {
+    render(<Shell services={createFakeServices({ tickMs: 0, cacheBytes: 0 })} />);
+    openStorage();
+    expect(await screen.findByText(/Rien à libérer/)).toBeTruthy();
+    expect((screen.getByRole("button", { name: /Vider le cache…/ }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("l'échec du vidage est lu tel quel et le cache reste proposé", async () => {
+    const base = createFakeServices({ tickMs: 0 });
+    render(<Shell services={{ ...base, cacheClear: () => Promise.reject("Une partie est en cours.") }} />);
+    openStorage();
+    await screen.findByText(/Libère 12,4 Go/);
+    fireEvent.click(screen.getByRole("button", { name: /Vider le cache…/ }));
+    fireEvent.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Vider le cache" }));
+    expect(await screen.findByText("Une partie est en cours.")).toBeTruthy();
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect((screen.getByRole("button", { name: /Vider le cache…/ }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("taille illisible : le bouton reste utilisable, sans chiffre", async () => {
+    const base = createFakeServices({ tickMs: 0 });
+    render(<Shell services={{ ...base, cacheSize: () => Promise.reject(new Error("boom")) }} />);
+    openStorage();
+    await waitFor(() => expect(screen.getByText(/Fichiers partagés entre tes instances\./)).toBeTruthy());
+    expect((screen.getByRole("button", { name: /Vider le cache…/ }) as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.queryByText(/Libère/)).toBeNull();
+  });
+});
+
 describe("Échap", () => {
   it("ferme le dialogue", () => {
     render(<Shell services={createFakeServices({ tickMs: 0 })} />);

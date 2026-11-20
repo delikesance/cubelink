@@ -223,7 +223,7 @@ describe("Page modpack : onglet Mods", () => {
     expect(within(panel).getByText("Personnalisé")).toBeTruthy();
     expect(within(panel).getByText(/9 mods · 8 activés/)).toBeTruthy();
     expect(within(panel).queryByRole("button", { name: "Fermer" })).toBeNull();
-    expect(screen.getByText(/· 9 mods$/)).toBeTruthy();
+    expect(await screen.findByText(/· 9 mods$/)).toBeTruthy();
   });
 
   it("filtre par nom", async () => {

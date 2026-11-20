@@ -661,24 +661,65 @@ pub fn set_custom_image(store: &InstanceStore, instance_id: &str, path: &str, ro
 
 /// Cache de la description longue, dans `art/` (supprimé avec les illustrations).
 /// Le suffixe change quand le nettoyage change, pour ne pas resservir un ancien cache.
-const DESCRIPTION_FILE: &str = "description-v3.html";
+const DESCRIPTION_FILE: &str = "description-v4.html";
 /// Au-delà, la description en cache est redemandée (en cas d'échec réseau, l'ancienne reste servie).
 const DESCRIPTION_TTL: Duration = Duration::from_secs(24 * 3600);
 const MAX_DESCRIPTION_BYTES: usize = 512 * 1024;
 
-/// Nettoie du HTML venu d'un hébergeur : balises de mise en forme, liens et images en http(s) seulement ;
+/// Une image de description n'est gardée que si elle vient d'un CDN des catalogues (`ART_HOSTS`), en https, sans
+/// identifiants ni port : ailleurs, ouvrir la page enverrait l'IP du joueur à un hôte choisi par l'auteur.
+/// `img-src` de `src-tauri/tauri.conf.json` énumère les mêmes hôtes (un test garde les deux synchronisés).
+fn description_image_allowed(src: &str) -> bool {
+    check_image_url(src, false).is_ok() && url::Url::parse(src).is_ok_and(|u| u.port().is_none())
+}
+
+/// Nettoie du HTML venu d'un hébergeur : balises de mise en forme, liens en http(s) ; images seulement depuis les
+/// CDN des catalogues (les autres sont remplacées par leur texte alternatif, rien n'est chargé chez un tiers) ;
 /// pas de script, de style, d'iframe ni d'attribut d'événement. Les liens s'ouvrent dans le navigateur.
 pub fn sanitize_description(html: &str) -> String {
     let clean = ammonia::Builder::default()
         .url_schemes(["http", "https"].into_iter().collect())
         .link_rel(Some("noopener noreferrer"))
         .set_tag_attribute_value("a", "target", "_blank")
+        .set_tag_attribute_value("img", "referrerpolicy", "no-referrer")
+        .attribute_filter(|tag, attr, value| {
+            if tag == "img" && attr == "src" && !description_image_allowed(value) {
+                None
+            } else {
+                Some(value.into())
+            }
+        })
         // Centrage d'origine (boutons, bannières) : seul `text-align` survit dans `style`.
         .add_generic_attributes(["style", "align"])
         .filter_style_properties(["text-align"].into_iter().collect())
         .clean(html)
         .to_string();
-    drop_empty_blocks(&clean)
+    drop_empty_blocks(&imgs_sans_source_en_texte(&clean))
+}
+
+/// Remplace par leur `alt` (déjà échappé par ammonia, qui échappe aussi `<`, `>` et `"` dans les valeurs) les `<img>`
+/// dont la source a été retirée : pas d'icône d'image cassée, et un pixel espion sans `alt` disparaît.
+fn imgs_sans_source_en_texte(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some(i) = rest.find("<img") {
+        out.push_str(&rest[..i]);
+        let tail = &rest[i..];
+        let Some(end) = tail.find('>') else {
+            // Balise tronquée (coupe de `fetch_description`) : on l'abandonne.
+            return out;
+        };
+        let tag = &tail[..=end];
+        if tag.contains(" src=\"") {
+            out.push_str(tag);
+        } else if let Some(a) = tag.find(" alt=\"") {
+            let v = &tag[a + 6..];
+            out.push_str(v.split('"').next().unwrap_or(""));
+        }
+        rest = &tail[end + 1..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Retire les blocs vides servant d'espacement (`<p>&nbsp;</p>`, `<h2><br></h2>`…), qui creusent des trous.
@@ -786,6 +827,73 @@ mod description_tests {
     }
 
     #[test]
+    fn images_des_cdn_gardees_les_autres_remplacees_par_leur_texte() {
+        let h = sanitize_description(concat!(
+            r#"<img src="https://cdn.modrinth.com/a.png" alt="ok">"#,
+            r#"<img src="https://media.forgecdn.net/b.png">"#,
+            r#"<p><img src="https://i.imgur.com/x.png" alt="capture"></p>"#,
+            r#"<img src="https://img.shields.io/badge/a-b.svg" alt="badge">"#,
+            r#"<img src="https://tracker.example/pixel.gif">"#,
+        ));
+        assert!(h.contains(r#"src="https://cdn.modrinth.com/a.png""#) && h.contains(r#"src="https://media.forgecdn.net/b.png""#), "{h}");
+        assert!(h.contains(r#"referrerpolicy="no-referrer""#), "{h}");
+        assert!(h.contains("<p>capture</p>") && h.contains("badge"), "{h}");
+        assert_eq!(h.matches("<img").count(), 2, "{h}");
+        for tiers in ["imgur", "shields", "tracker", "pixel"] {
+            assert!(!h.contains(tiers), "{tiers} dans {h}");
+        }
+    }
+
+    #[test]
+    fn images_refusees_http_relatives_userinfo_port_et_faux_hotes() {
+        for src in [
+            "http://cdn.modrinth.com/a.png",
+            "//cdn.modrinth.com/a.png",
+            "/a.png",
+            "a.png",
+            "https://cdn.modrinth.com.evil.tld/a.png",
+            "https://cdn.modrinth.com@evil.tld/a.png",
+            "https://user@cdn.modrinth.com/a.png",
+            "https://cdn.modrinth.com:8443/a.png",
+            "https://evil.cdn.modrinth.com/a.png",
+            "data:image/png;base64,AAAA",
+            "javascript:alert(1)",
+        ] {
+            let h = sanitize_description(&format!(r#"<p>x<img src="{src}" alt="vide"></p>"#));
+            assert_eq!(h, "<p>xvide</p>", "{src} -> {h}");
+        }
+        // Hôte en majuscules : normalisé, donc accepté.
+        assert!(sanitize_description(r#"<img src="https://CDN.Modrinth.com/a.png">"#).contains("<img"));
+    }
+
+    #[test]
+    fn alt_hostile_reste_du_texte_et_les_liens_ne_changent_pas() {
+        let h = sanitize_description(r#"<a href="https://exemple.org"><img src="https://e.vil/x.png" alt='a>b "c" <script>x</script>'></a>"#);
+        assert!(!h.contains("<script") && !h.contains("<img"), "{h}");
+        assert!(h.contains("a&gt;b") && h.contains("&lt;script&gt;"), "{h}");
+        assert!(h.contains(r#"href="https://exemple.org""#), "{h}");
+    }
+
+    #[test]
+    fn nettoyage_idempotent_avec_images() {
+        let once = sanitize_description(r#"<p><img src="https://cdn.modrinth.com/a.png" alt="a>b"><img src="https://e.vil/x.png" alt="t"></p>"#);
+        assert_eq!(sanitize_description(&once), once);
+    }
+
+    #[test]
+    fn img_src_de_la_csp_enumere_les_hotes_d_images() {
+        let conf: serde_json::Value = serde_json::from_str(include_str!("../../src-tauri/tauri.conf.json")).unwrap();
+        let img = conf["app"]["security"]["csp"]["img-src"].as_str().unwrap();
+        let sources: Vec<&str> = img.split_whitespace().collect();
+        assert!(!sources.contains(&"https:") && !sources.contains(&"http:") && !sources.contains(&"*"), "{img}");
+        for h in ART_HOSTS {
+            assert!(sources.contains(&format!("https://{h}").as_str()), "{h} absent de img-src : {img}");
+        }
+        let hotes = sources.iter().filter(|s| s.starts_with("https://")).count();
+        assert_eq!(hotes, ART_HOSTS.len(), "img-src a un hôte de plus ou de moins que ART_HOSTS : {img}");
+    }
+
+    #[test]
     fn markdown_devient_html() {
         let h = sanitize_description(&markdown_to_html("# Pack\n\n**Fort** et [lien](https://x.org)\n\n<center>ok</center>"));
         assert!(h.contains("<h1>Pack</h1>") && h.contains("<strong>Fort</strong>") && h.contains("https://x.org"));
@@ -848,6 +956,31 @@ mod tests {
 
     async fn modrinth_project(mr: &MockServer, id: &str, body: serde_json::Value) {
         Mock::given(method("GET")).and(path(format!("/v2/project/{id}"))).respond_with(ResponseTemplate::new(200).set_body_json(body)).mount(mr).await;
+    }
+
+    #[tokio::test]
+    async fn description_en_cache_sans_image_tierce_et_ancien_cache_ignore() {
+        let (mr, cf, tiers) = (MockServer::start().await, MockServer::start().await, MockServer::start().await);
+        let body = format!(
+            "# Pack\n\n<img src=\"https://cdn.modrinth.com/data/P1/a.png\" alt=\"cdn\">\n\n<img src=\"{0}/pixel.gif\" alt=\"compteur\">\n\n![badge]({0}/b.svg)\n\n[site](https://exemple.org)",
+            tiers.uri()
+        );
+        modrinth_project(&mr, "P1", json!({"id": "P1", "title": "T", "body": body, "gallery": []})).await;
+        let (_t, s, i) = store();
+        let p = providers(&mr, &cf, true);
+        apply_art(&p, &s, &i.id, BrowseSource::Modrinth, "P1").await.unwrap();
+        // Cache d'une version précédente, avec une image tierce : il ne doit plus être servi.
+        let dir = s.art_dir(&i.id).unwrap();
+        std::fs::write(dir.join("description-v3.html"), format!(r#"<img src="{}/vieux.gif">"#, tiers.uri())).unwrap();
+
+        let html = instance_description(&p, &s, &i.id).await.unwrap().unwrap();
+        assert!(html.contains(r#"src="https://cdn.modrinth.com/data/P1/a.png""#), "{html}");
+        assert!(html.contains("compteur") && html.contains("badge"), "{html}");
+        assert!(html.contains(r#"href="https://exemple.org""#), "{html}");
+        assert!(!html.contains(&tiers.uri()) && !html.contains("vieux"), "{html}");
+        assert_eq!(std::fs::read_to_string(dir.join(DESCRIPTION_FILE)).unwrap(), html);
+        assert!(!std::fs::read_to_string(dir.join(DESCRIPTION_FILE)).unwrap().contains(&tiers.uri()));
+        assert!(tiers.received_requests().await.unwrap().is_empty(), "l'hôte tiers a été contacté");
     }
 
     #[test]

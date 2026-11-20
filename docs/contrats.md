@@ -32,7 +32,7 @@ Arguments : clés JSON envoyées à Tauri (snake_case) et leur type TypeScript. 
 | `instances_art_image` | `instance_id: string`, `file: string`, `max_px: number \| null` | `string` | Data URL d'un fichier d'illustration (`icon` ou une capture), réduit à `max_px` de côté (512 par défaut). Décodage hors du thread principal. |
 | `instances_art_set` | `instance_id: string`, `path: string`, `role: string` | `Instance_Serialize` | Remplace l'icône ou la bannière (`role` : "icon" ou "banner") par une image choisie par le joueur. Lecture et écriture hors du thread principal ; autorisé pendant le jeu (`art/` n'est pas le dossier de jeu). |
 | `instances_art_lookup` | `instance_id: string`, `auto: boolean \| null` | `Instance_Serialize` | Cherche l'illustration du modpack et l'applique. `auto` : recherche silencieuse de l'accueil (nom identique seulement). |
-| `instances_description` | `instance_id: string` | `string \| null` | Description longue du modpack, en HTML déjà nettoyé ; `None` sans projet d'origine. |
+| `instances_description` | `instance_id: string` | `string \| null` | Description longue du modpack, en HTML déjà nettoyé (images gardées seulement depuis les CDN Modrinth et CurseForge, les autres remplacées par leur texte alternatif) ; `None` sans projet d'origine. |
 | `net_test` | — | `NetTest_Serialize` | Test de connexion réseau (Paramètres → « Tester ma connexion »). |
 | `friend_my_code` | — | `FriendCode` | Mon code ami (`mcl1-…`). |
 | `friend_regenerate_code` | — | `FriendCode` | Génère un nouveau code ami (l'ancien ne marche plus). |

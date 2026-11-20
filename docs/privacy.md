@@ -21,7 +21,7 @@ To play Minecraft Java Edition, you sign in with your Microsoft account. The sig
 To work, Cubelink connects to third-party services. These services receive your IP address and the request itself, as with any internet connection:
 - **Mojang / Minecraft services:** game versions, game files and libraries.
 - **Mod loaders (Fabric, Quilt, Forge, NeoForge):** loader metadata and files.
-- **Modrinth and CurseForge:** searching and downloading mods and modpacks.
+- **Modrinth and CurseForge:** searching and downloading mods and modpacks, and their pictures (icons, screenshots, and the images of a modpack's description, loaded only from their own image servers: cdn.modrinth.com and forgecdn.net). Images hosted anywhere else in a description are never loaded, so their host does not see your IP address; their alternative text is shown instead.
 - **Adoptium:** downloading a Java runtime if one is needed.
 - **GitHub (github.com/delikesance/cubelink):** checking for updates, when the app was not installed from the Microsoft Store.
 

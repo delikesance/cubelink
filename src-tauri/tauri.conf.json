@@ -19,7 +19,7 @@
         "default-src": "'self'",
         "script-src": "'self'",
         "connect-src": "'self' ipc: http://ipc.localhost",
-        "img-src": "'self' data: blob: https: asset: http://asset.localhost",
+        "img-src": "'self' data: blob: https://cdn.modrinth.com https://media.forgecdn.net https://edge.forgecdn.net https://mediafilez.forgecdn.net https://cdn.forgecdn.net asset: http://asset.localhost",
         "style-src": "'self' 'unsafe-inline'",
         "font-src": "'self' data:",
         "media-src": "'self'",

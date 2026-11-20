@@ -21,10 +21,13 @@ use crate::types::{Error, Instance, InstanceArt, Result};
 /// Hôtes d'images autorisés (HTTPS obligatoire). Le loopback n'est admis qu'avec `allow_loopback`.
 pub const ART_HOSTS: &[&str] =
     &["cdn.modrinth.com", "media.forgecdn.net", "edge.forgecdn.net", "mediafilez.forgecdn.net", "cdn.forgecdn.net"];
-/// Taille maximale d'une image téléchargée.
+/// Taille maximale d'une image téléchargée, et donc d'un fichier de `art/` relu pour en faire une miniature :
+/// tout ce que `download_image` écrit doit rester affichable.
 pub const MAX_IMAGE_BYTES: u64 = 12 * 1024 * 1024;
-/// Taille maximale d'une image choisie par l'utilisateur.
+/// Taille maximale d'une image choisie par l'utilisateur, et d'un original renvoyé tel quel à l'interface
+/// (quand il ne peut pas être réduit) : au-delà, la data URL pèserait trop lourd pour l'IPC.
 pub const MAX_LOCAL_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
+const _: () = assert!(MAX_LOCAL_IMAGE_BYTES <= MAX_IMAGE_BYTES);
 pub const MAX_SCREENSHOTS: usize = 6;
 /// Durée maximale de toute la récupération d'art d'une installation. À l'échéance, on applique ce qui est
 /// arrivé (icône, captures déjà reçues) au lieu de tout jeter.
@@ -519,7 +522,9 @@ pub fn image_data_url(store: &InstanceStore, instance_id: &str, file: &str) -> R
 ///
 /// La miniature est mise en cache dans `art/.thumbs/` sous un nom qui porte la taille et l'empreinte du
 /// fichier source (taille + date) : si la source change, l'ancienne miniature est ignorée puis supprimée.
-/// Si l'image n'est pas redimensionnable (GIF, illisible, déjà petite), l'original est renvoyé tel quel.
+/// Si l'image n'est pas redimensionnable (GIF, illisible, déjà petite), l'original est renvoyé tel quel, sauf
+/// au-delà de `MAX_LOCAL_IMAGE_BYTES` (erreur). Une source jusqu'à `MAX_IMAGE_BYTES` (capture pleine résolution
+/// téléchargée) est acceptée : elle est réduite avant l'envoi.
 pub fn image_data_url_sized(store: &InstanceStore, instance_id: &str, file: &str, max_px: u32) -> Result<String> {
     check_file_name(file)?;
     let max = max_px.clamp(64, 2048);
@@ -532,7 +537,7 @@ pub fn image_data_url_sized(store: &InstanceStore, instance_id: &str, file: &str
     let art_dir = store.art_dir(instance_id)?;
     let path = art_dir.join(file);
     let meta = std::fs::symlink_metadata(&path).map_err(|_| Error::NotFound(format!("illustration {file}")))?;
-    if !meta.is_file() || meta.len() > MAX_LOCAL_IMAGE_BYTES {
+    if !meta.is_file() || meta.len() > MAX_IMAGE_BYTES {
         return Err(invalid("illustration illisible"));
     }
     let thumbs = art_dir.join(THUMB_DIR);
@@ -554,6 +559,10 @@ pub fn image_data_url_sized(store: &InstanceStore, instance_id: &str, file: &str
     let bytes = std::fs::read(&path)?;
     let (mime, _) = sniff(&bytes).ok_or_else(|| invalid("format d'image non reconnu"))?;
     let Some((tmime, tbytes)) = make_thumbnail(&bytes, max) else {
+        // Pas de miniature : l'original part tel quel, mais pas au-delà de 8 Mio (data URL de 16 Mio par l'IPC).
+        if bytes.len() as u64 > MAX_LOCAL_IMAGE_BYTES {
+            return Err(invalid("illustration trop lourde pour être affichée"));
+        }
         return Ok(data_url(mime, &bytes));
     };
     // Écriture au mieux : un échec (disque plein, lecture seule) ne doit jamais empêcher l'affichage.
@@ -1366,6 +1375,58 @@ mod tests {
         assert_eq!(count(), 2);
         let (_, huge, _) = decode_data_url(&image_data_url_sized(&s, &i.id, "icon.jpg", 1).unwrap());
         assert_eq!(huge.height(), 64, "plancher à 64 px");
+    }
+
+    /// Écrit `bytes` à la place de l'icône `icon.png` d'une instance (contourne la limite de `set_custom_image`,
+    /// comme le fait `download_image` pour une capture de 8 à 12 Mio).
+    fn put_big_icon(bytes: &[u8]) -> (tempfile::TempDir, InstanceStore, Instance) {
+        let (t, s, i) = store();
+        custom(&s, &i.id, t.path(), "a.png", &encode_img(10, 10, false, image::ImageFormat::Png), "icon");
+        std::fs::write(s.art_dir(&i.id).unwrap().join("icon.png"), bytes).unwrap();
+        (t, s, i)
+    }
+
+    #[test]
+    fn downloaded_9mib_image_is_displayable_as_thumbnail() {
+        use image::ImageEncoder;
+        let mut raw = vec![0u8; 2000 * 1500 * 3];
+        // Bruit déterministe (xorshift) : incompressible, donc le PNG pèse plus de 8 Mio.
+        let mut x = 0x9E37_79B9_7F4A_7C15u64;
+        for b in &mut raw {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            *b = (x >> 32) as u8;
+        }
+        let mut png = Vec::new();
+        image::codecs::png::PngEncoder::new_with_quality(&mut png, image::codecs::png::CompressionType::Fast, image::codecs::png::FilterType::NoFilter)
+            .write_image(&raw, 2000, 1500, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        assert!(png.len() as u64 > MAX_LOCAL_IMAGE_BYTES && png.len() as u64 <= MAX_IMAGE_BYTES, "{}", png.len());
+        let (_t, s, i) = put_big_icon(&png);
+        let url = image_data_url(&s, &i.id, "icon.png").unwrap();
+        let (mime, img, bytes) = decode_data_url(&url);
+        assert_eq!(mime, "image/jpeg");
+        assert_eq!((img.width(), img.height()), (512, 384));
+        assert!((bytes.len() as u64) < MAX_LOCAL_IMAGE_BYTES / 20, "miniature légère : {}", bytes.len());
+        let thumbs = s.art_dir(&i.id).unwrap().join(".thumbs");
+        assert_eq!(std::fs::read_dir(&thumbs).unwrap().flatten().count(), 1, "miniature mise en cache");
+        assert_eq!(image_data_url(&s, &i.id, "icon.png").unwrap(), url);
+    }
+
+    #[test]
+    fn heavy_undecodable_images_are_refused_not_sent_raw() {
+        // 9 Mio avec un en-tête PNG valide mais rien de décodable : pas de miniature, trop lourd pour l'IPC.
+        let png_head = [0x89u8, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        let nine = png_head.iter().copied().chain(std::iter::repeat_n(0u8, 9 * 1024 * 1024)).collect::<Vec<_>>();
+        let (_t, s, i) = put_big_icon(&nine);
+        assert!(image_data_url_sized(&s, &i.id, "icon.png", 512).is_err());
+        // Au-delà de 12 Mio : refusé avant toute lecture.
+        let (_t2, s2, i2) = put_big_icon(&png_head.iter().copied().chain(std::iter::repeat_n(0u8, MAX_IMAGE_BYTES as usize)).collect::<Vec<_>>());
+        assert!(image_data_url_sized(&s2, &i2.id, "icon.png", 512).is_err());
+        // Sous 8 Mio, un original non réductible part toujours tel quel (comportement inchangé).
+        let (_t3, s3, i3) = put_big_icon(&png_head.iter().copied().chain(std::iter::repeat_n(0u8, 1024)).collect::<Vec<_>>());
+        assert!(image_data_url_sized(&s3, &i3.id, "icon.png", 512).unwrap().starts_with("data:image/png;base64,"));
     }
 
     #[test]

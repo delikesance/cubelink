@@ -2,7 +2,7 @@ import { validateOfflineName } from "./accounts";
 import { HEARTH_EULA_REQUIRED } from "./types";
 import type {
   AccountInfo, AccountsState, BrowseHit, BrowseInstallResult, BrowseKind, BrowseProgressEvent, BrowseSource, BrowseVersion, FixPlan, FixProgressEvent, FixResult, ModCheck, ModEntry, ModIssue,
-  CreateInstanceInput, DeviceCode, HostState, Invite, JoinAnswer, JoinRequest, ImportWarningEvent, LaunchLogEvent, FriendRequest, FriendWithPresence, Instance, InstanceArt,
+  CreateInstanceInput, DeviceCode, HostState, Invite, JoinAnswer, JoinRequest, ImportWarningEvent, ImportProgressEvent, ImportDeferredEvent, LaunchLogEvent, FriendRequest, FriendWithPresence, Instance, InstanceArt,
   JoinPlan, LaunchState, Manifest, PresenceEvent, UnknownModsEvent, Profile, Services, Settings,
   StageFallback, StageState, TransferProgress, Unsubscribe, UpdateState,
   HearthCard, HearthDetail, HearthHandover, HearthHostPrompt, HearthInvite, HearthMember, HearthMemberLite,
@@ -269,6 +269,8 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     fix: new Set<(e: FixProgressEvent) => void>(),
     drop: new Set<(p: string[]) => void>(),
     warning: new Set<(e: ImportWarningEvent) => void>(),
+    importProgress: new Set<(e: ImportProgressEvent) => void>(),
+    importDeferred: new Set<(e: ImportDeferredEvent) => void>(),
     host: new Set<(e: HostState) => void>(),
     invite: new Set<(i: Invite) => void>(),
     invites: new Set<(l: Invite[]) => void>(),
@@ -528,6 +530,9 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
       if (!input.name.trim()) throw new Error("Le nom de l'instance est obligatoire.");
       const inst: Instance = { ...noExtras, id: `inst-${instances.length + 1}`, ...input, mod_count: 0 };
       instances.push(inst);
+      emit(listeners.importProgress, { message: "Téléchargement du jeu…" });
+      // Simulation d'une préparation qui échoue (réseau coupé) : l'instance est conservée.
+      if (/hors ligne|offline/i.test(input.name)) emit(listeners.importDeferred, { instance_id: inst.id, message: "réseau indisponible" });
       return { ...inst };
     },
     instancesImportMrpack: async (path) => {
@@ -538,6 +543,8 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
         loader: { loader: "fabric", version: "0.16.5" }, ram_mb: 4096, mod_count: 12,
       };
       instances.push(inst);
+      emit(listeners.importProgress, { message: "Téléchargement du jeu…" });
+      if (/differe|deferred/i.test(path)) emit(listeners.importDeferred, { instance_id: inst.id, message: "réseau indisponible" });
       return { ...inst };
     },
     instancesLaunch: async (id) => {
@@ -1037,6 +1044,8 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     onLaunchState: (cb) => sub(listeners.launch, cb),
     onLaunchLog: (cb) => sub(listeners.log, cb),
     onImportWarning: (cb) => sub(listeners.warning, cb),
+    onImportProgress: (cb) => sub(listeners.importProgress, cb),
+    onImportDeferred: (cb) => sub(listeners.importDeferred, cb),
     hostState: async () => null,
     onHostState: (cb) => sub(listeners.host, cb),
     onTransferProgress: (cb) => sub(listeners.transfer, cb),

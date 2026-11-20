@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import "./main.css";
 import { useScreenTitle, useShell } from "../../app/context";
-import { peekImportWarning, setImportWarning } from "../../app/importWarning";
+import { peekImportWarning, peekPrepareDeferred, setImportWarning, setPrepareDeferred } from "../../app/importWarning";
 import type { FriendWithPresence, HostState, Instance, Invite } from "../../services";
 import { errMsg, useLaunch } from "../../app/useLaunch";
 import { Button, IconButton } from "../../ui";
@@ -65,10 +65,13 @@ export default function Main() {
   /** Modpack dont la suppression attend confirmation (clic droit > Supprimer). */
   const [toDelete, setToDelete] = useState<Instance | null>(null);
   const [warning, setWarning] = useState<string[] | null>(() => peekImportWarning());
+  /** Cause de l'échec de préparation du jeu après un import : l'instance est là, le jeu viendra au premier lancement. */
+  const [deferred, setDeferred] = useState<string | null>(() => peekPrepareDeferred());
 
   useScreenTitle(null);
 
-  useEffect(() => { setImportWarning(null); }, []);
+  useEffect(() => { setImportWarning(null); setPrepareDeferred(null); }, []);
+  useEffect(() => services.onImportDeferred((e) => setDeferred(e.message)), [services]);
   useEffect(() => services.onImportWarning((e) => { if (e.missing.length) setWarning(e.missing); }), [services]);
 
   useEffect(() => {
@@ -241,6 +244,14 @@ export default function Main() {
           </div>
         )}
         {actionError && <p className="home-err" role="alert">{actionError}</p>}
+        {deferred && instances && instances.length > 0 && (
+          <div className="home-warn enter" role="status">
+            <span>
+              Modpack ajouté, mais le jeu n'a pas pu être préparé ({deferred}). Il sera téléchargé au premier lancement.
+            </span>
+            <Button variant="secondary" onClick={() => setDeferred(null)}>Ignorer</Button>
+          </div>
+        )}
         {warning && instances && instances.length > 0 && (
           <div className="home-warn enter" role="status">
             <span>

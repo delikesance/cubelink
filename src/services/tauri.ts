@@ -112,6 +112,8 @@ export function createTauriServices(): Services {
     onLaunchState: (cb) => on("launch://state", cb),
     onLaunchLog: (cb) => on("launch://log", cb),
     onImportWarning: (cb) => on("import://warning", cb),
+    onImportProgress: (cb) => on("import://progress", cb),
+    onImportDeferred: (cb) => on("import://deferred", cb),
     hostState: () => commands.hostState(),
     onHostState: (cb) => on("host://state", cb),
     onTransferProgress: (cb) => on("transfer://progress", cb),

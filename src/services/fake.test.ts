@@ -147,6 +147,18 @@ describe("fake : gestion des instances", () => {
     expect(got).toEqual([["sodium", "iris"]]);
   });
 
+  it("signale l'échec de préparation du jeu sans refuser l'import", async () => {
+    const s = createFakeServices({ tickMs: 0 });
+    const prog: string[] = [];
+    const got: { instance_id: string; message: string }[] = [];
+    s.onImportProgress((e) => prog.push(e.message));
+    s.onImportDeferred((e) => got.push(e));
+    const inst = await s.instancesImportMrpack("pack-differe.mrpack");
+    expect(prog.length).toBeGreaterThan(0);
+    expect(got).toEqual([{ instance_id: inst.id, message: "réseau indisponible" }]);
+    expect((await s.instancesList()).some((i) => i.id === inst.id)).toBe(true);
+  });
+
   it("parcourir : pagination, filtre, non téléchargeables, versions", async () => {
     const s = svc();
     for (const source of ["curseforge", "modrinth"] as const) {

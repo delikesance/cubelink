@@ -87,6 +87,11 @@ export interface LaunchLogEvent { id: string; line: string }
 /** Événement import://warning : mods introuvables lors d'un import. */
 export interface ImportWarningEvent { missing: string[] }
 
+/** Événement import://progress : étape de la préparation du jeu qui suit une création ou un import (Java, assets, loader). */
+export interface ImportProgressEvent { message: string }
+/** Événement import://deferred : l'instance est créée, mais la préparation du jeu a échoué (réseau, Java) ; elle reprendra au premier lancement. */
+export interface ImportDeferredEvent { instance_id: string; message: string }
+
 export interface FixProgressEvent { done: number; total: number; label: string }
 export interface BrowseProgressEvent { done: number; total: number; label: string }
 /** Événement `stage://fallback` : le jeu n'a pas pu être affiché dans la fenêtre de Cubelink, il a gardé la sienne. */
@@ -261,6 +266,8 @@ export interface Services {
   onLaunchState(cb: (s: LaunchState) => void): Unsubscribe;
   onLaunchLog(cb: (e: LaunchLogEvent) => void): Unsubscribe;
   onImportWarning(cb: (e: ImportWarningEvent) => void): Unsubscribe;
+  onImportProgress(cb: (e: ImportProgressEvent) => void): Unsubscribe;
+  onImportDeferred(cb: (e: ImportDeferredEvent) => void): Unsubscribe;
   /** État du partage hôte au montage (null si rien n'est partagé). */
   hostState(): Promise<HostState | null>;
   /** Changements d'état du partage hôte (partage prêt, monde ouvert, arrêt). */

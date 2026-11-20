@@ -34,9 +34,9 @@ export const commands = {
 	authOfflineLogin: (name: string, options?: InvokeOptions) => __TAURI_INVOKE<Profile>("auth_offline_login", { name }, options),
 	/**  Instances installées. */
 	instancesList: (options?: InvokeOptions) => __TAURI_INVOKE<Instance_Serialize[]>("instances_list", undefined, options),
-	/**  Crée une instance vide. */
+	/**  Crée une instance vide, puis prépare le jeu (progression `import://progress`). Si cette préparation échoue (réseau, Java), l'instance est conservée et `import://deferred` l'annonce : le jeu sera téléchargé au premier lancement. */
 	instancesCreate: (name: string, minecraft: string, loader: LoaderSpec, ramMb: number, options?: InvokeOptions) => __TAURI_INVOKE<Instance_Serialize>("instances_create", { name, minecraft, loader, ram_mb: ramMb }, options),
-	/**  Importe un .mrpack, un zip CurseForge ou un zip brut (les champs facultatifs ne servent qu'au zip brut). Avertissements par `import://warning`. */
+	/**  Importe un .mrpack, un zip CurseForge ou un zip brut (les champs facultatifs ne servent qu'au zip brut). Avertissements par `import://warning`. La préparation du jeu qui suit l'import est « au mieux » : progression `import://progress` ; si elle échoue, l'instance et ses mods sont conservés et `import://deferred` l'annonce (le jeu sera téléchargé au premier lancement). Seule une erreur d'import elle-même renvoie une erreur. */
 	instancesImportMrpack: (path: string, name: string | null, minecraft: string | null, loader: LoaderSpec | null, ramMb: number | null, options?: InvokeOptions) => __TAURI_INVOKE<Instance_Serialize>("instances_import_mrpack", { path, name, minecraft, loader, ram_mb: ramMb }, options),
 	/**  Lance l'instance. Progression par `launch://state`, sortie du jeu par `launch://log`. */
 	instancesLaunch: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("instances_launch", { id }, options),

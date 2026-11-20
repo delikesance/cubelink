@@ -355,15 +355,17 @@ impl p2p_lib::transfer::send::PeerAuthorizer for HostAuthz {
         p2p_lib::transfer::send::PeerAuthorizer::is_allowed(self.authz.as_ref(), public_key)
     }
     fn denial(&self, public_key: &str) -> Reach {
-        if !self.authz.is_friend_hex(&public_key.to_lowercase()) {
+        let key = public_key.to_lowercase();
+        let join = hex::decode(&key).ok().and_then(|b| <[u8; 32]>::try_from(b).ok()).map(|k| self.authz.join_denial(&k));
+        if join.is_none() || join == Some(Reach::NotFriend) {
             Reach::NotFriend
         } else if !(self.share_mods)() {
             Reach::SharingOff
         } else if self.share.current().is_none() {
             Reach::NothingShared
         } else {
-            // Ami, mais pas invité pour cette partie : il doit demander à rejoindre (message neutre, voir Reach).
-            Reach::NotFriend
+            // Ami (ou membre du groupe), mais pas invité pour cette partie : il peut demander à rejoindre.
+            Reach::NotInvited
         }
     }
 }

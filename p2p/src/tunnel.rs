@@ -39,6 +39,11 @@ pub const TUNNEL_ALPN: &[u8] = b"cubelink/tunnel/1";
 /// Décide si un pair (clé publique ed25519) peut ouvrir un tunnel vers le monde de l'hôte.
 pub trait TunnelAuthorizer: Send + Sync {
     fn is_allowed(&self, public_key: &[u8; 32]) -> bool;
+
+    /// Raison du refus quand `is_allowed` est faux (annoncée à l'invité, y compris à la révocation) : par défaut « pas ami ».
+    fn denial(&self, _public_key: &[u8; 32]) -> Reach {
+        Reach::NotFriend
+    }
 }
 
 /// Autorise un ensemble fixe de clés (tests, usage simple).
@@ -311,6 +316,15 @@ async fn host_conn(incoming: iroh::endpoint::Incoming, core: Arc<HostCore>) {
     serve_conn(core, conn).await;
 }
 
+/// Code de fermeture annoncé à un pair refusé : la raison donnée par l'autorisation (pas ami, pas invité...), et
+/// `CLOSE_DENIED` pour un pair que l'autorisation laisse passer (hôte arrêté).
+fn denial_code(core: &HostCore, peer: &[u8; 32]) -> u32 {
+    if core.authorizer.is_allowed(peer) {
+        return crate::reach::CLOSE_DENIED;
+    }
+    core.authorizer.denial(peer).close_code().unwrap_or(crate::reach::CLOSE_DENIED)
+}
+
 /// Sert une connexion déjà établie sur `TUNNEL_ALPN` : autorisation, puis un flux = un TCP local.
 async fn serve_conn(core: Arc<HostCore>, conn: Connection) {
     let _guard = ConnGuard(conn.clone());
@@ -322,7 +336,7 @@ async fn serve_conn(core: Arc<HostCore>, conn: Connection) {
         return;
     }
     if port == 0 || *core.stop.borrow() || !core.authorizer.is_allowed(conn.remote_id().as_bytes()) {
-        conn.close(1u32.into(), b"denied");
+        conn.close(denial_code(&core, conn.remote_id().as_bytes()).into(), b"denied");
         core.counters.rejected.fetch_add(1, Ordering::Relaxed);
         return;
     }
@@ -340,7 +354,7 @@ async fn serve_conn(core: Arc<HostCore>, conn: Connection) {
             // en cours, sans attendre son prochain flux. Fermer la connexion abandonne aussi les relais TCP.
             _ = recheck.tick() => {
                 if !core.authorizer.is_allowed(&peer) {
-                    conn.close(crate::reach::CLOSE_DENIED.into(), b"revoked");
+                    conn.close(denial_code(&core, &peer).into(), b"revoked");
                     core.counters.rejected.fetch_add(1, Ordering::Relaxed);
                     break;
                 }
@@ -349,9 +363,10 @@ async fn serve_conn(core: Arc<HostCore>, conn: Connection) {
                 let Ok((mut send, mut recv)) = s else { break };
                 // Chaque nouveau flux (un TCP vers le serveur) est revérifié : jamais d'accès après révocation.
                 if !core.authorizer.is_allowed(&peer) {
-                    let _ = send.reset(crate::reach::CLOSE_DENIED.into());
-                    let _ = recv.stop(crate::reach::CLOSE_DENIED.into());
-                    conn.close(crate::reach::CLOSE_DENIED.into(), b"revoked");
+                    let code = denial_code(&core, &peer);
+                    let _ = send.reset(code.into());
+                    let _ = recv.stop(code.into());
+                    conn.close(code.into(), b"revoked");
                     core.counters.rejected.fetch_add(1, Ordering::Relaxed);
                     break;
                 }
@@ -569,6 +584,11 @@ impl GuestTunnel {
         let _ = st.wait_for(|s| *s == TunnelState::Lost).await;
     }
 
+    /// Raison annoncée par l'hôte quand il a fermé la connexion (refus, révocation), si elle est connue.
+    pub fn close_reason(&self) -> Option<Reach> {
+        Reach::from_conn(&self.shared.conn())
+    }
+
     /// Coupe de force la connexion à l'hôte (tests, bascule réseau simulée) : la reconnexion démarre.
     pub fn force_drop_connection(&self) {
         self.shared.conn().close(0u32.into(), b"test-drop");
@@ -779,6 +799,40 @@ mod tests {
         assert_eq!(reach_of(err), Reach::NotFriend);
         assert_eq!(host.stats().total_connections, 0);
         assert!(host.stats().rejected_connections >= 1);
+    }
+
+    /// Autorisation de test : un interrupteur, et `NotInvited` comme raison du refus (ami non invité ou invitation retirée).
+    struct Switch(std::sync::atomic::AtomicBool);
+
+    impl TunnelAuthorizer for Switch {
+        fn is_allowed(&self, _public_key: &[u8; 32]) -> bool {
+            self.0.load(Ordering::SeqCst)
+        }
+        fn denial(&self, _public_key: &[u8; 32]) -> Reach {
+            Reach::NotInvited
+        }
+    }
+
+    #[tokio::test]
+    async fn tunnel_refus_et_revocation_annoncent_la_raison_de_l_autorisation() {
+        let port = world().await;
+        let (h, g) = (ep(true).await, ep(false).await);
+        let auth = Arc::new(Switch(std::sync::atomic::AtomicBool::new(false)));
+        let host = HostTunnel::start_with_config(h.clone(), port, auth.clone(), TunnelConfig::default()).unwrap();
+
+        // Refus initial : « pas invité », pas « pas ami ».
+        let err = GuestTunnel::connect(g.clone(), h.addr()).await.err().expect("refusé");
+        assert_eq!(reach_of(err), Reach::NotInvited);
+
+        // Invité, puis révoqué en cours de partie : la connexion tombe avec la même raison.
+        auth.0.store(true, Ordering::SeqCst);
+        let guest = GuestTunnel::connect(g.clone(), h.addr()).await.unwrap();
+        assert_eq!(mc_session(guest.local_port, b"salut").await, b"salut");
+        auth.0.store(false, Ordering::SeqCst);
+        timeout(Duration::from_secs(5), guest.closed()).await.expect("tunnel coupé à la révocation");
+        assert_eq!(guest.close_reason(), Some(Reach::NotInvited));
+        guest.stop().await;
+        host.stop().await;
     }
 
     #[tokio::test]

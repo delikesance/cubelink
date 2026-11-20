@@ -143,6 +143,16 @@ impl StoreIndex {
             .map_err(db)
     }
 
+    /// Rafraîchit `last_used` sans toucher aux références : un objet réutilisé depuis le cache reste protégé du
+    /// balayage (par son âge) le temps que l'installation le lie. Sans effet si l'objet est absent.
+    pub fn touch(&self, sha256: &str) -> Result<()> {
+        check_hash(sha256)?;
+        self.lock()
+            .execute("UPDATE objects SET last_used = ?2 WHERE sha256 = ?1", params![sha256, now()])
+            .map_err(db)?;
+        Ok(())
+    }
+
     /// Incrémente le compteur de références ; renvoie la nouvelle valeur. `NotFound` si absent.
     pub fn add_ref(&self, sha256: &str) -> Result<u32> {
         self.bump(sha256, "refs + 1")
@@ -375,6 +385,20 @@ mod tests {
         assert_eq!(idx.get(&a).unwrap().unwrap().last_used, before, "last_used inchangé");
         assert_eq!(idx.all().unwrap().len(), 3);
         assert_eq!(idx.reconcile_refs(&live).unwrap(), 0, "idempotent");
+    }
+
+    #[test]
+    fn touch_refreshes_age_without_touching_refs() {
+        let (_d, _p, idx) = open_tmp();
+        let a = h(1);
+        idx.insert(&a, "p", 1).unwrap();
+        idx.add_ref(&a).unwrap();
+        idx.lock().execute("UPDATE objects SET last_used = 0 WHERE sha256 = ?1", params![a]).unwrap();
+        idx.touch(&a).unwrap();
+        let e = idx.get(&a).unwrap().unwrap();
+        assert!(e.last_used > 0);
+        assert_eq!(e.refs, 1);
+        idx.touch(&h(2)).unwrap();
     }
 
     #[test]

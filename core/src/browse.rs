@@ -697,10 +697,6 @@ pub async fn install_content(
             }
             let _ = std::fs::remove_file(mods_dir.join(format!("{}.disabled", pl.name)));
         }
-        if input.kind != BrowseKind::Mod {
-            // Pack de ressources / shader : l'ancienne version du même projet part (pas de sauvegarde : il se retélécharge).
-            mods::remove_old_versions_in(game_dir, dir, pl.source.as_str(), &pl.project_id, std::slice::from_ref(&pl.name))?;
-        }
         if let Err(e) = link_into(game_dir, &format!("{dir}/{}", pl.name), &store_root.join(&obj.rel_path)) {
             if let Some(b) = backup.take() {
                 b.rollback(game_dir);
@@ -708,6 +704,11 @@ pub async fn install_content(
             return Err(e);
         }
         index.add_ref(&obj.sha256)?;
+        if input.kind != BrowseKind::Mod {
+            // Pack de ressources / shader : l'ancienne version du même projet part, une fois la nouvelle posée
+            // (un échec de liaison laisse l'ancienne en place ; pas de sauvegarde : il se retélécharge).
+            mods::remove_old_versions_in(game_dir, dir, pl.source.as_str(), &pl.project_id, std::slice::from_ref(&pl.name))?;
+        }
         let recorded = mods::record_provenance(
             game_dir,
             &[(mods::provenance_key(dir, &pl.name), Provenance { source: pl.source.as_str().into(), id: pl.project_id.clone() })],

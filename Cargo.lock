@@ -1194,6 +1194,7 @@ dependencies = [
  "futures-util",
  "hex",
  "image",
+ "libc",
  "md-5",
  "proptest",
  "pulldown-cmark",

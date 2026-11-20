@@ -10,8 +10,6 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::Path;
 
-use same_file::Handle;
-
 use crate::store::index::{object_rel_path, StoreIndex};
 use crate::types::Result;
 
@@ -21,6 +19,25 @@ const SKIPPED_DIRS: [&str; 5] = ["saves", "logs", "crash-reports", "screenshots"
 
 /// Dernier niveau (0 = dossier de l'instance, 1 = son dossier de jeu) où `SKIPPED_DIRS` est appliqué.
 const SKIP_MAX_DEPTH: usize = 1;
+
+/// Identité physique d'un fichier. Sous Unix : (volume, inode), lue sans garder de descripteur ouvert (un cache de
+/// plusieurs milliers d'objets dépasserait sinon la limite de 1024 descripteurs). Ailleurs : `same_file::Handle`.
+#[cfg(unix)]
+type FileId = (u64, u64);
+#[cfg(not(unix))]
+type FileId = same_file::Handle;
+
+#[cfg(unix)]
+fn file_id(path: &Path) -> std::io::Result<FileId> {
+    use std::os::unix::fs::MetadataExt;
+    let m = fs::metadata(path)?;
+    Ok((m.dev(), m.ino()))
+}
+
+#[cfg(not(unix))]
+fn file_id(path: &Path) -> std::io::Result<FileId> {
+    same_file::Handle::from_path(path)
+}
 
 /// Résultat du parcours des instances.
 #[derive(Debug, Clone, Default)]
@@ -40,11 +57,11 @@ pub struct LiveScan {
 pub fn live_refs(store_root: &Path, index: &StoreIndex, instances_root: &Path) -> Result<LiveScan> {
     let mut scan = LiveScan { complete: true, ..LiveScan::default() };
 
-    let mut handles: HashMap<Handle, String> = HashMap::new();
+    let mut handles: HashMap<FileId, String> = HashMap::new();
     let mut sizes: HashSet<u64> = HashSet::new();
     for e in index.all()? {
         let path = store_root.join(object_rel_path(&e.sha256)?);
-        match Handle::from_path(&path) {
+        match file_id(&path) {
             Ok(h) => {
                 sizes.insert(e.size);
                 handles.insert(h, e.sha256);
@@ -77,7 +94,7 @@ pub fn live_refs(store_root: &Path, index: &StoreIndex, instances_root: &Path) -
 }
 
 struct Ctx<'a> {
-    handles: &'a HashMap<Handle, String>,
+    handles: &'a HashMap<FileId, String>,
     sizes: &'a HashSet<u64>,
 }
 
@@ -129,7 +146,7 @@ fn check_file(ctx: &Ctx<'_>, entry: &fs::DirEntry, scan: &mut LiveScan) {
         }
     }
     let path = entry.path();
-    match Handle::from_path(&path) {
+    match file_id(&path) {
         Ok(h) => {
             if let Some(sha) = ctx.handles.get(&h) {
                 *scan.counts.entry(sha.clone()).or_insert(0) += 1;

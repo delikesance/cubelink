@@ -193,7 +193,10 @@ impl AppState {
         // Espace libre du disque qui porte le magasin (les instances sont en général sur le même volume ; approximation
         // assumée). Mesure impossible : pas d'avertissement.
         let profile = self.active_profile_offline_read();
-        let warnings = join_warnings(to_receive_bytes, core_lib::disk::free_space_near(&self.paths.store), profile.as_ref());
+        // `df` (hors Windows) est un processus : mesure sur un thread dédié pour ne pas bloquer le runtime async.
+        let store = self.paths.store.clone();
+        let free = tokio::task::spawn_blocking(move || core_lib::disk::free_space_near(&store)).await.ok().flatten();
+        let warnings = join_warnings(to_receive_bytes, free, profile.as_ref());
         Ok(JoinPlan {
             manifest: hm.manifest,
             manifest_hash,

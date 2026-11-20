@@ -50,6 +50,15 @@ describe("Join", () => {
     expect(navigate).toHaveBeenCalledWith("settings", { tab: "compte" });
   });
 
+  it("arrondit le besoin au-dessus et l'espace libre au-dessous (jamais « 2 Go libres, il en reste 2 Go »)", async () => {
+    // Libre juste sous le besoin (reçu + 1 Gio) : les deux tailles doivent différer à l'affichage.
+    setup(createFakeServices({ tickMs: 0, freeDiskBytes: 1_073_741_900 }));
+    await screen.findByText("mods/mod-maison.jar");
+    const txt = screen.getByTestId("warn-disk").textContent ?? "";
+    const [, need, free] = txt.match(/Il te faut ([\d,]+) Go libres, il en reste ([\d,]+) Go/) ?? [];
+    expect(Number(need.replace(",", "."))).toBeGreaterThan(Number(free.replace(",", ".")));
+  });
+
   it("aucun bloc d'avertissement sans disque trop juste ni compte hors ligne", async () => {
     setup(createFakeServices({ tickMs: 0, freeDiskBytes: 50_000_000_000 }));
     await screen.findByText("mods/mod-maison.jar");

@@ -25,8 +25,11 @@ type PlanState =
 
 const mo = (bytes: number) => `${(bytes / 1_000_000).toLocaleString("fr-FR", { maximumFractionDigits: 1 })} Mo`;
 /** Taille lisible pour l'espace disque : en Go dès 1 Go, sinon en Mo. */
-const taille = (bytes: number) =>
-  bytes >= 1_000_000_000 ? `${(bytes / 1_000_000_000).toLocaleString("fr-FR", { maximumFractionDigits: 1 })} Go` : mo(bytes);
+const go = (bytes: number, round: (n: number) => number) =>
+  `${(round(bytes / 100_000_000) / 10).toLocaleString("fr-FR", { maximumFractionDigits: 1 })} Go`;
+/** `need` arrondi au-dessus et `free` au-dessous : jamais « il te faut 2 Go, il en reste 2 Go » alors que l'un manque. */
+const taille = (bytes: number, round: (n: number) => number = Math.round) =>
+  bytes >= 1_000_000_000 ? go(bytes, round) : mo(bytes);
 const stagger = (i: number) => ({ "--i": i }) as React.CSSProperties;
 
 export default function Join() {
@@ -308,7 +311,7 @@ export default function Join() {
               w.kind === "disk" ? (
                 <div key="disk" data-testid="warn-disk">
                   <h2>Il risque de manquer de place</h2>
-                  <p>Il te faut {taille(w.need)} libres, il en reste {taille(w.free)}. Libère de la place avant de rejoindre, sinon le transfert pourra échouer.</p>
+                  <p>Il te faut {taille(w.need, Math.ceil)} libres, il en reste {taille(w.free, Math.floor)}. Libère de la place avant de rejoindre, sinon le transfert pourra échouer.</p>
                 </div>
               ) : (
                 <div key="offline" data-testid="warn-offline">

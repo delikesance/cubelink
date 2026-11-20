@@ -75,6 +75,21 @@ pub struct Instance {
     /// Illustrations du modpack (icône, captures, couleur). Absent des anciens `instance.json`.
     #[serde(default)]
     pub art: Option<InstanceArt>,
+    /// Origine du modpack (projet et version du catalogue). Absent des anciens `instance.json`, des
+    /// instances créées à la main et des packs importés à la main que le catalogue ne reconnaît pas.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pack: Option<PackOrigin>,
+}
+
+/// Projet et version d'un modpack du catalogue, enregistrés à l'installation. Sert à retrouver
+/// l'illustration exacte (sans recherche par nom) et, plus tard, à proposer les mises à jour.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+pub struct PackOrigin {
+    /// "curseforge" ou "modrinth".
+    pub source: String,
+    pub project_id: String,
+    /// Identifiant de version du catalogue (Modrinth : id de version ; CurseForge : id de fichier).
+    pub version_id: String,
 }
 
 /// Illustrations d'une instance. Les fichiers sont dans `<dossier de l'instance>/art/`.
@@ -249,6 +264,8 @@ pub struct HearthCard {
     pub instance_id: Option<String>,
     /// Numéro de la version du monde la plus récente connue.
     pub version: Option<u64>,
+    /// Fins de partie non publiées, mises de côté sur ce PC (`HearthDetail::orphans`) : l'hôte n'a pas encore choisi.
+    pub orphans: u32,
 }
 
 /// Invitation à un groupe reçue d'un ami (événement `hearth://invites`).
@@ -334,6 +351,20 @@ pub struct HearthBranch {
     pub total_size: u64,
 }
 
+/// Fin de partie non publiée (plantage, arrêt de Cubelink, fermeture trop longue), mise de côté sur ce PC. Jamais annoncée
+/// aux autres membres : l'hôte la publie ou la supprime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+pub struct HearthOrphan {
+    pub id: String,
+    /// Dernière écriture du monde (secondes Unix).
+    pub at: i64,
+    /// Temps de jeu approximatif de cette partie.
+    pub played_secs: u64,
+    /// Numéro de la version dont la partie était partie (point de reprise le plus récent), si connue.
+    pub base_number: Option<u64>,
+    pub size_bytes: u64,
+}
+
 /// Réglages d'un groupe pour ce PC.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct HearthSettings {
@@ -356,6 +387,8 @@ pub struct HearthDetail {
     pub proposals: Vec<HearthProposal>,
     pub blocker: Option<HearthBlocker>,
     pub fork: Vec<HearthBranch>,
+    /// Fins de partie non publiées, de la plus récente à la plus ancienne.
+    pub orphans: Vec<HearthOrphan>,
     pub settings: HearthSettings,
 }
 
@@ -403,31 +436,27 @@ pub struct TransferProgress {
     pub bytes_total: u64,
     /// Octets par seconde, 0 si inconnu.
     pub speed_bps: u64,
-    /// Vrai si le transfert passe par un relais.
-    pub via_relay: bool,
     /// Message d'échec (phase `failed`), en français.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
 /// Paramètres de l'application (écran Paramètres). Forme alignée sur `src/services/types.ts`.
+///
+/// #55 : les anciens champs `allow_relay`, `relay_only` (relais publics n0) et `discovery` (découverte n0) n'existent
+/// plus. Un ancien `settings.json` qui les contient se charge sans erreur (champs inconnus ignorés) et ils
+/// disparaissent à la réécriture.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct Settings {
     pub language: String,
+    /// Mémoire par défaut des instances (Mo). `0` : « Automatique », calculée au lancement selon le PC et le nombre de
+    /// mods (`instance::auto_ram_mb`). Valeur par défaut : `0`.
     pub default_ram_mb: u32,
     pub java_path: Option<String>,
     pub trust_default: TrustLevel,
-    pub allow_relay: bool,
     pub close_on_launch: bool,
-    /// Réglage du design : toujours passer par le relais.
-    pub relay_only: bool,
     /// Réglage du design : envoyer des mods à mes amis.
     pub share_mods: bool,
-    /// Découverte d'adresses publique (pkarr + DNS n0) : retrouver un ami dont l'adresse a changé.
-    /// Publie la clé publique, le relais et les IP auprès de n0. Lu à la création de l'endpoint
-    /// (redémarrage requis). `true` par défaut (fichiers de réglages anciens : `true`).
-    #[serde(default = "default_discovery")]
-    pub discovery: bool,
     /// Ouvrir automatiquement mon monde solo au réseau local (agent Java Cubelink, instances `Own`) pour que mes
     /// amis puissent le rejoindre sans manipulation. `true` par défaut (fichiers de réglages anciens : `true`).
     #[serde(default = "default_lan_auto")]
@@ -450,6 +479,10 @@ pub struct Settings {
     /// `true` par défaut (fichiers de réglages anciens : `true`).
     #[serde(default = "default_start_with_os")]
     pub start_with_os: bool,
+    /// Interne : vrai une fois la migration « 4096 Mo (ancienne valeur d'usine) devient Automatique » faite. Absent des
+    /// anciens fichiers (`false`) ; le front ne le modifie pas (`settings_set` garde la valeur actuelle).
+    #[serde(default)]
+    pub ram_auto_migrated: bool,
 }
 
 pub const DEFAULT_OVERLAY_HOTKEY: &str = "Ctrl+Shift+C";
@@ -460,10 +493,6 @@ fn default_overlay_enabled() -> bool {
 
 fn default_overlay_hotkey() -> String {
     DEFAULT_OVERLAY_HOTKEY.to_string()
-}
-
-fn default_discovery() -> bool {
-    true
 }
 
 fn default_lan_auto() -> bool {
@@ -489,9 +518,23 @@ mod tests {
         assert!(s.overlay_enabled);
         assert!(!s.open_to_all_friends, "anciens réglages : pas d'invitation automatique de tous les amis");
         assert_eq!(s.overlay_hotkey, "Ctrl+Shift+C");
-        assert!(s.discovery && s.lan_auto);
+        assert!(s.lan_auto);
         assert!(s.embedded_game);
         assert!(s.start_with_os);
+        assert!(!s.ram_auto_migrated, "ancien fichier : la migration de la mémoire reste à faire");
+        assert_eq!(s.default_ram_mb, 4096, "la valeur lue n'est pas touchée par la désérialisation");
+    }
+
+    /// #55 : les réglages `discovery`, `allow_relay` et `relay_only` (n0) n'existent plus ; un ancien fichier qui les
+    /// contient se charge sans erreur et ils disparaissent à la réécriture.
+    #[test]
+    fn anciens_reglages_n0_sont_ignores_puis_supprimes() {
+        let old = r#"{"language":"fr","default_ram_mb":4096,"java_path":null,"trust_default":"ask","allow_relay":true,"close_on_launch":false,"relay_only":true,"share_mods":true,"discovery":true}"#;
+        let s: Settings = serde_json::from_str(old).unwrap();
+        let rewritten = serde_json::to_string(&s).unwrap();
+        for k in ["discovery", "allow_relay", "relay_only"] {
+            assert!(!rewritten.contains(k), "{k} : {rewritten}");
+        }
     }
 
     #[test]

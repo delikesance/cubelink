@@ -15,14 +15,14 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use core_lib::hearth::server::{log_message, InstallRequest, LineSink, ServerConfig, ServerInstaller};
 use core_lib::instance::InstanceStore;
 use core_lib::types::{
-    HearthBlocker, HearthBranch, HearthCard, HearthDetail, HearthInvite, HearthMember, HearthMemberLite, HearthProposal,
+    HearthBlocker, HearthBranch, HearthCard, HearthDetail, HearthInvite, HearthMember, HearthMemberLite, HearthOrphan, HearthProposal,
     HearthSettings, HearthStateKind, HearthUnclean, HearthVersion, LoaderSpec,
 };
 use iroh::{Endpoint, EndpointAddr};
@@ -37,7 +37,7 @@ use p2p_lib::hearth::outbox::{MemberReplica, Outbox, Replica};
 use p2p_lib::hearth::proto::{HearthConn, HearthDelegate, NetError};
 use p2p_lib::hearth::store::{Group, GroupKey, GroupStore};
 use p2p_lib::hearth::sync::{human_size, FetchOptions, GroupMembers, PublishedWorld, SyncError, WorldStore};
-use p2p_lib::hearth::version::{SignedVersion, VersionHeader, VersionId, VersionKind, VersionPoint};
+use p2p_lib::hearth::version::{SignedVersion, VersionGraph, VersionHeader, VersionId, VersionKind, VersionPoint};
 use p2p_lib::identity::Identity;
 use p2p_lib::presence::PeerKey;
 use serde::{Deserialize, Serialize};
@@ -47,6 +47,12 @@ use crate::state::{lock, now_secs, EventSink};
 
 /// Erreur renvoyée par `hearth_play` quand l'EULA de Minecraft n'a pas encore été acceptée (l'écran la propose).
 pub const EULA_REQUIRED: &str = "eula_required";
+/// Préfixe de l'erreur de `hearth_play` quand la dernière version est connue (en-tête) mais que personne de joignable n'en
+/// a le contenu. Format : `head_unavailable|<n° de la tête>|<n° de la dernière version complète, ou vide>|<nom de l'auteur>`.
+/// L'écran propose « Attendre » et, s'il y a une version complète, « Jouer depuis la n° N ».
+pub const HEAD_UNAVAILABLE: &str = "head_unavailable";
+/// Message de `fetch_version` quand aucun membre n'est en ligne pour fournir le monde.
+const NO_MEMBER_ONLINE: &str = "aucun membre du groupe n'est joignable pour récupérer le monde";
 /// Délai entre deux sondes des membres.
 pub const PROBE_INTERVAL: Duration = Duration::from_secs(60);
 /// Délai d'une sonde d'un membre.
@@ -72,6 +78,9 @@ const INVITE_TTL_SECS: i64 = 7 * 24 * 3600;
 /// Message des commandes refusées quand l'interrupteur est coupé.
 pub const HEARTH_DISABLED: &str = "Les serveurs de groupe sont désactivés : active « Serveurs de groupe (expérimental) » dans les Réglages.";
 /// Délai laissé au serveur d'un groupe oublié pour s'arrêter avant d'être tué.
+/// Attente maximale, avant de quitter un groupe, que ma dernière partie soit remise à un membre (une remise prend des minutes).
+pub const LEAVE_FLUSH_WAIT: Duration = Duration::from_secs(5 * 60);
+const LEAVE_FLUSH_POLL: Duration = Duration::from_millis(250);
 const FORGET_STOP_GRACE: Duration = Duration::from_secs(20);
 /// Délai laissé au serveur pour s'arrêter proprement (sauvegarde du monde).
 const SERVER_STOP_GRACE: Duration = Duration::from_secs(90);
@@ -284,6 +293,60 @@ struct GroupMeta {
     /// `PackUpdate` appliqué à la chaîne.
     #[serde(default)]
     pending_pack: Option<(String, String)>,
+    /// Fins de partie non publiées, mises de côté dans `server/orphans/<id>/world` (docs/hearth.md § 7.5).
+    #[serde(default)]
+    orphans: Vec<OrphanRecord>,
+}
+
+/// Une fin de partie non publiée, mise de côté. Purement locale : jamais signée, jamais annoncée, hors du graphe des versions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OrphanRecord {
+    /// Nom du dossier sous `server/orphans/` (jamais fourni par l'écran : il le retrouve ici).
+    id: String,
+    /// Dernière écriture du monde (secondes Unix).
+    at: i64,
+    played_secs: u64,
+    /// Version dont la partie était partie (point de reprise le plus récent) et son numéro.
+    #[serde(default)]
+    base: Option<String>,
+    #[serde(default)]
+    base_number: Option<u64>,
+}
+
+/// Marqueur de session (docs/hearth.md § 7.5) : écrit dans `server/.cubelink-session` quand le serveur démarre, retiré
+/// quand le monde a été publié. Présent au « Jouer » suivant, il dit que `server/world` contient du jeu qui n'a pas été
+/// publié. Hors de `world/` : jamais haché, jamais publié.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct SessionMarker {
+    #[serde(default)]
+    base: Option<String>,
+    #[serde(default)]
+    base_number: Option<u64>,
+    #[serde(default)]
+    started_at: i64,
+}
+
+const SESSION_MARKER: &str = ".cubelink-session";
+
+/// Dernière écriture (secondes Unix) et taille du contenu de `world` ; `None` s'il n'existe pas ou ne contient aucun fichier.
+fn world_stats(world: &Path) -> Option<(i64, u64)> {
+    let (mut newest, mut bytes, mut files) = (0i64, 0u64, 0u64);
+    let mut stack = vec![world.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else { continue };
+        for e in rd.flatten() {
+            let Ok(t) = e.file_type() else { continue };
+            if t.is_dir() {
+                stack.push(e.path());
+            } else if let Ok(m) = e.metadata() {
+                files += 1;
+                bytes += m.len();
+                let secs = m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs() as i64);
+                newest = newest.max(secs);
+            }
+        }
+    }
+    (files > 0).then_some((newest, bytes))
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -297,16 +360,30 @@ struct Meta {
     groups: BTreeMap<String, GroupMeta>,
 }
 
+/// Écrit `data` dans `path` d'un coup : un fichier temporaire PROPRE À CET APPEL (deux écritures concurrentes ne se
+/// partagent jamais le même : sinon la première à renommer fait disparaître le temporaire de l'autre, « fichier
+/// introuvable »), puis un remplacement. Le temporaire est supprimé si l'écriture échoue.
 fn write_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
+    static SEQ: AtomicU64 = AtomicU64::new(0);
     if let Some(p) = path.parent() {
         std::fs::create_dir_all(p)?;
     }
-    let tmp = path.with_extension("tmp");
-    let mut f = std::fs::File::create(&tmp)?;
-    f.write_all(data)?;
-    f.sync_all()?;
-    std::fs::rename(&tmp, path)
+    let mut name = path.file_name().map(std::ffi::OsStr::to_os_string).unwrap_or_default();
+    name.push(format!(".{}-{}.tmp", std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed)));
+    let tmp = path.with_file_name(name);
+    let write = || -> std::io::Result<()> {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(data)?;
+        f.sync_all()?;
+        drop(f);
+        std::fs::rename(&tmp, path)
+    };
+    let r = write();
+    if r.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    r
 }
 
 /// Dernier état connu d'un membre.
@@ -316,6 +393,8 @@ pub struct MemberStatus {
     pub op_seq: u64,
     /// Version la plus avancée qu'il dit avoir (parmi celles qu'on connaît).
     pub latest: Option<VersionPoint>,
+    /// Les versions qu'il dit pouvoir servir en entier (ses têtes complètes).
+    pub announced: Vec<VersionId>,
 }
 
 /// Invitation de groupe reçue, en attente de la réponse de l'utilisateur.
@@ -351,6 +430,8 @@ pub struct ActiveHost {
     /// Exclu après une veille : la partie finit comme branche sans bail (`LeaseRelease { Suspend }`).
     fenced: AtomicBool,
     players: Arc<Mutex<BTreeSet<String>>>,
+    /// Quelqu'un est déjà entré sur ce serveur : le monde peut contenir du jeu non publié, même si tout le monde est parti.
+    ever_joined: Arc<AtomicBool>,
     tasks: Mutex<Vec<JoinHandle<()>>>,
     stopping: AtomicBool,
 }
@@ -387,6 +468,45 @@ pub fn effective_heads(g: &p2p_lib::hearth::version::VersionGraph, state: &Group
 // Le runtime
 // ---------------------------------------------------------------------------------------------------------
 
+/// Mémoire des têtes inconnues déjà tentées, par (groupe, pair). Sans elle, une tête qu'on n'arrive pas à rattraper
+/// (version d'un ex-membre, évincée, rejetée) relancerait le rattrapage à chaque `Hello` du pair.
+#[derive(Default)]
+struct UnknownMemo {
+    tried: HashMap<(GroupId, PeerKey), BTreeSet<VersionId>>,
+}
+
+impl UnknownMemo {
+    /// Borne par pair : au-delà, on repart de zéro plutôt que de grossir sans fin.
+    const MAX_PER_PEER: usize = 256;
+
+    /// Vrai si `unknown` contient une tête jamais tentée auprès de ce pair (et la note comme tentée). Un ensemble
+    /// vide, identique ou plus petit que ce qui a été tenté rend faux.
+    fn claim(&mut self, key: (GroupId, PeerKey), unknown: &BTreeSet<VersionId>) -> bool {
+        if unknown.is_empty() {
+            return false;
+        }
+        let tried = self.tried.entry(key).or_default();
+        if unknown.is_subset(tried) {
+            return false;
+        }
+        if tried.len() + unknown.len() > Self::MAX_PER_PEER {
+            tried.clear();
+        }
+        tried.extend(unknown.iter().copied());
+        true
+    }
+
+    /// Oublie ce pair (hors ligne, rattrapage en échec) : la prochaine tête inconnue sera retentée.
+    fn forget(&mut self, key: &(GroupId, PeerKey)) {
+        self.tried.remove(key);
+    }
+
+    /// Oublie tout un groupe (des opérations ont changé qui peut signer : une tête écartée peut devenir valide).
+    fn forget_group(&mut self, gid: &GroupId) {
+        self.tried.retain(|(g, _), _| g != gid);
+    }
+}
+
 pub struct HearthRuntime {
     me: PeerKey,
     identity: Arc<Identity>,
@@ -399,7 +519,12 @@ pub struct HearthRuntime {
     groups: Mutex<HashMap<GroupId, Arc<Mutex<Group>>>>,
     leases: Mutex<LeaseTable>,
     status: Mutex<HashMap<(GroupId, PeerKey), MemberStatus>>,
+    /// Têtes inconnues qu'on a déjà tenté de rattraper auprès de chaque pair : le rattrapage complet n'est pas relancé à chaque `Hello`.
+    unknown_tried: Mutex<UnknownMemo>,
     meta: Mutex<Meta>,
+    /// Sérialise les enregistrements de `meta.json` : l'instantané est pris sous ce verrou, donc le dernier écrit est
+    /// toujours le plus récent.
+    meta_io: Mutex<()>,
     invites: Mutex<Vec<PendingInvite>>,
     /// Invitations reçues (ami, secondes Unix) sur les dernières 24 h : quota par ami, même si elles sont écartées.
     invite_log: Mutex<Vec<(PeerKey, i64)>>,
@@ -433,6 +558,66 @@ pub struct HearthRuntime {
     /// Groupes dont un premier « Jouer » a reçu un bail « au mieux » : le second clic vaut confirmation.
     best_effort: Mutex<HashMap<GroupId, Instant>>,
     me_weak: Weak<HearthRuntime>,
+}
+
+/// Pourquoi `propose_inner` échoue : « personne joignable » (cas du départ) ou un message affichable.
+#[derive(Debug)]
+enum ProposeErr {
+    Unreachable,
+    Msg(String),
+}
+
+impl From<String> for ProposeErr {
+    fn from(m: String) -> Self {
+        ProposeErr::Msg(m)
+    }
+}
+
+impl std::fmt::Display for ProposeErr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProposeErr::Unreachable => f.write_str("Personne du groupe n'a pu être joint : ton départ n'a pas pu leur être annoncé. Réessaie quand un ami est connecté."),
+            ProposeErr::Msg(m) => f.write_str(m),
+        }
+    }
+}
+
+/// Échec de `hearth_leave`, avec un code stable pour que l'écran choisisse quoi proposer. Seul `Unreachable` autorise le
+/// repli « supprimer quand même ce PC » (après une seconde confirmation), et seuls `OutboxPending` et `OrphanPending` autorisent de rejouer avec
+/// `force` (« Quitter quand même », la dernière partie sera perdue pour le groupe) ; jamais une autre erreur.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, specta::Type)]
+#[serde(tag = "code", content = "message", rename_all = "snake_case")]
+pub enum LeaveError {
+    /// Je suis le dernier membre : quitter effacerait la seule copie du monde. Rien n'a été touché.
+    LastMember,
+    /// Aucun autre membre n'a reçu mon départ. Rien n'a été supprimé.
+    Unreachable,
+    /// Ma dernière partie n'a été remise à aucun membre (file d'envoi non vidée) : la quitter maintenant la perdrait pour le
+    /// groupe. Rien n'a été supprimé ; mon serveur est arrêté et la version reste en file. Rejouable, ou avec `force`.
+    OutboxPending,
+    /// Une fin de partie non publiée est mise de côté sur ce PC : quitter la supprimerait. Rien n'a été supprimé ; rejouable
+    /// avec `force` (« Quitter quand même »), ou après l'avoir publiée ou supprimée depuis la page du serveur.
+    OrphanPending,
+    /// Toute autre erreur (quota, disque, jeu en cours…) : message affichable, rien n'est supprimé par le front.
+    Other(String),
+}
+
+impl From<String> for LeaveError {
+    fn from(m: String) -> Self {
+        LeaveError::Other(m)
+    }
+}
+
+impl std::fmt::Display for LeaveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LeaveError::LastMember => f.write_str("Tu es le dernier membre de ce groupe : le quitter effacerait la seule copie du monde."),
+            LeaveError::Unreachable => f.write_str(&ProposeErr::Unreachable.to_string()),
+            LeaveError::OutboxPending => f.write_str("Ta dernière partie n'a pas encore été envoyée aux autres membres."),
+            LeaveError::OrphanPending => f.write_str("Une partie non publiée est gardée de côté sur ce PC : la quitter la supprimerait."),
+            LeaveError::Other(m) => f.write_str(m),
+        }
+    }
 }
 
 /// Issue de la première phase de la prise du bail ([`HearthRuntime::begin_starting`]).
@@ -522,7 +707,9 @@ impl HearthRuntime {
             groups: Mutex::new(groups),
             leases: Mutex::new(LeaseTable::new()),
             status: Mutex::new(HashMap::new()),
+            unknown_tried: Mutex::new(UnknownMemo::default()),
             meta: Mutex::new(meta),
+            meta_io: Mutex::new(()),
             invites: Mutex::new(Vec::new()),
             invite_log: Mutex::new(Vec::new()),
             outbox,
@@ -715,6 +902,7 @@ impl HearthRuntime {
     }
 
     fn save_meta(&self) {
+        let _io = lock(&self.meta_io);
         let data = serde_json::to_vec_pretty(&*lock(&self.meta)).unwrap_or_default();
         if let Err(e) = write_atomic(&self.root.join("meta.json"), &data) {
             tracing::warn!("métadonnées Hearth non enregistrées : {e}");
@@ -1011,6 +1199,7 @@ impl HearthRuntime {
         let ok = matches!(r, Ok(Ok(())));
         if !ok {
             lock(&self.status).entry((gid, key)).or_default().online = false;
+            lock(&self.unknown_tried).forget(&(gid, key));
         }
         ok
     }
@@ -1028,10 +1217,11 @@ impl HearthRuntime {
             }
         }
         let (seq, heads) = self.with_group(&gid, |g| (g.state().op_seq, g.heads()))?;
+        let complete = self.complete_heads_of(&gid);
         // Connexion et `Hello` : 4 s au plus (le rattrapage qui suit a son propre délai).
         let (conn, st) = tokio::time::timeout(ROUND_HELLO_TIMEOUT, async {
             let conn = self.connect(&key).await?;
-            let st = conn.hello(&gid, seq, &heads).await.map_err(|e| e.to_string())?;
+            let st = conn.hello_with(&gid, seq, &heads, Some(&complete)).await.map_err(|e| e.to_string())?;
             Ok::<_, String>((conn, st))
         })
         .await
@@ -1040,14 +1230,16 @@ impl HearthRuntime {
             let ops = conn.fetch_ops(&gid, seq).await.map_err(|e| e.to_string())?;
             self.apply_ops(gid, &ops)?;
         }
-        let missing = self.with_group(&gid, |g| st.heads.iter().any(|h| !g.graph().contains(h)))?;
-        if missing {
+        let missing = self.claim_unknown(&gid, &key, &st.heads);
+        if self.with_group(&gid, |g| st.heads.iter().any(|h| !g.graph().contains(h)))? {
             let after = self.with_group(&gid, |g| g.heads().iter().filter_map(|h| g.graph().get(h)).map(|v| v.header.number).min().unwrap_or(0))?;
-            let vs = conn.fetch_versions(&gid, after.saturating_sub(1)).await.map_err(|e| e.to_string())?;
+            let known = |id: &VersionId| self.with_group(&gid, |g| g.graph().contains(id)).unwrap_or(false);
+            let vs = conn.fetch_versions_reaching(&gid, after.saturating_sub(1), &st.heads, known, missing).await.map_err(|e| e.to_string())?;
             self.with_group(&gid, |g| g.add_versions(vs).map(|_| ()).map_err(|e| e.to_string()))??;
         }
-        let latest = self.with_group(&gid, |g| st.heads.iter().filter_map(|h| g.graph().get(h)).map(|v| v.header.point()).max())?;
-        lock(&self.status).insert((gid, key), MemberStatus { online: true, op_seq: st.op_seq, latest });
+        // Sa version = ce qu'il peut servir en entier : un en-tête sans contenu ne dit pas qu'il est « à jour ».
+        let latest = self.with_group(&gid, |g| st.announced().iter().filter_map(|h| g.graph().get(h)).map(|v| v.header.point()).max())?;
+        lock(&self.status).insert((gid, key), MemberStatus { online: true, op_seq: st.op_seq, latest, announced: st.announced().to_vec() });
         self.mark_seen(&gid, &key);
         match st.lease {
             Some(l) if l.holder == key => {
@@ -1066,14 +1258,44 @@ impl HearthRuntime {
         Ok(())
     }
 
+    /// Les versions que `key` a dit pouvoir servir en entier à sa dernière réponse.
+    pub fn announced_by(&self, gid: &GroupId, key: &PeerKey) -> Vec<VersionId> {
+        lock(&self.status).get(&(*gid, *key)).map(|s| s.announced.clone()).unwrap_or_default()
+    }
+
     /// Reprend auprès de `key` les opérations et les versions qui nous manquent.
     pub async fn pull_from(self: &Arc<Self>, gid: GroupId, key: PeerKey) -> Result<(), String> {
+        self.pull_from_wanting(gid, key, &[], false).await
+    }
+
+    /// Les têtes de `wanted` qu'on ne connaît pas encore, et si c'est la première fois qu'on les demande à `key`
+    /// (alors le rattrapage peut aller jusqu'au repli complet de [`Self::pull_from_wanting`]).
+    fn claim_unknown(&self, gid: &GroupId, key: &PeerKey, wanted: &[VersionId]) -> bool {
+        let unknown: BTreeSet<VersionId> =
+            self.with_group(gid, |g| wanted.iter().filter(|h| !g.graph().contains(h)).copied().collect()).unwrap_or_default();
+        lock(&self.unknown_tried).claim((*gid, *key), &unknown)
+    }
+
+    /// Comme [`Self::pull_from`], en visant les têtes `wanted` : le seuil de numéro de `GetVersions` vient de nos
+    /// versions, alors qu'une branche basse (n° 31 à 33 quand le groupe est à la n° 50) est sous ce seuil. Avec `full`,
+    /// si une tête voulue reste hors d'atteinte on redemande tous les en-têtes (voir `fetch_versions_reaching`).
+    pub async fn pull_from_wanting(self: &Arc<Self>, gid: GroupId, key: PeerKey, wanted: &[VersionId], full: bool) -> Result<(), String> {
+        let r = self.pull_inner(gid, key, wanted, full).await;
+        if r.is_err() {
+            // Rien n'a abouti : la prochaine occasion retentera.
+            lock(&self.unknown_tried).forget(&(gid, key));
+        }
+        r
+    }
+
+    async fn pull_inner(self: &Arc<Self>, gid: GroupId, key: PeerKey, wanted: &[VersionId], full: bool) -> Result<(), String> {
         let conn = self.connect(&key).await?;
         let seq = self.with_group(&gid, |g| g.state().op_seq)?;
         let ops = conn.fetch_ops(&gid, seq).await.map_err(|e| e.to_string())?;
         self.apply_ops(gid, &ops)?;
         let after = self.with_group(&gid, |g| g.graph().iter().map(|(_, v)| v.header.number).max().unwrap_or(0))?;
-        let vs = conn.fetch_versions(&gid, after.saturating_sub(1)).await.map_err(|e| e.to_string())?;
+        let known = |id: &VersionId| self.with_group(&gid, |g| g.graph().contains(id)).unwrap_or(false);
+        let vs = conn.fetch_versions_reaching(&gid, after.saturating_sub(1), wanted, known, full).await.map_err(|e| e.to_string())?;
         self.with_group(&gid, |g| g.add_versions(vs).map(|_| ()).map_err(|e| e.to_string()))??;
         self.emit_state();
         Ok(())
@@ -1089,6 +1311,8 @@ impl HearthRuntime {
                 let before = g.state().clone();
                 g.append_ops(ops).map(|_| (before, g.state().clone())).map_err(|e| e.to_string())
             })??;
+        // Qui peut signer a peut-être changé : une tête écartée jusque-là mérite un nouvel essai.
+        lock(&self.unknown_tried).forget_group(&gid);
         self.after_change(&before, &after);
         if ops.iter().any(|o| matches!(o.op, GroupOp::Leave)) && before.members != after.members {
             self.after_leave(&after);
@@ -1166,7 +1390,7 @@ impl HearthRuntime {
         }
         let addrs = self.online_addrs(&gid, prefer);
         if addrs.is_empty() {
-            return Err("aucun membre du groupe n'est joignable pour récupérer le monde".into());
+            return Err(NO_MEMBER_ONLINE.into());
         }
         {
             let mut f = lock(&self.fetching);
@@ -1200,7 +1424,7 @@ impl HearthRuntime {
             on_progress: Some(on_progress),
             previous_total,
             confirmed,
-            free_bytes: free_space(&self.root),
+            free_bytes: core_lib::disk::free_space(&self.root),
             ..FetchOptions::default()
         };
         let res = world.fetch(&net.endpoint, &gid, &addrs, &coll, v.header.total_size, &opts).await;
@@ -1289,6 +1513,68 @@ impl HearthRuntime {
     pub fn head(&self, gid: &GroupId) -> Option<SignedVersion> {
         let mut h = self.heads_of(gid)?;
         (h.len() == 1).then(|| h.remove(0))
+    }
+
+    /// La version la plus avancée dont le monde est en entier sur ce PC : la tête unique si son contenu est là, sinon
+    /// son plus proche ancêtre (même période) qui l'est. C'est d'elle que repart un `ContinueWithout` : repartir d'une
+    /// tête dont personne n'a le contenu ne débloquerait rien. `None` : fourche, aucune version, ou aucun contenu.
+    pub fn complete_head(&self, gid: &GroupId) -> Option<SignedVersion> {
+        let head = self.head(gid)?;
+        let epoch = self.state(gid)?.epoch;
+        self.with_group(gid, |g| self.nearest_complete(g.graph(), &head.id(), epoch).cloned()).ok().flatten()
+    }
+
+    /// `id` si son monde est en entier sur ce PC, sinon son plus proche ancêtre qui l'est, sans quitter l'époque `epoch`.
+    fn nearest_complete<'g>(&self, graph: &'g VersionGraph, id: &VersionId, epoch: u64) -> Option<&'g SignedVersion> {
+        graph
+            .ancestry(id)
+            .iter()
+            .filter_map(|a| graph.get(a))
+            // La tête elle-même passe toujours : après un `ContinueWithout` elle est la base, d'une époque précédente.
+            .enumerate()
+            .take_while(|(i, v)| *i == 0 || v.header.epoch == epoch)
+            .map(|(_, v)| v)
+            .find(|v| self.world_complete(v))
+    }
+
+    /// Ce que ce PC annonce comme « ma version » : pour chaque tête du graphe, elle-même si son monde est en entier ici,
+    /// sinon son plus proche ancêtre complet. Une tête dont on n'a que l'en-tête n'est jamais annoncée (personne ne
+    /// pourrait y jouer en s'y fiant) ; les en-têtes, eux, continuent de circuler par `heads`.
+    pub fn complete_heads_of(&self, gid: &GroupId) -> Vec<VersionId> {
+        let Some(epoch) = self.state(gid).map(|s| s.epoch) else { return Vec::new() };
+        self.with_group(gid, |g| {
+            let mut out: Vec<VersionId> = Vec::new();
+            for h in g.graph().heads(g.state()) {
+                if let Some(v) = self.nearest_complete(g.graph(), &h.id(), epoch) {
+                    if !out.contains(&v.id()) {
+                        out.push(v.id());
+                    }
+                }
+            }
+            out
+        })
+        .unwrap_or_default()
+    }
+
+    /// L'erreur « personne n'a le contenu de la tête » (voir [`HEAD_UNAVAILABLE`]), avec le repli possible : la dernière
+    /// version complète ici. Le nom de l'auteur ne contient jamais le séparateur.
+    pub fn head_unavailable_error(&self, gid: &GroupId, head: &SignedVersion) -> String {
+        let prev = self.complete_head(gid).map(|v| v.header.number.to_string()).unwrap_or_default();
+        let name = self.name_of(&head.header.author).replace('|', " ");
+        format!("{HEAD_UNAVAILABLE}|{}|{prev}|{name}", head.header.number)
+    }
+
+    /// Une erreur de `fetch_version` qui veut dire « personne ne peut fournir ce monde » (et non : disque plein, version
+    /// trop grosse à confirmer, mise à jour déjà en cours). Une erreur de transfert (`transfert impossible`) n'en fait pas
+    /// partie : une coupure réseau se réessaie, voir [`Self::is_unserved_after_probe`].
+    fn is_unserved(e: &str) -> bool {
+        e == NO_MEMBER_ONLINE || e.starts_with("aucun membre joignable")
+    }
+
+    /// Une erreur de transfert est aussi « personne ne peut fournir ce monde » quand une sonde `Have` ne trouve plus aucun
+    /// membre qui l'ait (le pair contacté n'a que l'en-tête). Si l'un l'a, c'est un accroc réseau : l'erreur reste affichée.
+    async fn is_unserved_after_probe(self: &Arc<Self>, gid: &GroupId, v: &SignedVersion, e: &str) -> bool {
+        Self::is_unserved(e) || (e.starts_with("transfert impossible") && !self.online_member_has_world(gid, v).await)
     }
 
     pub fn is_fork(&self, gid: &GroupId) -> bool {
@@ -1444,6 +1730,10 @@ impl HearthDelegate for HearthRuntime {
         self.with_group(group, |g| g.heads()).unwrap_or_default()
     }
 
+    fn complete_heads(&self, group: &GroupId) -> Vec<VersionId> {
+        self.complete_heads_of(group)
+    }
+
     fn lease(&self, group: &GroupId) -> Option<Lease> {
         // Un serveur prêt, sinon un serveur en préparation : un membre qui nous sonde sait qu'il y a une partie.
         self.active(group)
@@ -1456,20 +1746,23 @@ impl HearthDelegate for HearthRuntime {
         coll.is_some_and(|c| lock(&self.complete).contains(&c))
     }
 
-    fn on_status(&self, from: PeerKey, group: &GroupId, op_seq: u64, heads: &[VersionId]) {
+    fn on_status(&self, from: PeerKey, group: &GroupId, op_seq: u64, heads: &[VersionId], complete_heads: Option<&[VersionId]>) {
+        // Sa version : ce qu'il peut servir en entier (un nœud ancien qui ne le dit pas : ses têtes).
+        let announced = complete_heads.unwrap_or(heads);
         let latest = self
-            .with_group(group, |g| heads.iter().filter_map(|h| g.graph().get(h)).map(|v| v.header.point()).max())
+            .with_group(group, |g| announced.iter().filter_map(|h| g.graph().get(h)).map(|v| v.header.point()).max())
             .ok()
             .flatten();
-        lock(&self.status).insert((*group, from), MemberStatus { online: true, op_seq, latest });
+        lock(&self.status).insert((*group, from), MemberStatus { online: true, op_seq, latest, announced: announced.to_vec() });
         self.mark_seen(group, &from);
-        let (mine, known) = self
-            .with_group(group, |g| (g.state().op_seq, heads.iter().all(|h| g.graph().contains(h))))
-            .unwrap_or((0, true));
-        if op_seq > mine || !known {
-            let (rt, gid) = (self.arc(), *group);
+        let mine = self.with_group(group, |g| g.state().op_seq).unwrap_or(0);
+        // Une tête inconnue ne relance le rattrapage qu'une fois par pair (sinon chaque `Hello` le relancerait sans fin
+        // pour une tête qu'on n'arrive pas à obtenir).
+        let fresh = self.claim_unknown(group, &from, heads);
+        if op_seq > mine || fresh {
+            let (rt, gid, heads) = (self.arc(), *group, heads.to_vec());
             spawn(async move {
-                let _ = rt.pull_from(gid, from).await;
+                let _ = rt.pull_from_wanting(gid, from, &heads, fresh).await;
                 rt.sync_heads(gid, Some(from)).await;
             });
         }
@@ -1484,11 +1777,13 @@ impl HearthDelegate for HearthRuntime {
             (lock(&self.leases).observe(g.state(), g.graph(), &from, lease, Instant::now()), unknown_base)
         });
         let Ok((r, unknown_base)) = r else { return };
-        if unknown_base {
-            // Une base inconnue est d'abord synchronisée (elle ne donne aucun avantage en attendant).
+        // Une base inconnue est d'abord synchronisée (elle ne donne aucun avantage en attendant), une fois par base et par
+        // pair : le bail est renouvelé toutes les quelques secondes.
+        let wanted: Vec<VersionId> = base.into_iter().collect();
+        if unknown_base && self.claim_unknown(&gid, &from, &wanted) {
             let rt = self.arc();
             spawn(async move {
-                let _ = rt.pull_from(gid, from).await;
+                let _ = rt.pull_from_wanting(gid, from, &wanted, true).await;
                 rt.sync_heads(gid, Some(from)).await;
             });
         }
@@ -1538,10 +1833,12 @@ impl HearthDelegate for HearthRuntime {
                 );
             }
         }
-        if version.is_some() {
+        if let Some(v) = version {
             let rt = self.arc();
+            let wanted = [v];
+            let full = self.claim_unknown(&gid, &from, &wanted);
             spawn(async move {
-                let _ = rt.pull_from(gid, from).await;
+                let _ = rt.pull_from_wanting(gid, from, &wanted, full).await;
                 rt.sync_heads(gid, Some(from)).await;
             });
         }
@@ -1613,8 +1910,10 @@ impl HearthDelegate for HearthRuntime {
             if !unknown_parent {
                 return Err(why.clone());
             }
+            let wanted: Vec<VersionId> = v.header.parent.into_iter().collect();
+            let full = self.claim_unknown(&gid, &from, &wanted);
             spawn(async move {
-                if rt.pull_from(gid, from).await.is_ok() && rt.version(&gid, &v.id()).is_some() {
+                if rt.pull_from_wanting(gid, from, &wanted, full).await.is_ok() && rt.version(&gid, &v.id()).is_some() {
                     let _ = rt.fetch_version(gid, &v, Some(from)).await;
                 }
             });
@@ -1721,6 +2020,47 @@ impl HearthRuntime {
         conn.send_invite(&ops, &gk).await.map_err(|e| e.to_string())
     }
 
+    /// Versions de ce groupe encore en file d'envoi (une remise réussie à un membre retire l'entrée).
+    fn group_pending(&self, gid: &GroupId) -> Vec<(VersionId, u32)> {
+        self.outbox.pending().iter().filter(|e| e.group_id() == *gid).map(|e| (e.id(), e.attempts)).collect()
+    }
+
+    /// Attend que la file d'envoi du groupe soit vidée, donc que chaque version ait été remise à au moins un membre
+    /// (#56 : `forget_now` jette ce qui reste en file). Rend `true` quand elle est vide. Rend `false` tout de suite si aucun
+    /// membre ne répond, ou si une remise vient d'échouer ; sinon au bout de `timeout`. Ne supprime rien : la boucle
+    /// d'envoi continue en fond tant que le groupe existe.
+    pub async fn flush_group_outbox(self: &Arc<Self>, gid: &GroupId, timeout: Duration) -> bool {
+        let mut base = self.group_pending(gid);
+        if base.is_empty() {
+            return true;
+        }
+        // Présence fraîche : le cache peut dater de la dernière ronde (une minute) et garder en ligne un ami parti.
+        if self.probe_round(*gid).await.answers.is_empty() {
+            return false;
+        }
+        let deadline = Instant::now() + timeout;
+        let mut last = usize::MAX;
+        loop {
+            let now = self.group_pending(gid);
+            if now.is_empty() {
+                self.emit_state();
+                return true;
+            }
+            if now.len() != last {
+                last = now.len();
+                self.emit_state();
+            }
+            // Une tentative de plus sur une version encore en file : le dernier passage a échoué chez tous les membres.
+            base.retain(|(id, _)| now.iter().any(|(n, _)| n == id));
+            let failed = now.iter().any(|(id, a)| base.iter().find(|(b, _)| b == id).is_some_and(|(_, a0)| a > a0));
+            if failed || Instant::now() >= deadline {
+                return false;
+            }
+            self.outbox.wake();
+            tokio::time::sleep(LEAVE_FLUSH_POLL).await;
+        }
+    }
+
     /// Oublie le groupe sur ce PC (départ, retrait). L'état en mémoire disparaît tout de suite ; puis, dans l'ordre : le
     /// serveur actif est arrêté (tué après un délai), l'accès du groupe est fermé, les collections du groupe sont libérées
     /// dans le magasin de blobs, enfin les données du groupe sont supprimées du disque.
@@ -1799,10 +2139,26 @@ impl HearthRuntime {
 
     /// Propose une opération (ou l'applique tout de suite si ma voix suffit).
     pub async fn propose(self: &Arc<Self>, gid: GroupId, op: GroupOp) -> Result<(), String> {
+        self.propose_inner(gid, op).await.map_err(|e| e.to_string())
+    }
+
+    /// Quitte le groupe : refuse si je suis le dernier membre, sinon propose `Leave` en distinguant l'échec « personne
+    /// joignable » (le départ n'est pas annoncé, mais rien n'est perdu) des autres erreurs.
+    pub async fn propose_leave(self: &Arc<Self>, gid: GroupId) -> Result<(), LeaveError> {
+        if self.state(&gid).is_some_and(|s| s.members.len() <= 1) {
+            return Err(LeaveError::LastMember);
+        }
+        self.propose_inner(gid, GroupOp::Leave).await.map_err(|e| match e {
+            ProposeErr::Unreachable => LeaveError::Unreachable,
+            ProposeErr::Msg(m) => LeaveError::Other(m),
+        })
+    }
+
+    async fn propose_inner(self: &Arc<Self>, gid: GroupId, op: GroupOp) -> Result<(), ProposeErr> {
         let leaving = matches!(op, GroupOp::Leave);
         self.check_continue_vote(&gid, &op)?;
         let (p, status) = self.with_group(&gid, |g| {
-            g.check_continue_base(&op, true).map_err(|e| e.to_string())?;
+            g.check_continue_base(&op, true, Some(&|v| self.world_complete(v))).map_err(|e| e.to_string())?;
             let mut p = Proposal::new(g.state(), op).map_err(|e| e.to_string())?;
             p.vote(g.state(), &*self.identity).map_err(|e| e.to_string())?;
             let status = g.put_proposal(p.clone(), &self.me).map_err(|e| e.to_string())?;
@@ -1821,10 +2177,10 @@ impl HearthRuntime {
                 // peux plus servir la chaîne, et les autres me compteraient pour toujours dans leurs quorums.
                 let others = self.state(&gid).map_or(0, |s| self.others(&s).len());
                 if others > 0 && self.broadcast(gid, false, visit).await == 0 {
-                    return Err("Personne du groupe n'a pu être joint : ton départ n'a pas pu leur être annoncé. Réessaie quand un ami est connecté.".into());
+                    return Err(ProposeErr::Unreachable);
                 }
             }
-            return self.finalize(gid, status.id).await;
+            return self.finalize(gid, status.id).await.map_err(ProposeErr::Msg);
         }
         self.broadcast(gid, true, visit).await;
         self.emit_state();
@@ -1879,7 +2235,7 @@ impl HearthRuntime {
         let (sig, status) = self.with_group(&gid, |g| {
             let p = g.proposal(&id).ok_or("cette proposition n'existe plus")?.clone();
             self.check_continue_vote(&gid, &p.op)?;
-            g.check_continue_base(&p.op, true).map_err(|e| e.to_string())?;
+            g.check_continue_base(&p.op, true, Some(&|v| self.world_complete(v))).map_err(|e| e.to_string())?;
             let sig = p.sign(&*self.identity);
             let status = g.add_vote(&id, self.me, sig).map_err(|e| e.to_string())?;
             Ok::<_, String>((sig, status))
@@ -2040,15 +2396,173 @@ impl HearthRuntime {
         self.with_group(gid, |g| g.graph().get(&id).map(|x| x.header.point())).ok().flatten()
     }
 
+    fn session_marker_path(&self, gid: &GroupId) -> PathBuf {
+        self.server_dir(gid).join(SESSION_MARKER)
+    }
+
+    /// Écrit (ou met à jour) le marqueur de session. `base` : la version dont part la partie, puis chaque point de reprise.
+    /// L'heure de début de la partie est conservée d'une écriture à l'autre.
+    fn write_session_marker(&self, gid: &GroupId, base: Option<(VersionId, u64)>) -> std::io::Result<()> {
+        let path = self.session_marker_path(gid);
+        let started_at = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice::<SessionMarker>(&b).ok()).map_or_else(now_secs, |m| m.started_at);
+        let m = SessionMarker { base: base.map(|b| b.0.to_hex()), base_number: base.map(|b| b.1), started_at };
+        write_atomic(&path, &serde_json::to_vec(&m).unwrap_or_default())
+    }
+
+    /// Le monde de la partie est publié (ou n'a rien à publier) : le marqueur n'a plus lieu d'être.
+    fn clear_session_marker(&self, gid: &GroupId) {
+        let _ = std::fs::remove_file(self.session_marker_path(gid));
+    }
+
+    /// Le dernier serveur de ce groupe sur ce PC s'est-il arrêté sans que son monde soit publié ?
+    pub fn has_session_marker(&self, gid: &GroupId) -> bool {
+        self.session_marker_path(gid).exists()
+    }
+
+    /// Si le marqueur de session est là, `server/world` contient du jeu non publié (plantage du serveur ou du PC, Cubelink
+    /// tué, fermeture plus longue que le délai) : le dossier est **déplacé** dans `server/orphans/<id>/world` (un renommage,
+    /// donc instantané et sans copie), enregistré dans les métadonnées du groupe, et le marqueur est retiré. Rien n'est
+    /// publié ni annoncé : l'hôte choisit ensuite (`orphan_publish`, `orphan_discard`). Si le déplacement échoue, rien
+    /// n'est supprimé et l'erreur remonte. Rend `true` si un monde a été mis de côté.
+    pub async fn shelve_unpublished_world(self: &Arc<Self>, gid: GroupId) -> Result<bool, String> {
+        let dir = self.server_dir(&gid);
+        let marker_path = dir.join(SESSION_MARKER);
+        if !marker_path.exists() {
+            return Ok(false);
+        }
+        // Un marqueur illisible reste un marqueur : on ne sait pas de quelle version la partie est partie, c'est tout.
+        let marker: SessionMarker = std::fs::read(&marker_path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        let world = dir.join("world");
+        let w = world.clone();
+        let stats = tokio::task::spawn_blocking(move || world_stats(&w)).await.map_err(|e| e.to_string())?;
+        let Some((newest, _)) = stats else {
+            // Pas de monde, ou un dossier vide : rien à garder.
+            let _ = std::fs::remove_file(&marker_path);
+            return Ok(false);
+        };
+        let at = if newest > 0 { newest } else { now_secs() };
+        let played_secs = if marker.started_at > 0 { (at - marker.started_at).max(0) as u64 } else { 0 };
+        let orphans = dir.join("orphans");
+        let existing: HashSet<String> = self.meta_of(&gid).orphans.iter().map(|o| o.id.clone()).collect();
+        let mut id = now_secs().to_string();
+        let mut n = 1;
+        while existing.contains(&id) || orphans.join(&id).exists() {
+            n += 1;
+            id = format!("{}-{n}", now_secs());
+        }
+        let rec = OrphanRecord { id: id.clone(), at, played_secs, base: marker.base, base_number: marker.base_number };
+        // L'enregistrement d'abord : un plantage entre les deux laisse une entrée sans dossier (retirée à la lecture), jamais
+        // un dossier que personne ne sait retrouver.
+        self.update_meta(&gid, |m| m.orphans.push(rec));
+        let target = orphans.join(&id);
+        let moved = std::fs::create_dir_all(&target).and_then(|()| std::fs::rename(&world, target.join("world")));
+        if let Err(e) = moved {
+            self.update_meta(&gid, |m| m.orphans.retain(|o| o.id != id));
+            let _ = std::fs::remove_dir(&target);
+            return Err(format!(
+                "Ta dernière partie n'a pas été publiée et n'a pas pu être mise de côté ({e}). Ferme Minecraft s'il est encore ouvert, puis réessaie. Rien n'a été supprimé."
+            ));
+        }
+        let _ = std::fs::remove_file(&marker_path);
+        self.emit_state();
+        Ok(true)
+    }
+
+    /// Fins de partie mises de côté dont le dossier existe encore (les entrées sans dossier sont retirées).
+    fn live_orphans(&self, gid: &GroupId) -> Vec<OrphanRecord> {
+        let dir = self.server_dir(gid).join("orphans");
+        let all = self.meta_of(gid).orphans;
+        if all.iter().all(|o| dir.join(&o.id).join("world").is_dir()) {
+            return all;
+        }
+        self.update_meta(gid, |m| m.orphans.retain(|o| dir.join(&o.id).join("world").is_dir()));
+        self.meta_of(gid).orphans
+    }
+
+    /// Nombre de fins de partie non publiées mises de côté pour ce groupe.
+    pub fn orphan_count(&self, gid: &GroupId) -> usize {
+        self.meta_of(gid).orphans.len()
+    }
+
+    fn orphan_record(&self, gid: &GroupId, id: &str) -> Result<OrphanRecord, String> {
+        self.live_orphans(gid).into_iter().find(|o| o.id == id).ok_or_else(|| "cette partie n'existe plus sur ce PC".to_string())
+    }
+
+    /// Ce qu'il faut pour afficher les fins de partie de ce groupe (la plus récente d'abord). Lit le disque (taille).
+    fn orphans_view(&self, gid: &GroupId) -> Vec<HearthOrphan> {
+        let dir = self.server_dir(gid).join("orphans");
+        let mut v: Vec<HearthOrphan> = self
+            .live_orphans(gid)
+            .into_iter()
+            .map(|o| HearthOrphan {
+                size_bytes: dir_size(&dir.join(&o.id)),
+                id: o.id,
+                at: o.at,
+                played_secs: o.played_secs,
+                base_number: o.base_number,
+            })
+            .collect();
+        v.sort_by(|a, b| b.at.cmp(&a.at).then(b.id.cmp(&a.id)));
+        v
+    }
+
+    /// Publie une fin de partie mise de côté : une nouvelle `Session`, enfant de la version dont la partie était partie. Si
+    /// le groupe a avancé entre-temps, c'est une fourche explicite que le groupe tranche ensuite (docs/hearth.md § 7.5).
+    /// Hors du graphe jusqu'ici, elle y entre seulement maintenant et part alors en file d'envoi.
+    pub async fn orphan_publish(self: &Arc<Self>, gid: GroupId, id: &str) -> Result<SignedVersion, String> {
+        self.require_state(&gid)?;
+        if self.active(&gid).is_some() || self.play_of(&gid).is_some() {
+            return Err("arrête le serveur avant de publier cette partie".into());
+        }
+        let rec = self.orphan_record(&gid, id)?;
+        let parent = match rec.base.as_deref().and_then(VersionId::from_hex).and_then(|b| self.version(&gid, &b)) {
+            Some(b) => Some((b.id(), b.header.number)),
+            // Sa version de départ n'est plus connue : on repart de la tête.
+            None => match self.heads_of(&gid).unwrap_or_default().as_slice() {
+                [] => None,
+                [h] => Some((h.id(), h.header.number)),
+                _ => return Err("Deux versions du monde existent : choisis d'abord laquelle garder, puis publie cette partie.".into()),
+            },
+        };
+        let world = self.server_dir(&gid).join("orphans").join(&rec.id).join("world");
+        let v = self.publish_version(gid, &world, VersionKind::Session, parent, rec.played_secs).await?;
+        self.remove_orphan(&gid, &rec)?;
+        Ok(v)
+    }
+
+    /// Supprime une fin de partie mise de côté (choix explicite de l'hôte).
+    pub async fn orphan_discard(self: &Arc<Self>, gid: GroupId, id: &str) -> Result<(), String> {
+        self.require_state(&gid)?;
+        let rec = self.orphan_record(&gid, id)?;
+        self.remove_orphan(&gid, &rec)
+    }
+
+    fn remove_orphan(&self, gid: &GroupId, rec: &OrphanRecord) -> Result<(), String> {
+        let dir = self.server_dir(gid).join("orphans").join(&rec.id);
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir).map_err(|e| format!("la partie n'a pas pu être supprimée : {e}"))?;
+        }
+        self.update_meta(gid, |m| m.orphans.retain(|o| o.id != rec.id));
+        self.emit_state();
+        Ok(())
+    }
+
     /// Prépare le monde du groupe pour un serveur : la tête matérialisée dans `server/world`. Un nouveau groupe sans
     /// version n'a rien à écrire (le serveur crée le monde).
     pub async fn prepare_world(self: &Arc<Self>, gid: GroupId, head: Option<&SignedVersion>) -> Result<(), String> {
+        // Une partie qui ne s'est pas terminée proprement a laissé du jeu non publié dans `server/world` : on le met de côté
+        // avant tout, que la tête ait changé ou non. Rien n'est écrasé ni publié sans l'accord de l'hôte (§ 7.5).
+        self.shelve_unpublished_world(gid).await?;
         let Some(h) = head else { return Ok(()) };
         let dest = self.server_dir(&gid).join("world");
         if self.materialized(&gid) == Some(h.id()) && dest.join("level.dat").is_file() {
             return Ok(());
         }
-        self.fetch_version_user(gid, h, None).await?;
+        if let Err(e) = self.fetch_version_user(gid, h, None).await {
+            // Le contenu de la tête n'est chez personne de joignable (par exemple son auteur s'est éteint avant l'envoi) :
+            // l'écran propose d'attendre ou de repartir de la dernière version complète.
+            return Err(if self.is_unserved_after_probe(&gid, h, &e).await { self.head_unavailable_error(&gid, h) } else { e });
+        }
         let world = self.world()?;
         world.materialize(&h.header.collection, &dest).await.map_err(|e| e.to_string())?;
         self.set_materialized(&gid, Some(h.id()));
@@ -2066,12 +2580,14 @@ impl HearthRuntime {
             return Err(if a.group == gid { "le serveur de ce groupe tourne déjà".into() } else { "un autre serveur de groupe tourne déjà sur ce PC".to_string() });
         }
         let players: Arc<Mutex<BTreeSet<String>>> = Arc::default();
-        let (pl, rt) = (players.clone(), self.clone());
+        let ever_joined = Arc::new(AtomicBool::new(false));
+        let (pl, ej, rt) = (players.clone(), ever_joined.clone(), self.clone());
         let on_line: LineSink = Arc::new(move |line| {
             if let Some((joined, name)) = parse_player_event(line) {
                 {
                     let mut set = lock(&pl);
                     if joined {
+                        ej.store(true, Ordering::SeqCst);
                         set.insert(name);
                     } else {
                         set.remove(&name);
@@ -2108,6 +2624,12 @@ impl HearthRuntime {
             server.stop(Duration::from_secs(20)).await;
             return Err("Le groupe a été supprimé pendant le démarrage du serveur.".into());
         }
+        // Dès ici le monde peut contenir du jeu non publié : le marqueur le dit jusqu'à la publication (§ 7.5).
+        if let Err(e) = self.write_session_marker(&gid, base) {
+            server.stop(Duration::from_secs(20)).await;
+            self.emit_state();
+            return Err(format!("Impossible de noter le début de la partie sur le disque : {e}"));
+        }
         let lease = match starting {
             // Même partie (même `lease_id`, `seq` continue), signée de nouveau en phase `Ready`.
             Some(e) => self.resign(lock(&e.lease).ready()),
@@ -2123,6 +2645,7 @@ impl HearthRuntime {
             fence: Mutex::new(HostFence::new(&*self.clock())),
             fenced: AtomicBool::new(false),
             players,
+            ever_joined,
             tasks: Mutex::new(Vec::new()),
             stopping: AtomicBool::new(false),
         });
@@ -2509,6 +3032,10 @@ impl HearthRuntime {
         // ensuite. Sinon la `Session` finale aurait le même parent et le groupe verrait une fourche après une partie normale.
         if let Some(Ok(v)) = &published {
             *lock(&host.tip) = Some((v.id(), v.header.number));
+            // Si la partie se termine mal après ce point, la fin de partie repartira de lui.
+            if let Err(e) = self.write_session_marker(&host.group, Some((v.id(), v.header.number))) {
+                eprintln!("[cubelink] marqueur de session non mis à jour : {e}");
+            }
         }
         begun?;
         let v = published.ok_or("point de reprise non fait")??;
@@ -2524,6 +3051,11 @@ impl HearthRuntime {
             t.abort();
         }
         host.server.stop(Duration::from_secs(20)).await;
+        // Si personne n'est jamais entré, il n'y a rien à publier : le marqueur tombe. Sinon (tout le monde est parti après
+        // une vraie partie) il reste, et le prochain « Jouer » met ce monde de côté au lieu de l'écraser (§ 7.5).
+        if !host.ever_joined.load(Ordering::SeqCst) {
+            self.clear_session_marker(&gid);
+        }
         let l = lock(&host.lease).clone();
         let visit: Visit =
             Arc::new(move |c| Box::pin(async move { c.release_lease(&gid, l.lease_id, l.seq, ReleaseReason::Handover, None).await }));
@@ -2554,8 +3086,15 @@ impl HearthRuntime {
         } else {
             Ok(None)
         };
-        if let Ok(Some(v)) = &published {
-            self.set_materialized(&gid, Some(v.id()));
+        match &published {
+            Ok(Some(v)) => {
+                self.set_materialized(&gid, Some(v.id()));
+                self.clear_session_marker(&gid);
+            }
+            // Pas de dossier de monde : rien à publier. Une publication en échec laisse le marqueur : le prochain « Jouer »
+            // mettra le monde de côté au lieu de l'écraser.
+            Ok(None) => self.clear_session_marker(&gid),
+            Err(_) => {}
         }
         let vid = published.as_ref().ok().and_then(|v| v.as_ref().map(SignedVersion::id));
         let l = lock(&host.lease).clone();
@@ -2616,6 +3155,7 @@ impl HearthRuntime {
             can_host: instance_id.is_some(),
             instance_id: instance_id.clone(),
             version: heads.first().map(|h| h.header.number),
+            orphans: self.orphan_count(gid) as u32,
         };
         let decision = self.decision(gid);
         let holder_of = |k: &PeerKey| Some(self.lite(&st, k));
@@ -2678,7 +3218,15 @@ impl HearthRuntime {
         let (graph, proposals) = self.with_group(gid, |g| (g.graph().clone(), g.proposals().cloned().collect::<Vec<_>>()))?;
         let heads = effective_heads(&graph, &st);
         let head = (heads.len() == 1).then(|| heads[0].clone());
-        let my_latest = graph.latest_by_number(&st).map(|v| v.header.point());
+        // La version la plus avancée qui existe (en-tête connu) et celle dont j'ai le monde en entier : un en-tête sans
+        // contenu ne me met pas « à jour ».
+        let newest = graph.latest_by_number(&st).map(|v| v.header.point());
+        let my_latest = self
+            .complete_heads_of(gid)
+            .iter()
+            .filter_map(|id| graph.get(id))
+            .map(|v| v.header.point())
+            .max();
         let now = now_secs();
         let meta = self.meta_of(gid);
         let unseen = |k: &PeerKey| -> Option<u32> {
@@ -2693,9 +3241,10 @@ impl HearthRuntime {
             .map(|k| {
                 let s = lock(&self.status).get(&(*gid, *k)).cloned().unwrap_or_default();
                 let latest = if *k == self.me { my_latest } else { s.latest };
-                let sync = match (latest, my_latest) {
+                let sync = match (latest, newest) {
                     (Some(l), Some(m)) if l >= m => "ok",
                     (Some(_), Some(_)) => "behind",
+                    (None, Some(_)) if *k == self.me => "behind",
                     (None, None) if *k == self.me || s.online => "ok",
                     (Some(_), None) => "ok",
                     _ => "unknown",
@@ -2763,7 +3312,7 @@ impl HearthRuntime {
             .collect();
         let blocker = head.as_ref().and_then(|h| {
             let a = h.header.author;
-            let days = blocking_days(a == self.me, st.is_member(&a), unseen(&a))?;
+            let days = blocking_days(a == self.me, st.is_member(&a), unseen(&a), self.world_complete(h))?;
             Some(HearthBlocker { member: self.lite(&st, &a), days })
         });
         let fork: Vec<HearthBranch> = if heads.len() > 1 {
@@ -2787,7 +3336,7 @@ impl HearthRuntime {
             outbox_pending: self.outbox.pending().iter().filter(|e| e.group_id() == *gid).count() as u32,
             instance_name: self.instance_of(gid).and_then(|i| self.instances.get(&i).ok()).map(|i| i.name),
         };
-        Ok(HearthDetail { card, members, versions, proposals, blocker, fork, settings })
+        Ok(HearthDetail { card, members, versions, proposals, blocker, fork, orphans: self.orphans_view(gid), settings })
     }
 
     /// Le membre qui bloque le groupe (bannière « Continuer sans X »), s'il y en a un.
@@ -2795,7 +3344,43 @@ impl HearthRuntime {
         self.detail(gid).ok()?.blocker.and_then(|b| parse_key(&b.member.public_key))
     }
 
-    /// Propose de continuer sans `absent` : repart de la version la plus récente que nous avons.
+    /// Le monde de `v` est-il en entier dans le magasin de ce PC, même si l'ensemble en mémoire (`complete`, rempli en
+    /// tâche de fond au démarrage) ne le sait pas encore ? Le note alors.
+    pub async fn world_on_disk_complete(&self, v: &SignedVersion) -> bool {
+        if self.world_complete(v) {
+            return true;
+        }
+        let Ok(world) = self.world() else { return false };
+        let coll = v.header.collection;
+        let done = world.is_complete(&coll).await;
+        if done {
+            lock(&self.complete).insert(coll);
+        }
+        done
+    }
+
+    /// Un membre en ligne dit-il avoir le monde de `v` en entier (sonde `Have`) ?
+    pub async fn online_member_has_world(self: &Arc<Self>, gid: &GroupId, v: &SignedVersion) -> bool {
+        let (found, id) = (Arc::new(AtomicBool::new(false)), v.id());
+        let visit: Visit = Arc::new({
+            let (found, gid) = (found.clone(), *gid);
+            move |c| {
+                let found = found.clone();
+                Box::pin(async move {
+                    if c.have_version(&gid, &id).await? {
+                        found.store(true, Ordering::SeqCst);
+                    }
+                    Ok(())
+                })
+            }
+        });
+        self.broadcast(*gid, true, visit).await;
+        found.load(Ordering::SeqCst)
+    }
+
+    /// Propose de continuer sans `absent` : repart de la version la plus récente dont nous avons le monde en entier
+    /// (celle de l'absent n'a en général pas de contenu chez nous). Refuse si un membre en ligne a déjà le monde de la
+    /// dernière version : rien n'est bloqué, il suffit de le récupérer.
     pub async fn propose_continue(self: &Arc<Self>, gid: GroupId, absent: PeerKey) -> Result<(), String> {
         let st = self.require_state(&gid)?;
         if !st.is_member(&absent) || absent == self.me {
@@ -2812,7 +3397,17 @@ impl HearthRuntime {
         if let Some(id) = existing {
             return self.vote(gid, id).await;
         }
-        let base = self.head(&gid).ok_or("aucune version connue pour repartir")?.id();
+        let head = self.head(&gid).ok_or("aucune version connue pour repartir")?;
+        // Un membre joignable a déjà le monde de la tête : on le récupère, rien n'est bloqué.
+        if self.online_member_has_world(&gid, &head).await {
+            let rt = self.clone();
+            spawn(async move { rt.sync_heads(gid, None).await });
+            return Err("un membre en ligne a déjà le monde de la dernière version : il se synchronise, réessaie dans un instant si besoin.".into());
+        }
+        let base = self
+            .complete_head(&gid)
+            .ok_or("aucune version complète sur ce PC pour repartir : le monde n'a pas encore été récupéré ici")?
+            .id();
         // Dernier signe de vie de l'absent tel que nous le connaissons ; sans cela, rien n'atteste son absence.
         let seen = self.meta_of(&gid).seen.get(&key_hex(&absent)).copied().ok_or("on ne sait pas depuis quand ce membre est absent")?;
         let (absent_since, at) = (u64::try_from(seen).unwrap_or(0), u64::try_from(now_secs()).unwrap_or(0));
@@ -2821,36 +3416,11 @@ impl HearthRuntime {
 }
 
 /// Nombre de jours d'absence de l'auteur de la version la plus récente, s'il bloque le groupe : un autre membre,
-/// actuellement dans le groupe, pas revenu depuis `CONTINUE_AFTER_DAYS` jours au moins.
-fn blocking_days(author_is_me: bool, is_member: bool, unseen_days: Option<u32>) -> Option<u32> {
+/// actuellement dans le groupe, pas revenu depuis `CONTINUE_AFTER_DAYS` jours au moins, et dont la version n'est pas
+/// déjà complète sur ce PC (sinon son absence ne bloque rien : on a le monde, on peut y jouer).
+fn blocking_days(author_is_me: bool, is_member: bool, unseen_days: Option<u32>, head_complete: bool) -> Option<u32> {
     let days = unseen_days?;
-    (!author_is_me && is_member && days >= CONTINUE_AFTER_DAYS).then_some(days)
-}
-
-/// Espace libre (octets) sur le disque qui porte `path`, s'il se mesure ; `None` sinon (la vérification est alors
-/// sautée, jamais un refus).
-pub fn free_space(path: &Path) -> Option<u64> {
-    #[cfg(windows)]
-    {
-        use std::os::windows::ffi::OsStrExt;
-        #[link(name = "kernel32")]
-        extern "system" {
-            fn GetDiskFreeSpaceExW(dir: *const u16, available: *mut u64, total: *mut u64, free: *mut u64) -> i32;
-        }
-        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
-        let mut available = 0u64;
-        // SAFETY : `wide` est une chaîne terminée par zéro qui vit pendant l'appel ; les pointeurs de sortie inutiles sont nuls
-        // (permis par l'API) et `available` est un entier valide.
-        let ok = unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut available, std::ptr::null_mut(), std::ptr::null_mut()) };
-        (ok != 0).then_some(available)
-    }
-    #[cfg(not(windows))]
-    {
-        let out = std::process::Command::new("df").arg("-Pk").arg(path).output().ok()?;
-        let text = String::from_utf8_lossy(&out.stdout);
-        let kib: u64 = text.lines().nth(1)?.split_whitespace().nth(3)?.parse().ok()?;
-        kib.checked_mul(1024)
-    }
+    (!author_is_me && is_member && !head_complete && days >= CONTINUE_AFTER_DAYS).then_some(days)
 }
 
 /// Taille d'un dossier, bornée (un dossier immense ne fige pas l'écran).
@@ -2881,6 +3451,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn world_stats_compte_les_fichiers_et_ignore_un_dossier_vide() {
+        let d = tempfile::tempdir().unwrap();
+        assert_eq!(world_stats(&d.path().join("absent")), None);
+        std::fs::create_dir_all(d.path().join("w/region")).unwrap();
+        assert_eq!(world_stats(&d.path().join("w")), None, "des dossiers vides ne sont pas un monde");
+        std::fs::write(d.path().join("w/level.dat"), b"abc").unwrap();
+        std::fs::write(d.path().join("w/region/r.0.0.mca"), b"12345").unwrap();
+        let (newest, bytes) = world_stats(&d.path().join("w")).unwrap();
+        assert_eq!(bytes, 8);
+        assert!(newest > 1_600_000_000);
+    }
+
+    #[test]
+    fn un_marqueur_de_session_ancien_ou_incomplet_se_lit_quand_meme() {
+        let m: SessionMarker = serde_json::from_str("{}").unwrap();
+        assert_eq!((m.base, m.started_at), (None, 0));
+        let m: SessionMarker = serde_json::from_str(r#"{"base":"ab","base_number":3,"started_at":7}"#).unwrap();
+        assert_eq!((m.base.as_deref(), m.base_number, m.started_at), (Some("ab"), Some(3), 7));
+        let g: GroupMeta = serde_json::from_str("{}").unwrap();
+        assert!(g.orphans.is_empty(), "les métadonnées d'avant ce champ restent lisibles");
+    }
+
+    #[test]
     fn joueur_qui_entre_ou_sort_seulement_depuis_un_message_de_journal() {
         assert_eq!(
             parse_player_event("[12:00:01] [Server thread/INFO]: Alice joined the game"),
@@ -2897,14 +3490,48 @@ mod tests {
     #[test]
     fn bannière_seulement_apres_sept_jours_pour_un_autre_membre() {
         // Moins de sept jours, ou jamais vu : pas de bannière.
-        assert_eq!(blocking_days(false, true, Some(CONTINUE_AFTER_DAYS - 1)), None);
-        assert_eq!(blocking_days(false, true, None), None);
+        assert_eq!(blocking_days(false, true, Some(CONTINUE_AFTER_DAYS - 1), false), None);
+        assert_eq!(blocking_days(false, true, None, false), None);
         // Sept jours et plus : « X n'est pas revenu depuis N jours ».
-        assert_eq!(blocking_days(false, true, Some(CONTINUE_AFTER_DAYS)), Some(CONTINUE_AFTER_DAYS));
-        assert_eq!(blocking_days(false, true, Some(30)), Some(30));
+        assert_eq!(blocking_days(false, true, Some(CONTINUE_AFTER_DAYS), false), Some(CONTINUE_AFTER_DAYS));
+        assert_eq!(blocking_days(false, true, Some(30), false), Some(30));
         // Jamais pour moi, ni pour quelqu'un qui n'est plus dans le groupe.
-        assert_eq!(blocking_days(true, true, Some(30)), None);
-        assert_eq!(blocking_days(false, false, Some(30)), None);
+        assert_eq!(blocking_days(true, true, Some(30), false), None);
+        assert_eq!(blocking_days(false, false, Some(30), false), None);
+        // Le monde de sa version est déjà complet ici : son absence ne bloque rien, pas de bannière.
+        assert_eq!(blocking_days(false, true, Some(30), true), None);
+    }
+
+    #[test]
+    fn tetes_inconnues_tentees_une_seule_fois_par_pair() {
+        let (g, p, q) = (GroupId([1; 16]), [2u8; 32], [3u8; 32]);
+        let id = |n: u8| VersionId([n; 32]);
+        let set = |ns: &[u8]| ns.iter().map(|n| id(*n)).collect::<BTreeSet<_>>();
+        let mut m = UnknownMemo::default();
+        assert!(!m.claim((g, p), &set(&[])), "rien d'inconnu : rien à tenter");
+        // Premier `Hello` avec une tête inconnue : on tente ; les suivants identiques ne relancent rien.
+        assert!(m.claim((g, p), &set(&[33])));
+        for _ in 0..5 {
+            assert!(!m.claim((g, p), &set(&[33])));
+        }
+        // Un autre pair est indépendant.
+        assert!(m.claim((g, q), &set(&[33])));
+        // Une nouvelle tête inconnue : un essai de plus ; un sous-ensemble de ce qui a été tenté, non.
+        assert!(m.claim((g, p), &set(&[33, 40])));
+        assert!(!m.claim((g, p), &set(&[40])));
+        // Pair hors ligne ou rattrapage en échec : on retente.
+        m.forget(&(g, p));
+        assert!(m.claim((g, p), &set(&[33])));
+        // Des opérations appliquées (qui peut signer a changé) : tout le groupe est retenté.
+        m.forget_group(&g);
+        assert!(m.claim((g, p), &set(&[33])) && m.claim((g, q), &set(&[33])));
+        // Borne : on repart de zéro plutôt que de grossir sans fin.
+        let many: BTreeSet<VersionId> = (0..=255u8).map(id).collect();
+        assert!(m.claim((g, p), &many));
+        let fresh = VersionId([0, 1].iter().cycle().take(32).copied().collect::<Vec<u8>>().try_into().unwrap());
+        assert!(m.claim((g, p), &BTreeSet::from([fresh])), "un id nouveau au-delà de la borne : essai de plus");
+        assert!(!m.claim((g, p), &BTreeSet::from([fresh])));
+        assert!(m.tried[&(g, p)].len() <= UnknownMemo::MAX_PER_PEER);
     }
 
     #[test]

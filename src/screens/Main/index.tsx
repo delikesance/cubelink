@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import "./main.css";
 import { useScreenTitle, useShell } from "../../app/context";
-import { peekImportWarning, setImportWarning } from "../../app/importWarning";
+import { peekImportWarning, peekPrepareDeferred, setImportWarning, setPrepareDeferred } from "../../app/importWarning";
 import type { FriendWithPresence, HostState, Instance, Invite } from "../../services";
 import { errMsg, useLaunch } from "../../app/useLaunch";
 import { Button, IconButton } from "../../ui";
@@ -48,7 +48,6 @@ export default function Main() {
   const [instances, setInstances] = useState<Instance[] | null>(null);
   const { launch, error: launchError, play: startGame, kill: stopGame, clearError } = useLaunch(services);
   /** Dernier modpack lancé depuis l'accueil : nomme l'échec quand l'appel de lancement lui-même est rejeté. */
-  const [lastPlayed, setLastPlayed] = useState<string | null>(null);
   /** Événement d'échec que l'utilisateur a fermé (comparé par identité). */
   const [dismissed, setDismissed] = useState<unknown>(null);
   const [requests, setRequests] = useState<number | null>(null);
@@ -65,10 +64,13 @@ export default function Main() {
   /** Modpack dont la suppression attend confirmation (clic droit > Supprimer). */
   const [toDelete, setToDelete] = useState<Instance | null>(null);
   const [warning, setWarning] = useState<string[] | null>(() => peekImportWarning());
+  /** Cause de l'échec de préparation du jeu après un import : l'instance est là, le jeu viendra au premier lancement. */
+  const [deferred, setDeferred] = useState<string | null>(() => peekPrepareDeferred());
 
   useScreenTitle(null);
 
-  useEffect(() => { setImportWarning(null); }, []);
+  useEffect(() => { setImportWarning(null); setPrepareDeferred(null); }, []);
+  useEffect(() => services.onImportDeferred((e) => setDeferred(e.message)), [services]);
   useEffect(() => services.onImportWarning((e) => { if (e.missing.length) setWarning(e.missing); }), [services]);
 
   useEffect(() => {
@@ -123,7 +125,7 @@ export default function Main() {
   const play = (id: string) => {
     setActionError(null);
     const inst = instances?.find((x) => x.id === id);
-    gate.guard(inst ?? { id, name: id }, () => { setLastPlayed(id); void startGame(id); }, () => navigate("instance", { id, tab: "mods" }), () => navigate("instance", { id, tab: "mods", fix: "1" }));
+    gate.guard(inst ?? { id, name: id }, () => { void startGame(id); }, () => navigate("instance", { id, tab: "mods" }), () => navigate("instance", { id, tab: "mods", fix: "1" }));
   };
   const kill = async (id: string) => {
     setActionError(null);
@@ -212,8 +214,8 @@ export default function Main() {
   };
 
   // Échec de lancement rapide : bandeau en haut, avec accès aux logs du modpack concerné.
-  const failedId = launch?.state === "failed" && launch !== dismissed ? launch.id : launchError !== null ? lastPlayed : null;
-  const failMsg = launchError ?? (launch?.state === "failed" ? launch.message ?? "" : "");
+  const failedId = launch?.state === "failed" && launch !== dismissed ? launch.id : launchError ? launchError.id : null;
+  const failMsg = launchError?.message ?? (launch?.state === "failed" ? launch.message ?? "" : "");
   const failInst = failedId ? instances?.find((i) => i.id === failedId) : undefined;
 
   // Colonne d'amis : en partie, en ligne, tous ; filtre par pseudo.
@@ -241,6 +243,14 @@ export default function Main() {
           </div>
         )}
         {actionError && <p className="home-err" role="alert">{actionError}</p>}
+        {deferred && instances && instances.length > 0 && (
+          <div className="home-warn enter" role="status">
+            <span>
+              Modpack ajouté, mais le jeu n'a pas pu être préparé ({deferred}). Il sera téléchargé au premier lancement.
+            </span>
+            <Button variant="secondary" onClick={() => setDeferred(null)}>Ignorer</Button>
+          </div>
+        )}
         {warning && instances && instances.length > 0 && (
           <div className="home-warn enter" role="status">
             <span>
@@ -318,7 +328,7 @@ export default function Main() {
                     <button type="button" className="home-tile" aria-label={i.name} onClick={() => navigate("instance", { id: i.id })}>
                       <Avatar services={services} inst={i} className="home-av home-tile-av" />
                       <span className="home-tile-txt">
-                        <span className="n">{i.name}</span>
+                        <span className="n" title={i.name}>{i.name}</span>
                         <span className="m">{shortMeta(i)}{n > 0 && <span className="there"> · {friendsHere(n)}</span>}</span>
                       </span>
                     </button>

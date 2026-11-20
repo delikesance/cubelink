@@ -5,7 +5,7 @@
 
 /* Zone principale (parties puis modpacks) et colonne d'amis à droite */
 .home{display:flex}
-.home-main{flex:1;min-width:0;overflow:auto;box-sizing:border-box;padding:var(--sp-5) 40px;display:flex;flex-direction:column;gap:var(--sp-5)}
+.home-main{container:home-main/inline-size;flex:1;min-width:0;overflow:auto;box-sizing:border-box;padding:var(--sp-5) 40px;display:flex;flex-direction:column;gap:var(--sp-5)}
 .home-head{display:flex;align-items:flex-end;justify-content:space-between;gap:var(--sp-4)}
 .home-head.is-small{align-items:center}
 .home-head-txt{display:flex;flex-direction:column;gap:6px;min-width:0}
@@ -130,11 +130,9 @@
 
 /* Paramètres (A5) */
 
-@media (max-width:1100px){
-  .home-sessions-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
-}
-@media (max-width:900px){
-  .home-main{padding:var(--sp-4)}
+/* La place dépend de .home-main (fenêtre moins la colonne d'amis de --panel-w), pas de la fenêtre : à 960 px (minWidth) il reste 500 px utiles.
+   En dessous de 660 px de large, une colonne de modpacks (texte lisible) et deux de parties. --panel-w ne bouge pas : stage.ts et .ov-dock s'y calent. */
+@container home-main (max-width:660px){
   .home-grid{grid-template-columns:minmax(0,1fr)}
-  .home-side{width:320px}
+  .home-sessions-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
 }

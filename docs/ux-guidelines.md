@@ -41,10 +41,10 @@ Priorités : **H** = haute (sécurité, blocage, état manquant), **M** = moyenn
 
 ### 1. Connexion (`Login`)
 
-Constats : bouton « Se connecter avec Microsoft », lien « Pas de compte Minecraft ? En acheter un », rassurance sur l'identité locale, lien d'aide « Problème lors de la connexion ? », textes secondaires en 12-13 px.
+Constats : bouton « Se connecter avec Microsoft », lien « Pas de compte Minecraft ? En acheter un », rassurance sur l'identité locale, lien « Obtenir un nouveau code » sur l'écran du code (ex-« Problème lors de la connexion ? », renommé car il ne fait que redemander un code), textes secondaires en 12-13 px.
 
-- **H** : Ajouter l'**état d'attente** après le clic : « Ouverture de Microsoft dans ton navigateur… En attente de ta connexion » avec un bouton « Annuler » et un délai d'expiration (P1 [A p.17]). Sans cela, l'utilisateur ne sait pas si le clic a fonctionné pendant que le navigateur s'ouvre.
-- **H** : Concevoir les **états d'erreur** : compte sans licence Minecraft, connexion annulée, pas de réseau. Message en langage courant + action (« Réessayer », « Acheter le jeu ») (P3 [A p.23]). Le lien « Problème lors de la connexion ? » doit mener quelque part de précis, pas à une page générique.
+- **H** : Ajouter l'**état d'attente** après le clic : « Ouverture de Microsoft dans ton navigateur… En attente de ta connexion » avec un bouton « Annuler » (aussi sur Échap, sur les écrans code, expiré et échec ; retour à l'accueil avec « Jouer hors ligne ») et un délai d'expiration (P1 [A p.17]). Sans cela, l'utilisateur ne sait pas si le clic a fonctionné pendant que le navigateur s'ouvre.
+- **H** : Concevoir les **états d'erreur** : compte sans licence Minecraft, connexion annulée, pas de réseau. Message en langage courant + action (« Réessayer », « Acheter le jeu ») (P3 [A p.23]). Le lien d'aide doit mener quelque part de précis, pas à une page générique : traité en nommant honnêtement l'action (« Obtenir un nouveau code »), faute d'infrastructure d'aide.
 - **M** : Reformuler la rassurance « Ton identité réseau est créée sur cet ordinateur » : « identité réseau » est du jargon. Proposition : « Cubelink crée une clé privée sur cet ordinateur pour te reconnaître auprès de tes amis. Aucun serveur ne stocke ton compte ni ta liste d'amis. » (P3, P10 [B p.42]). Garder la seconde phrase, elle est le meilleur argument du produit.
 - **M** : Un seul appel à l'action visible ; « En acheter un » doit rester visuellement secondaire (lien, pas bouton) (P5 [A p.15]).
 - **B** : Porter les textes secondaires (12-13 px, `#8A8A8A` sur `#0A0A0A`) à 13-14 px et vérifier le ratio de contraste (P9 [A p.16]).

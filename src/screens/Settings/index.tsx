@@ -6,6 +6,7 @@ import { Button, Card, Field, Input } from "../../ui";
 import { UpdateSection } from "./UpdateSection";
 import { Logo } from "../Login/Logo";
 import { formatBytes } from "../Install/format";
+import { IdentityBackup } from "./IdentityBackup";
 import { Accounts } from "./Accounts";
 import { useStageSupported } from "../../app/stage";
 import type { NetTest, Settings as BaseSettings } from "../../services/types";
@@ -29,6 +30,17 @@ export type SettingsData = BaseSettings;
 
 export const RAM_MIN_MB = 512;
 export const RAM_MAX_MB = 65536;
+/** Valeur « Automatique » de la mémoire par défaut : calculée au lancement selon le PC et le nombre de mods. */
+export const RAM_AUTO_MB = 0;
+/** Valeur proposée quand on quitte « Automatique » sans valeur manuelle connue. */
+const RAM_MANUAL_START_MB = 4096;
+/** Au-delà de cette part de la RAM du PC, une valeur manuelle fait ralentir Windows : on prévient (sans bloquer). */
+const RAM_WARN_SHARE = 0.75;
+
+/** « 16 Go », « 7,5 Go » : arrondi au dixième. */
+export function gbLabel(mb: number): string {
+  return `${Math.round((mb / 1024) * 10) / 10} Go`.replace(".", ",");
+}
 
 /** Message d'erreur en français ou null. */
 export function validateRam(mb: number): string | null {
@@ -74,55 +86,31 @@ export const SECTIONS = [
 ] as const;
 export type SectionId = (typeof SECTIONS)[number]["id"];
 
-/** Région lisible d'un relais n0 (« euc1-1.relay.n0.iroh.link » → « Europe »). */
-function relayPlace(host: string | null): string {
-  const h = (host ?? "").toLowerCase();
-  if (h.startsWith("eu")) return "Europe";
-  if (h.startsWith("us")) return "Amérique du Nord";
-  if (h.startsWith("ap")) return "Asie-Pacifique";
-  return host ?? "";
-}
-
 export type NetTone = "ok" | "warn" | "danger" | "neutral";
 /** Un point vérifié : `ok` null = non mesuré ou sans objet. */
 export interface NetCheck { label: string; ok: boolean | null; detail: string }
 /** Verdict lisible d'un coup d'œil : niveau (couleur + icône + mot), ce que ça change, puis le détail. */
 export interface NetVerdict { tone: NetTone; label: string; summary: string; checks: NetCheck[] }
 
+/**
+ * Aucun relais ni serveur tiers : tes amis ne te joignent que par une adresse directe (IPv6 globale, IPv4 publique ou
+ * port ouvert sur ta box). On ne peut pas vérifier depuis l'appareil qu'un pare-feu ne la filtre pas : d'où
+ * « probablement ». Sans aucune de ces adresses, tu ne peux te connecter qu'à un ami qui, lui, est joignable.
+ */
 export function netVerdict(t: NetTest): NetVerdict {
-  const where = relayPlace(t.relay);
-  const relayDetail = t.relay_connected
-    ? ["joignable", where, t.relay_ms != null ? `${t.relay_ms} ms` : ""].filter(Boolean).join(" · ")
-    : "injoignable";
-  const direct: NetCheck = t.relay_only
-    ? { label: "Connexion directe", ok: null, detail: "désactivée par ton réglage" }
-    : t.partial
-      ? { label: "Connexion directe", ok: null, detail: "pas encore mesurée" }
-      : !t.udp
-        ? { label: "Connexion directe", ok: false, detail: "bloquée par un pare-feu (UDP filtré)" }
-        : t.direct === false
-          ? { label: "Connexion directe", ok: false, detail: "gênée par ton routeur" }
-          : { label: "Connexion directe", ok: true, detail: "possible" };
-  const relay: NetCheck = { label: "Relais de secours", ok: t.relay_connected, detail: relayDetail };
-  const checks = [direct, relay];
+  const checks: NetCheck[] = [
+    { label: "Adresse IPv6", ok: t.ipv6, detail: t.ipv6 ? "publique, disponible" : "indisponible chez ton fournisseur ou sur ta box" },
+    { label: "Adresse IPv4 publique", ok: t.ipv4_public, detail: t.ipv4_public ? "portée directement par ton appareil" : "non (derrière une box ou un CGNAT)" },
+    { label: "Port ouvert sur la box", ok: t.port_mapped, detail: t.port_mapped ? "ouvert automatiquement (UPnP)" : "non ouvert (UPnP, NAT-PMP et PCP absents ou désactivés)" },
+  ];
   const v = (tone: NetTone, label: string, summary: string): NetVerdict => ({ tone, label, summary, checks });
-
-  if (!t.relay_connected && (!t.udp || t.relay_only)) {
-    return v("danger", "Hors ligne", t.relay_only
-      ? "Personne ne peut te rejoindre : le relais est injoignable et tu as choisi de toujours passer par lui."
-      : "Personne ne peut te rejoindre. Vérifie ta connexion Internet ou ton pare-feu.");
+  if (t.port_mapped) {
+    return v("ok", "Joignable", "Ta box a ouvert le port : tes amis peuvent se connecter directement à toi, sans serveur intermédiaire.");
   }
-  if (t.relay_only) return v("ok", "Relais uniquement", "Comme demandé, tout passe par le relais : tes amis te rejoignent, un peu plus lentement.");
-  if (t.partial) return v("neutral", "Test incomplet", "La mesure n'est pas terminée. Réessaie dans quelques secondes.");
-  if (!t.udp) return v("warn", "Limitée", "Tes amis peuvent te rejoindre, mais tout passe par le relais : plus lent.");
-  if (t.direct === false) {
-    return t.relay_connected
-      ? v("warn", "Correcte", "Tes amis peuvent te rejoindre ; certaines parties passeront par le relais, un peu plus lent.")
-      : v("danger", "Fragile", "Certains amis risquent de ne pas pouvoir te rejoindre.");
+  if (t.ipv6 || t.ipv4_public) {
+    return v("ok", "Probablement joignable", "Tu as une adresse publique : tes amis devraient pouvoir se connecter directement à toi, sauf si un pare-feu la bloque.");
   }
-  return t.relay_connected
-    ? v("ok", "Excellente", "Tout est bon : tes amis peuvent te rejoindre directement, sans ralentissement.")
-    : v("warn", "Bonne", "Connexion directe possible, mais sans secours si le routeur d'un ami la bloque.");
+  return v("warn", "Peu joignable", "Tes amis ne peuvent pas se connecter à toi, sauf sur le même réseau local. Toi, tu peux rejoindre un ami qui est joignable. Active l'UPnP sur ta box ou l'IPv6 pour y remédier.");
 }
 
 /** Icônes Iconoir (trait) : réussite, avertissement, échec, non mesuré. */
@@ -199,6 +187,8 @@ export default function Settings({ testConnection }: SettingsProps = {}) {
   const [clearing, setClearing] = useState(false);
   const [javaPath, setJavaPath] = useState("");
   const [ram, setRam] = useState("");
+  // RAM physique du PC en Mo (`null` : illisible ou pas encore lue).
+  const [sysRam, setSysRam] = useState<number | null>(null);
   const [hotkey, setHotkey] = useState(DEFAULT_HOTKEY);
   // Interrupteur de sécurité des serveurs de groupe : `null` tant qu'il n'est pas lu.
   const [hearthOn, setHearthOn] = useState<boolean | null>(null);
@@ -214,11 +204,12 @@ export default function Settings({ testConnection }: SettingsProps = {}) {
         if (!alive.current) return;
         setSettings(s);
         setJavaPath(s.java_path ?? "");
-        setRam(String(s.default_ram_mb));
+        setRam(String(s.default_ram_mb === RAM_AUTO_MB ? RAM_MANUAL_START_MB : s.default_ram_mb));
         setHotkey(s.overlay_hotkey || DEFAULT_HOTKEY);
       },
       (e) => { if (alive.current) setError(messageOf(e)); },
     );
+    services.systemRamMb().then((mb) => { if (alive.current) setSysRam(mb); }, () => {});
     services.hearthEnabled().then((v) => { if (alive.current) setHearthOn(v); }, () => { if (alive.current) setHearthOn(false); });
     return () => { alive.current = false; };
   }, [services]);
@@ -327,10 +318,19 @@ export default function Settings({ testConnection }: SettingsProps = {}) {
     const next = hotkey.trim();
     if (next !== (settings.overlay_hotkey || DEFAULT_HOTKEY)) void update({ overlay_hotkey: next });
   };
+  const ramAuto = settings ? settings.default_ram_mb === RAM_AUTO_MB : true;
   const commitRam = () => {
-    if (!settings || ramError) return;
+    if (!settings || ramAuto || ramError) return;
     if (ramNum !== settings.default_ram_mb) void update({ default_ram_mb: ramNum });
   };
+  // Passer en manuel reprend la dernière valeur saisie (4 Go au départ) ; revenir à « Automatique » la garde en réserve.
+  const toggleRamAuto = (auto: boolean) => {
+    if (!settings) return;
+    if (auto) void update({ default_ram_mb: RAM_AUTO_MB });
+    else if (!ramError) void update({ default_ram_mb: ramNum });
+    else { setRam(String(RAM_MANUAL_START_MB)); void update({ default_ram_mb: RAM_MANUAL_START_MB }); }
+  };
+  const ramTooHigh = !ramAuto && !ramError && sysRam !== null && ramNum > sysRam * RAM_WARN_SHARE;
 
   // Focus initial dans la confirmation (bouton le moins destructeur), restitué à la fermeture.
   useEffect(() => {
@@ -391,6 +391,7 @@ export default function Settings({ testConnection }: SettingsProps = {}) {
 
       <div {...panel("compte")}>
         <Accounts onError={setError} />
+        <IdentityBackup />
       </div>
 
       <div {...panel("amis")}>
@@ -404,7 +405,7 @@ export default function Settings({ testConnection }: SettingsProps = {}) {
       </div>
 
       <div {...panel("reseau")}>
-        <p className="set-sub">Connexion directe quand c'est possible, sinon via un relais (un serveur intermédiaire public, plus lent).</p>
+        <p className="set-sub">Cubelink se connecte à tes amis en direct, sans serveur intermédiaire. Pour que deux amis puissent se joindre, au moins l'un des deux doit être joignable (IPv6 ou port ouvert sur la box).</p>
         <Card className="set-list">
           <div className="set-row">
             <div className="set-txt">
@@ -415,14 +416,6 @@ export default function Settings({ testConnection }: SettingsProps = {}) {
             </div>
             <Button variant="secondary" disabled={netBusy} onClick={() => void runTest()}>{netBusy ? "Test en cours…" : "Tester ma connexion"}</Button>
           </div>
-          <label className="set-row" style={{ cursor: "pointer" }}>
-            <div className="set-txt"><b>Passer toujours par le relais</b><span>Utiliser uniquement le relais&nbsp;: tes amis ne voient pas ton adresse IP, mais le relais la voit. Les transferts seront plus lents.</span></div>
-            <input type="checkbox" className="set-check" disabled={dis} checked={!!settings?.relay_only} onChange={(e) => void update({ relay_only: e.target.checked })} />
-          </label>
-          <label className="set-row" style={{ cursor: "pointer" }}>
-            <div className="set-txt"><b>Retrouver mes amis même si leur adresse change</b><span>Publie ta présence via les serveurs n0 pour que tes amis te retrouvent. Désactive pour rester totalement privé. Appliqué au prochain démarrage.</span></div>
-            <input type="checkbox" className="set-check" disabled={dis} checked={settings?.discovery !== false} onChange={(e) => void update({ discovery: e.target.checked })} />
-          </label>
           <label className="set-row" style={{ cursor: "pointer" }}>
             <div className="set-txt"><b>Ouvrir mon monde au réseau local automatiquement</b><span>Quand tu entres dans un monde solo, Cubelink l'ouvre pour que tes amis puissent te rejoindre. Appliqué au prochain lancement du jeu.</span></div>
             <input type="checkbox" className="set-check" disabled={dis} checked={settings?.lan_auto !== false} onChange={(e) => void update({ lan_auto: e.target.checked })} />
@@ -443,7 +436,7 @@ export default function Settings({ testConnection }: SettingsProps = {}) {
         <Card as="section" aria-label="Raccourci jeu et launcher" className="set-field">
           {stageSupported && (
             <label className="set-row" style={{ cursor: "pointer" }}>
-              <div className="set-txt"><b>Jeu intégré</b><span>Le jeu s'affiche dans la fenêtre de Cubelink. Désactive si le jeu ne s'affiche pas correctement. Appliqué au prochain lancement du jeu, et sous Linux au prochain démarrage de Cubelink.</span></div>
+              <div className="set-txt"><b>Jeu intégré</b><span>Le jeu s'affiche dans la fenêtre de Cubelink. Désactive si le jeu ne s'affiche pas correctement. Appliqué au prochain lancement du jeu. Sous Linux, il faut aussi quitter Cubelink (clic droit sur son icône dans la zone de notification, puis « Quitter Cubelink ») et le relancer : fermer la fenêtre ne suffit pas.</span></div>
               <input type="checkbox" className="set-check" disabled={dis} checked={settings?.embedded_game !== false} onChange={(e) => void update({ embedded_game: e.target.checked })} />
             </label>
           )}
@@ -467,21 +460,40 @@ export default function Settings({ testConnection }: SettingsProps = {}) {
         </Card>
         <details className="set-more">
           <summary>En savoir plus</summary>
-          <p>Ce test ne garantit pas la connexion directe avec chaque ami&nbsp;: certains réseaux l'empêchent, et Cubelink passe alors par le relais.</p>
+          <p>Il n'y a plus de serveur intermédiaire&nbsp;: si ni toi ni ton ami n'êtes joignables (réseau très fermé, sans IPv6 ni UPnP), vous ne pourrez pas vous connecter, en attendant la découverte par DHT Mainline et les relais Cubelink (prévus).</p>
         </details>
       </div>
 
       <div {...panel("java")}>
-        <p className="set-sub">Réglages appliqués par défaut aux nouvelles instances. Chaque instance garde ses propres valeurs.</p>
+        <p className="set-sub">Valeurs proposées pour toutes les instances qui n'ont pas les leurs.</p>
         <Card className="set-two">
-          <Field label="Mémoire par défaut (Mo)" error={ramError} hint="Utilisée par toutes les instances réglées sur « Valeur des paramètres », dont les mondes de tes amis.">
+          <div style={{ gridColumn: "1 / -1" }}>
+            <label className="set-row" style={{ cursor: "pointer" }}>
+              <div className="set-txt">
+                <b>Mémoire automatique (recommandé)</b>
+                <span>
+                  Cubelink choisit à chaque lancement selon le nombre de mods et la mémoire de ton PC
+                  {sysRam !== null ? ` (≈\u00a0${gbLabel(sysRam)} sur ce PC)` : ""}. S'applique aux instances réglées sur «&nbsp;Valeur des paramètres&nbsp;», dont les mondes de tes amis.
+                </span>
+              </div>
+              <input type="checkbox" className="set-check" disabled={dis} checked={ramAuto} onChange={(e) => toggleRamAuto(e.target.checked)} />
+            </label>
+          </div>
+          <Field label="Mémoire par défaut (Mo)" error={ramAuto ? undefined : ramError} hint={ramAuto ? "Décoche « Mémoire automatique » pour choisir une valeur toi-même." : "Utilisée par toutes les instances réglées sur « Valeur des paramètres », dont les mondes de tes amis."}>
             {(p) => (
-              <Input {...p} type="number" inputMode="numeric" min={RAM_MIN_MB} max={RAM_MAX_MB} step={256} disabled={dis}
+              <Input {...p} type="number" inputMode="numeric" min={RAM_MIN_MB} max={RAM_MAX_MB} step={256} disabled={dis || ramAuto}
                 value={ram} onChange={(e) => setRam(e.target.value)} onBlur={commitRam}
                 onKeyDown={(e) => { if (e.key === "Enter") commitRam(); }} />
             )}
           </Field>
-          <Field label="Chemin de Java" hint="Facultatif. Laisse vide si tu ne sais pas." error={javaError}>
+          <div role="status" aria-live="polite" style={{ gridColumn: "1 / -1" }}>
+            {ramTooHigh && sysRam !== null && (
+              <p className="set-hint">
+                Attention&nbsp;: {gbLabel(ramNum)} dépassent 75&nbsp;% de la mémoire de ce PC ({gbLabel(sysRam)}). Windows risque de ralentir, voire de fermer le jeu. Repasse en «&nbsp;Mémoire automatique&nbsp;» si tu hésites.
+              </p>
+            )}
+          </div>
+          <Field label="Chemin de Java" hint="Facultatif. Utilisé seulement si sa version convient à Minecraft ; sinon Cubelink choisit et installe la bonne. Laisse vide si tu ne sais pas." error={javaError}>
             {(p) => (
               <Input {...p} type="text" spellCheck={false} autoComplete="off" disabled={dis}
                 value={javaPath} onChange={(e) => setJavaPath(e.target.value)} onBlur={commitJava}

@@ -453,6 +453,7 @@ mod tests {
             jvm_args: String::new(),
             wrapper: String::new(),
             art: None,
+            pack: None,
         }
     }
 

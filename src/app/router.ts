@@ -1,7 +1,7 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
 
 export const ROUTES = [
-  "login", "main", "instance", "create", "install", "join", "settings", "error", "legal", "browse", "hearth",
+  "login", "main", "instance", "create", "join", "settings", "error", "legal", "browse", "hearth",
 ] as const;
 export type RouteName = (typeof ROUTES)[number];
 export const DEFAULT_ROUTE: RouteName = "login";
@@ -20,6 +20,8 @@ export function parseHash(hash: string): Location {
   new URLSearchParams(query).forEach((v, k) => { params[k] = v; });
   // Ancien écran Amis : ses réglages vivent maintenant dans Paramètres > Amis.
   if (name === "friends") return { route: "settings", params: { ...params, tab: "amis" } };
+  // Ancien écran Install (supprimé) : le transfert d'un ami vit dans Rejoindre.
+  if (name === "install") return params.friend ? { route: "join", params } : { route: "main", params: {} };
   const route = (ROUTES as readonly string[]).includes(name) ? (name as RouteName) : DEFAULT_ROUTE;
   return { route, params };
 }
@@ -97,7 +99,20 @@ function backIndex(): number {
 
 export function canGoBack(): boolean { return backIndex() >= 0; }
 
+/**
+ * Garde de sortie : tant qu'elle est enregistrée, un retour (bouton de la barre, Alt+←, bouton souris) lui est
+ * soumis. Elle renvoie `true` pour bloquer le retour (typiquement en demandant une confirmation). Un seul
+ * propriétaire à la fois ; le désenregistreur ne retire que sa propre garde. `navigate()` n'est pas gardé.
+ */
+let backGuard: (() => boolean) | null = null;
+
+export function setBackGuard(guard: () => boolean): () => void {
+  backGuard = guard;
+  return () => { if (backGuard === guard) backGuard = null; };
+}
+
 export function goBack(fallback?: RouteName): void {
+  if (backGuard?.()) return;
   const i = backIndex();
   if (i < 0) { navigate(fallback ?? "main"); return; }
   const target = stack[i];
@@ -118,6 +133,7 @@ export function takePendingFocus(): string | null {
 export function resetHistory(): void {
   stack = [];
   pendingFocus = null;
+  backGuard = null;
   sync();
   emit();
 }

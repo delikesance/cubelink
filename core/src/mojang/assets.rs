@@ -54,8 +54,8 @@ impl Default for DownloadOptions {
     }
 }
 
-fn net(e: impl std::fmt::Display) -> Error {
-    Error::Network(e.to_string())
+fn net(e: reqwest::Error) -> Error {
+    crate::http::net_error(e)
 }
 
 /// Télécharge l'index, vérifie son sha1, le sauvegarde dans `<assets_dir>/indexes/<id>.json`.
@@ -72,7 +72,7 @@ pub async fn fetch_asset_index(index_ref: &AssetIndexRef, assets_dir: &Path) -> 
             }
         }
     }
-    let resp = reqwest::get(&index_ref.url).await.map_err(net)?;
+    let resp = crate::http::client().get(&index_ref.url).send().await.map_err(net)?;
     if !resp.status().is_success() {
         return Err(Error::Network(format!("index d'assets {} : HTTP {}", index_ref.id, resp.status())));
     }
@@ -127,8 +127,22 @@ pub async fn download_assets_with<F>(
 where
     F: Fn(AssetProgress) + Send + Sync,
 {
+    download_assets_client(&crate::http::client(), index, assets_dir, base_url, progress, options).await
+}
+
+/// Cœur de [`download_assets_with`] avec un client fourni (les tests y injectent des délais courts).
+async fn download_assets_client<F>(
+    client: &reqwest::Client,
+    index: &AssetIndex,
+    assets_dir: &Path,
+    base_url: Option<&str>,
+    progress: F,
+    options: &DownloadOptions,
+) -> Result<()>
+where
+    F: Fn(AssetProgress) + Send + Sync,
+{
     let base = base_url.unwrap_or(DEFAULT_RESOURCES_URL).trim_end_matches('/');
-    let client = reqwest::Client::new();
 
     // Dédoublonnage : plusieurs noms peuvent pointer vers le même objet.
     let mut seen = HashSet::new();
@@ -149,7 +163,6 @@ where
 
     let mut results = stream::iter(objects)
         .map(|(hash, size)| {
-            let client = &client;
             async move {
                 fetch_object(client, base, assets_dir, &hash, size, options).await?;
                 Ok::<u64, Error>(size)
@@ -440,5 +453,24 @@ mod tests {
         let err = fetch_asset_index(&r, dir.path()).await.unwrap_err();
         assert!(matches!(err, Error::Integrity { .. }));
         assert!(!dir.path().join("indexes/17.json").exists());
+    }
+
+    #[tokio::test]
+    async fn objet_qui_ne_repond_pas_echoue_en_network_apres_les_tentatives() {
+        let server = MockServer::start().await;
+        let cs = contents(1);
+        let h = obj(&cs[0]).0;
+        Mock::given(method("GET"))
+            .and(path(format!("/{}/{}", &h[..2], h)))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(cs[0].clone()).set_delay(Duration::from_secs(5)))
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let client = crate::http::builder_with(Duration::from_secs(5), Duration::from_millis(200)).build().unwrap();
+        let o = DownloadOptions { attempts: 2, ..opts() };
+        let t = std::time::Instant::now();
+        let err = download_assets_client(&client, &index_of(&cs), dir.path(), Some(&server.uri()), |_| {}, &o).await.unwrap_err();
+        assert!(t.elapsed() < Duration::from_secs(3), "{:?}", t.elapsed());
+        assert!(matches!(&err, Error::Network(m) if m.contains("délai dépassé")), "{err:?}");
     }
 }

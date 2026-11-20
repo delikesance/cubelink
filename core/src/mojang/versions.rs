@@ -114,7 +114,7 @@ impl VersionsClient {
     }
 
     pub fn with_manifest_url(url: impl Into<String>) -> Self {
-        Self { http: reqwest::Client::new(), manifest_url: url.into() }
+        Self { http: crate::http::client(), manifest_url: url.into() }
     }
 
     async fn get_bytes(&self, url: &str) -> Result<Vec<u8>> {
@@ -152,7 +152,7 @@ pub async fn fetch_version_json(entry: &VersionEntry) -> Result<VersionJson> {
 
 /// GET d'une URL en mémoire : 404 en `NotFound`, autre échec HTTP en `Network`.
 pub(crate) async fn get_bytes(http: &reqwest::Client, url: &str) -> Result<Vec<u8>> {
-    let resp = http.get(url).send().await.map_err(|e| Error::Network(e.to_string()))?;
+    let resp = http.get(url).send().await.map_err(crate::http::net_error)?;
     let status = resp.status();
     if status.as_u16() == 404 {
         return Err(Error::NotFound(url.to_string()));
@@ -160,7 +160,7 @@ pub(crate) async fn get_bytes(http: &reqwest::Client, url: &str) -> Result<Vec<u
     if !status.is_success() {
         return Err(Error::Network(format!("HTTP {} pour {url}", status.as_u16())));
     }
-    let bytes = resp.bytes().await.map_err(|e| Error::Network(e.to_string()))?;
+    let bytes = resp.bytes().await.map_err(crate::http::net_error)?;
     Ok(bytes.to_vec())
 }
 

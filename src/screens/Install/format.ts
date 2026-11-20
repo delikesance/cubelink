@@ -55,16 +55,19 @@ export function etaSeconds(p: TransferProgress, smoothed: number | null): number
   return Math.max(0, (p.bytes_total - p.bytes_done) / smoothed);
 }
 
-export type FailureKind = "friend-left" | "bad-hash" | "disk-full" | "java-missing" | "offline";
+export type FailureKind = "friend-left" | "bad-hash" | "disk-full";
 
-/** Identifie la cause d'un échec d'après son message ; null si non reconnu. */
+/**
+ * Identifie la cause d'un échec de transfert d'après son message ; null si non reconnu (l'appelant
+ * affiche alors le message réel). Un message sur Java ou sur le réseau n'est jamais pris pour un départ
+ * de l'ami, même s'il contient « ami ».
+ */
 export function classifyFailure(message: string | undefined): FailureKind | null {
   if (!message) return null;
   const m = message.toLowerCase();
   if (/disk|disque|espace|enospc|no space/.test(m)) return "disk-full";
   if (/hash|integrit|intégrit|corrompu|checksum|mismatch/.test(m)) return "bad-hash";
-  if (/java/.test(m)) return "java-missing";
-  if (/offline|hors ligne|r[eé]seau|network/.test(m)) return "offline";
+  if (/java|offline|hors ligne|r[eé]seau|network/.test(m)) return null;
   if (/friend|ami|peer|left|d[eé]connect|parti/.test(m)) return "friend-left";
   return null;
 }

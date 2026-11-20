@@ -6,11 +6,14 @@ import { makeFriends, friendKeyOnB, waitOnline, sleep } from './e2e2-common';
 
 export { sleep };
 
-export interface Invite { id: string; public_key: string; name: string; world_name: string; minecraft: string; received_at: number; expires_at: number }
+export interface Invite { id: string; public_key: string; name: string; world_name: string; minecraft: string; received_at: number; expires_at: number; pack?: string | null }
 
 /** Raccourci rare : evite d'occuper Ctrl+Shift+C (global a la machine) pendant les tests. */
 export const TEST_HOTKEY = 'Ctrl+Alt+Shift+F11';
-export const WORLD_NAME = 'Monde Invitation';
+/** Nom de l'instance de l'hote : il part dans `pack` (modpack de l'ami), pas dans `world_name`. */
+export const PACK_NAME = 'Monde Invitation';
+/** Monde reellement ouvert (dossier de `saves/` de la fixture d'instance) : c'est lui que porte `world_name` (invites.rs : `current_world`). */
+export const WORLD_NAME = 'TestWorld';
 
 /** A (hote, instance posee, connecte) et B (ami, connecte), amis acceptes ; renvoie la cle de chacun vue par l'autre. */
 export async function setupPair(world: Pick<World, 'appA' | 'appB'>) {
@@ -23,7 +26,7 @@ export async function setupPair(world: Pick<World, 'appA' | 'appB'>) {
   }
   await loginOffline(appA.page, 'Hote');
   await loginOffline(appB.page, 'Invite');
-  const host = await makeHostInstance(appA, { name: WORLD_NAME });
+  const host = await makeHostInstance(appA, { name: PACK_NAME });
   await makeFriends(appA, appB);
   const keyA = await friendKeyOnB(appB); // A vu par B
   const keyB = await friendKeyOnB(appA); // B vu par A

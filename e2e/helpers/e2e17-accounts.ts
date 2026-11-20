@@ -78,7 +78,6 @@ export class Sandbox {
       WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${cdp} --remote-allow-origins=*`,
       WEBVIEW2_USER_DATA_FOLDER: this.webview,
       CUBELINK_DATA_DIR: this.dataDir,
-      CUBELINK_RELAY_MODE: 'disabled',
     };
     for (const k of Object.keys(env)) if (k === 'CUBELINK_TEST_MODE' || k.startsWith('CUBELINK_AUTH_')) delete env[k];
     if (testMode) {

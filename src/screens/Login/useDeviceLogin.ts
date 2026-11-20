@@ -25,40 +25,63 @@ export function useDeviceLogin(services: Services, onFailure?: (message: string)
   const [left, setLeft] = useState(0);
   const [copied, setCopied] = useState(false);
   const run = useRef(0);
+  /** Numéro de l'appel `authBeginLogin` en vol (0 = aucun) : un second clic pendant l'attente ne demande pas un second code. */
+  const beginning = useRef(0);
   const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const failure = useRef(onFailure);
   failure.current = onFailure;
 
+  /** Un flux de connexion est ouvert côté Rust (code demandé, validation pas encore reçue). */
+  const open = useRef(false);
+  const svc = useRef(services);
+  svc.current = services;
+
+  // Quitter l'écran en plein flux (sans Annuler ni Échap) coupe aussi la connexion côté Rust : une validation tardive
+  // n'ajoute aucun compte.
   useEffect(() => () => {
     run.current += 1;
     if (copyTimer.current) clearTimeout(copyTimer.current);
+    if (open.current) {
+      open.current = false;
+      svc.current.authCancelLogin().catch(() => { /* rien à annuler côté Rust */ });
+    }
   }, []);
 
   const start = useCallback(async () => {
+    if (beginning.current) return;
     const id = ++run.current;
+    beginning.current = id;
     setState({ step: "starting" });
+    open.current = true;
     try {
       const code = await services.authBeginLogin();
+      if (beginning.current === id) beginning.current = 0;
       if (id !== run.current) return;
       setLeft(code.expires_in);
       setCopied(false);
       setState({ step: "code", code });
       const profile = await services.authPollLogin();
       if (id !== run.current) return;
+      open.current = false;
       setState({ step: "connected", profile });
     } catch (e) {
+      if (beginning.current === id) beginning.current = 0;
       if (id !== run.current) return;
+      open.current = false;
       const message = messageOf(e);
       if (failure.current?.(message)) return;
       setState({ step: "error", message });
     }
   }, [services]);
 
-  /** Abandonne le flux en cours (la réponse tardive est ignorée). */
+  /** Abandonne le flux en cours : la réponse tardive est ignorée ici, et Rust cesse d'attendre le code (aucun compte ajouté). */
   const cancel = useCallback(() => {
     run.current += 1;
+    beginning.current = 0;
+    open.current = false;
     setState({ step: "idle" });
-  }, []);
+    services.authCancelLogin().catch(() => { /* rien à annuler côté Rust */ });
+  }, [services]);
 
   const waiting = state.step === "code";
   useEffect(() => {

@@ -10,11 +10,11 @@ use core_lib::launch_run::{self, LaunchEvent, LaunchPhase, LaunchStateEvent};
 use core_lib::mojang::libraries::{Arch, Os};
 use core_lib::mojang::versions::release_ids;
 use core_lib::mrpack::{self, ImportOptions, PackKind, PlainSpec};
-use core_lib::types::{Instance, Loader, LoaderSpec, Profile};
+use core_lib::types::{Instance, Loader, LoaderSpec, PackOrigin, Profile};
 use tauri::State;
 
 use crate::error::{sanitize, user_msg};
-use crate::install::{ensure_game, resolve_loader_version, safe_version, Progress};
+use crate::install::{ensure_game, ensure_game_with, resolve_loader_version, safe_version, JavaSetting, Progress};
 use crate::state::{lock, AppState};
 
 pub(crate) fn valid_id(id: &str) -> bool {
@@ -254,7 +254,7 @@ async fn lan_map_path(st: &AppState, inst: &Instance, version: &LaunchVersion, l
         Loader::NeoForge | Loader::Forge => return None,
     };
     let mappings = downloads.client_mappings.as_ref()?; // absent : jeu non obfusqué (26.x)
-    match ensure_lanmap(&dir, &reqwest::Client::new(), &inst.minecraft, runtime, mappings, inter.as_deref()).await {
+    match ensure_lanmap(&dir, &core_lib::http::client(), &inst.minecraft, runtime, mappings, inter.as_deref()).await {
         Ok(p) => Some(p),
         Err(e) => {
             tracing::warn!("LAN: correspondance de noms indisponible ({e}), l'ouverture auto peut échouer");
@@ -287,11 +287,19 @@ impl Drop for GameGuard {
         // Sans effet si la fin du jeu a deja ete annoncee.
         self.0.stage.run_finished();
         *lock(&self.0.game_handle) = None;
+        *lock(&self.0.launch_cancel) = None;
         *lock(&self.0.game) = None;
     }
 }
 
 impl AppState {
+    /// Mémoire donnée au jeu (Mo) : réglage de l'instance, sinon réglage global, sinon « Automatique ». Les mods sont
+    /// comptés sur le disque à l'instant du lancement : ceux d'un monde d'ami viennent d'être synchronisés.
+    pub(crate) fn launch_ram_mb(&self, inst: &Instance) -> u32 {
+        let mods = self.instances.mod_count(&inst.id).unwrap_or(inst.mod_count);
+        core_lib::instance::effective_ram_mb(inst.ram_mb, self.settings_get().default_ram_mb, mods, core_lib::sysmem::physical_ram_mb())
+    }
+
     pub fn instances_list(&self) -> Vec<Instance> {
         self.instances.list()
     }
@@ -302,13 +310,30 @@ impl AppState {
         let spec = LoaderSpec { loader: loader.loader, version };
         let inst = self.instances.create(name.trim(), &minecraft, spec, ram_mb).map_err(|e| user_msg(&e))?;
         let _ = self.instances.mark_custom(&inst.id);
-        let java = self.settings_get().java_path;
-        let noop: Progress = Arc::new(|_| {});
-        match ensure_game(&self.paths, &inst, java, noop).await {
-            Ok(_) => Ok(inst),
+        self.prepare_game_best_effort(&inst).await;
+        Ok(inst)
+    }
+
+    /// Prépare le jeu (loader, Java, assets) juste après une création ou un import, « au mieux » : un échec (réseau coupé, Mojang
+    /// ou Adoptium indisponible…) ne supprime jamais l'instance, qui est valide ; `ensure_game` est idempotent et reprendra au
+    /// premier lancement. La progression passe par `import://progress`, l'échec par `import://deferred`. Renvoie `true` si le jeu est prêt.
+    async fn prepare_game_best_effort(&self, inst: &Instance) -> bool {
+        let emit = self.emit.clone();
+        let progress: Progress = Arc::new(move |message| emit("import://progress", serde_json::json!({ "message": message })));
+        let java = JavaSetting::global(self.settings_get().java_path);
+        let r = ensure_game(&self.paths, inst, java, progress).await;
+        self.note_prepare_result(inst, r.map(|_| ()))
+    }
+
+    /// Suite d'une préparation : sur échec, journalise et annonce `import://deferred` (l'instance reste).
+    fn note_prepare_result(&self, inst: &Instance, r: core_lib::types::Result<()>) -> bool {
+        match r {
+            Ok(()) => true,
             Err(e) => {
-                let _ = self.instances.delete(&inst.id);
-                Err(user_msg(&e))
+                let message = user_msg(&e);
+                eprintln!("[Cubelink] préparation du jeu différée pour l'instance {} : {message}", inst.id);
+                self.emit_event("import://deferred", &serde_json::json!({ "instance_id": inst.id, "message": message }));
+                false
             }
         }
     }
@@ -323,7 +348,7 @@ impl AppState {
         loader: Option<LoaderSpec>,
         ram_mb: Option<u32>,
     ) -> Result<Instance, String> {
-        let (inst, missing) = self.import_pack_file(path, name, minecraft, loader, ram_mb, None).await?;
+        let (inst, missing) = self.import_pack_file(path, name, minecraft, loader, ram_mb, None, None).await?;
         if !missing.is_empty() {
             self.emit_event("import://warning", &serde_json::json!({ "missing": missing }));
         }
@@ -331,6 +356,11 @@ impl AppState {
     }
 
     /// Cœur de l'import : renvoie l'instance et les mods CurseForge introuvables (sans émettre d'événement).
+    ///
+    /// `origin` : projet et version du catalogue quand l'appelant les connaît (installation depuis Parcourir).
+    /// Sans `origin`, un `.mrpack` est reconnu par son empreinte SHA-1 auprès de Modrinth (meilleur effort :
+    /// hors ligne, pack modifié ou non publié, l'import réussit quand même, sans origine).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn import_pack_file(
         &self,
         path: &str,
@@ -339,6 +369,7 @@ impl AppState {
         loader: Option<LoaderSpec>,
         ram_mb: Option<u32>,
         progress: Option<core_lib::mrpack::FilesProgress>,
+        origin: Option<PackOrigin>,
     ) -> Result<(Instance, Vec<String>), String> {
         let file = validate_mrpack_path(path)?;
         // Sans choix : « Par défaut » (la valeur globale, lue à chaque lancement).
@@ -359,6 +390,7 @@ impl AppState {
                 .map_err(|_| "import interrompu".to_string())?
                 .map_err(|e| user_msg(&e))?
         };
+        let hash_target = (origin.is_none() && kind == PackKind::Modrinth).then(|| file.clone());
         let (instances, index, store_root) = (self.instances.clone(), self.store.clone(), self.paths.store.clone());
         let cancel = Arc::new(AtomicBool::new(false));
         // Les futurs d'import ne sont pas prouvés `Send` par rustc : on les exécute sur un thread dédié.
@@ -398,12 +430,27 @@ impl AppState {
             }
         };
         let inst = result.map_err(|_| "import interrompu".to_string())?.map_err(|e| user_msg(&e))?;
-        let noop: Progress = Arc::new(|_| {});
-        match ensure_game(&self.paths, &inst, self.settings_get().java_path, noop).await {
-            Ok(_) => Ok((inst, missing)),
+        // Les mods sont déjà installés : un échec de préparation du jeu ne doit pas les effacer.
+        self.prepare_game_best_effort(&inst).await;
+        let inst = self.attach_pack_origin(&crate::commands_browse::providers(), inst, origin, hash_target).await;
+        Ok((inst, missing))
+    }
+
+    /// Enregistre l'origine du modpack sur l'instance importée : celle de l'appelant si elle est connue, sinon
+    /// (`.mrpack` local) celle que Modrinth reconnaît à l'empreinte du fichier. Meilleur effort : sans origine ou en cas
+    /// d'échec, l'instance est rendue telle quelle.
+    async fn attach_pack_origin(&self, p: &core_lib::browse::Providers, inst: Instance, origin: Option<PackOrigin>, hash_target: Option<PathBuf>) -> Instance {
+        let origin = match (origin, hash_target) {
+            (Some(o), _) => Some(o),
+            (None, Some(f)) => core_lib::browse::resolve_pack_origin(p, &f).await,
+            (None, None) => None,
+        };
+        let Some(o) = origin else { return inst };
+        match self.instances.set_pack(&inst.id, Some(o)) {
+            Ok(updated) => updated,
             Err(e) => {
-                let _ = self.instances.delete(&inst.id);
-                Err(user_msg(&e))
+                eprintln!("[Cubelink] origine du modpack non enregistrée pour {} : {e}", inst.id);
+                inst
             }
         }
     }
@@ -453,6 +500,8 @@ impl AppState {
                 return Err("une partie est déjà en cours de préparation ou de jeu".into());
             }
             *g = Some(inst.id.clone());
+            // Sous le verrou `game` : un seul lancement à la fois, donc un seul drapeau.
+            *lock(&self.launch_cancel) = Some((inst.id.clone(), Arc::new(AtomicBool::new(false))));
         }
         // Zone de jeu integree : les panneaux se ferment des le clic (sur le launcher, ou sur le jeu qui vient de se fermer).
         let what = format!("{} ({}, {:?})", inst.id, inst.minecraft, inst.loader.loader);
@@ -483,49 +532,84 @@ impl AppState {
             self.stage.abort_switch("le jeu suivant s'ouvre hors de la fenetre du launcher");
         }
         let me = self.clone();
+        let cancel = lock(&self.launch_cancel).as_ref().map(|(_, f)| f.clone()).unwrap_or_default();
         // Runtime de Tauri (et non `tokio::spawn`) : valable même appelée hors d'un runtime tokio.
         tauri::async_runtime::spawn(async move {
-            let _guard = GameGuard(me.clone());
-            let joined = join.is_some();
-            me.run_game(inst, profile, token, join).await;
-            me.stage.run_finished();
-            if joined {
-                me.join_close_tunnel().await;
+            let id = inst.id.clone();
+            let cancelled = {
+                let _guard = GameGuard(me.clone());
+                let joined = join.is_some();
+                let cancelled = me.run_game(inst, profile, token, join, cancel).await;
+                me.stage.run_finished();
+                if joined {
+                    me.join_close_tunnel().await;
+                }
+                cancelled
+            };
+            // Annulé pendant la préparation : `exited` part une fois `game` libéré, pour qu'un nouveau clic sur « Jouer » passe.
+            // Le verrou `game` reste tenu pendant l'émission : un lancement concurrent de la même instance (ami, lien profond)
+            // ne peut pas poser son `preparing` avant, donc cet `exited` ne périme jamais le suivant.
+            if cancelled {
+                let game = lock(&me.game);
+                if game.is_none() {
+                    me.emit_state(&id, LaunchPhase::Exited, None);
+                }
             }
         });
         Ok(())
     }
 
-    fn emit_state(&self, id: &str, state: LaunchPhase, message: Option<String>) {
+    pub(crate) fn emit_state(&self, id: &str, state: LaunchPhase, message: Option<String>) {
         self.emit_event("launch://state", &LaunchStateEvent { id: id.to_string(), state, message });
     }
 
     /// Lance le jeu ; si l'agent LAN fait planter la JVM au chargement (erreur native impossible à attraper côté
     /// Java), relance UNE fois la même instance sans agent et désactive l'agent pour la session.
-    async fn run_game(self: &Arc<Self>, inst: Instance, profile: Profile, token: Option<String>, join_server: Option<(String, u16)>) {
+    /// Renvoie `true` si le lancement a été annulé avant le démarrage du jeu (l'événement `exited` reste à émettre).
+    async fn run_game(
+        self: &Arc<Self>,
+        inst: Instance,
+        profile: Profile,
+        token: Option<String>,
+        join_server: Option<(String, u16)>,
+        cancel: Arc<AtomicBool>,
+    ) -> bool {
         let mut crashed = false;
-        self.run_game_once(inst.clone(), profile.clone(), token.clone(), join_server.clone(), &mut crashed).await;
+        if self.run_game_once(inst.clone(), profile.clone(), token.clone(), join_server.clone(), &mut crashed, &cancel).await {
+            return true;
+        }
         if crashed {
             self.lan_agent_off.store(true, std::sync::atomic::Ordering::SeqCst);
             tracing::warn!("LAN: l'agent a fait planter la JVM, relance sans agent");
-            self.run_game_once(inst, profile, token, join_server, &mut false).await;
+            return self.run_game_once(inst, profile, token, join_server, &mut false, &cancel).await;
         }
+        false
     }
 
-    async fn run_game_once(self: &Arc<Self>, inst: Instance, profile: Profile, token: Option<String>, join_server: Option<(String, u16)>, crashed: &mut bool) {
+    /// `true` : annulé pendant la préparation, avant le démarrage du jeu (rien n'a été émis : voir `run_game`).
+    async fn run_game_once(
+        self: &Arc<Self>,
+        inst: Instance,
+        profile: Profile,
+        token: Option<String>,
+        join_server: Option<(String, u16)>,
+        crashed: &mut bool,
+        cancel: &Arc<AtomicBool>,
+    ) -> bool {
         let id = inst.id.clone();
         self.emit_state(&id, LaunchPhase::Preparing, None);
         let me = self.clone();
         let pid = id.clone();
         let progress: Progress = Arc::new(move |m| me.emit_state(&pid, LaunchPhase::Preparing, Some(m)));
-        let java_setting = inst.java_path.clone().filter(|j| !j.trim().is_empty()).or_else(|| self.settings_get().java_path);
-        let prepared = match ensure_game(&self.paths, &inst, java_setting, progress).await {
+        let java_setting = JavaSetting::for_instance(inst.java_path.as_deref(), self.settings_get().java_path);
+        let prepared = match ensure_game_with(&self.paths, &inst, java_setting, progress, cancel.clone()).await {
             Ok(p) => p,
-            Err(e) => return self.emit_state(&id, LaunchPhase::Failed, Some(user_msg(&e))),
+            Err(core_lib::types::Error::Cancelled) => return true,
+            Err(e) => return self.fail(&id, user_msg(&e)),
         };
         let game_dir = match self.instances.game_dir(&id) {
             Ok(d) => d,
-            Err(e) => return self.emit_state(&id, LaunchPhase::Failed, Some(user_msg(&e))),
+            Err(e) => return self.fail(&id, user_msg(&e)),
         };
         // Rejoindre : l'écran d'accueil « accessibilité » d'un dossier neuf bloquerait la connexion directe.
         if join_server.is_some() {
@@ -548,7 +632,7 @@ impl AppState {
         });
         let agent_on = agent_arg.is_some();
         let lan_map = if agent_on && join_server.is_none() { lan_map_path(self, &inst, &prepared.version, &prepared.libs_dir).await } else { None };
-        let ram_mb_eff = core_lib::instance::effective_ram_mb(inst.ram_mb, self.settings_get().default_ram_mb);
+        let ram_mb_eff = self.launch_ram_mb(&inst);
         let spec = LaunchSpec {
             java_path: prepared.java,
             game_dir,
@@ -581,17 +665,21 @@ impl AppState {
         };
         let mut cmd = match build_command(&spec) {
             Ok(c) => c,
-            Err(e) => return self.emit_state(&id, LaunchPhase::Failed, Some(user_msg(&e))),
+            Err(e) => return self.fail(&id, user_msg(&e)),
         };
         drop(spec);
         // Essai : fenetre du jeu cachee des sa creation (jamais hors de la zone integree, voir `Stage::hide_start`).
         cmd.hide_first_window = self.stage.hide_start(crate::stage::hide_start_switch());
         let log_dir = self.paths.logs.join(&id);
+        // « Annuler le lancement » arrivé pendant la dernière étape : on ne démarre pas le jeu.
+        if cancel.load(std::sync::atomic::Ordering::SeqCst) {
+            return true;
+        }
         // Le launcher se ferme (fenetre fermee pendant la preparation) : on ne demarre pas un jeu que plus rien ne suivrait.
         // `pass` est garde jusqu'a ce que le jeu soit suivi : une fermeture qui arrive entre-temps attend (voir `QuitGate`).
         let Some(pass) = self.quit.enter_spawn() else {
             self.stage.note("fermeture du launcher pendant la preparation : le jeu n'est pas demarre");
-            return self.emit_state(&id, LaunchPhase::Failed, Some("Cubelink est en train de se fermer".into()));
+            return self.fail(&id, "Cubelink est en train de se fermer".into());
         };
         // Le jeu reste vivant (via `game_handle`) jusqu'à la fin de la boucle : le lâcher l'arrêterait.
         // Linux : un jeu de la Scene est force en X11/XWayland (Wayland natif non adoptable), voir `RunOptions::force_x11`.
@@ -603,16 +691,16 @@ impl AppState {
         };
         let mut game = match launch_run::spawn_with(&cmd, &log_dir, run_opts).await {
             Ok(g) => g,
-            Err(e) => return self.emit_state(&id, LaunchPhase::Failed, Some(user_msg(&e))),
+            Err(e) => return self.fail(&id, user_msg(&e)),
         };
         if self.quit.quitting() {
             // La fermeture est arrivee pendant le demarrage du processus : il est arrete tout de suite, avant toute fenetre.
             self.stage.note("fermeture du launcher pendant le demarrage du jeu : processus arrete");
             let _ = game.kill().await;
-            return self.emit_state(&id, LaunchPhase::Failed, Some("Cubelink est en train de se fermer".into()));
+            return self.fail(&id, "Cubelink est en train de se fermer".into());
         }
         let Some(mut rx) = game.events() else {
-            return self.emit_state(&id, LaunchPhase::Failed, Some("suivi du jeu indisponible".into()));
+            return self.fail(&id, "suivi du jeu indisponible".into());
         };
         let game = Arc::new(game);
         // Invité : Dynamic FPS (et autres) bride le rendu hors premier plan et retarde le quickPlay (voir `foreground`).
@@ -621,6 +709,11 @@ impl AppState {
             cubelink_host::foreground::bring_game_to_front(game.pid);
         }
         *lock(&self.game_handle) = Some((id.clone(), game.clone()));
+        // Clic sur « Annuler le lancement » entre le démarrage du processus et la pose de `game_handle` : on arrête le jeu
+        // tout juste lancé (la boucle ci-dessous émet `exited`).
+        if cancel.load(std::sync::atomic::Ordering::SeqCst) {
+            let _ = game.kill().await;
+        }
         // `stage.staged()` est relu a chaque usage : un repli en cours de lancement rend sa fenetre au jeu, et tout le pilotage
         // du rideau devient alors sans objet (les appels eux-memes sont inertes hors de la zone integree).
         let mut revealed = false;
@@ -684,6 +777,12 @@ impl AppState {
             self.emit_state(&id, LaunchPhase::Exited, None);
         }
         game.wait().await;
+        false
+    }
+
+    fn fail(&self, id: &str, message: String) -> bool {
+        self.emit_state(id, LaunchPhase::Failed, Some(message));
+        false
     }
 }
 
@@ -695,7 +794,7 @@ pub fn instances_list(state: State<'_, Arc<AppState>>) -> Result<Vec<Instance>, 
     Ok(state.instances_list().into_iter().filter(|i| !core_lib::guest::is_guest_instance(&state.instances, &i.id)).collect())
 }
 
-/// Crée une instance vide.
+/// Crée une instance vide, puis prépare le jeu (progression `import://progress`). Si cette préparation échoue (réseau, Java), l'instance est conservée et `import://deferred` l'annonce : le jeu sera téléchargé au premier lancement.
 #[tauri::command(rename_all = "snake_case")]
 #[specta::specta(rename_all = "snake_case")]
 pub async fn instances_create(
@@ -708,7 +807,7 @@ pub async fn instances_create(
     state.instances_create(name, minecraft, loader, ram_mb).await
 }
 
-/// Importe un .mrpack, un zip CurseForge ou un zip brut (les champs facultatifs ne servent qu'au zip brut). Avertissements par `import://warning`.
+/// Importe un .mrpack, un zip CurseForge ou un zip brut (les champs facultatifs ne servent qu'au zip brut). Avertissements par `import://warning`. La préparation du jeu qui suit l'import est « au mieux » : progression `import://progress` ; si elle échoue, l'instance et ses mods sont conservés et `import://deferred` l'annonce (le jeu sera téléchargé au premier lancement). Seule une erreur d'import elle-même renvoie une erreur. Un `.mrpack` est reconnu auprès de Modrinth par son SHA-1 (meilleur effort, borné à 20 s, silencieux hors ligne) : s'il est connu, `Instance.pack` reçoit son projet et sa version, sinon `pack` reste absent et l'import réussit quand même.
 #[tauri::command(rename_all = "snake_case")]
 #[specta::specta(rename_all = "snake_case")]
 pub async fn instances_import_mrpack(
@@ -740,6 +839,49 @@ pub async fn minecraft_versions(state: State<'_, Arc<AppState>>) -> Result<Vec<S
 mod tests {
     use super::*;
     use crate::state::test_support::test_state;
+
+    #[tokio::test]
+    async fn attach_pack_origin_known_hash_unknown_and_explicit() {
+        use core_lib::browse::Providers;
+        use core_lib::providers::curseforge_api::CfApi;
+        use core_lib::providers::modrinth_api::ModrinthClient;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let d = tempfile::tempdir().unwrap();
+        let (state, _ev) = test_state(d.path());
+        let mr = MockServer::start().await;
+        let cf = MockServer::start().await;
+        let p = Providers { modrinth: ModrinthClient::with_base_url(format!("{}/v2", mr.uri()), "test"), cf: CfApi::with_base(cf.uri(), "k"), allow_loopback: true };
+        let spec = LoaderSpec { loader: Loader::Fabric, version: "0.1".into() };
+        let file = d.path().join("pack.mrpack");
+        std::fs::write(&file, b"un mrpack").unwrap();
+        let sha1 = core_lib::unknown_mods::sha1_hex(b"un mrpack");
+        Mock::given(method("GET"))
+            .and(path(format!("/v2/version_file/{sha1}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "VER1", "project_id": "PROJ1", "version_number": "1.2", "files": [], "dependencies": []})))
+            .mount(&mr)
+            .await;
+        // 1. .mrpack local reconnu par son empreinte : origine écrite dans l'instance et dans instance.json.
+        let a = state.instances.create("A", "1.21.1", spec.clone(), 2048).unwrap();
+        let a = state.attach_pack_origin(&p, a, None, Some(file.clone())).await;
+        let want = PackOrigin { source: "modrinth".into(), project_id: "PROJ1".into(), version_id: "VER1".into() };
+        assert_eq!(a.pack, Some(want.clone()));
+        let raw = std::fs::read_to_string(d.path().join("instances").join(&a.id).join("instance.json")).unwrap();
+        assert!(raw.contains("PROJ1") && raw.contains("VER1"), "{raw}");
+        assert_eq!(state.instances.get(&a.id).unwrap().pack, Some(want));
+        // 2. Hash inconnu (404 par défaut du faux serveur) : pas d'origine, pas d'erreur.
+        std::fs::write(&file, b"pack modifie").unwrap();
+        let b = state.instances.create("B", "1.21.1", spec.clone(), 2048).unwrap();
+        let b = state.attach_pack_origin(&p, b, None, Some(file.clone())).await;
+        assert_eq!(b.pack, None);
+        assert_eq!(state.instances.get(&b.id).unwrap().pack, None);
+        // 3. Origine fournie (Parcourir) : posée telle quelle, sans interroger Modrinth (aucune cible de hash).
+        let c = state.instances.create("C", "1.21.1", spec, 2048).unwrap();
+        let given = PackOrigin { source: "curseforge".into(), project_id: "50".into(), version_id: "7".into() };
+        let c = state.attach_pack_origin(&p, c, Some(given.clone()), None).await;
+        assert_eq!(c.pack, Some(given));
+    }
 
     #[test]
     fn agent_supporte_selon_version_java_et_loader() {
@@ -901,6 +1043,114 @@ mod tests {
         LoaderSpec { loader: Loader::Vanilla, version: String::new() }
     }
 
+    /// Réel (disque, vraie RAM de la machine, vrai java) : la mémoire « Automatique » suit le nombre de jars de `mods/`,
+    /// l'instance et le réglage manuel l'emportent, et la JVM accepte vraiment le `-Xmx` calculé.
+    #[test]
+    fn memoire_automatique_au_lancement() {
+        let dir = tempfile::tempdir().unwrap();
+        let (st, _) = test_state(dir.path());
+        assert_eq!(st.settings_get().default_ram_mb, 0, "Automatique par défaut");
+        let phys = core_lib::sysmem::physical_ram_mb();
+        let mut inst = st.instances.create("Auto", "1.21.1", vanilla(), core_lib::instance::RAM_DEFAULT).unwrap();
+        assert_eq!(st.launch_ram_mb(&inst), core_lib::instance::auto_ram_mb(0, phys));
+        let mods = st.instances.game_dir(&inst.id).unwrap().join("mods");
+        std::fs::create_dir_all(&mods).unwrap();
+        for n in 0..120 {
+            std::fs::write(mods.join(format!("m{n}.jar")), b"x").unwrap();
+        }
+        // `inst` est l'ancienne copie (0 mod) : le lancement recompte sur le disque.
+        let auto = st.launch_ram_mb(&inst);
+        assert_eq!(auto, core_lib::instance::auto_ram_mb(120, phys));
+        assert!(auto >= core_lib::instance::auto_ram_mb(0, phys) && auto.is_multiple_of(256) && auto >= 1024, "{auto}");
+        if phys.is_some_and(|p| p >= 10 * 1024) {
+            assert_eq!(auto, 6144, "120 mods sur un PC de 10 Go ou plus");
+        }
+        // Réglage global manuel, puis réglage de l'instance.
+        lock(&st.settings).default_ram_mb = 3072;
+        assert_eq!(st.launch_ram_mb(&inst), 3072);
+        inst.ram_mb = 2048;
+        assert_eq!(st.launch_ram_mb(&inst), 2048);
+
+        // Vrai java : le tas maximal obtenu est bien celui demandé.
+        let Ok(out) = std::process::Command::new("java").args([format!("-Xmx{auto}M"), "-XX:+PrintFlagsFinal".into(), "-version".into()]).output() else {
+            return; // pas de java sur cette machine
+        };
+        let text = String::from_utf8_lossy(&out.stdout);
+        let heap: u64 = text.lines().find(|l| l.contains(" MaxHeapSize "))
+            .and_then(|l| l.split('=').nth(1)).and_then(|v| v.split_whitespace().next()).and_then(|v| v.parse().ok())
+            .unwrap_or_else(|| panic!("MaxHeapSize introuvable : {text}"));
+        let want = u64::from(auto) * 1024 * 1024;
+        assert!(heap.abs_diff(want) <= want / 50, "java a pris {heap} octets au lieu de {want}");
+    }
+
+    /// Réel (disque, sockets, tâche de lancement) : le jeu à télécharger ne répond jamais ; « Annuler le lancement »
+    /// interrompt la préparation tout de suite, émet `exited` (jamais `failed`), libère l'instance, qui se relance aussitôt.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn annuler_pendant_la_preparation_libere_l_instance() {
+        use std::time::{Duration, Instant};
+        let dir = tempfile::tempdir().unwrap();
+        let (st, events) = test_state(dir.path());
+        // Serveur muet : la connexion TLS vers le jar du jeu reste en attente.
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        let srv = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((s, _)) = l.accept().await {
+                held.push(s);
+            }
+        });
+        let inst = st.instances.create("Lent", "1.21.1", vanilla(), 2048).unwrap();
+        let vdir = st.paths.versions.join("1.21.1");
+        std::fs::create_dir_all(&vdir).unwrap();
+        std::fs::write(
+            vdir.join("1.21.1.json"),
+            serde_json::json!({
+                "id": "1.21.1", "mainClass": "net.minecraft.client.main.Main",
+                "assetIndex": { "id": "17", "url": format!("https://127.0.0.1:{port}/i.json"), "sha1": "0".repeat(40), "size": 1 },
+                "downloads": { "client": { "url": format!("https://127.0.0.1:{port}/c.jar"), "sha1": "0".repeat(40), "size": 10 } },
+                "javaVersion": { "majorVersion": 21 }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        // Java imposé par le réglage : la recherche de Java ne touche pas au réseau.
+        std::fs::create_dir_all(dir.path().join("faux-java")).unwrap();
+        let java = dir.path().join("faux-java").join("java");
+        std::fs::write(&java, b"#!/bin/sh\n").unwrap();
+        lock(&st.settings).java_path = Some(java.display().to_string());
+        *lock(&st.profile) = Some(Profile::Offline { name: "Test".into(), uuid: "00000000-0000-0000-0000-000000000000".into() });
+
+        let states = |events: &crate::state::test_support::Events| -> Vec<(String, Option<String>)> {
+            lock(events)
+                .iter()
+                .filter(|(n, _)| n == "launch://state")
+                .map(|(_, v)| (v["state"].as_str().unwrap().to_string(), v["message"].as_str().map(str::to_string)))
+                .collect()
+        };
+        for tour in 1..=2 {
+            let before = states(&events).len();
+            st.launch_with(&inst.id, None).await.unwrap_or_else(|e| panic!("tour {tour} : {e}"));
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            assert_eq!(lock(&st.game).as_deref(), Some(inst.id.as_str()), "préparation en cours");
+            let t = Instant::now();
+            st.instances_kill(&inst.id).await.unwrap();
+            loop {
+                if states(&events)[before..].iter().any(|(s, _)| s == "exited") {
+                    break;
+                }
+                assert!(t.elapsed() < Duration::from_secs(3), "pas d'exited : {:?}", states(&events));
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            let seq = states(&events)[before..].to_vec();
+            assert!(seq.iter().all(|(s, _)| s != "failed"), "{seq:?}");
+            assert_eq!(seq.last().unwrap(), &("exited".to_string(), None), "{seq:?}");
+            assert!(seq.iter().any(|(s, m)| s == "preparing" && m.as_deref() == Some("Annulation en cours…")), "{seq:?}");
+            // `exited` part après la libération : un nouveau clic sur « Jouer » passe tout de suite.
+            assert!(lock(&st.game).is_none() && lock(&st.launch_cancel).is_none() && lock(&st.game_handle).is_none());
+        }
+        srv.abort();
+    }
+
     #[tokio::test]
     async fn creation_invalide_donne_une_erreur_claire() {
         let dir = tempfile::tempdir().unwrap();
@@ -949,7 +1199,6 @@ mod tests {
 
     /// Changement de modpack dont le lancement suivant est REFUSE (chaque refus de `launch_with`) : le rideau, reste ferme a
     /// mi-barre apres la fin de l'ancien jeu, se rouvre sur le launcher, et l'erreur revient a l'interface.
-    #[cfg(windows)]
     #[tokio::test(flavor = "multi_thread")]
     async fn changement_de_modpack_lancement_refuse_rouvre_le_rideau() {
         use crate::stage::fake::{switch_pending, FakeHost};
@@ -985,7 +1234,6 @@ mod tests {
 
     /// Lancement ACCEPTE apres un changement de modpack, mais qui echoue pendant la preparation (version introuvable) : la
     /// tache de jeu s'arrete avant `watch`, le rideau se rouvre sur le launcher et l'echec est annonce a l'interface.
-    #[cfg(windows)]
     #[tokio::test(flavor = "multi_thread")]
     async fn changement_de_modpack_echec_de_preparation_rouvre_le_rideau() {
         use crate::stage::fake::{switch_pending, FakeHost};
@@ -1013,7 +1261,6 @@ mod tests {
 
     /// Le jeu suivant s'ouvre HORS de la zone integree (reglage coupe entre la fermeture et le lancement) : plus personne ne
     /// rouvrirait le rideau du changement de modpack.
-    #[cfg(windows)]
     #[tokio::test(flavor = "multi_thread")]
     async fn changement_de_modpack_vers_un_jeu_hors_scene_rouvre_le_rideau() {
         use crate::stage::fake::{switch_pending, FakeHost};

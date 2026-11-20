@@ -4,9 +4,20 @@ import { ShellContext, type ShellContextValue } from "../../app/context";
 import { createFakeServices, FAKE_MANIFEST_HASH } from "../../services/fake";
 import type { Services } from "../../services";
 import type { TransferProgress } from "../../services/types";
-import Join from "./index";
+import { goBack as routerGoBack, resetHistory } from "../../app/router";
+import Join, { ramHint } from "./index";
 
-afterEach(cleanup);
+afterEach(() => { cleanup(); resetHistory(); });
+
+describe("ramHint", () => {
+  const pack = (n: number) => Array.from({ length: n }, (_, i) => ({ path: `mods/m${i}.jar` })) as unknown as Parameters<typeof ramHint>[0];
+  it("suit les seuils de la mémoire Automatique (100 et 250 mods)", () => {
+    expect(ramHint(pack(99))).toBeUndefined();
+    expect(ramHint(pack(100))).toMatch(/6 Go/);
+    expect(ramHint(pack(249))).toMatch(/6 Go/);
+    expect(ramHint(pack(250))).toMatch(/8 Go/);
+  });
+});
 
 function setup(over: Partial<Services> = {}, params: Record<string, string> = { friend: "pk-alex" }) {
   const services = { ...createFakeServices({ tickMs: 0 }), ...over };
@@ -15,14 +26,16 @@ function setup(over: Partial<Services> = {}, params: Record<string, string> = { 
   const navigate = vi.fn();
   const goBack = vi.fn();
   const value = { services, route: "join", params, navigate, goBack, canGoBack: false, setTitle: () => {} } as ShellContextValue;
-  render(<ShellContext.Provider value={value}><Join /></ShellContext.Provider>);
+  const ui = (v: ShellContextValue) => <ShellContext.Provider value={v}><Join /></ShellContext.Provider>;
+  const { unmount, rerender } = render(ui(value));
   const emit = (p: TransferProgress) => act(() => cb(p));
-  return { services, navigate, goBack, emit };
+  const setParams = (next: Record<string, string>) => rerender(ui({ ...value, params: next }));
+  return { services, navigate, goBack, emit, unmount, setParams };
 }
 
 const P = (o: Partial<TransferProgress> & { error?: string } = {}): TransferProgress => ({
   phase: "receiving", files_done: 12, files_total: 40, bytes_done: 340_000_000, bytes_total: 1_200_000_000,
-  speed_bps: 8_000_000, via_relay: false, ...o,
+  speed_bps: 8_000_000, ...o,
 });
 
 async function startJoin() {
@@ -33,6 +46,35 @@ async function startJoin() {
 }
 
 describe("Join", () => {
+  it("avertit du disque et du compte hors ligne sans bloquer « Rejoindre et jouer »", async () => {
+    const accounts = [{ id: "off-notch", kind: "offline" as const, name: "Notch", uuid: "u" }];
+    const { navigate } = setup(createFakeServices({ tickMs: 0, accounts, freeDiskBytes: 500_000_000 }));
+    await screen.findByText("mods/mod-maison.jar");
+    const box = screen.getByTestId("join-warnings");
+    expect(box.getAttribute("role")).toBe("status");
+    expect(screen.getByTestId("warn-disk").textContent).toMatch(/Il te faut 1,1 Go libres, il en reste 500 Mo/);
+    expect(screen.getByTestId("warn-offline").textContent).toMatch(/compte hors ligne/);
+    fireEvent.click(screen.getByRole("checkbox", { name: /confiance/ }));
+    expect((screen.getByRole("button", { name: "Rejoindre et jouer" }) as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "Changer de compte" }));
+    expect(navigate).toHaveBeenCalledWith("settings", { tab: "compte" });
+  });
+
+  it("arrondit le besoin au-dessus et l'espace libre au-dessous (jamais « 2 Go libres, il en reste 2 Go »)", async () => {
+    // Libre juste sous le besoin (reçu + 1 Gio) : les deux tailles doivent différer à l'affichage.
+    setup(createFakeServices({ tickMs: 0, freeDiskBytes: 1_073_741_900 }));
+    await screen.findByText("mods/mod-maison.jar");
+    const txt = screen.getByTestId("warn-disk").textContent ?? "";
+    const [, need, free] = txt.match(/Il te faut ([\d,]+) Go libres, il en reste ([\d,]+) Go/) ?? [];
+    expect(Number(need.replace(",", "."))).toBeGreaterThan(Number(free.replace(",", ".")));
+  });
+
+  it("aucun bloc d'avertissement sans disque trop juste ni compte hors ligne", async () => {
+    setup(createFakeServices({ tickMs: 0, freeDiskBytes: 50_000_000_000 }));
+    await screen.findByText("mods/mod-maison.jar");
+    expect(screen.queryByTestId("join-warnings")).toBeNull();
+  });
+
   it("RAM : valeur des paramètres par défaut, ou valeur choisie transmise à joinStart", async () => {
     const start = vi.fn(async () => {});
     setup({ joinStart: start });
@@ -68,6 +110,25 @@ describe("Join", () => {
     expect(btn.disabled).toBe(false);
   });
 
+  it("mods inconnus : avertissement et case de confiance dans la carte, avant les versions et le bouton", async () => {
+    setup();
+    await screen.findByText("mods/mod-maison.jar");
+    const card = document.querySelector(".join-card") as HTMLElement;
+    const warn = card.querySelector(".join-warn") as HTMLElement;
+    const body = card.querySelector(".join-body") as HTMLElement;
+    const trust = screen.getByRole("checkbox", { name: /confiance/ });
+    const btn = screen.getByRole("button", { name: "Rejoindre et jouer" });
+    const before = (a: Node, b: Node) => !!(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(card.contains(warn)).toBe(true);
+    expect(card.contains(trust)).toBe(true);
+    // Avertissement après le titre, avant les versions et le résumé ; case avant le bouton.
+    expect(before(card.querySelector(".join-who")!, warn)).toBe(true);
+    expect(before(warn, body)).toBe(true);
+    // La case est dans l'avertissement qu'elle accepte, donc visible avec la liste, et avant le bouton qu'elle débloque.
+    expect(warn.contains(trust)).toBe(true);
+    expect(before(trust, btn)).toBe(true);
+  });
+
   it("Rejoindre appelle joinStart puis affiche la progression dans la même page", async () => {
     const { services, navigate, emit } = setup({ joinPlay: vi.fn(async () => {}) });
     const spy = vi.spyOn(services, "joinStart");
@@ -90,6 +151,45 @@ describe("Join", () => {
     expect(play.mock.calls[0][0]).toBe("pk-alex");
     // Instance invitée : désignée par le backend (vide), jamais la première instance de la liste.
     expect(play.mock.calls[0][1]).toBe("");
+  });
+
+  it("écran quitté pendant le lancement : joinPlay se termine sans renvoyer à l'accueil", async () => {
+    let finish: () => void = () => {};
+    const play = vi.fn(() => new Promise<void>((r) => { finish = r; }));
+    const { navigate, emit, unmount } = setup({ joinPlay: play });
+    await startJoin();
+    emit(P({ phase: "done" }));
+    await waitFor(() => expect(play).toHaveBeenCalledTimes(1));
+    unmount();
+    await act(async () => { finish(); await Promise.resolve(); });
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it("écran quitté pendant le lancement : un échec de joinPlay est avalé sans erreur ni navigation", async () => {
+    let fail: (e: Error) => void = () => {};
+    const play = vi.fn(() => new Promise<void>((_, r) => { fail = r; }));
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { navigate, emit, unmount } = setup({ joinPlay: play });
+    await startJoin();
+    emit(P({ phase: "done" }));
+    await waitFor(() => expect(play).toHaveBeenCalledTimes(1));
+    unmount();
+    await act(async () => { fail(new Error("boum")); await Promise.resolve(); });
+    expect(navigate).not.toHaveBeenCalled();
+    expect(err).not.toHaveBeenCalled();
+    err.mockRestore();
+  });
+
+  it("autre ami ouvert pendant le lancement (écran non démonté) : pas de retour forcé à l'accueil", async () => {
+    let finish: () => void = () => {};
+    const play = vi.fn(() => new Promise<void>((r) => { finish = r; }));
+    const { navigate, emit, setParams } = setup({ joinPlay: play });
+    await startJoin();
+    emit(P({ phase: "done" }));
+    await waitFor(() => expect(play).toHaveBeenCalledTimes(1));
+    setParams({ friend: "pk-autre" });
+    await act(async () => { finish(); await Promise.resolve(); });
+    expect(navigate).not.toHaveBeenCalled();
   });
 
   it("échec de la connexion au jeu : message sur place puis Réessayer", async () => {
@@ -130,6 +230,71 @@ describe("Join", () => {
     expect((screen.getByRole("checkbox", { name: /confiance/ }) as HTMLInputElement).checked).toBe(false);
   });
 
+  it("panneau de transfert : barre accessible, annonce live limitée à la phase, préparation et lancement", async () => {
+    const { emit } = setup();
+    await startJoin();
+    expect(screen.getByRole("status").textContent).toBe("Préparation en cours");
+    emit(P());
+    const bar = screen.getByRole("progressbar");
+    expect(bar.getAttribute("aria-valuemin")).toBe("0");
+    expect(bar.getAttribute("aria-valuemax")).toBe("100");
+    expect((bar.getAttribute("aria-valuetext") ?? "").replace(/[\u202f\u00a0]/g, " ")).toContain("12 / 40 fichiers · 340 Mo / 1,2 Go · 8 Mo/s");
+    const live = screen.getByRole("status");
+    expect(live.textContent).toBe("Réception des fichiers");
+    emit(P({ files_done: 20, bytes_done: 500_000_000 }));
+    expect(live.textContent).toBe("Réception des fichiers");
+    emit(P({ phase: "verifying" }));
+    expect(live.textContent).toBe("Vérification d'intégrité");
+    emit(P({ phase: "launching" }));
+    expect(live.textContent).toBe("Lancement du jeu");
+    expect(screen.queryByRole("button", { name: "Pause" })).toBeNull();
+  });
+
+  it("pause puis reprise : joinPause / joinResume, l'étape en cours reste la réception", async () => {
+    const pause = vi.fn(async () => {});
+    const resume = vi.fn(async () => {});
+    const { emit } = setup({ joinPause: pause, joinResume: resume });
+    await startJoin();
+    emit(P());
+    fireEvent.click(screen.getByRole("button", { name: "Pause" }));
+    await waitFor(() => expect(pause).toHaveBeenCalled());
+    emit(P({ phase: "paused", speed_bps: 0 }));
+    expect(screen.getByRole("status").textContent).toBe("Transfert en pause");
+    expect(screen.getByText("2. Réception des fichiers").closest("li")?.getAttribute("aria-current")).toBe("step");
+    fireEvent.click(screen.getByRole("button", { name: "Reprendre" }));
+    await waitFor(() => expect(resume).toHaveBeenCalled());
+  });
+
+  it("échec : message réel, bloc Détails et chemin du journal", async () => {
+    let det: (e: { step: string; message: string; details: string; log_file: string }) => void = () => {};
+    const { emit } = setup({ onTransferErrorDetails: (c: typeof det) => { det = c; return () => {}; } } as never);
+    await startJoin();
+    act(() => det({ step: "Réception", message: "Réception : réponse inattendue de l'hôte", details: "étape: Réception | détail: reset", log_file: "C:\\logs\\join-errors.log" }));
+    emit(P({ phase: "failed", error: "Réception : réponse inattendue de l'hôte" }));
+    expect((await screen.findByRole("alert")).textContent).toMatch(/^Réception : réponse inattendue de l'hôte/);
+    expect(screen.getByText("Détails")).toBeTruthy();
+    expect(screen.getByLabelText("Détails de l'erreur").textContent).toContain("détail: reset");
+    expect(screen.getByRole("button", { name: "Copier" })).toBeTruthy();
+    expect(screen.getByText(/join-errors\.log/)).toBeTruthy();
+  });
+
+  it("échec sur Java ou le réseau : message réel sur place, jamais pris pour un départ de l'ami", async () => {
+    const { navigate, emit } = setup();
+    await startJoin();
+    emit(P({ phase: "failed", error: "Java 21 introuvable : l'ami attend" }));
+    expect(screen.getByRole("alert").textContent).toContain("Java 21 introuvable");
+    expect(screen.queryByText(/s'est déconnecté/)).toBeNull();
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it("mods inconnus reçus pendant le transfert (transfer://unknown_mods) : liste affichée", async () => {
+    let push: (e: { instance_id: string; unknown_mods: string[] }) => void = () => {};
+    setup({ onUnknownMods: (cb) => { push = cb; return () => {}; } });
+    await startJoin();
+    act(() => push({ instance_id: "i1", unknown_mods: ["mods/maison-recue.jar"] }));
+    expect(screen.getByRole("note").textContent).toContain("mods/maison-recue.jar");
+  });
+
   it("échec inconnu : message réel, Retour à l'accueil", async () => {
     const { navigate, emit } = setup();
     await startJoin();
@@ -153,6 +318,79 @@ describe("Join", () => {
     fireEvent.click(screen.getByRole("button", { name: "Oui, annuler" }));
     await waitFor(() => expect(navigate).toHaveBeenCalledWith("main"));
     expect(cancel).toHaveBeenCalled();
+  });
+
+  describe("Retour pendant le transfert (vrai routeur)", () => {
+    const back = () => act(() => { routerGoBack(); });
+
+    it("Retour, Alt+← ou souris 3 ouvrent la confirmation ; Continuer garde le transfert et le lancement auto", async () => {
+      const cancel = vi.fn(async () => {});
+      const play = vi.fn(async (_f: string, _i: string) => {});
+      const { navigate, emit } = setup({ joinCancel: cancel, joinPlay: play });
+      await startJoin();
+      emit(P());
+      expect(screen.queryByText(/Annuler l'installation/)).toBeNull();
+      back();
+      expect(screen.getByText(/Annuler l'installation/)).toBeTruthy();
+      fireEvent.click(screen.getByRole("button", { name: "Continuer l'installation" }));
+      expect(screen.queryByText(/Annuler l'installation/)).toBeNull();
+      expect(cancel).not.toHaveBeenCalled();
+      expect(navigate).not.toHaveBeenCalled();
+      // même chaîne que le Shell : Alt+← et souris passent par goBack()
+      const onKey = (e: KeyboardEvent) => { if (e.altKey && e.key === "ArrowLeft") routerGoBack(); };
+      window.addEventListener("keydown", onKey);
+      fireEvent.keyDown(window, { key: "ArrowLeft", altKey: true });
+      window.removeEventListener("keydown", onKey);
+      expect(screen.getByText(/Annuler l'installation/)).toBeTruthy();
+      fireEvent.click(screen.getByRole("button", { name: "Continuer l'installation" }));
+      // le transfert se termine : confirmation fermée, lancement automatique conservé
+      emit(P({ phase: "done", files_done: 40, bytes_done: 1_200_000_000, speed_bps: 0 }));
+      await waitFor(() => expect(play).toHaveBeenCalledTimes(1));
+      await waitFor(() => expect(navigate).toHaveBeenCalledWith("main"));
+    });
+
+    it("« Oui, annuler » : joinCancel puis accueil", async () => {
+      const cancel = vi.fn(async () => {});
+      const { navigate, emit } = setup({ joinCancel: cancel });
+      await startJoin();
+      emit(P());
+      back();
+      fireEvent.click(screen.getByRole("button", { name: "Oui, annuler" }));
+      await waitFor(() => expect(navigate).toHaveBeenCalledWith("main"));
+      expect(cancel).toHaveBeenCalledTimes(1);
+    });
+
+    it("pendant la préparation (avant le premier événement), Retour est déjà gardé", async () => {
+      setup();
+      await startJoin();
+      back();
+      expect(screen.getByText(/Annuler l'installation/)).toBeTruthy();
+    });
+
+    it("échec ou fin : la confirmation se ferme et Retour redevient libre ; Réessayer réarme la garde", async () => {
+      const { emit } = setup();
+      window.location.hash = "#/main"; resetHistory();
+      window.location.hash = "#/join?friend=pk-alex"; window.dispatchEvent(new HashChangeEvent("hashchange"));
+      await startJoin();
+      emit(P());
+      back();
+      expect(screen.getByText(/Annuler l'installation/)).toBeTruthy();
+      emit(P({ phase: "failed", error: "Réception : réponse inattendue" }));
+      expect(screen.queryByText(/Annuler l'installation/)).toBeNull();
+      back();
+      expect(window.location.hash).toBe("#/main");
+    });
+
+    it("démonté : la garde est levée", async () => {
+      const { emit, unmount } = setup();
+      window.location.hash = "#/main"; resetHistory();
+      window.location.hash = "#/join?friend=pk-alex"; window.dispatchEvent(new HashChangeEvent("hashchange"));
+      await startJoin();
+      emit(P());
+      unmount();
+      back();
+      expect(window.location.hash).toBe("#/main");
+    });
   });
 
   it("échec de joinStart : erreur sur le plan, pas de transfert", async () => {

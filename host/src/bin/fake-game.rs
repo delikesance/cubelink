@@ -31,7 +31,8 @@
 //! Variante LINUX (X11, `x11rb`, pour `tests/x11_*.rs` et `tests/scene_*.rs`) : meme contrat d'arguments, sans Win32. Fenetre 870 x 520 en (200, 150),
 //! `WM_CLASS` = la classe demandee, `_NET_WM_PID`, `WM_DELETE_WINDOW` (le processus s'arrete dessus). Options reprises : `disown`
 //! (quand son parent n'est plus la racine, se reparente sur la racine), `glfwhelper` (cree AVANT sa fenetre deux fenetres d'aide
-//! minuscules, jamais affichees : `GLFW3 Helper` et `SDLHelperWindowInputCatcher`), `stall=<ms>`, `late=<ms>`. Message client
+//! minuscules, jamais affichees : `GLFW3 Helper` et `SDLHelperWindowInputCatcher`), `stall=<ms>`, `late=<ms>`, `grab=x,y,l,h`
+//! (le rectangle pris par GRAB : un moniteur parmi plusieurs). Message client
 //! `_FAKE_GAME_GRAB` : la fenetre prend d'elle-meme la taille de l'ecran (plein ecran), `_FAKE_GAME_UNGRAB` : elle reprend sa
 //! taille ; chacun incremente la propriete `_FAKE_GAME_ACKS` de la fenetre (le test sait que le jeu a obei). Pas de gestionnaire de
 //! fenetres : rien n'y est emule (cadre, barre des taches).
@@ -334,6 +335,11 @@ mod imp_x11 {
         let (disown, helpers) = (args.iter().any(|a| a == "disown"), args.iter().any(|a| a == "glfwhelper"));
         let (stall, late) = (opt("stall="), opt("late="));
         let syncwait = args.iter().any(|a| a == "syncwait");
+        // `grab=x,y,l,h` : rectangle pris au message GRAB (un moniteur parmi plusieurs) ; par defaut, toute la racine
+        let grab_rect: Option<(i32, i32, u32, u32)> = args.iter().find_map(|a| a.strip_prefix("grab=")).and_then(|v| {
+            let v: Vec<i32> = v.split(',').filter_map(|n| n.parse().ok()).collect();
+            if let [x, y, w, h] = v[..] { Some((x, y, w.max(1) as u32, h.max(1) as u32)) } else { None }
+        });
         let (mut sync_ok, mut sync_fail, mut cn_count) = (0u32, 0u32, 0u32);
         let mut pending: Option<Instant> = None;
         let mut idle_since = Instant::now();
@@ -404,7 +410,7 @@ mod imp_x11 {
                     }
                     Event::ClientMessage(m) if m.type_ == grab || m.type_ == ungrab => {
                         let Some(w) = win else { continue };
-                        let rect: (i32, i32, u32, u32) = if m.type_ == grab { (0, 0, screen_size.0 as u32, screen_size.1 as u32) } else { (200, 150, 870, 520) };
+                        let rect: (i32, i32, u32, u32) = if m.type_ == grab { grab_rect.unwrap_or((0, 0, screen_size.0 as u32, screen_size.1 as u32)) } else { (200, 150, 870, 520) };
                         let aux = ConfigureWindowAux::new().x(rect.0).y(rect.1).width(rect.2).height(rect.3);
                         c.configure_window(w, &aux).unwrap();
                         n_acks += 1;

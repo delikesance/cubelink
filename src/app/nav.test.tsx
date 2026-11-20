@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Shell } from "./shell";
-import { canGoBack, goBack, navigate, resetHistory } from "./router";
+import { canGoBack, goBack, navigate, resetHistory, setBackGuard } from "./router";
 import { createFakeServices } from "../services/fake";
 
 const hash = () => window.location.hash;
@@ -78,5 +78,26 @@ describe("raccourcis globaux", () => {
     fireEvent.keyDown(window, { key: "ArrowLeft", altKey: true });
     expect(hash()).toBe("#/browse");
     dlg.remove();
+  });
+});
+
+describe("garde de retour dans le Shell", () => {
+  it("bouton Retour, Alt+← et souris 3 passent par la garde tant qu'elle bloque", () => {
+    render(<Shell services={createFakeServices({ tickMs: 0 })} />);
+    nav("main"); nav("legal");
+    let blocking = true;
+    const guard = vi.fn(() => blocking);
+    const off = setBackGuard(guard);
+    fireEvent.click(document.querySelector(".tb-back") as HTMLElement);
+    expect(guard).toHaveBeenCalledTimes(1);
+    fireEvent.keyDown(window, { key: "ArrowLeft", altKey: true });
+    expect(guard).toHaveBeenCalledTimes(2);
+    fireEvent.mouseUp(window, { button: 3 });
+    expect(guard).toHaveBeenCalledTimes(3);
+    expect(hash()).toBe("#/legal");
+    blocking = false;
+    fireEvent.keyDown(window, { key: "ArrowLeft", altKey: true });
+    expect(hash()).toBe("#/main");
+    off();
   });
 });

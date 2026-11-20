@@ -91,6 +91,30 @@ pub fn returned_rect(work: (i32, i32, i32, i32), want: (i32, i32)) -> (i32, i32,
     (l + (ww - w) / 2, t + (wh - h) / 2, w, h)
 }
 
+/// Le moniteur, parmi `monitors` (`(x, y, largeur, hauteur)`), qui contient `point` ; si le point n'est dans aucun (centre dans un
+/// trou entre deux ecrans, fenetre hors ecran), le moniteur le plus proche. `None` : aucun moniteur valide (liste vide, tailles nulles).
+pub fn monitor_for(monitors: &[(i32, i32, i32, i32)], point: (i32, i32)) -> Option<(i32, i32, i32, i32)> {
+    let dist2 = |&(x, y, w, h): &(i32, i32, i32, i32)| {
+        let d = |p: i32, lo: i32, size: i32| i64::from((lo - p).max(p - (lo + size - 1)).max(0));
+        let (dx, dy) = (d(point.0, x, w), d(point.1, y, h));
+        dx * dx + dy * dy
+    };
+    monitors.iter().filter(|m| m.2 > 0 && m.3 > 0).min_by_key(|m| dist2(m)).copied()
+}
+
+/// Zone de travail `work` (`(gauche, haut, droite, bas)`, globale en multi-ecrans) restreinte au moniteur `mon`
+/// (`(x, y, largeur, hauteur)`). Si l'intersection est vide ou plus petite qu'une fenetre de jeu (panneau d'un autre moniteur,
+/// zone mal renseignee), le moniteur entier : une fenetre rendue n'est jamais invisible.
+pub fn intersect_work(work: (i32, i32, i32, i32), mon: (i32, i32, i32, i32)) -> (i32, i32, i32, i32) {
+    let whole = (mon.0, mon.1, mon.0 + mon.2, mon.1 + mon.3);
+    let (l, t, r, b) = (work.0.max(whole.0), work.1.max(whole.1), work.2.min(whole.2), work.3.min(whole.3));
+    if r - l < MIN_SIZE.0 || b - t < MIN_SIZE.1 {
+        whole
+    } else {
+        (l, t, r, b)
+    }
+}
+
 /// Classe d'une fenetre d'AIDE de SDL 3 ou de GLFW 3.4 (cachee, « message seulement », creee avant ou apres la fenetre du jeu) :
 /// jamais une fenetre de jeu, jamais touchee. Mesure sur un vrai Minecraft SDL 3 : les prendre pour des fenetres de jeu declenchait
 /// un repli « rattachement refuse » alors que LA fenetre du jeu etait adoptee et posee ; sur un gros modpack, l'adoption de la
@@ -209,6 +233,44 @@ mod tests {
         // refus pas encore etabli : l'absence de fenetre affichee decide
         let w = Watched { refused: Some((secs(1), 1)), ..w };
         assert_eq!(verdict(&G, &w), Some(FallbackReason::NoWindow));
+    }
+
+    #[test]
+    fn moniteur_du_point() {
+        let (a, b) = ((0, 0, 1920, 1080), (1920, 0, 1920, 1080));
+        assert_eq!(monitor_for(&[a, b], (100, 100)), Some(a));
+        assert_eq!(monitor_for(&[a, b], (2500, 500)), Some(b));
+        // sur la jonction : le premier pixel du second moniteur est au second
+        assert_eq!(monitor_for(&[a, b], (1919, 0)), Some(a));
+        assert_eq!(monitor_for(&[a, b], (1920, 0)), Some(b));
+        // hors de tous les ecrans : le plus proche
+        assert_eq!(monitor_for(&[a, b], (5000, 500)), Some(b));
+        assert_eq!(monitor_for(&[a, b], (-300, -300)), Some(a));
+        // trou entre deux moniteurs de tailles differentes
+        let (c, d) = ((0, 0, 1000, 800), (1200, 0, 1000, 800));
+        assert_eq!(monitor_for(&[c, d], (1050, 400)), Some(c));
+        assert_eq!(monitor_for(&[c, d], (1150, 400)), Some(d));
+        // liste vide ou moniteurs degeneres
+        assert_eq!(monitor_for(&[], (0, 0)), None);
+        assert_eq!(monitor_for(&[(0, 0, 0, 0), (10, 10, 100, 0)], (5, 5)), None);
+        assert_eq!(monitor_for(&[(0, 0, 0, 0), b], (5, 5)), Some(b));
+    }
+
+    #[test]
+    fn zone_de_travail_restreinte_au_moniteur() {
+        let b = (1920, 0, 1920, 1080);
+        // zone globale (deux ecrans, panneau de 40 px en haut) : on ne garde que le moniteur, panneau compris
+        assert_eq!(intersect_work((0, 40, 3840, 1080), b), (1920, 40, 3840, 1080));
+        // panneau sur l'autre moniteur : le second est entier
+        assert_eq!(intersect_work((0, 0, 1920, 1040), b), (1920, 0, 3840, 1080));
+        // zone plus grande que le moniteur
+        assert_eq!(intersect_work((-100, -100, 9000, 9000), b), (1920, 0, 3840, 1080));
+        // intersection vide ou minuscule : le moniteur entier
+        assert_eq!(intersect_work((0, 0, 1000, 1000), b), (1920, 0, 3840, 1080));
+        assert_eq!(intersect_work((0, 0, 1930, 1080), b), (1920, 0, 3840, 1080));
+        // le resultat sert a poser une fenetre dans le moniteur, pas a cheval sur la jonction
+        let (x, _, w, _) = returned_rect(intersect_work((0, 0, 3840, 1080), b), (870, 520));
+        assert!(x >= 1920 && x + w <= 3840);
     }
 
     #[test]

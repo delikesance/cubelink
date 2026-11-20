@@ -292,11 +292,11 @@ pub async fn ensure_lanmap(
     if dest.is_file() {
         return Ok(dest);
     }
-    let resp = http.get(&mappings.url).send().await.map_err(|e| Error::Network(e.to_string()))?;
+    let resp = http.get(&mappings.url).send().await.map_err(crate::http::net_error)?;
     if !resp.status().is_success() {
         return Err(Error::Network(format!("téléchargement des mappings : HTTP {}", resp.status().as_u16())));
     }
-    let bytes = resp.bytes().await.map_err(|e| Error::Network(e.to_string()))?;
+    let bytes = resp.bytes().await.map_err(crate::http::net_error)?;
     let actual = sha1_hex(&bytes);
     if !actual.eq_ignore_ascii_case(&mappings.sha1) {
         return Err(Error::Integrity { expected: mappings.sha1.clone(), actual });

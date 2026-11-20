@@ -894,7 +894,10 @@ impl IrohBackend {
                 }
             }
         });
-        *lock(&self.tunnel_watch) = Some(handle);
+        // Deux ouvertures concurrentes : la tâche de l'ancienne ne doit pas continuer d'émettre.
+        if let Some(old) = lock(&self.tunnel_watch).replace(handle) {
+            old.abort();
+        }
         *self.guest_tunnel.lock().await = Some(t);
         Ok(port)
     }

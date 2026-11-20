@@ -48,6 +48,8 @@ pub fn validate_hotkey(h: &str) -> Result<(), String> {
 /// Fenêtre de la limitation de fréquence des notifications.
 const NOTIFY_WINDOW: Duration = Duration::from_secs(60);
 /// Plafond de notifications par fenêtre, tous pairs confondus : une rafale de clés différentes n'inonde pas le bureau.
+/// Les demandes d'ami viennent d'inconnus : elles ont leur propre plafond, pour qu'une rafale de leur part ne rende pas
+/// muettes les invitations et demandes à rejoindre des amis.
 const NOTIFY_GLOBAL_MAX: usize = 5;
 
 /// Titre de la notification d'une demande d'ami reçue.
@@ -73,12 +75,23 @@ pub fn friend_request_notification(payload: &Value) -> Option<(String, String)> 
     Some((FRIEND_REQUEST_TITLE.into(), format!("{name} veut t'ajouter en ami. Ouvre Cubelink pour répondre.")))
 }
 
-/// Les trois sortes de notification d'un ami.
+/// Titre de la notification d'une liaison perdue avec l'hôte.
+const TUNNEL_LOST_TITLE: &str = "Connexion perdue";
+
+/// Pur : notification d'une liaison perdue avec l'hôte (`tunnel://state` `lost`) ; `None` pour les autres états. Avec la
+/// Scène, le jeu recouvre le bandeau du launcher : sans notification système, l'invité ne le voit pas.
+pub fn tunnel_lost_notification(payload: &Value) -> Option<(String, String)> {
+    (payload.get("state")?.as_str()? == "lost")
+        .then(|| (TUNNEL_LOST_TITLE.into(), "La liaison avec ton ami est perdue : il a fermé son monde ou sa connexion a coupé. Ouvre Cubelink.".into()))
+}
+
+/// Les sortes de notification d'un ami.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum Kind {
     Invite,
     Request,
     JoinRequest,
+    TunnelLost,
 }
 
 impl Kind {
@@ -88,6 +101,7 @@ impl Kind {
             Kind::Invite => "friend://invite",
             Kind::Request => "friend://request",
             Kind::JoinRequest => "friend://join_request",
+            Kind::TunnelLost => "tunnel://state",
         }
     }
 
@@ -96,6 +110,7 @@ impl Kind {
             Kind::Invite => invite_notification(payload, hotkey),
             Kind::Request => friend_request_notification(payload),
             Kind::JoinRequest => join_request_notification(payload, hotkey),
+            Kind::TunnelLost => tunnel_lost_notification(payload),
         }
     }
 }
@@ -110,7 +125,8 @@ pub struct NotifyLimiter {
 #[derive(Default)]
 struct LimiterState {
     per_peer: HashMap<(Kind, String), Instant>,
-    global: VecDeque<Instant>,
+    /// Envois récents : [0] les demandes d'ami (inconnus), [1] le reste (amis).
+    global: [VecDeque<Instant>; 2],
 }
 
 impl NotifyLimiter {
@@ -121,17 +137,20 @@ impl NotifyLimiter {
         let mut st = lock(&self.inner);
         let fresh = |t: &Instant| now.saturating_duration_since(*t) < NOTIFY_WINDOW;
         st.per_peer.retain(|_, t| fresh(t));
-        st.global.retain(fresh);
+        for g in st.global.iter_mut() {
+            g.retain(fresh);
+        }
+        let class = usize::from(kind != Kind::Request);
         if !key.is_empty() && st.per_peer.contains_key(&(kind, key.to_string())) {
             return false;
         }
-        if st.global.len() >= NOTIFY_GLOBAL_MAX {
+        if st.global[class].len() >= NOTIFY_GLOBAL_MAX {
             return false;
         }
         if !key.is_empty() {
             st.per_peer.insert((kind, key.to_string()), now);
         }
-        st.global.push_back(now);
+        st.global[class].push_back(now);
         true
     }
 }
@@ -145,7 +164,7 @@ fn plan_notification(
     now: Instant,
 ) -> Option<(String, String)> {
     let notif = kind.build(payload, hotkey)?;
-    let key = payload.get("public_key").and_then(Value::as_str).unwrap_or_default();
+    let key = payload.get("public_key").or_else(|| payload.get("friend_public_key")).and_then(Value::as_str).unwrap_or_default();
     limiter.allow(kind, key, now).then_some(notif)
 }
 
@@ -309,7 +328,7 @@ pub fn setup(app: &AppHandle, test_mode: bool) {
     // Invitation, demande d'ami et demande à rejoindre : sans notification, un hôte ou un ami dont la fenêtre n'est pas à
     // l'écran ne les voit jamais, et elles expirent.
     let limiter = Arc::new(NotifyLimiter::default());
-    for kind in [Kind::Invite, Kind::Request, Kind::JoinRequest] {
+    for kind in [Kind::Invite, Kind::Request, Kind::JoinRequest, Kind::TunnelLost] {
         let h = app.clone();
         let limiter = limiter.clone();
         app.listen(kind.event(), move |ev| {
@@ -391,6 +410,22 @@ mod tests {
     }
 
     #[test]
+    fn notification_de_liaison_perdue() {
+        let lost = serde_json::json!({"state": "lost", "friend_public_key": "ab"});
+        let (t, b) = tunnel_lost_notification(&lost).unwrap();
+        assert_eq!(t, "Connexion perdue");
+        assert!(b.contains("Ouvre Cubelink"));
+        for s in ["ok", "reconnecting", "closed"] {
+            assert!(tunnel_lost_notification(&serde_json::json!({"state": s})).is_none(), "{s}");
+        }
+        // Limitée par ami (clé `friend_public_key`).
+        let l = NotifyLimiter::default();
+        let t0 = Instant::now();
+        assert!(plan_notification(&l, Kind::TunnelLost, &lost, None, t0).is_some());
+        assert!(plan_notification(&l, Kind::TunnelLost, &lost, None, t0 + Duration::from_secs(1)).is_none());
+    }
+
+    #[test]
     fn limiteur_un_par_pair_et_par_minute() {
         let l = NotifyLimiter::default();
         let t0 = Instant::now();
@@ -413,7 +448,12 @@ mod tests {
             assert!(l.allow(Kind::Request, &format!("k{i}"), t0), "{i}");
         }
         assert!(!l.allow(Kind::Request, "autre", t0 + Duration::from_secs(5)));
+        // Les demandes d'ami ont leur propre plafond : celles des amis passent encore, jusqu'au leur.
+        for i in 0..NOTIFY_GLOBAL_MAX {
+            assert!(l.allow(Kind::JoinRequest, &format!("j{i}"), t0 + Duration::from_secs(5)), "{i}");
+        }
         assert!(!l.allow(Kind::JoinRequest, "encore", t0 + Duration::from_secs(5)));
+        assert!(!l.allow(Kind::TunnelLost, "encore", t0 + Duration::from_secs(5)));
         assert!(l.allow(Kind::Request, "autre", t0 + Duration::from_secs(61)));
         // Sans clé : pas de limite par pair, seulement le plafond global.
         let l = NotifyLimiter::default();

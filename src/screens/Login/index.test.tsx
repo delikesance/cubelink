@@ -109,6 +109,19 @@ describe("écran Connexion", () => {
     expect(cancelLogin).toHaveBeenCalledTimes(1);
   });
 
+  it("quitter l'écran du code sans Annuler prévient aussi Rust ; un démontage sans flux ne prévient pas", async () => {
+    const { svc } = lateServices();
+    const cancelLogin = vi.fn(async () => {});
+    const view = render(<Shell services={{ ...svc, authCancelLogin: cancelLogin }} />);
+    fireEvent.click(btn());
+    expect(await screen.findByLabelText(/^Code :/)).toBeTruthy();
+    view.unmount();
+    expect(cancelLogin).toHaveBeenCalledTimes(1);
+    const idle = vi.fn(async () => {});
+    render(<Shell services={{ ...svc, authCancelLogin: idle }} />).unmount();
+    expect(idle).not.toHaveBeenCalled();
+  });
+
   it("Échap pendant la demande du code (réseau lent) quitte l'attente ; un second clic ne redemande pas de code", async () => {
     const base = createFakeServices({ tickMs: 0 });
     let release: (c: { user_code: string; verification_uri: string; expires_in: number }) => void = () => {};

@@ -385,6 +385,16 @@ const ATTEMPTS_FILE: &str = "attempts";
 const APPLY_RETRIES: u32 = 20;
 const APPLY_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
 
+/// Fichiers `friends.db*` de `dir` encore ouverts par ce processus (Linux : `/proc/self/fd`).
+#[cfg(all(test, target_os = "linux"))]
+fn open_db_files(dir: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir("/proc/self/fd")
+        .unwrap()
+        .filter_map(|e| std::fs::read_link(e.ok()?.path()).ok())
+        .filter(|p| p.parent() == Some(dir) && p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("friends.db")))
+        .collect()
+}
+
 /// Applique une restauration déposée par [`stage_import`]. À appeler au tout début du démarrage, avant l'ouverture
 /// de l'identité et de la base. Sans restauration en attente : ne fait rien (`Ok(false)`).
 /// `hearth_dir` : dossier des groupes Hearth, lié à l'identité ; quand la clé change, il est mis de côté en
@@ -434,6 +444,9 @@ fn apply_pending_import_with(
 }
 
 fn apply_inner(p2p_dir: &Path, hearth_dir: Option<&Path>, pending: &Path) -> Result<(), BackupError> {
+    // Contrainte Windows rejouée sous Linux : rien ne doit tenir `friends.db*` ouvert pendant l'échange de fichiers.
+    #[cfg(all(test, target_os = "linux"))]
+    assert_eq!(open_db_files(p2p_dir), Vec::<PathBuf>::new(), "friends.db* est encore ouvert : Windows refuserait le renommage");
     let new_key = pending.join(KEY_FILE);
     let new_db = pending.join(DB_FILE);
     let key_ok = std::fs::metadata(&new_key).map(|m| m.len() == 32).unwrap_or(false);
@@ -731,8 +744,24 @@ mod tests {
         let old = Identity::load_or_create(dst.path()).unwrap();
         let old_db = FriendsDb::open(dst.path().join("friends.db")).unwrap();
         old_db.add_friend(&Friend { public_key: key('c'), name: "Carole".into(), trust: TrustLevel::Ask, added_at: 1 }).unwrap();
-        // Base ouverte : son journal WAL est sur le disque pendant l'application (arrêt brutal simulé).
-        std::mem::forget(old_db);
+        // Arrêt brutal simulé : le journal WAL et le `-shm` d'une base non fermée restent sur le disque. On les fige par
+        // copie pendant que la connexion vit, puis la connexion est fermée : aucun descripteur ne reste ouvert
+        // (sous Windows il bloquerait le renommage ; l'application s'exécute avant toute ouverture de la base).
+        let crashed = dst.path().join("crashed");
+        std::fs::create_dir_all(&crashed).unwrap();
+        for n in ["friends.db", "friends.db-wal", "friends.db-shm"] {
+            let _ = std::fs::copy(dst.path().join(n), crashed.join(n));
+        }
+        drop(old_db);
+        for n in ["friends.db", "friends.db-wal", "friends.db-shm"] {
+            let _ = std::fs::remove_file(dst.path().join(n));
+            if crashed.join(n).exists() {
+                std::fs::rename(crashed.join(n), dst.path().join(n)).unwrap();
+            }
+        }
+        std::fs::remove_dir(&crashed).unwrap();
+        assert!(dst.path().join("friends.db-wal").exists(), "précondition : un journal WAL traîne");
+        assert!(open_db_files(dst.path()).is_empty(), "précondition : aucune connexion ouverte");
 
         stage_import(dst.path(), &file, PASS).unwrap();
         assert!(apply_pending_import(dst.path(), None).unwrap());
@@ -810,7 +839,8 @@ mod tests {
         let (id, db) = setup(src.path());
         let file = export(src.path(), &id, &db, PASS);
         let dst = tempfile::tempdir().unwrap();
-        let (old_id, _old_db) = setup(dst.path());
+        let (old_id, old_db) = setup(dst.path());
+        drop(old_db);
         stage_import(dst.path(), &file, PASS).unwrap();
         let stamp = std::fs::read_to_string(dst.path().join(PENDING_DIR).join(STAMP_FILE)).unwrap();
         std::fs::create_dir_all(dst.path().join(format!("identity.key.bak-{}", stamp.trim()))).unwrap();
@@ -848,6 +878,8 @@ mod tests {
         let src = tempfile::tempdir().unwrap();
         let (id, db) = setup(src.path());
         let file = export(src.path(), &id, &db, PASS);
+        // Restaurer sur place : la connexion de l'application est fermée (elle l'est avant le redémarrage).
+        drop(db);
         let hearth = src.path().join("hearth-test");
         std::fs::create_dir_all(&hearth).unwrap();
         stage_import(src.path(), &file, PASS).unwrap();

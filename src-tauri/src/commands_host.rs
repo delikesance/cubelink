@@ -205,7 +205,7 @@ impl AppState {
                 Ok(()) => {
                     sent.insert(key, std::time::Instant::now());
                 }
-                Err(e) => eprintln!("[Cubelink] annonce du monde à un ami impossible : {e}"),
+                Err(e) => tracing::warn!("annonce du monde à un ami impossible : {e}"),
             }
         }
     }
@@ -217,7 +217,7 @@ impl HostAuto {
         let (s, id) = (st.clone(), instance_id.to_string());
         let share = tauri::async_runtime::spawn(async move {
             if let Err(e) = s.host_start_sharing(&id, 0).await {
-                eprintln!("partage automatique impossible : {e}");
+                tracing::warn!("partage automatique impossible : {e}");
             }
         });
         let s = st.clone();

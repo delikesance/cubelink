@@ -114,7 +114,7 @@ impl AppState {
     fn read_accounts(&self) -> AccountsFile {
         let _g = ACCOUNTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         self.load_accounts().unwrap_or_else(|e| {
-            eprintln!("[Cubelink] comptes illisibles : {}", user_msg(&e));
+            tracing::warn!("comptes illisibles : {}", user_msg(&e));
             AccountsFile::default()
         })
     }
@@ -123,7 +123,7 @@ impl AppState {
     fn update_accounts<R>(&self, f: impl FnOnce(&mut AccountsFile) -> Result<R, String>) -> Result<(R, AccountsFile), String> {
         let _g = ACCOUNTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut file = self.load_accounts().unwrap_or_else(|e| {
-            eprintln!("[Cubelink] comptes illisibles, réinitialisés : {}", user_msg(&e));
+            tracing::warn!("comptes illisibles, réinitialisés : {}", user_msg(&e));
             AccountsFile::default()
         });
         let r = f(&mut file)?;
@@ -206,7 +206,7 @@ impl AppState {
         match self.refresh_session().await {
             Ok(t) => Some(t.profile),
             Err(RefreshFailure::Transient(m)) => {
-                eprintln!("[Cubelink] session : renouvellement reporté ({m})");
+                tracing::warn!("session : renouvellement reporté ({m})");
                 Some(stored.profile)
             }
             Err(_) => None,

@@ -361,7 +361,7 @@ impl AddrBook {
         }
         self.transport.add_peer(merged.clone());
         if let Err(e) = self.db.set_friend_addr(&key, &to_peer_addr(&merged)) {
-            eprintln!("[cubelink] adresse d'ami non persistée : {e}");
+            tracing::warn!("adresse d'ami non persistée : {e}");
         }
     }
 }
@@ -780,7 +780,7 @@ impl IrohBackend {
         let id = lock(&self.current_share).clone();
         if let Some(id) = id {
             if let Err(e) = self.share_instance(&id).await {
-                eprintln!("[cubelink] recalcul du manifeste impossible : {e}");
+                tracing::warn!("recalcul du manifeste impossible : {e}");
             }
         }
         self.resharing.store(false, Ordering::SeqCst);

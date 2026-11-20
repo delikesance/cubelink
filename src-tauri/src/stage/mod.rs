@@ -414,7 +414,7 @@ impl Stage {
             Ok(o) => {
                 let _ = self.core.outbox.set(o);
             }
-            Err(e) => eprintln!("[Cubelink] journal de la zone de jeu indisponible : {e}"),
+            Err(e) => tracing::warn!("journal de la zone de jeu indisponible : {e}"),
         }
     }
 
@@ -518,7 +518,7 @@ impl Stage {
                 self.relayout(window);
             }
             Err(e) => {
-                eprintln!("[Cubelink] zone de jeu integree indisponible : {e}");
+                tracing::warn!("zone de jeu integree indisponible : {e}");
                 self.note(&format!("Scene indisponible : {e}"));
             }
         }

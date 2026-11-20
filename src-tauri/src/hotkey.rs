@@ -105,10 +105,10 @@ pub fn apply_settings(app: &AppHandle) {
             });
             match res {
                 Ok(()) => *reg = Some(sc),
-                Err(e) => eprintln!("[Cubelink] raccourci « {hotkey} » non enregistré : {e}"),
+                Err(e) => tracing::warn!("raccourci « {hotkey} » non enregistré : {e}"),
             }
         }
-        Err(e) => eprintln!("[Cubelink] raccourci « {hotkey} » invalide : {e}"),
+        Err(e) => tracing::warn!("raccourci « {hotkey} » invalide : {e}"),
     }
 }
 
@@ -147,7 +147,7 @@ pub fn setup(app: &AppHandle, test_mode: bool) {
         let hotkey = (!cfg!(target_os = "linux") || scene).then_some(hotkey.as_str());
         if let Some((title, body)) = invite_notification(&v, hotkey) {
             if let Err(e) = h.notification().builder().title(title).body(body).show() {
-                eprintln!("[Cubelink] notification d'invitation : {e}");
+                tracing::warn!("notification d'invitation : {e}");
             }
         }
     });

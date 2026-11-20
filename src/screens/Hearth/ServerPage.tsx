@@ -213,6 +213,7 @@ function Settings({ d, services, instances, ask, onError }: { d: HearthDetail; s
           <input type="checkbox" checked={d.settings.keep_background} onChange={(e) => { services.hearthSetBackground(id, e.target.checked).catch((x: unknown) => onError(errText(x))); }} />
           <span>Garder le serveur ouvert quand mon jeu se ferme</span>
         </label>
+        <p className="hearth-hint">Sans joueur pendant 30 minutes, le serveur s'arrête tout seul, même ouvert.</p>
       </section>
     </div>
   );

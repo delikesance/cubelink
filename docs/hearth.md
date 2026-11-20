@@ -76,7 +76,7 @@ GroupId      = 16 octets aléatoires (hex dans les noms de fichiers et le JSON)
 PackPin      = { pack_collection: BlobHash, pack_hash, minecraft, loader: LoaderSpec }     (§ 6.2)
 GroupSettings= { ops: Creator | Members(BTreeSet<AccountKey>) | None, op_level (4 ou 2),
                  spawn_protection, allow_flight, pvp, view_distance, simulation_distance,
-                 enable_command_block, idle_stop_minutes (défaut 5), extra_exclude, … }
+                 enable_command_block, idle_stop_minutes (défaut 30 ; pas encore réglable), extra_exclude, … }
 MemberInfo   = { since_op, until_op?, dormant: bool, mc_profile? }
 GroupState   = { id, name, pack: PackPin, pack_history: Vec<(op_seq, base_version, pack_hash)>,
                  creator: AccountKey, members: BTreeMap<AccountKey, MemberInfo>,
@@ -361,7 +361,7 @@ Il ne contient que les fichiers qui comptent pour le jeu (mods, config, kubejs, 
 
 `server.properties` est **régénéré à chaque démarrage** depuis `GroupSettings`. Valeurs par défaut : `spawn-protection=0`, `allow-flight=true`, `max-tick-time=-1`, `view-distance=10`, `simulation-distance=8` ; `difficulty` et `hardcore` lus dans `level.dat` à la création ; `pvp` et `enable-command-block` réglables. Pour un monde neuf, `level-seed` et `level-type` (preset du pack) viennent de l'opération `Create`. **Clés forcées**, non modifiables : `online-mode=true`, `server-ip=127.0.0.1`, `server-port`, `level-name=w`, `white-list=true`, `enforce-whitelist=true`, `enable-rcon=false`, `enable-query=false`, `prevent-proxy-connections=false`.
 
-Réglage d'appareil `hearth_can_host` (Auto, Jamais). Réglage de groupe `idle_stop_minutes` (défaut 5, de 1 à 30).
+Réglage d'appareil `hearth_can_host` (Auto, Jamais). Arrêt du serveur vide : 30 minutes sans joueur (constante `IDLE_STOP` de `src-tauri/src/hearth.rs`). Le réglage de groupe `idle_stop_minutes` (de 1 à 120) est prévu mais pas encore branché.
 
 ### 6.4 Identité Minecraft, liste blanche, opérateurs
 
@@ -409,7 +409,7 @@ Un seul mécanisme : le préfixe `server_state/` de la collection (§ 3.3). Il r
 
 - **Renouvellement** toutes les 30 s (règles de vie du § 3.4). Les boucles tournent en Rust.
 - **Réplication continue** : chaque joueur connecté tire en fond les blobs de chaque `Checkpoint` (débit plafonné, § 4), pour que le dernier delta soit petit.
-- **Serveur vide** : `stop` après `idle_stop_minutes` sans joueur, avec version `Session` et `LeaseRelease`.
+- **Serveur vide** : `stop` après 30 minutes sans joueur (`IDLE_STOP`, § 6.3), **y compris avec « Garder le serveur ouvert »** (qui ne couvre que l'intervalle entre deux parties rapprochées), avec version `Session` et `LeaseRelease`. Si personne n'est jamais entré, le serveur s'arrête sans rien publier. La surveillance sonde toutes les 30 s.
 - **Éviction** : si un `RemoveMember` ou `Leave` s'applique pendant la partie, voir § 2 (connexions fermées, `kick`, `whitelist remove`).
 
 ### 7.4 Points de reprise (toutes les 10 min)
@@ -422,7 +422,7 @@ Une seule séquence (`core/src/hearth/server.rs`, `world.rs`) :
 4. `save-on`, **garanti par une garde** (`Drop` ou `finally`) sur tous les chemins : panne, panique, délai dépassé, ENOSPC. La phase `save-off` se limite à la copie vers le staging.
 5. **Hors `save-off`** : hachage BLAKE3 et import (`ImportMode::Copy` depuis le staging), validation légère (chaque `.dat` commence par l'en-tête gzip et se décompresse), nouvelle version `Checkpoint`, entrée d'outbox.
 
-Règles : une seule empreinte, le BLAKE3 du blob (`FileStamp { size, mtime_ms, blake3 }`, rempli par le résultat de l'import) ; aucune version si aucun fichier n'a changé (même collection) ou si aucun joueur n'était connecté depuis le point précédent. Le flush est chronométré : s'il dépasse 5 s, l'intervalle passe à 20 puis 30 minutes, sans jamais s'allonger davantage ; l'autosave du jeu (5 min, non bloquant) tourne normalement entre deux. Annonce en jeu avant le flush (`tellraw @a`, désactivable). Un point de reprise abandonné est journalisé et retenté au cycle suivant. **Disque** : sondé toutes les 30 s ; sous 3 Go : avertissement dans le jeu (`say`) et points de reprise suspendus ; sous 1,5 Go : `save-all flush`, `stop`, puis publication de la `Session` depuis `w/` (import par hachage sans copie si le staging est impossible). Avant d'héberger : monde + 2 fois la taille moyenne d'un point de reprise + 2 Go libres, sinon Bloqué avec « Libère X Go ».
+Règles : une seule empreinte, le BLAKE3 du blob (`FileStamp { size, mtime_ms, blake3 }`, rempli par le résultat de l'import) ; aucune version si aucun fichier n'a changé (même collection que la dernière version de la chaîne) ou si aucun joueur n'était connecté depuis le point précédent (drapeau « un joueur est entré depuis le dernier point » : celui qui entre puis sort entre deux points compte) ; `save-on` est envoyé dans tous les cas. Le flush est chronométré : s'il dépasse 5 s, l'intervalle passe à 20 puis 30 minutes, sans jamais s'allonger davantage ; l'autosave du jeu (5 min, non bloquant) tourne normalement entre deux. Annonce en jeu avant le flush (`tellraw @a`, désactivable). Un point de reprise abandonné est journalisé et retenté au cycle suivant. **Disque** : sondé toutes les 30 s ; sous 3 Go : avertissement dans le jeu (`say`) et points de reprise suspendus ; sous 1,5 Go : `save-all flush`, `stop`, puis publication de la `Session` depuis `w/` (import par hachage sans copie si le staging est impossible). Avant d'héberger : monde + 2 fois la taille moyenne d'un point de reprise + 2 Go libres, sinon Bloqué avec « Libère X Go ».
 
 ### 7.5 Fin de partie, plantage, arrêt de la machine
 

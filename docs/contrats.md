@@ -223,7 +223,7 @@ Erreur spéciale : `head_unavailable|<n° de la tête>|<n° de la dernière vers
 - `hearth://state` : `HearthCard[]`, liste complète à chaque changement visible (état, sondes, synchro, étapes de lancement, votes).
 - `hearth://invites` : `HearthInvite[]`, liste complète des invitations en attente.
 - `hearth://handover` : `{ group_id, name, from_name }`. L'hôte vient d'arrêter le serveur pendant que je jouais (je peux reprendre avec `hearth_play`).
-- `hearth://host_prompt` : `{ group_id, name, players }`. Mon jeu s'est fermé mais `players` joueurs sont encore sur mon serveur (et le réglage « garder ouvert » est désactivé) : le serveur reste ouvert jusqu'à `hearth_stop`.
+- `hearth://host_prompt` : `{ group_id, name, players }`. Mon jeu s'est fermé mais `players` joueurs sont encore sur mon serveur (et le réglage « garder ouvert » est désactivé) : le serveur reste ouvert jusqu'à `hearth_stop`, ou jusqu'à 30 minutes sans joueur (arrêt automatique, même avec « garder ouvert »).
 
 ### Types
 

@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use common::{befriend, wait_for, world, Node};
 use core_lib::types::HearthStateKind;
-use cubelink_app::hearth::{BoxFut, ClientLauncher, LeaveError, RenewTick, RunningServer, ServerRunner, ServerSpec, EULA_REQUIRED};
+use cubelink_app::hearth::{BoxFut, ClientLauncher, LeaveError, RenewTick, RunningServer, ServerRunner, ServerSpec, Timings, EULA_REQUIRED};
 use cubelink_app::state::{lock, AppState};
 use p2p_lib::hearth::lease::{Lease, ManualClock};
 use p2p_lib::hearth::model::{GroupId, GroupOp};
@@ -465,7 +465,7 @@ async fn point_de_reprise_interrompu_pendant_save_on_ne_fourche_pas() {
     let before = a.runner.calls.lock().unwrap().iter().filter(|c| **c == "save-on").count();
     let rt = a.rt().clone();
     let h = host.clone();
-    let task = tokio::spawn(async move { rt.checkpoint(&h).await });
+    let task = tokio::spawn(async move { rt.checkpoint(&h).await.map(|v| v.expect("le monde a changé : une version est publiée")) });
     // `save-on` est demandé : la version de reprise est déjà publiée, et la tâche attend la confirmation.
     wait_for("point de reprise en attente de save-on", 30, || {
         a.runner.calls.lock().unwrap().iter().filter(|c| **c == "save-on").count() > before
@@ -1191,6 +1191,134 @@ async fn mise_de_cote_impossible_ne_supprime_rien() {
     assert_eq!(std::fs::read(a.rt().server_dir(&g).join("world/region-jouee.mca")).unwrap(), SENTINELLE, "le monde est intact");
     assert!(a.rt().has_session_marker(&g));
     assert_eq!(a.node.st.hearth.detail(&g).unwrap().orphans.len(), 0);
+    for p in &peers {
+        p.stop().await;
+    }
+}
+
+const JOINED: &str = "[12:00:00] [Server thread/INFO]: Steve joined the game";
+const LEFT: &str = "[12:05:00] [Server thread/INFO]: Steve left the game";
+
+fn timings(checkpoint_ms: u64, idle_stop_ms: u64) -> Timings {
+    Timings { checkpoint: Duration::from_millis(checkpoint_ms), idle_stop: Duration::from_millis(idle_stop_ms), idle_poll: Duration::from_millis(100) }
+}
+
+fn on_line_of(a: &Peer) -> core_lib::hearth::server::LineSink {
+    a.runner.specs.lock().unwrap()[0].on_line.clone()
+}
+
+fn world_file(a: &Peer, name: &str, contents: &str) {
+    std::fs::write(a.runner.specs.lock().unwrap()[0].dir.join("world").join(name), contents).unwrap();
+}
+
+/// Serveur sans joueur : aucun point de reprise n'est publié (ticket #94), mais un appel direct reste possible.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn serveur_vide_ne_publie_aucun_point_de_reprise() {
+    let (peers, g, id) = group_of(&["Alice", "Bob"]).await;
+    let a = &peers[0];
+    a.rt().set_timings(timings(150, 3_600_000));
+    a.node.st.hearth_play(&id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert!(a.rt().head(&g).is_none(), "aucun joueur : aucune version");
+    assert!(!a.runner.calls.lock().unwrap().contains(&"save-off"), "le serveur n'est même pas mis en pause");
+    // Un appel direct force le point (le monde est nouveau : une version).
+    let host = a.rt().active(&g).unwrap();
+    let v = a.rt().checkpoint(&host).await.unwrap().expect("monde nouveau : une version");
+    assert_eq!(v.header.kind, VersionKind::Checkpoint);
+    for p in &peers {
+        p.stop().await;
+    }
+}
+
+/// Un joueur entré puis sorti entre deux points compte ; un monde identique à la tête ne produit pas de version, et
+/// `save-on` est quand même envoyé ; sans nouveau joueur, plus de point.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn point_de_reprise_seulement_si_joueur_et_monde_change() {
+    let (peers, g, id) = group_of(&["Alice", "Bob"]).await;
+    let a = &peers[0];
+    a.rt().set_timings(timings(1500, 3_600_000));
+    a.node.st.hearth_play(&id).await.unwrap();
+    // Entré puis sorti avant le premier point : il compte.
+    let on_line = on_line_of(a);
+    on_line(JOINED);
+    world_file(a, "region-1.mca", "un");
+    on_line(LEFT);
+    wait_for("premier point de reprise", 30, || a.rt().head(&g).is_some()).await;
+    let v1 = a.rt().head(&g).unwrap();
+    assert_eq!(v1.header.kind, VersionKind::Checkpoint);
+    assert_eq!(v1.header.number, 1);
+    // Personne depuis : plusieurs tours sans rien publier, même si le monde change.
+    world_file(a, "region-2.mca", "deux");
+    tokio::time::sleep(Duration::from_millis(4000)).await;
+    assert_eq!(a.rt().head(&g).unwrap().id(), v1.id(), "aucun joueur depuis le dernier point : rien");
+    // Un joueur revient mais le monde ne bouge pas par rapport à la tête : rien non plus, et save-on est bien envoyé.
+    let host = a.rt().active(&g).unwrap();
+    a.rt().checkpoint(&host).await.unwrap().expect("region-2 est nouveau");
+    let v2 = a.rt().head(&g).unwrap();
+    assert_eq!(v2.header.number, 2);
+    let (offs, ons) = {
+        let c = a.runner.calls.lock().unwrap();
+        (c.iter().filter(|c| **c == "save-off").count(), c.iter().filter(|c| **c == "save-on").count())
+    };
+    assert_eq!(offs, ons, "chaque save-off est suivi d'un save-on");
+    on_line(JOINED);
+    tokio::time::sleep(Duration::from_millis(4000)).await;
+    assert_eq!(a.rt().head(&g).unwrap().id(), v2.id(), "monde identique à la tête : aucune version");
+    let ons_after = a.runner.calls.lock().unwrap().iter().filter(|c| **c == "save-on").count();
+    assert!(ons_after > ons, "le point a bien eu lieu (save-on), sans publier");
+    assert!(a.runner.calls.lock().unwrap().iter().filter(|c| **c == "save-off").count() == ons_after);
+    // Joueur resté connecté et monde changé : un point de plus.
+    world_file(a, "region-3.mca", "trois");
+    wait_for("point de reprise avec joueur", 30, || a.rt().head(&g).is_some_and(|h| h.header.number == 3)).await;
+    for p in &peers {
+        p.stop().await;
+    }
+}
+
+/// Serveur vide trop longtemps (même avec « garder ouvert ») : il s'arrête, la session est publiée, le partage fermé et le
+/// bail relâché. Un joueur connecté empêche l'arrêt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn serveur_vide_s_arrete_apres_l_inactivite() {
+    let (peers, g, id) = group_of(&["Alice", "Bob"]).await;
+    let (a, b) = (&peers[0], &peers[1]);
+    a.rt().set_timings(timings(3_600_000, 2000));
+    a.rt().set_keep_background(&g, true);
+    a.node.st.hearth_play(&id).await.unwrap();
+    assert_eq!(a.state_of(&g), HearthStateKind::Hosting);
+    on_line_of(a)(JOINED);
+    world_file(a, "region-jouee.mca", "jouée");
+    tokio::time::sleep(Duration::from_millis(3500)).await;
+    assert!(a.rt().active(&g).is_some(), "un joueur est connecté : le serveur reste");
+    on_line_of(a)(LEFT);
+    wait_for("serveur arrêté après inactivité", 30, || a.rt().active(&g).is_none()).await;
+    wait_for("partage fermé", 30, || a.node.be.shared_instance().is_none()).await;
+    assert_ne!(a.state_of(&g), HearthStateKind::Hosting);
+    let calls = a.runner.calls.lock().unwrap().clone();
+    assert_eq!(calls.iter().filter(|c| **c == "stop").count(), 1, "un seul arrêt : {calls:?}");
+    let s = a.rt().head(&g).expect("la session est publiée");
+    assert_eq!(s.header.kind, VersionKind::Session);
+    assert!(!a.rt().has_session_marker(&g), "la session publiée efface le marqueur");
+    wait_for("bail relâché chez Bob", 20, || b.rt().lease_of_holder(&g, &a.key()).is_none()).await;
+    for p in &peers {
+        p.stop().await;
+    }
+}
+
+/// Personne n'est jamais entré : arrêt sans rien publier, marqueur effacé, partage fermé.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn serveur_jamais_rejoint_s_arrete_sans_version() {
+    let (peers, g, id) = group_of(&["Alice", "Bob"]).await;
+    let (a, b) = (&peers[0], &peers[1]);
+    a.rt().set_timings(timings(3_600_000, 1500));
+    a.node.st.hearth_play(&id).await.unwrap();
+    assert!(a.rt().has_session_marker(&g));
+    wait_for("serveur arrêté", 30, || a.rt().active(&g).is_none()).await;
+    wait_for("partage fermé", 30, || a.node.be.shared_instance().is_none()).await;
+    assert_eq!(a.runner.calls.lock().unwrap().clone(), ["start", "stop"], "rien à publier : pas de save-all");
+    assert!(a.rt().head(&g).is_none(), "aucune version publiée");
+    assert!(!a.rt().has_session_marker(&g));
+    assert_ne!(a.state_of(&g), HearthStateKind::Hosting);
+    wait_for("bail relâché chez Bob", 20, || b.rt().lease_of_holder(&g, &a.key()).is_none()).await;
     for p in &peers {
         p.stop().await;
     }

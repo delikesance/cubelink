@@ -65,6 +65,25 @@ const CLAIM_YIELD_WAIT: Duration = Duration::from_secs(12);
 const BEST_EFFORT_CONFIRM: Duration = Duration::from_secs(120);
 /// Période des points de reprise pendant une partie.
 pub const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(10 * 60);
+/// Un serveur sans joueur pendant ce temps s'arrête, même avec « Garder le serveur ouvert » (docs/hearth.md § 7.3).
+pub const IDLE_STOP: Duration = Duration::from_secs(30 * 60);
+/// Période de la surveillance du serveur vide.
+pub const IDLE_POLL: Duration = Duration::from_secs(30);
+
+/// Délais de la partie hébergée (injectables : les tests les raccourcissent).
+#[derive(Debug, Clone, Copy)]
+pub struct Timings {
+    pub checkpoint: Duration,
+    pub idle_stop: Duration,
+    pub idle_poll: Duration,
+}
+
+impl Default for Timings {
+    fn default() -> Self {
+        Self { checkpoint: CHECKPOINT_INTERVAL, idle_stop: IDLE_STOP, idle_poll: IDLE_POLL }
+    }
+}
+
 /// Jours sans nouvelles avant de pouvoir continuer sans un membre.
 pub const CONTINUE_AFTER_DAYS: u32 = 7;
 /// Versions plus jeunes que cela sont gardées par le ramasse-miettes des versions.
@@ -418,6 +437,9 @@ pub struct ActiveHost {
     players: Arc<Mutex<BTreeSet<String>>>,
     /// Quelqu'un est déjà entré sur ce serveur : le monde peut contenir du jeu non publié, même si tout le monde est parti.
     ever_joined: Arc<AtomicBool>,
+    /// Un joueur est entré depuis le dernier point de reprise (un drapeau, pas un compteur : celui qui entre puis sort entre
+    /// deux points compte aussi). Sans joueur depuis le dernier point, le suivant est sauté.
+    played_since_checkpoint: Arc<AtomicBool>,
     tasks: Mutex<Vec<JoinHandle<()>>>,
     stopping: AtomicBool,
 }
@@ -534,6 +556,8 @@ pub struct HearthRuntime {
     /// Fin d'une partie hébergée qui s'arrête d'elle-même (plantage) : l'application arrête aussi le partage, l'accès et
     /// l'état de lancement.
     end_hook: Mutex<Option<EndHook>>,
+    /// Délais des points de reprise et de l'arrêt du serveur vide.
+    timings: Mutex<Timings>,
     /// Une seule fermeture générale à la fois : la seconde attend la première.
     stop_all: tokio::sync::Mutex<()>,
     /// Horloges (injectables : les tests font « dormir » la machine sans attendre).
@@ -709,6 +733,7 @@ impl HearthRuntime {
             starting: Mutex::new(HashMap::new()),
             oversize: Mutex::new(HashSet::new()),
             end_hook: Mutex::new(None),
+            timings: Mutex::new(Timings::default()),
             stop_all: tokio::sync::Mutex::new(()),
             clock: Mutex::new(Arc::new(SystemClock)),
             best_effort: Mutex::new(HashMap::new()),
@@ -739,6 +764,11 @@ impl HearthRuntime {
     /// Remplace le lanceur de serveur (tests).
     pub fn set_runner(&self, r: Arc<dyn ServerRunner>) {
         *lock(&self.runner) = r;
+    }
+
+    /// Remplace les délais de la partie hébergée (tests).
+    pub fn set_timings(&self, t: Timings) {
+        *lock(&self.timings) = t;
     }
 
     /// Remplace le lanceur du jeu (tests).
@@ -2566,13 +2596,15 @@ impl HearthRuntime {
         }
         let players: Arc<Mutex<BTreeSet<String>>> = Arc::default();
         let ever_joined = Arc::new(AtomicBool::new(false));
-        let (pl, ej, rt) = (players.clone(), ever_joined.clone(), self.clone());
+        let played = Arc::new(AtomicBool::new(false));
+        let (pl, ej, pc, rt) = (players.clone(), ever_joined.clone(), played.clone(), self.clone());
         let on_line: LineSink = Arc::new(move |line| {
             if let Some((joined, name)) = parse_player_event(line) {
                 {
                     let mut set = lock(&pl);
                     if joined {
                         ej.store(true, Ordering::SeqCst);
+                        pc.store(true, Ordering::SeqCst);
                         set.insert(name);
                     } else {
                         set.remove(&name);
@@ -2631,6 +2663,7 @@ impl HearthRuntime {
             fenced: AtomicBool::new(false),
             players,
             ever_joined,
+            played_since_checkpoint: played,
             tasks: Mutex::new(Vec::new()),
             stopping: AtomicBool::new(false),
         });
@@ -2969,9 +3002,28 @@ impl HearthRuntime {
         let (rt, h) = (self.clone(), host.clone());
         let checkpoints = spawn(async move {
             loop {
-                tokio::time::sleep(CHECKPOINT_INTERVAL).await;
-                if let Err(e) = rt.checkpoint(&h).await {
-                    eprintln!("[cubelink] point de reprise du groupe {} : {e}", h.group);
+                let every = lock(&rt.timings).checkpoint;
+                tokio::time::sleep(every).await;
+                rt.checkpoint_tick(&h).await;
+            }
+        });
+        let (rt, h) = (self.clone(), host.clone());
+        let idle = spawn(async move {
+            let mut idle_since: Option<Instant> = None;
+            loop {
+                let t = *lock(&rt.timings);
+                tokio::time::sleep(t.idle_poll).await;
+                if h.players() > 0 {
+                    idle_since = None;
+                    continue;
+                }
+                let since = *idle_since.get_or_insert_with(Instant::now);
+                if since.elapsed() >= t.idle_stop {
+                    eprintln!("[cubelink] serveur du groupe {} arrêté : aucun joueur depuis {} min", h.group, t.idle_stop.as_secs() / 60);
+                    // Tâche détachée, comme `watch` : la fin de partie abandonne les tâches de l'hôte, dont celle-ci.
+                    let (rt, gid) = (rt.clone(), h.group);
+                    spawn(async move { rt.idle_stop(gid).await });
+                    break;
                 }
             }
         });
@@ -2986,7 +3038,7 @@ impl HearthRuntime {
                 spawn(async move { rt.host_ended(gid).await });
             }
         });
-        lock(&host.tasks).extend([renew, checkpoints, watch]);
+        lock(&host.tasks).extend([renew, checkpoints, idle, watch]);
     }
 
     /// Le serveur d'une partie s'est arrêté seul : l'application ferme tout (partage, accès, état de lancement) ; sans
@@ -3001,13 +3053,42 @@ impl HearthRuntime {
         }
     }
 
-    /// Point de reprise : le serveur cesse d'écrire, le monde est publié, le serveur reprend.
-    pub async fn checkpoint(self: &Arc<Self>, host: &Arc<ActiveHost>) -> Result<SignedVersion, String> {
+    /// Un tour de la boucle des points de reprise : sauté si personne n'a joué depuis le précédent (le monde n'a pas pu
+    /// changer). Un point en échec est retenté au tour suivant.
+    async fn checkpoint_tick(self: &Arc<Self>, host: &Arc<ActiveHost>) {
+        if !host.played_since_checkpoint.swap(false, Ordering::SeqCst) && host.players() == 0 {
+            return;
+        }
+        if let Err(e) = self.checkpoint(host).await {
+            host.played_since_checkpoint.store(true, Ordering::SeqCst);
+            eprintln!("[cubelink] point de reprise du groupe {} : {e}", host.group);
+        }
+    }
+
+    /// Publie le monde de `dir` sauf s'il est identique à la version `tip` (même collection) : alors rien n'est signé ni mis
+    /// en file d'envoi, et on rend `None`. Aucune suspension entre la publication des fichiers et l'enregistrement.
+    async fn publish_if_changed(
+        self: &Arc<Self>,
+        gid: GroupId,
+        dir: &Path,
+        tip: Option<(VersionId, u64)>,
+        played_secs: u64,
+    ) -> Result<Option<SignedVersion>, String> {
+        let pw: PublishedWorld = self.world()?.publish_dir(&gid, dir).await.map_err(|e| e.to_string())?;
+        if tip.and_then(|t| self.version(&gid, &t.0)).is_some_and(|v| v.header.collection == pw.collection) {
+            return Ok(None);
+        }
+        self.record_version(gid, VersionKind::Checkpoint, tip, played_secs, pw.collection, pw.total_size).map(Some)
+    }
+
+    /// Point de reprise : le serveur cesse d'écrire, le monde est publié, le serveur reprend. Rend `None` quand le monde est
+    /// identique à la dernière version de la chaîne (rien n'est publié).
+    pub async fn checkpoint(self: &Arc<Self>, host: &Arc<ActiveHost>) -> Result<Option<SignedVersion>, String> {
         let begun = host.server.flush_begin().await;
         let published = if begun.is_ok() {
             let dir = host.server.world_dir();
             let tip = *lock(&host.tip);
-            Some(self.publish_version(host.group, &dir, VersionKind::Checkpoint, tip, host.started.elapsed().as_secs()).await)
+            Some(self.publish_if_changed(host.group, &dir, tip, host.started.elapsed().as_secs()).await)
         } else {
             None
         };
@@ -3016,7 +3097,7 @@ impl HearthRuntime {
         // Cette avance doit rester AVANT tout `await` : `flush_end` attend `save-on` (jusqu'à 30 s) et `finish_hosting` peut
         // annuler cette tâche pendant l'attente ; entre l'enregistrement de la version et l'avance du tip, il n'y a aucune
         // suspension, donc aucune annulation possible.
-        if let Some(Ok(v)) = &published {
+        if let Some(Ok(Some(v))) = &published {
             *lock(&host.tip) = Some((v.id(), v.header.number));
             // Si la partie se termine mal après ce point, la fin de partie repartira de lui.
             if let Err(e) = self.write_session_marker(&host.group, Some((v.id(), v.header.number))) {
@@ -3029,6 +3110,18 @@ impl HearthRuntime {
         let v = published.ok_or("point de reprise non fait")??;
         resumed?;
         Ok(v)
+    }
+
+    /// Le serveur est resté vide trop longtemps : fin de partie complète, comme `yield_hosting` (publication de la `Session`
+    /// si quelqu'un est entré, bail relâché, partage fermé par `end_hook`). Si personne n'est jamais entré, il n'y a rien à
+    /// publier : le serveur est seulement arrêté.
+    async fn idle_stop(self: &Arc<Self>, gid: GroupId) {
+        // Le vide vient d'être constaté par la surveillance (aucune suspension depuis) : pas de nouvelle vérification.
+        let Some(host) = self.active(&gid) else { return };
+        if !host.ever_joined.load(Ordering::SeqCst) {
+            self.abort_hosting(gid).await;
+        }
+        self.host_ended(gid).await;
     }
 
     /// Un autre bail l'emporte pendant que mon serveur est vide : fin de partie complète, comme l'auto-exclusion après

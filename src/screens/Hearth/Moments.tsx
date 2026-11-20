@@ -84,6 +84,7 @@ function HostPromptMoment({ services, e, onClose }: { services: Services; e: Hea
           <input type="checkbox" checked={always} onChange={(ev) => setAlways(ev.target.checked)} />
           <span>Toujours garder le serveur ouvert quand mon jeu se ferme</span>
         </label>
+        <p className="hearth-hint">Même ouvert, le serveur s'arrête tout seul après 30 minutes sans joueur.</p>
         {error && <p className="hearth-err" role="alert">{error}</p>}
       </div>
       <div className="home-modal-foot">

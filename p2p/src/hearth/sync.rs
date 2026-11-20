@@ -278,6 +278,11 @@ impl Index {
     fn contains(&self, group: &GroupId, root: &Hash) -> bool {
         lock(&self.roots).get(root).is_some_and(|s| s.contains(group))
     }
+
+    /// Les collections servies pour ce groupe.
+    fn roots_of(&self, group: &GroupId) -> Vec<Hash> {
+        lock(&self.roots).iter().filter(|(_, g)| g.contains(group)).map(|(r, _)| *r).collect()
+    }
 }
 
 /// Tâche qui répond aux événements d'iroh-blobs (connexion, requête) selon la table et l'appartenance.
@@ -606,6 +611,31 @@ impl WorldStore {
         self.inner.index.unregister(group, &root);
         self.store().tags().delete(tag_name(group, &root)).await.map_err(store_err)?;
         Ok(())
+    }
+
+    /// Octets que les mondes de ce groupe occupent dans le magasin : les blobs des collections qu'il garde, chacun
+    /// compté une fois même s'il sert à plusieurs versions (un fichier inchangé d'une version à l'autre n'est qu'un blob).
+    /// Un blob partagé avec un autre groupe compte pour chacun : c'est la part que ce groupe référence, pas l'espace
+    /// qu'on récupérerait en l'oubliant. Les parties absentes ou incomplètes ne comptent pas.
+    pub async fn group_bytes(&self, group: &GroupId) -> u64 {
+        let mut seen: HashSet<Hash> = HashSet::new();
+        let mut total = 0u64;
+        for root in self.inner.index.roots_of(group) {
+            if seen.insert(root) {
+                if let Ok(BlobStatus::Complete { size }) = self.store().blobs().status(root).await {
+                    total += size;
+                }
+            }
+            let Ok(coll) = Collection::load(root, self.store()).await else { continue };
+            for (_, hash) in coll.iter() {
+                if seen.insert(*hash) {
+                    if let Ok(BlobStatus::Complete { size }) = self.store().blobs().status(*hash).await {
+                        total += size;
+                    }
+                }
+            }
+        }
+        total
     }
 
     /// Cette collection est-elle présente en entier (liste, noms et fichiers) ?

@@ -560,6 +560,16 @@ impl Group {
         }
     }
 
+    /// Heure locale (secondes Unix) à laquelle cette version est arrivée sur ce PC : la date du fichier
+    /// `versions/<id>.json`, écrit une seule fois à la réception (atomiquement). Ce n'est jamais `created_at`, que
+    /// l'auteur déclare lui-même. `None` : version inconnue, ou date illisible (l'appelant la traite comme « maintenant »).
+    /// Une copie du dossier du groupe ne fait que rajeunir la date, donc rallonger la durée de garde.
+    pub fn received_at(&self, id: &VersionId) -> Option<u64> {
+        let path = self.dir.join("versions").join(format!("{id}.json"));
+        let t = fs::metadata(path).and_then(|m| m.modified()).ok()?;
+        t.duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs())
+    }
+
     fn write_version(&self, v: &SignedVersion) -> Result<(), StoreError> {
         let path = self.dir.join("versions").join(format!("{}.json", v.id()));
         let data = serde_json::to_vec(v).expect("sérialisation JSON de types simples");
@@ -1092,6 +1102,30 @@ mod tests {
         assert_eq!(again.heads(), vec![v3.id()]);
         assert_eq!(again.graph().len(), 3);
         assert!(again.skipped().is_empty());
+    }
+
+    #[test]
+    fn received_at_est_la_date_locale_de_reception_pas_created_at() {
+        let tmp = dir();
+        let store = GroupStore::open(tmp.path()).unwrap();
+        let a = testutil::key(1);
+        let mut g = store.create(&create_op(&a, &[]), GroupKey::random()).unwrap();
+        let id = g.id();
+        // Une version dont l'auteur déclare une date passée (novembre 2023) : reçue à l'instant.
+        let v1 = version(&a, id, 1, None, 0, 1);
+        assert!(v1.header.created_at < 1_800_000_000 && v1.header.created_at > 1_000_000_000);
+        assert_eq!(g.received_at(&v1.id()), None, "inconnue avant l'ajout");
+        let before = unix_now();
+        g.add_version(v1.clone()).unwrap();
+        let got = g.received_at(&v1.id()).expect("reçue");
+        assert!(got + 5 >= before && got <= unix_now() + 5 && got > v1.header.created_at, "date locale, pas created_at : {got}");
+        assert_eq!(g.received_at(&VersionId([7; 32])), None);
+        // La date survit au rechargement, et suit le fichier.
+        let file = g.dir().join("versions").join(format!("{}.json", v1.id()));
+        let old = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        fs::File::options().write(true).open(&file).unwrap().set_modified(old).unwrap();
+        let again = store.open_group(&id).unwrap();
+        assert_eq!(again.received_at(&v1.id()), Some(1_000_000));
     }
 
     #[test]

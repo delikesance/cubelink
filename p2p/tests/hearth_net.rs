@@ -773,3 +773,30 @@ async fn lower_branch() {
     let again = conn.fetch_versions_reaching(&g, 49, &st.heads, known, true).await.unwrap();
     assert!(again.iter().all(|v| v.header.number > 49));
 }
+
+/// La place d'un groupe, c'est ses blobs : un fichier inchangé d'une version à l'autre est compté une fois, et une
+/// version libérée n'est plus comptée (#96).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn group_bytes_compte_les_blobs_une_fois_et_baisse_a_la_liberation() {
+    let a = node(false).await;
+    let g = GroupId::random();
+    let other = GroupId::random();
+    assert_eq!(a.world.group_bytes(&g).await, 0);
+    let w = tempfile::tempdir().unwrap();
+    std::fs::write(w.path().join("gros.bin"), noise(1, 100_000)).unwrap();
+    std::fs::write(w.path().join("level.dat"), noise(2, 1_000)).unwrap();
+    let p1 = a.world.publish_dir(&g, w.path()).await.unwrap();
+    let one = a.world.group_bytes(&g).await;
+    assert!(one >= p1.total_size && one < p1.total_size + 2_000, "blobs + liste : {one} pour {}", p1.total_size);
+    // Seul le petit fichier change : le gros blob n'est pas recompté.
+    std::fs::write(w.path().join("level.dat"), noise(3, 1_000)).unwrap();
+    let p2 = a.world.publish_dir(&g, w.path()).await.unwrap();
+    assert_ne!(p1.collection, p2.collection);
+    let two = a.world.group_bytes(&g).await;
+    assert!(two > one && two < one + 3_000, "le gros fichier compte une fois : {one} puis {two}");
+    // Un autre groupe qui ne garde rien ne pèse rien ; libérer la n° 1 retire ses blobs propres.
+    assert_eq!(a.world.group_bytes(&other).await, 0);
+    a.world.release(&g, &p1.collection).await.unwrap();
+    let after = a.world.group_bytes(&g).await;
+    assert!(after < two && after >= p2.total_size, "{after}");
+}

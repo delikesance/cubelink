@@ -327,6 +327,8 @@ mod tests {
         fs::hard_link(&pb, game(&e).join("saves/w/x.bin")).unwrap();
         #[cfg(unix)]
         std::os::unix::fs::symlink(&pa, game(&e).join("mods/sym.jar")).unwrap();
+        #[cfg(not(unix))]
+        let _ = pa; // pas de lien symbolique sans droits d'administrateur sous Windows
         let r = run(&e, &all());
         assert_eq!(r.removed.len(), 2);
         assert!(game(&e).join("saves/w/x.bin").exists());

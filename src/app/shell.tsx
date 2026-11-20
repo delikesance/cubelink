@@ -6,6 +6,7 @@ import { navigate, goBack, parseHash, takePendingFocus, useCanGoBack, useLocatio
 import { TitleBar } from "./TitleBar";
 import { UpdateBanner } from "./UpdateBanner";
 import { StageNotice } from "./StageNotice";
+import { TunnelNotice } from "./TunnelNotice";
 import { JoinRequestBanner } from "./JoinRequestBanner";
 import { useContextMenu, useSuppressNativeMenu } from "./useContextMenu";
 import { openExternal } from "./externalLinks";
@@ -198,6 +199,7 @@ export function Shell({ services }: { services?: Services } = {}) {
         {linkMenu.menu}
         <UpdateBanner services={svc} />
         <StageNotice services={svc} />
+        <TunnelNotice services={svc} />
         {route !== "login" && <JoinRequestBanner services={svc} stage={stage} />}
         <div className="stage-slot" ref={slotRef} aria-hidden="true" />
         {/* Monté (et déjà dessiné) sous la fenêtre du jeu tant que le jeu est affiché : la découpe animée de la fenêtre du jeu

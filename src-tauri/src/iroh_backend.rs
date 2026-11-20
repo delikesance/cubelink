@@ -429,6 +429,8 @@ pub struct IrohBackend {
     peers: Arc<Mutex<HashMap<String, EndpointAddr>>>,
     book: AddrBook,
     guest_tunnel: tokio::sync::Mutex<Option<GuestTunnel>>,
+    /// Tâche qui relaie `tunnel://state` pour le tunnel invité ouvert (annulée avant sa fermeture).
+    tunnel_watch: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     emit: EventSink,
     instances: Arc<core_lib::instance::InstanceStore>,
     store: Arc<core_lib::store::index::StoreIndex>,
@@ -640,6 +642,7 @@ impl IrohBackend {
             peers,
             book,
             guest_tunnel: tokio::sync::Mutex::new(None),
+            tunnel_watch: std::sync::Mutex::new(None),
             emit: st.emit.clone(),
             instances: st.instances.clone(),
             store: st.store.clone(),
@@ -817,10 +820,16 @@ impl IrohBackend {
     }
 
     /// Ferme le tunnel invité ouvert, s'il existe.
+    /// Émet `tunnel://state` `closed` s'il y en avait un, pour que l'interface retire son bandeau.
     pub async fn close_guest_tunnel(&self) {
+        // Le relais d'état s'arrête d'abord : l'arrêt du tunnel ne doit pas produire un `reconnecting` parasite.
+        if let Some(w) = lock(&self.tunnel_watch).take() {
+            w.abort();
+        }
         let t = self.guest_tunnel.lock().await.take();
         if let Some(t) = t {
             t.stop().await;
+            (self.emit)("tunnel://state", serde_json::json!({ "state": "closed" }));
         }
     }
 
@@ -873,17 +882,19 @@ impl IrohBackend {
         }
         let t = self.join_tunnel(&key).await?;
         let port = t.local_port;
-        // Événement `tunnel://state` `{state: "ok" | "reconnecting" | "lost"}` à chaque changement de liaison.
+        // Événement `tunnel://state` `{state: "ok" | "reconnecting" | "lost", friend_public_key}` à chaque changement de liaison
+        // (`closed` est émis par `close_guest_tunnel`).
         let (mut rx, emit) = (t.subscribe(), self.emit.clone());
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             while rx.changed().await.is_ok() {
                 let state = *rx.borrow_and_update();
-                emit("tunnel://state", serde_json::json!({ "state": state.as_str() }));
+                emit("tunnel://state", serde_json::json!({ "state": state.as_str(), "friend_public_key": key }));
                 if state == p2p_lib::tunnel::TunnelState::Lost {
                     break;
                 }
             }
         });
+        *lock(&self.tunnel_watch) = Some(handle);
         *self.guest_tunnel.lock().await = Some(t);
         Ok(port)
     }

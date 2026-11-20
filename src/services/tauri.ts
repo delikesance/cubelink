@@ -158,6 +158,7 @@ export function createTauriServices(): Services {
     updateCheck: () => commands.updateCheck(),
     updateInstall: () => done(commands.updateInstall()),
     onUpdateState: (cb) => on("update://state", cb),
+    onTunnelState: (cb) => on("tunnel://state", cb),
     onBrowseProgress: (cb) => on("browse://progress", cb),
     onModsFixProgress: (cb) => on("mods-fix://progress", cb),
     stageSupported: () => commands.stageSupported(),

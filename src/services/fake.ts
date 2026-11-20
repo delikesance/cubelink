@@ -4,7 +4,7 @@ import type {
   AccountInfo, AccountsState, BrowseHit, BrowseInstallResult, BrowseKind, BrowseProgressEvent, BrowseSource, BrowseVersion, FixPlan, FixProgressEvent, FixResult, ModCheck, ModEntry, ModIssue,
   CreateInstanceInput, DeviceCode, HostState, Invite, JoinAnswer, JoinRequest, ImportWarningEvent, LaunchLogEvent, FriendRequest, FriendWithPresence, Instance, InstanceArt,
   JoinPlan, LaunchState, Manifest, PresenceEvent, UnknownModsEvent, Profile, Services, Settings,
-  StageFallback, StageState, TransferProgress, Unsubscribe, UpdateState,
+  StageFallback, StageState, TransferProgress, TunnelStateEvent, Unsubscribe, UpdateState,
   HearthCard, HearthDetail, HearthHandover, HearthHostPrompt, HearthInvite, HearthMember, HearthMemberLite,
 } from "./types";
 
@@ -42,6 +42,8 @@ export interface FakeControls {
   readonly joinRequestCalls: Array<{ kind: "ask" | "answer"; arg: string; accept?: boolean }>;
   /** Test : appels de commandes de jeu enregistrés (switch, join, invite). */
   readonly gameCalls: Array<{ kind: "switch" | "join" | "invite" | "close"; arg: string; instanceId?: string }>;
+  /** Test : émet tunnel://state (charge utile brute, comme Rust). */
+  emitTunnelState(e: TunnelStateEvent): void;
   /** Test : fusionne `patch` dans l'état de mise à jour et émet update://state (ex. available, downloading, ready). */
   emitUpdateState(patch: Partial<UpdateState>): void;
   /** Test : état (fusionné) auquel aboutit la prochaine updateCheck ; par défaut up_to_date. */
@@ -275,6 +277,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     joinRequest: new Set<(r: JoinRequest) => void>(),
     joinRequests: new Set<(l: JoinRequest[]) => void>(),
     update: new Set<(s: UpdateState) => void>(),
+    tunnel: new Set<(e: TunnelStateEvent) => void>(),
     hearthState: new Set<(l: HearthCard[]) => void>(),
     hearthInvites: new Set<(l: HearthInvite[]) => void>(),
     hearthHandover: new Set<(e: HearthHandover) => void>(),
@@ -1020,6 +1023,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     joinRequestCalls,
     gameCalls,
     emitUpdateState: (patch) => setUpdate(patch),
+    emitTunnelState: (e) => emit(listeners.tunnel, { ...e }),
     setUpdateCheckResult: (patch) => { updateCheckPatch = patch; },
     updateState: async () => ({ ...updateSt }),
     updateCheck: async () => {
@@ -1032,6 +1036,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
       if (updateSt.phase !== "ready") throw new Error("Aucune mise à jour prête à installer.");
     },
     onUpdateState: (cb) => sub(listeners.update, cb),
+    onTunnelState: (cb) => sub(listeners.tunnel, cb),
 
     onAuthState: (cb) => sub(listeners.auth, cb),
     onAccountsState: (cb) => sub(listeners.accounts, cb),

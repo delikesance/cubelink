@@ -10,6 +10,8 @@ export interface MenuItem {
   separator?: boolean;
   /** Visible mais inactive (ex. Jouer pendant qu'un autre jeu tourne). */
   disabled?: boolean;
+  /** Pourquoi l'entrée est inactive : affichée sous le libellé. */
+  hint?: string;
   onSelect: () => void;
 }
 
@@ -82,7 +84,7 @@ export function ContextMenu({ label, x, y, items, onClose }: ContextMenuProps) {
             onClick={() => { onClose(false); it.onSelect(); }}
           >
             {it.icon && <span className="home-menuicon" aria-hidden="true">{it.icon}</span>}
-            <span>{it.label}</span>
+            {it.hint ? <span className="home-menutxt"><span>{it.label}</span><span className="home-menuhint">{it.hint}</span></span> : <span>{it.label}</span>}
           </button>
         </Fragment>
       ))}

@@ -171,8 +171,15 @@ export default function InstancePage() {
     patchInstance(updated);
   };
 
+  // Le backend refuse de supprimer une instance en préparation ou en jeu : on l'interdit dès l'interface.
+  const deleteBlocked = running || preparing;
+  const deleteReason = preparing ? "Annule le lancement pour supprimer cette instance." : running ? "Arrête le jeu pour supprimer cette instance." : undefined;
+  // Le jeu peut démarrer pendant que la confirmation est ouverte : on la ferme.
+  useEffect(() => { if (deleteBlocked) setConfirmDel(false); }, [deleteBlocked]);
+
   const remove = async () => {
     setConfirmDel(false);
+    if (deleteBlocked) return;
     await run(async () => {
       await services.instancesDelete(id);
       forget(id);
@@ -225,7 +232,7 @@ export default function InstancePage() {
     { key: "lookup", label: "Chercher automatiquement", icon: <Icon d={ICONS.wand} />, onSelect: () => { void artRun("lookup"); } },
     { key: "browse", label: "Parcourir des mods", icon: <Icon d={ICONS.search} />, separator: true, onSelect: () => navigate("browse", { kind: "mod", instance: id }) },
     { key: "folder", label: "Ouvrir le dossier", icon: <Icon d={ICONS.folder} />, onSelect: () => { void run(() => services.instancesOpenFolder(id)); } },
-    { key: "delete", label: "Supprimer", icon: <Icon d={ICONS.trash} />, danger: true, separator: true, onSelect: () => setConfirmDel(true) },
+    { key: "delete", label: "Supprimer", icon: <Icon d={ICONS.trash} />, danger: true, separator: true, disabled: deleteBlocked, hint: deleteReason, onSelect: () => setConfirmDel(true) },
   ];
 
 
@@ -360,7 +367,7 @@ export default function InstancePage() {
           <SettingsDialog
             key={inst.id} instance={inst} onSave={save}
             onOpenFolder={() => { void run(() => services.instancesOpenFolder(id)); }}
-            onDelete={() => { void remove(); }}
+            onRequestDelete={() => setConfirmDel(true)} deleteBlockedReason={deleteReason}
           />
         )}
         {tab === "logs" && <LogsPanel services={services} instanceId={inst.id} />}

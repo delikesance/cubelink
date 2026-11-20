@@ -81,7 +81,7 @@
 .ipg-panel .dr-folder>.cl-btn,.ipg-panel .dr-folder>button{grid-column:2;justify-self:start}
 .ipg-panel .dr-danger>.dr-danger-t{grid-column:1}
 .ipg-panel .dr-danger>.dr-danger-btn{grid-column:2;justify-self:start;align-self:center}
-.ipg-panel .dr-danger>.dr-confirm{grid-column:2}
+.ipg-panel .dr-danger>.dr-danger-hint{grid-column:2}
 .ipg-panel .dr-form>.home-err,.ipg-panel .dr-form>.dr-notice{margin-block:var(--sp-3) 0}
 @media (max-width:760px){
   .ipg-panel .dr-form>.cl-field,.ipg-panel .dr-mem,.ipg-panel .dr-folder,.ipg-panel .dr-danger{grid-template-columns:minmax(0,1fr)}

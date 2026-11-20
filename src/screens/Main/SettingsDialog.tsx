@@ -12,8 +12,10 @@ export interface SettingsDialogProps {
   /** Absent : panneau en pleine page (pas de bouton Annuler, la page reste ouverte après l'enregistrement). */
   onClose?: () => void;
   onOpenFolder: () => void;
-  /** Suppression confirmée depuis la zone dangereuse. */
-  onDelete: () => void;
+  /** Demande de suppression depuis la zone dangereuse : la confirmation est celle de la page. */
+  onRequestDelete: () => void;
+  /** Présent : la suppression est impossible pour cette raison (jeu en cours) ; le bouton est inactif et la raison affichée. */
+  deleteBlockedReason?: string;
 }
 
 /** Système Linux (interface WebKitGTK) : seul système où la commande d'enrobage s'applique. */
@@ -22,7 +24,7 @@ export function isLinuxHost(ua: string = typeof navigator === "undefined" ? "" :
 }
 
 /** Panneau « Paramètres » d'une instance (A5) : nom, mémoire, Java, arguments JVM, commande d'enrobage (Linux), dossier, zone dangereuse. */
-export function SettingsDialog({ instance, onSave, onClose, onOpenFolder, onDelete }: SettingsDialogProps) {
+export function SettingsDialog({ instance, onSave, onClose, onOpenFolder, onRequestDelete, deleteBlockedReason }: SettingsDialogProps) {
   const uid = useId();
   const [name, setName] = useState(instance.name);
   const [ram, setRam] = useState(instance.ram_mb);
@@ -34,7 +36,6 @@ export function SettingsDialog({ instance, onSave, onClose, onOpenFolder, onDele
   const [nameError, setNameError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [confirmDel, setConfirmDel] = useState(false);
   const [saved, setSaved] = useState(false);
 
   const submit = async (e: FormEvent) => {
@@ -91,18 +92,14 @@ export function SettingsDialog({ instance, onSave, onClose, onOpenFolder, onDele
 
         <div className="dr-danger">
           <div className="dr-danger-t">Zone dangereuse</div>
-          <Button variant="secondary" className="dr-danger-btn" aria-expanded={confirmDel} icon={<Icon d={ICONS.trash} />} onClick={() => setConfirmDel(true)}>
+          <Button
+            variant="secondary" className="dr-danger-btn" icon={<Icon d={ICONS.trash} />}
+            disabled={!!deleteBlockedReason} aria-describedby={deleteBlockedReason ? `${uid}-del-why` : undefined}
+            onClick={onRequestDelete}
+          >
             Supprimer l'instance
           </Button>
-          {confirmDel && (
-            <div className="dr-confirm enter" role="alertdialog" aria-label="Confirmation de suppression">
-              <p><b>Supprimer {instance.name} ?</b> Les mondes et les fichiers de l'instance seront effacés. Impossible d'annuler.</p>
-              <div className="dr-confirm-act">
-                <Button variant="secondary" data-autofocus onClick={() => setConfirmDel(false)}>Garder</Button>
-                <Button variant="danger" onClick={onDelete}>Supprimer</Button>
-              </div>
-            </div>
-          )}
+          {deleteBlockedReason && <p className="dr-danger-hint" id={`${uid}-del-why`}>{deleteBlockedReason}</p>}
         </div>
       </form>
       <footer className="dr-foot">

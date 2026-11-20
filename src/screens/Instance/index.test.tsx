@@ -209,6 +209,60 @@ describe("Page modpack : suppression", () => {
   });
 });
 
+describe("Page modpack : suppression pendant le jeu", () => {
+  const launchSetup = (del = vi.fn(async () => {})) => {
+    let emit: (s: LaunchState) => void = () => {};
+    const r = setup({ instancesDelete: del, onLaunchState: (cb) => { emit = cb; return () => {}; } });
+    return { ...r, del, emit: (state: LaunchState["state"]) => act(() => emit({ id: "inst-aeronautics", state } as LaunchState)) };
+  };
+
+  it.each([["running", "Arrête le jeu"], ["preparing", "Annule le lancement"]] as const)("%s : l'entrée Supprimer du menu ⋯ est inactive et dit pourquoi", async (state, why) => {
+    const { emit, del } = launchSetup();
+    await ready();
+    emit(state);
+    const menu = await openMenu();
+    const item = within(menu).getByRole("menuitem", { name: new RegExp(`^Supprimer.*${why}`) });
+    expect((item as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(item);
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(del).not.toHaveBeenCalled();
+  });
+
+  it("running : le bouton des Réglages est inactif et la raison est visible", async () => {
+    const { emit, del } = launchSetup();
+    await ready();
+    emit("running");
+    fireEvent.click(tab("Réglages"));
+    const panel = screen.getByRole("tabpanel");
+    const btn = within(panel).getByRole("button", { name: "Supprimer l'instance" }) as HTMLButtonElement;
+    expect(btn.disabled).toBe(true);
+    expect(within(panel).getByText("Arrête le jeu pour supprimer cette instance.")).toBeTruthy();
+    fireEvent.click(btn);
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(del).not.toHaveBeenCalled();
+  });
+
+  it("à l'arrêt, la suppression redevient possible", async () => {
+    const { emit } = launchSetup();
+    await ready();
+    emit("running");
+    emit("exited");
+    fireEvent.click(tab("Réglages"));
+    const btn = within(screen.getByRole("tabpanel")).getByRole("button", { name: "Supprimer l'instance" }) as HTMLButtonElement;
+    expect(btn.disabled).toBe(false);
+    expect(screen.queryByText(/Arrête le jeu/)).toBeNull();
+  });
+
+  it("le jeu démarre pendant que la confirmation est ouverte : elle se ferme et rien n'est supprimé", async () => {
+    const { emit, del } = launchSetup();
+    fireEvent.click(within(await openMenu()).getByRole("menuitem", { name: "Supprimer" }));
+    await screen.findByRole("alertdialog");
+    emit("running");
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+    expect(del).not.toHaveBeenCalled();
+  });
+});
+
 describe("Page modpack : onglet Mods", () => {
   async function openMods() {
     const view = setup({}, { id: "inst-aeronautics", tab: "mods" });
@@ -333,15 +387,19 @@ describe("Page modpack : onglet Réglages", () => {
     expect((await within(panel).findByText("disque plein"))).toBeTruthy();
   });
 
-  it("zone dangereuse : confirmation intégrée puis suppression et retour à l'accueil", async () => {
+  it("zone dangereuse : ouvre la confirmation partagée de la page (Annuler / Supprimer), pas de bloc en ligne", async () => {
     const del = vi.fn(async () => {});
     const { navigate } = setup({ instancesDelete: del });
     await ready();
     fireEvent.click(tab("Réglages"));
     const panel = screen.getByRole("tabpanel");
     fireEvent.click(within(panel).getByRole("button", { name: "Supprimer l'instance" }));
-    fireEvent.click(within(within(panel).getByRole("alertdialog")).getByRole("button", { name: "Supprimer" }));
+    const dlg = await screen.findByRole("alertdialog", { name: "Supprimer l'instance ?" });
+    expect(within(panel).queryByRole("button", { name: "Garder" })).toBeNull();
+    expect(within(dlg).getByRole("button", { name: "Annuler" })).toBeTruthy();
+    fireEvent.click(within(dlg).getByRole("button", { name: "Supprimer" }));
     await waitFor(() => expect(navigate).toHaveBeenCalledWith("main"));
+    expect(del).toHaveBeenCalledTimes(1);
     expect(del).toHaveBeenCalledWith("inst-aeronautics");
   });
 });

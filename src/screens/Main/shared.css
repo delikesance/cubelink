@@ -12,6 +12,8 @@
 .home-menuitem.is-danger,.home-menuitem.danger{color:var(--danger)}
 .home-menuicon{display:flex;color:var(--muted)}
 .home-menuitem.is-danger .home-menuicon,.home-menuitem.danger .home-menuicon{color:var(--danger)}
+.home-menutxt{display:flex;flex-direction:column;gap:2px;padding:var(--sp-2) 0}
+.home-menuhint{font:500 12px/1.3 var(--font-ui);color:var(--muted)}
 .home-menusep{height:1px;margin:var(--sp-1) var(--sp-2);background:var(--line)}
 
 /* Modale (suppression, visionneuse) */
@@ -129,9 +131,7 @@
 .dr-danger{display:flex;flex-direction:column;gap:var(--sp-3);padding-top:var(--sp-4);border-top:1px solid var(--line)}
 .dr-danger-t{font:700 13px/1 var(--font-ui);color:var(--danger)}
 .dr-danger-btn{align-self:flex-start;color:var(--danger)}
-.dr-confirm{padding:var(--sp-4);border-radius:var(--r-md);background:#2A1A1E;border:1px solid var(--danger);display:flex;flex-direction:column;gap:var(--sp-3)}
-.dr-confirm p{margin:0;line-height:1.5}
-.dr-confirm-act{display:flex;gap:var(--sp-3);justify-content:flex-end}
+.dr-danger-hint{margin:0;color:var(--muted);font:500 13px/1.4 var(--font-ui)}
 
 /* Compatibilité des mods */
 .dr-issues{flex:none;border-radius:var(--r-md);background:var(--surface-2);border:1px solid var(--line);overflow:hidden}

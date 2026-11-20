@@ -5,6 +5,9 @@ dist/
 e2e/artifacts/
 .claude/*
 !.claude/agents/
+!.claude/settings.json
+!.claude/hooks/
+.claude/cache/
 .vite/
 *.tsbuildinfo
 .DS_Store
@@ -14,3 +17,4 @@ e2e/artifacts/
 core/resources/cubelink-lan-agent.jar
 test-results/
 .playwright-mcp/
+.omh/

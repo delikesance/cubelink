@@ -397,6 +397,8 @@ pub struct IrohBackend {
     endpoint: Endpoint,
     router: Router,
     friends_svc: FriendService,
+    /// Base des amis, fermée à l'arrêt : libère `friends.db` même si des tâches de fond gardent encore un `Arc`.
+    friends_db: Arc<FriendsDb>,
     presence: Arc<PresenceService>,
     transport: Arc<IrohTransport>,
     share: Arc<ShareState>,
@@ -625,6 +627,7 @@ impl IrohBackend {
             endpoint,
             router,
             friends_svc,
+            friends_db: st.friends.clone(),
             presence: presence.clone(),
             transport,
             share,
@@ -716,6 +719,7 @@ impl IrohBackend {
         self.close_guest_tunnel().await;
         self.presence.stop().await;
         let _ = self.router.shutdown().await;
+        self.friends_db.close();
     }
 
     // ----- hôte -----

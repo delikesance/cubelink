@@ -82,6 +82,12 @@
 a.cl-btn.set-linkbtn{color:var(--text);text-decoration:none}
 .set h1:focus,.set h1:focus-visible{outline:none}
 
+/* Sauvegarde de l'identité */
+.idb-card{margin-top:var(--sp-4);padding:20px}
+.idb-live:empty{display:none}
+.idb-ok{margin:0;color:var(--text);line-height:1.5}
+.idb-warn{margin:0;line-height:1.5;max-width:68ch}
+
 /* Comptes */
 .acc-card{display:flex;flex-direction:column;gap:var(--sp-3);padding:8px 20px 16px}
 .acc-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column}

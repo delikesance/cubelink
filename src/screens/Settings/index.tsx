@@ -5,6 +5,7 @@ import { useBack } from "../../app/context";
 import { Button, Card, Field, Input } from "../../ui";
 import { UpdateSection } from "./UpdateSection";
 import { Logo } from "../Login/Logo";
+import { IdentityBackup } from "./IdentityBackup";
 import { Accounts } from "./Accounts";
 import { useStageSupported } from "../../app/stage";
 import type { NetTest, Settings as BaseSettings } from "../../services/types";
@@ -349,6 +350,7 @@ export default function Settings({ testConnection, clearCache }: SettingsProps =
 
       <div {...panel("compte")}>
         <Accounts onError={setError} />
+        <IdentityBackup />
       </div>
 
       <div {...panel("amis")}>

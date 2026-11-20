@@ -26,6 +26,10 @@ export interface FakeOptions {
 /** Commandes de test exposées par le faux service. */
 export interface FakeControls {
   setPickedFiles(paths: string[]): void;
+  /** Test : chemin renvoyé par pickSavePath (`null` : le sélecteur est annulé). Défaut : un chemin fictif. */
+  setSavePath(path: string | null): void;
+  /** Test : sauvegardes d'identité demandées (`export`/`import` avec leurs arguments) et redémarrages. */
+  readonly identityCalls: Array<{ kind: "export" | "import" | "restart"; path?: string; passphrase?: string }>;
   /** Simule un glisser-déposer natif de fichiers sur la fenêtre. */
   dropFiles(paths: string[]): void;
   /** Test : émet un événement host://state. */
@@ -71,6 +75,11 @@ export interface FakeControls {
   /** Test : appels enregistrés de stageView, stagePanel, stageLayout et setFullscreen, dans l'ordre. */
   readonly stageCalls: Array<{ cmd: "view" | "panel" | "layout" | "fullscreen"; arg: unknown }>;
 }
+
+/** Clé publique renvoyée par les sauvegardes d'identité simulées. */
+export const FAKE_IDENTITY_KEY = "ab".repeat(32);
+/** Phrase de passe que `identityImport` simulé refuse (« phrase incorrecte »). */
+export const WRONG_PASSPHRASE = "mauvaise phrase";
 
 /** Hash du manifeste simulé, renvoyé par `joinPlan` et exigé par `joinStart`. */
 export const FAKE_MANIFEST_HASH = "f".repeat(64);
@@ -255,6 +264,9 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
   const joinHeld = new Map<string, (a: JoinAnswer) => void>();
   const joinRequestCalls: Array<{ kind: "ask" | "answer"; arg: string; accept?: boolean }> = [];
   const gameCalls: Array<{ kind: "switch" | "join" | "invite" | "close"; arg: string; instanceId?: string }> = [];
+  const identityCalls: Array<{ kind: "export" | "import" | "restart"; path?: string; passphrase?: string }> = [];
+  let identityStaged = false;
+  let savePath: string | null | undefined;
 
   const listeners = {
     auth: new Set<(p: Profile | null) => void>(),
@@ -989,6 +1001,24 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
       return multiple ? ok : ok.slice(0, 1);
     },
     setPickedFiles: (paths) => { picked = paths; },
+    pickSavePath: async ({ defaultName }) => (savePath === undefined ? `/fictif/${defaultName}` : savePath),
+    setSavePath: (path) => { savePath = path; },
+    identityCalls,
+    identityExport: async (path, passphrase) => {
+      identityCalls.push({ kind: "export", path, passphrase });
+      if ([...passphrase].length < 8) throw new Error("La phrase de passe est trop courte : 8 caractères au minimum.");
+      return FAKE_IDENTITY_KEY;
+    },
+    identityImport: async (path, passphrase) => {
+      identityCalls.push({ kind: "import", path, passphrase });
+      if (passphrase === WRONG_PASSPHRASE) throw new Error("Phrase de passe incorrecte, ou fichier abîmé.");
+      identityStaged = true;
+      return FAKE_IDENTITY_KEY;
+    },
+    identityRestart: async () => {
+      if (!identityStaged) throw new Error("Aucune restauration en attente.");
+      identityCalls.push({ kind: "restart" });
+    },
     dropFiles: (paths) => emit(listeners.drop, paths),
     emitHostState: (e) => emit(listeners.host, e),
     emitInvite: (p) => {

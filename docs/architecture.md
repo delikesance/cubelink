@@ -115,7 +115,8 @@ Chaque launcher contient : client Tauri, nœud P2P (Iroh), store de blobs adress
 - **Limites connues de confidentialité** : le statut « en jeu » est visible de tous les amis acceptés (octet facultatif du `PONG`) ; un membre de groupe Hearth qui n'est pas ami peut ouvrir un tunnel vers le monde du groupe ; la poignée de main QUIC est ouverte à qui connaît la clé publique (`p2p/src/presence.rs`) ; sans relais, le code ami contient des IP ; les images des descriptions de mods sont chargées depuis des hôtes tiers (`img-src https:`, `core/src/art.rs`) ; les sondes de présence (30 s) ne ralentissent pas pour un ami hors ligne.
 - Fonction « amis ayant joué au modpack » : nouvelle donnée réseau, à cadrer (opt-in, amis acceptés seulement, protocole versionné et signé).
 - Code de vérification : la comparaison est maintenant imposée dans l'interface (case à cocher avant « Accepter »), mais pas par le protocole ; code de 64 bits à allonger ?
-- Cache anti-rejeu en mémoire (vidé au redémarrage) ; sauvegarde de `identity.key`.
+- Cache anti-rejeu en mémoire (vidé au redémarrage).
+- **Sauvegarde de `identity.key`** : traitée. Paramètres > Compte exporte l'identité et la liste d'amis dans un fichier `.cubelink-id` chiffré par une phrase de passe (format v1 : `p2p/src/identity_backup.rs`), et le restaure par dépôt dans `p2p/import-pending/` puis redémarrage (anciens fichiers gardés en `.bak`, `hearth/` mis de côté si la clé change). **Restent à faire** : clés de groupe Hearth dans le conteneur, chiffrement de la clé au repos (DPAPI ou trousseau), alerte « même identité sur deux PC », restauration proposée au premier lancement et rappel après le premier ami.
 
 Points tranchés depuis le cadrage : format du code ami (`mcl1-`, voir `p2p/src/friend_code.rs`), messages d'ajout (`friend_proto.rs`), protocole de transfert (`p2p/src/transfer/`), manifeste (`core/src/manifest.rs`). Hash : SHA-256 dans le manifeste ; BLAKE3 pour iroh-blobs.
 
@@ -134,6 +135,7 @@ Workspace Rust `core` (logique), `p2p` (réseau), `src-tauri` (commandes et int�
 | Mods d'une instance (liste, activer, retirer, ajouter) | fait | `core/src/mods.rs` |
 | Art d'instance (image auto du modpack, image perso) | fait | `core/src/art.rs` |
 | Identité, code ami, ajout à double sens, présence | fait | `p2p/src/identity.rs`, `friend_*.rs`, `presence.rs` |
+| Sauvegarde et restauration de l'identité (`.cubelink-id`) | fait (export, import, redémarrage ; Windows non essayé en réel) | `p2p/src/identity_backup.rs`, `src-tauri/src/commands_identity.rs` |
 | Manifeste hôte, transfert par hash, reprise | fait | `core/src/manifest.rs`, `p2p/src/transfer/`, `manifest_channel.rs` |
 | Profil invité, mods inconnus | fait | `core/src/guest.rs`, `unknown_mods.rs` |
 | Tunnel de jeu | fait | `p2p/src/tunnel.rs` |

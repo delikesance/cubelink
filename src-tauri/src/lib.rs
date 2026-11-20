@@ -9,6 +9,7 @@ pub mod commands_browse;
 pub mod commands_friends;
 pub mod commands_game;
 pub mod commands_hearth;
+pub mod commands_identity;
 pub mod commands_host;
 pub mod commands_instances;
 pub mod commands_join;
@@ -81,6 +82,9 @@ macro_rules! commands {
             commands_join::join_play,
             commands_settings::settings_get,
             commands_settings::settings_set,
+            commands_identity::identity_export,
+            commands_identity::identity_import,
+            commands_identity::identity_restart,
             commands_browse::browse_search,
             commands_browse::browse_versions,
             commands_browse::browse_install,

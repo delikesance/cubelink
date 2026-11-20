@@ -4,6 +4,8 @@
 # Version `<majeur>.<mineur>.<patch suivant>-canary.<run>` : la vraie release suivante la remplacera normalement.
 # Quatre jobs : `version` (calculée une fois, partagée), `linux` et `windows` (en parallèle, construisent et vérifient),
 # `publish` (seul à écrire sur GitHub, seulement si les DEUX builds ont réussi : pas de pré-version à moitié vide).
+# Après la publication, `publish` ne garde que les 10 dernières pré-versions canary (les plus anciennes sont supprimées avec leur tag,
+# jamais une release stable) : purge irréversible, seuil `KEEP` de l'étape, logique dans scripts/canary-prune.mjs.
 # Le .msi canary n'est pas signé (SmartScreen avertit) et il n'y a pas de .msix (réservé au Store, voir release.yml).
 name: canary
 
@@ -50,7 +52,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with: { node-version: 22 }
-      - run: node --test scripts/canary-version.test.mjs
+      - run: node --test scripts/canary-version.test.mjs scripts/canary-prune.test.mjs
       - name: Version
         id: v
         run: |
@@ -233,3 +235,19 @@ jobs:
           git log -10 --pretty='- %s' > notes.md
           gh release create "v$VERSION" --target "$GITHUB_SHA" --prerelease --latest=false --title "Cubelink $VERSION (canary)" --notes-file notes.md \
             artifacts/*.msi artifacts/*.AppImage artifacts/*.rpm artifacts/*.deb
+      # Ménage, APRÈS la création (la nouvelle pré-version compte parmi les KEEP gardées). Suppression IRRÉVERSIBLE de la
+      # release et de son tag, limitée aux pré-versions `v<x.y.z>-canary.<run>[.<essai>]` (voir scripts/canary-prune.mjs).
+      # Jamais bloquant : un échec de purge ne doit pas rendre rouge une publication réussie (l'étape reste visible dans le run).
+      # Le groupe `concurrency: canary` sérialise les purges.
+      - name: Purge des anciennes pré-versions
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KEEP: 10
+        run: |
+          set -euo pipefail
+          gh release list --limit 200 --json tagName,isPrerelease,isDraft,createdAt | node scripts/canary-prune.mjs "$KEEP" > stale.txt
+          while read -r tag; do
+            echo "Suppression de $tag"
+            gh release delete "$tag" --cleanup-tag --yes || echo "::warning::suppression de $tag impossible"
+          done < stale.txt

@@ -96,7 +96,7 @@ pub struct Version {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct GalleryImage {
-    /// Version réduite (environ 350 px de large) : seulement en secours de `raw_url`.
+    /// Version réduite (environ 350 px de large) : seulement en secours de `raw_url` (trop petite pour la visionneuse).
     pub url: String,
     /// Image d'origine, en pleine résolution.
     #[serde(default)]

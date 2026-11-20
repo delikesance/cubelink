@@ -130,7 +130,13 @@ async fn query_curseforge(fps: &[CfCandidate], cf: &CfApi, report: &mut UnknownR
                     matched.entry(m.file.file_fingerprint as u32).or_default().push((m.id, m.file.id, sha1));
                 }
             }
-            Err(e) => tracing::warn!("reconnaissance CurseForge impossible : {e}"),
+            Err(e) => {
+                tracing::warn!("reconnaissance CurseForge impossible : {e}");
+                // Hors ligne : les lots suivants attendraient 30 s chacun pour rien.
+                if matches!(e, Error::Network(_)) {
+                    break;
+                }
+            }
         }
     }
     let mut found: HashSet<String> = HashSet::new();

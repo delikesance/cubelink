@@ -121,8 +121,9 @@ struct Remote {
     summary: String,
     color: Option<String>,
     icon_url: Option<String>,
-    /// URL de chaque capture, dans l'ordre d'affichage (version réduite : largement suffisante pour une bannière).
-    shot_urls: Vec<String>,
+    /// Chaque capture, dans l'ordre d'affichage : l'URL à télécharger d'abord et, au besoin, un repli (version réduite
+    /// de Modrinth, environ 350 px : trop petite pour la visionneuse et la bannière, d'où le plein format d'abord).
+    shot_urls: Vec<(String, Option<String>)>,
     page_url: Option<String>,
 }
 
@@ -155,7 +156,13 @@ async fn remote_modrinth(p: &Providers, id: &str) -> Result<Remote> {
         summary: proj.description,
         color: proj.color.map(hex_color),
         icon_url: proj.icon_url.filter(|u| !u.is_empty()),
-        shot_urls: gallery.into_iter().map(|g| g.url).filter(|u| !u.is_empty()).collect(),
+        shot_urls: gallery
+            .into_iter()
+            .filter_map(|g| match g.raw_url.filter(|r| !r.is_empty() && *r != g.url) {
+                Some(raw) => Some((raw, Some(g.url).filter(|u| !u.is_empty()))),
+                None => Some(g.url).filter(|u| !u.is_empty()).map(|u| (u, None)),
+            })
+            .collect(),
         page_url: Some(format!("https://modrinth.com/modpack/{slug}")),
     })
 }
@@ -169,7 +176,7 @@ async fn remote_curseforge(p: &Providers, id: &str) -> Result<Remote> {
         summary: m.summary,
         color: None,
         icon_url: m.logo.and_then(|l| l.url.filter(|u| !u.is_empty()).or(l.thumbnail_url)).filter(|u| !u.is_empty()),
-        shot_urls: m.screenshots.into_iter().map(|s| s.url).filter(|u| !u.is_empty()).collect(),
+        shot_urls: m.screenshots.into_iter().map(|s| s.url).filter(|u| !u.is_empty()).map(|u| (u, None)).collect(),
         page_url: m.links.and_then(|l| l.website_url).filter(|u| u.starts_with("https://")),
     })
 }
@@ -214,23 +221,39 @@ pub async fn fetch_art(p: &Providers, source: BrowseSource, project_id: &str, st
     })
 }
 
-/// Télécharge les captures (au plus `MAX_SCREENSHOTS`, `SHOT_PARALLELISM` à la fois) et renvoie les noms de
-/// fichiers dans l'ordre d'affichage, numérotés sans trou (`shot-1`, `shot-2`…). À l'échéance, les téléchargements
-/// en cours sont abandonnés et seules les captures complètes sont gardées.
-async fn download_screenshots(urls: &[String], allow_loopback: bool, stage: &Path, deadline: Instant) -> Vec<String> {
+/// Télécharge les captures (`SHOT_PARALLELISM` à la fois, on s'arrête à `MAX_SCREENSHOTS` réussies) et renvoie les
+/// noms de fichiers dans l'ordre d'affichage, numérotés sans trou (`shot-1`, `shot-2`…). Une capture introuvable
+/// est remplacée par la suivante de la galerie (au plus `2 * MAX_SCREENSHOTS` tentatives). À l'échéance, les
+/// téléchargements en cours sont abandonnés et seules les captures complètes sont gardées.
+async fn download_screenshots(urls: &[(String, Option<String>)], allow_loopback: bool, stage: &Path, deadline: Instant) -> Vec<String> {
     // Le nom (`shot-<rang>`) est fixé d'avance : pas de collision entre téléchargements parallèles.
-    let mut stream = futures_util::stream::iter(urls.iter().take(MAX_SCREENSHOTS).cloned().enumerate())
-        // URL possédée : un `&String` dans le future le rendait non `Send` pour le compilateur (commande Tauri async).
-        .map(|(i, url)| async move { (i, download_image(&url, allow_loopback, stage, &format!("shot-{}", i + 1)).await) })
+    let mut stream = futures_util::stream::iter(urls.iter().take(2 * MAX_SCREENSHOTS).cloned().enumerate())
+        // URL possédées : un `&String` dans le future le rendait non `Send` pour le compilateur (commande Tauri async).
+        .map(|(i, (url, fallback))| async move {
+            let stem = format!("shot-{}", i + 1);
+            let mut res = download_image(&url, allow_loopback, stage, &stem).await;
+            if let (Err(e), Some(small)) = (&res, fallback) {
+                tracing::debug!("art : original refusé ({e}), repli sur la version réduite");
+                res = download_image(&small, allow_loopback, stage, &stem).await;
+            }
+            (i, res)
+        })
         .buffer_unordered(SHOT_PARALLELISM);
     let mut got: Vec<(usize, String)> = Vec::new();
-    let mut take = |(i, res): (usize, Result<String>)| match res {
-        Ok(n) => got.push((i, n)),
-        Err(e) => tracing::warn!("art : capture ignorée : {e}"),
+    let mut take = |(i, res): (usize, Result<String>)| {
+        match res {
+            Ok(n) => got.push((i, n)),
+            Err(e) => tracing::warn!("art : capture ignorée : {e}"),
+        }
+        got.len()
     };
     loop {
         match timeout_at(deadline, stream.next()).await {
-            Ok(Some(item)) => take(item),
+            Ok(Some(item)) => {
+                if take(item) >= MAX_SCREENSHOTS {
+                    break;
+                }
+            }
             Ok(None) => break,
             Err(_) => {
                 tracing::warn!("art : délai dépassé, captures restantes abandonnées");
@@ -244,6 +267,10 @@ async fn download_screenshots(urls: &[String], allow_loopback: bool, stage: &Pat
     }
     drop(stream); // abandonne les téléchargements en cours (l'écriture sur disque n'a lieu qu'une fois l'image reçue en entier)
     got.sort_by_key(|(i, _)| *i);
+    // Au plus `MAX_SCREENSHOTS` : les images arrivées en plus (téléchargements parallèles) sont supprimées.
+    for (_, name) in got.split_off(got.len().min(MAX_SCREENSHOTS)) {
+        let _ = std::fs::remove_file(stage.join(name));
+    }
     // Pas de trous dans la numérotation : on renomme vers le rang réel.
     let mut names = Vec::with_capacity(got.len());
     for (rank, (i, name)) in got.into_iter().enumerate() {
@@ -277,13 +304,17 @@ impl Drop for StageGuard {
 /// Supprime les dossiers de préparation (`art.tmp*`) laissés par un arrêt brutal. Les récents sont épargnés : ils
 /// appartiennent peut-être à un `apply_art` en cours sur la même instance.
 fn clean_stale_stages(art_dir: &Path) {
+    clean_stages_older_than(art_dir, STALE_STAGE);
+}
+
+fn clean_stages_older_than(art_dir: &Path, max_age: Duration) {
     let Some(parent) = art_dir.parent() else { return };
     let Ok(rd) = std::fs::read_dir(parent) else { return };
     for e in rd.flatten() {
         if !e.file_name().to_string_lossy().starts_with("art.tmp") {
             continue;
         }
-        let stale = e.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age > STALE_STAGE);
+        let stale = e.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age > max_age);
         if stale {
             let _ = std::fs::remove_dir_all(e.path());
         }
@@ -533,8 +564,11 @@ pub fn image_data_url_sized(store: &InstanceStore, instance_id: &str, file: &str
             if let Ok(rd) = std::fs::read_dir(&thumbs) {
                 for e in rd.flatten() {
                     let n = e.file_name().to_string_lossy().into_owned();
-                    // Les `.tmp` sont des écritures en cours d'un appel concurrent : on n'y touche pas.
-                    if n.starts_with(&prefix) && !n.ends_with(".tmp") && n != format!("{cached}.jpg") && n != format!("{cached}.png") {
+                    // Un `.tmp` récent est l'écriture en cours d'un appel concurrent : on n'y touche pas ; un vieux est
+                    // le reste d'un arrêt brutal.
+                    let tmp_in_progress = n.ends_with(".tmp")
+                        && !e.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age > STALE_STAGE);
+                    if n.starts_with(&prefix) && !tmp_in_progress && n != format!("{cached}.jpg") && n != format!("{cached}.png") {
                         let _ = std::fs::remove_file(e.path());
                     }
                 }
@@ -957,7 +991,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn modrinth_uses_reduced_version_only() {
+    async fn modrinth_prefers_full_resolution_and_falls_back_to_reduced() {
         let (mr, cf) = (MockServer::start().await, MockServer::start().await);
         let u = mr.uri();
         modrinth_project(
@@ -965,17 +999,31 @@ mod tests {
             "P5",
             json!({"id": "P5", "title": "T", "gallery": [
                 {"url": format!("{u}/img/a_350"), "raw_url": format!("{u}/img/a"), "ordering": 0},
-                {"url": format!("{u}/img/b_350"), "raw_url": format!("{u}/img/b"), "ordering": 1}]}),
+                {"url": format!("{u}/img/b_350"), "raw_url": format!("{u}/img/b-absente"), "ordering": 1}]}),
         )
         .await;
+        serve(&mr, "/img/a", JPG).await; // original de la 1re : jpeg
         serve(&mr, "/img/a_350", PNG).await;
-        serve(&mr, "/img/b_350", JPG).await;
-        // Le plein format n'est jamais demandé.
-        Mock::given(method("GET")).and(path("/img/a")).respond_with(ResponseTemplate::new(200).set_body_bytes(PNG.to_vec())).expect(0).mount(&mr).await;
-        Mock::given(method("GET")).and(path("/img/b")).respond_with(ResponseTemplate::new(200).set_body_bytes(PNG.to_vec())).expect(0).mount(&mr).await;
+        serve(&mr, "/img/b_350", PNG).await; // original de la 2e introuvable : version réduite
         let (_t, s, i) = store();
         let a = apply_art(&providers(&mr, &cf, true), &s, &i.id, BrowseSource::Modrinth, "P5").await.unwrap().art.unwrap();
-        assert_eq!(a.screenshots, vec!["shot-1.png", "shot-2.jpg"]);
+        assert_eq!(a.screenshots, vec!["shot-1.jpg", "shot-2.png"]);
+    }
+
+    #[tokio::test]
+    async fn failed_screenshots_are_replaced_by_the_next_ones() {
+        let (mr, cf) = (MockServer::start().await, MockServer::start().await);
+        project_with_shots(&mr, "P12", 8).await;
+        serve(&mr, "/img/icon", PNG).await;
+        // Les 2e et 5e sont absentes (404) : on en garde quand même 6, sur les 8 de la galerie.
+        for k in [0, 2, 3, 5, 6, 7] {
+            serve(&mr, &format!("/img/{k}"), PNG).await;
+        }
+        let (_t, s, i) = store();
+        let a = apply_art(&providers(&mr, &cf, true), &s, &i.id, BrowseSource::Modrinth, "P12").await.unwrap().art.unwrap();
+        assert_eq!(a.screenshots.len(), MAX_SCREENSHOTS);
+        let on_disk = std::fs::read_dir(s.art_dir(&i.id).unwrap()).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with("shot-")).count();
+        assert_eq!(on_disk, MAX_SCREENSHOTS);
     }
 
     #[tokio::test]
@@ -1095,10 +1143,10 @@ mod tests {
         let art_dir = s.art_dir(&i.id).unwrap();
         let (old, recent) = (art_dir.with_file_name("art.tmp-vieux"), art_dir.with_file_name("art.tmp-recent"));
         std::fs::create_dir_all(&old).unwrap();
+        // Pas de `set_modified` sur un dossier (impossible sous Windows) : le seuil d'âge est un paramètre.
+        std::thread::sleep(Duration::from_millis(400));
         std::fs::create_dir_all(&recent).unwrap();
-        let two_hours_ago = std::time::SystemTime::now() - Duration::from_secs(7200);
-        std::fs::File::open(&old).unwrap().set_modified(two_hours_ago).unwrap();
-        clean_stale_stages(&art_dir);
+        clean_stages_older_than(&art_dir, Duration::from_millis(200));
         assert!(!old.exists() && recent.exists());
     }
 

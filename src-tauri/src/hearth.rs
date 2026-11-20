@@ -1770,10 +1770,14 @@ impl HearthDelegate for HearthRuntime {
         }
         if matches!(r, Ok(Observed::Accepted)) {
             // Je suis moi-même en train d'héberger : si ce bail gagne et que personne ne joue sur mon serveur, je cède.
-            if self.active(&gid).is_some_and(|a| a.players() == 0) && self.arbitrate_now(&gid).is_some() {
-                eprintln!("[cubelink] un autre bail l'emporte sur celui du groupe {gid} : ce serveur s'arrête");
-                let rt = self.arc();
-                spawn(async move { rt.abort_hosting(gid).await });
+            // Le bail adverse est renouvelé toutes les quelques secondes : `fenced` garantit une seule fin de partie.
+            if let Some(host) = self.active(&gid).filter(|a| a.players() == 0) {
+                if self.arbitrate_now(&gid).is_some() && !host.fenced.swap(true, Ordering::SeqCst) {
+                    eprintln!("[cubelink] un autre bail l'emporte sur celui du groupe {gid} : ce serveur s'arrête et publie sa session");
+                    let rt = self.arc();
+                    // Tâche détachée : la fin de partie dure jusqu'à l'arrêt du serveur et la publication.
+                    spawn(async move { rt.yield_hosting(host).await });
+                }
             }
             self.emit_state();
         }
@@ -3027,7 +3031,31 @@ impl HearthRuntime {
         Ok(v)
     }
 
-    /// Abandonne l'hébergement sans rien publier (un autre membre a gardé la main) : le serveur est arrêté, le bail relâché.
+    /// Un autre bail l'emporte pendant que mon serveur est vide : fin de partie complète, comme l'auto-exclusion après
+    /// veille. Le jeu depuis le dernier point de reprise est publié comme branche (`Suspend`), puis l'application ferme le
+    /// partage, le tunnel et l'état de lancement (`end_hook`). Si personne n'est jamais entré, il n'y a rien à publier :
+    /// le serveur est seulement arrêté, puis le partage fermé. `host.fenced` est déjà posé par l'appelant.
+    async fn yield_hosting(self: &Arc<Self>, host: Arc<ActiveHost>) {
+        let gid = host.group;
+        if host.ever_joined.load(Ordering::SeqCst) {
+            // `save-all flush`, puis `save-on` : l'arrêt qui suit enregistre le monde (`save-off` l'en empêcherait).
+            if host.server.flush_begin().await.is_ok() {
+                let _ = host.server.flush_end().await;
+            }
+            // Un joueur est entré pendant l'écriture : le serveur reste, la prochaine annonce du bail adverse réessaiera.
+            if host.players() > 0 {
+                host.fenced.store(false, Ordering::SeqCst);
+                return;
+            }
+            self.host_ended(gid).await;
+        } else {
+            self.abort_hosting(gid).await;
+            self.host_ended(gid).await;
+        }
+    }
+
+    /// Abandonne l'hébergement sans rien publier (un autre membre a gardé la main au démarrage, avant tout joueur) : le
+    /// serveur est arrêté, le bail relâché.
     pub async fn abort_hosting(self: &Arc<Self>, gid: GroupId) {
         let Some(host) = lock(&self.active).remove(&gid) else { return };
         host.stopping.store(true, Ordering::SeqCst);

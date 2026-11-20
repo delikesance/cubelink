@@ -608,6 +608,94 @@ async fn auto_exclusion_apres_veille() {
     }
 }
 
+/// Alice héberge ; `joined` : Steve entre puis sort (le serveur compte 0 joueur mais le monde a été joué). Rend le
+/// groupe, Bob ayant publié une version plus récente et son bail `Ready` étant prêt à être reçu par Alice.
+async fn alice_heberge_et_bob_a_un_bail_plus_fort(joined: bool) -> (Vec<Peer>, GroupId, Lease) {
+    let (peers, g, id) = group_of(&["Alice", "Bob"]).await;
+    let (a, b) = (&peers[0], &peers[1]);
+    a.node.st.hearth_play(&id).await.unwrap();
+    assert_eq!(a.state_of(&g), HearthStateKind::Hosting);
+    assert_eq!(a.node.be.shared_instance().as_deref(), Some(a.instance.as_str()), "le monde est partagé");
+    if joined {
+        let on_line = a.runner.specs.lock().unwrap()[0].on_line.clone();
+        on_line("[12:00:00] [Server thread/INFO]: Steve joined the game");
+        on_line("[12:09:00] [Server thread/INFO]: Steve left the game");
+        std::fs::write(a.runner.specs.lock().unwrap()[0].dir.join("world").join("neuf-minutes.txt"), "9 minutes de jeu").unwrap();
+    }
+    let host = a.rt().active(&g).expect("serveur d'Alice");
+    assert_eq!(host.players(), 0);
+    // Bob a publié une version plus récente que la base d'Alice : son bail l'emporte au départage.
+    let dir = b.dir.path().join("monde-de-bob");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("level.dat"), "monde de Bob").unwrap();
+    let v = b.rt().publish_version(g, &dir, VersionKind::Session, None, 60).await.unwrap();
+    wait_for("version de Bob chez Alice", 30, || a.rt().version(&g, &v.id()).is_some()).await;
+    let lease = Lease::new(g, b.key(), Some((v.id(), v.header.number))).signed(&*b.node.st.identity);
+    (peers, g, lease)
+}
+
+/// Un bail concurrent qui l'emporte alors que mon serveur est vide, après une vraie partie : la session est publiée
+/// comme branche (`Suspend`), le serveur est arrêté après `save-all flush`, et le partage est fermé (`host_stop_sharing`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bail_concurrent_serveur_vide_publie_et_ferme_le_partage() {
+    let (peers, g, lease) = alice_heberge_et_bob_a_un_bail_plus_fort(true).await;
+    let (a, b) = (&peers[0], &peers[1]);
+    let before = a.rt().heads_of(&g).unwrap().len();
+    // Le bail adverse est renouvelé toutes les quelques secondes : plusieurs réceptions, une seule fin de partie.
+    for _ in 0..3 {
+        a.rt().on_lease(b.key(), lease.clone());
+    }
+    wait_for("serveur d'Alice arrêté", 30, || a.rt().active(&g).is_none()).await;
+    wait_for("partage fermé", 30, || a.node.be.shared_instance().is_none()).await;
+    assert_ne!(a.state_of(&g), HearthStateKind::Hosting);
+    assert_eq!(a.runner.calls.lock().unwrap().clone(), ["start", "save-off", "save-on", "stop"], "save-all flush, puis un seul stop");
+    wait_for("bail relâché chez Bob", 20, || b.rt().lease_of_holder(&g, &a.key()).is_none()).await;
+    // La session d'Alice est publiée : une branche de plus, visible comme fourche chez Alice et chez Bob.
+    a.rt().probe_all().await;
+    b.rt().probe_all().await;
+    wait_for("session d'Alice publiée (fourche)", 30, || a.rt().is_fork(&g) && a.rt().heads_of(&g).unwrap().len() > before).await;
+    wait_for("fourche chez Bob", 30, || b.rt().is_fork(&g)).await;
+    for p in &peers {
+        p.stop().await;
+    }
+}
+
+/// Personne n'est jamais entré : rien à publier. Le serveur s'arrête quand même et le partage est fermé.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bail_concurrent_serveur_jamais_joue_ne_publie_rien_mais_ferme_le_partage() {
+    let (peers, g, lease) = alice_heberge_et_bob_a_un_bail_plus_fort(false).await;
+    let (a, b) = (&peers[0], &peers[1]);
+    let before = a.rt().heads_of(&g).unwrap().len();
+    a.rt().on_lease(b.key(), lease);
+    wait_for("serveur d'Alice arrêté", 30, || a.rt().active(&g).is_none()).await;
+    wait_for("partage fermé", 30, || a.node.be.shared_instance().is_none()).await;
+    assert_eq!(a.runner.calls.lock().unwrap().clone(), ["start", "stop"], "pas de publication : pas de save-all");
+    assert_eq!(a.rt().heads_of(&g).unwrap().len(), before, "aucune version publiée");
+    wait_for("bail relâché chez Bob", 20, || b.rt().lease_of_holder(&g, &a.key()).is_none()).await;
+    for p in &peers {
+        p.stop().await;
+    }
+}
+
+/// Un joueur est connecté : un bail concurrent ne coupe pas le serveur.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bail_concurrent_serveur_occupe_continue() {
+    let (peers, g, lease) = alice_heberge_et_bob_a_un_bail_plus_fort(true).await;
+    let (a, b) = (&peers[0], &peers[1]);
+    let on_line = a.runner.specs.lock().unwrap()[0].on_line.clone();
+    on_line("[12:10:00] [Server thread/INFO]: Steve joined the game");
+    assert_eq!(a.rt().active(&g).unwrap().players(), 1);
+    a.rt().on_lease(b.key(), lease);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(a.rt().active(&g).is_some(), "le serveur occupé reste");
+    assert_eq!(a.state_of(&g), HearthStateKind::Hosting);
+    assert!(!a.runner.calls.lock().unwrap().contains(&"stop"));
+    assert!(a.node.be.shared_instance().is_some());
+    for p in &peers {
+        p.stop().await;
+    }
+}
+
 /// Interrupteur de sécurité : coupé, les commandes refusent avec un message clair, la lecture d'état reste possible, et le
 /// protocole `cubelink/hearth/1` ne reconnaît plus ni amis ni membres.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

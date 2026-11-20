@@ -43,6 +43,9 @@ pub struct Hooks {
     pub cf_api: Option<String>,
     pub java_path: Option<PathBuf>,
     pub data_dir: Option<PathBuf>,
+    /// `CUBELINK_TEST_LAUNCHER_HOME` : dossier qui remplace le profil de l'utilisateur pour chercher Prism, la Modrinth App
+    /// et la CurseForge App (`<dir>/.local/share`, `<dir>/AppData`, `<dir>/curseforge`). Les vrais lanceurs ne sont pas lus.
+    pub launcher_home: Option<PathBuf>,
     pub relay: Option<RelayMode>,
     pub skip_java_probe: bool,
     /// `CUBELINK_TRANSFER_IDLE_SECS` : délai d'inactivité d'un transfert (secondes) avant l'échec.
@@ -123,6 +126,16 @@ impl Hooks {
             }
             None => None,
         };
+        let launcher_home = match get("CUBELINK_TEST_LAUNCHER_HOME").filter(|v| !v.trim().is_empty()) {
+            Some(d) => {
+                let d = PathBuf::from(d);
+                if !d.is_absolute() {
+                    return Err("CUBELINK_TEST_LAUNCHER_HOME : chemin absolu requis".into());
+                }
+                Some(d)
+            }
+            None => None,
+        };
         let relay = match get("CUBELINK_RELAY_MODE").filter(|v| !v.trim().is_empty()).as_deref() {
             None => None,
             Some("disabled") => Some(RelayMode::Disabled),
@@ -154,6 +167,7 @@ impl Hooks {
             cf_api: url("CUBELINK_TEST_CF_API")?,
             java_path,
             data_dir,
+            launcher_home,
             relay,
             skip_java_probe: get("CUBELINK_SKIP_JAVA_PROBE").as_deref() == Some("1"),
             transfer_idle_secs: match get("CUBELINK_TRANSFER_IDLE_SECS").filter(|v| !v.trim().is_empty()) {
@@ -468,5 +482,16 @@ mod tests {
         let p: &[(&str, &str)] = &[("CUBELINK_TEST_MODE", "1"), ("CUBELINK_AUTH_MS_URL", "http://127.0.0.1:1")];
         let w = Hooks::from_lookup(env(p)).unwrap().warning().unwrap();
         assert!(w.contains("ATTENTION") && w.contains("mode test") && w.contains('1'));
+    }
+
+    #[test]
+    fn dossier_des_lanceurs_de_test_absolu_et_en_mode_test_seulement() {
+        let abs = if cfg!(windows) { "C:\\tmp\\home" } else { "/tmp/home" };
+        let ok: &[(&str, &str)] = &[("CUBELINK_TEST_MODE", "1"), ("CUBELINK_TEST_LAUNCHER_HOME", abs)];
+        assert_eq!(Hooks::from_lookup(env(ok)).unwrap().launcher_home, Some(PathBuf::from(abs)));
+        let rel: &[(&str, &str)] = &[("CUBELINK_TEST_MODE", "1"), ("CUBELINK_TEST_LAUNCHER_HOME", "relatif")];
+        assert!(Hooks::from_lookup(env(rel)).is_err());
+        let off: &[(&str, &str)] = &[("CUBELINK_TEST_LAUNCHER_HOME", abs)];
+        assert_eq!(Hooks::from_lookup(env(off)).unwrap().launcher_home, None, "ignoré hors mode test");
     }
 }

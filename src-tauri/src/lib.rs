@@ -50,6 +50,8 @@ macro_rules! commands {
             commands_instances::instances_list,
             commands_instances::instances_create,
             commands_instances::instances_import_mrpack,
+            commands_instances::launcher_import_scan,
+            commands_instances::launcher_import_run,
             commands_instances::instances_launch,
             commands_instances::minecraft_versions,
             commands_game::instances_kill,

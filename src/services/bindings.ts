@@ -38,6 +38,10 @@ export const commands = {
 	instancesCreate: (name: string, minecraft: string, loader: LoaderSpec, ramMb: number, options?: InvokeOptions) => __TAURI_INVOKE<Instance_Serialize>("instances_create", { name, minecraft, loader, ram_mb: ramMb }, options),
 	/**  Importe un .mrpack, un zip CurseForge ou un zip brut (les champs facultatifs ne servent qu'au zip brut). Avertissements par `import://warning`. Un `.mrpack` est reconnu auprès de Modrinth par son SHA-1 (meilleur effort, borné à 20 s, silencieux hors ligne) : s'il est connu, `Instance.pack` reçoit son projet et sa version, sinon `pack` reste absent et l'import réussit quand même. */
 	instancesImportMrpack: (path: string, name: string | null, minecraft: string | null, loader: LoaderSpec | null, ramMb: number | null, options?: InvokeOptions) => __TAURI_INVOKE<Instance_Serialize>("instances_import_mrpack", { path, name, minecraft, loader, ram_mb: ramMb }, options),
+	/**  Cherche les instances de Prism / MultiMC, de la Modrinth App et de la CurseForge App (dossiers habituels Windows et Linux, Flatpak compris) ou, avec `path`, dans le dossier choisi (une instance, un dossier d'instances ou la racine d'un lanceur). Lecture seule : rien n'est écrit chez l'autre lanceur. Une instance au loader inconnu de Cubelink est listée avec `unsupported` (raison) et n'est pas importable. */
+	launcherImportScan: (path: string | null, options?: InvokeOptions) => __TAURI_INVOKE<DetectedInstance_Serialize[]>("launcher_import_scan", { path }, options),
+	/**  Importe l'instance du dossier `path` (relue sur le disque, jamais l'objet reçu d'une recherche) : version de Minecraft et loader repris (version du loader recommandée si le lanceur ne la donne pas), `mods/`, `config/`, `saves/`, `resourcepacks/`, `shaderpacks/`, `options.txt` et `servers.dat` placés dans une nouvelle instance. Les jars et zips de packs vont dans le magasin par hash puis sont liés (lien physique, repli copie), le reste est copié ; la source n'est jamais modifiée ni liée, les liens symboliques ne sont pas suivis. Échec : l'instance n'est pas créée. Progression par `browse://progress`, puis recherche silencieuse de l'illustration par nom (20 s au plus). */
+	launcherImportRun: (path: string, launcher: Launcher, name: string | null, ramMb: number | null, options?: InvokeOptions) => __TAURI_INVOKE<Instance_Serialize>("launcher_import_run", { path, launcher, name, ram_mb: ramMb }, options),
 	/**  Lance l'instance. Progression par `launch://state`, sortie du jeu par `launch://log`. */
 	instancesLaunch: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("instances_launch", { id }, options),
 	/**  Versions de Minecraft disponibles. */
@@ -385,6 +389,43 @@ export type ContentCheck_Serialize = {
 	verdicts: VersionVerdict[],
 	/**  Mods déjà présents qui empêchent toute version testée (noms affichables). */
 	blockers: string[],
+};
+
+/**  Une instance trouvée chez un autre lanceur. */
+export type DetectedInstance = DetectedInstance_Serialize | DetectedInstance_Deserialize;
+
+/**  Une instance trouvée chez un autre lanceur. */
+export type DetectedInstance_Deserialize = {
+	launcher: Launcher,
+	name: string,
+	/**  Dossier de l'instance chez le lanceur d'origine (c'est ce chemin que l'import relit). */
+	path: string,
+	minecraft: string,
+	/**  Loader et sa version ; la version est vide quand le lanceur ne la donne pas (Cubelink choisit la recommandée). */
+	loader: LoaderSpec,
+	/**  Nombre de mods (`.jar`, activés ou non). */
+	mod_count: number,
+	/**  L'instance contient au moins un monde. */
+	has_saves: boolean,
+	/**  Raison pour laquelle l'instance ne peut pas être importée (loader que Cubelink ne gère pas). */
+	unsupported?: string | null,
+};
+
+/**  Une instance trouvée chez un autre lanceur. */
+export type DetectedInstance_Serialize = {
+	launcher: Launcher,
+	name: string,
+	/**  Dossier de l'instance chez le lanceur d'origine (c'est ce chemin que l'import relit). */
+	path: string,
+	minecraft: string,
+	/**  Loader et sa version ; la version est vide quand le lanceur ne la donne pas (Cubelink choisit la recommandée). */
+	loader: LoaderSpec,
+	/**  Nombre de mods (`.jar`, activés ou non). */
+	mod_count: number,
+	/**  L'instance contient au moins un monde. */
+	has_saves: boolean,
+	/**  Raison pour laquelle l'instance ne peut pas être importée (loader que Cubelink ne gère pas). */
+	unsupported: string | null,
 };
 
 export type DeviceCodeInfo = {
@@ -1014,6 +1055,9 @@ export type LaunchStateEvent_Serialize = {
 	state: LaunchPhase,
 	message?: string,
 };
+
+/**  Lanceur d'origine. */
+export type Launcher = "prism" | "curseforge" | "modrinth";
 
 export type Loader = "vanilla" | "neoforge" | "fabric" | "quilt" | "forge";
 

@@ -93,6 +93,11 @@ impl SessionAccess {
         sets.serving = None;
     }
 
+    /// Le monde solo est fermé : plus aucun invité pour lui. L'accès des groupes n'est pas touché.
+    pub fn clear_guests(&self) {
+        lock(&self.inner).guests.clear();
+    }
+
     /// Vrai si ce pair a une entrée, pour une cible quelconque (sans tenir compte de l'amitié).
     pub fn contains(&self, key: &PeerKey) -> bool {
         let sets = lock(&self.inner);

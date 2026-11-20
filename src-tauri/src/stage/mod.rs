@@ -29,7 +29,8 @@ use crate::stage_log::Outbox;
 use crate::state::{lock, EventSink};
 
 pub mod commands;
-#[cfg(all(test, windows))]
+#[cfg(test)]
+#[allow(dead_code)] // sous Linux seuls les tests du recalage s'en servent ; les scenarios du lancement sont ceux de Windows
 pub(crate) mod fake;
 mod platform;
 #[cfg(test)]
@@ -307,6 +308,8 @@ pub(crate) trait HostApi: Send + Sync {
     fn panel(&self) -> bool;
     fn set_panel(&self, open: bool, width_px: i32) -> bool;
     fn set_calm(&self, calm: bool);
+    /// Echelle d'affichage de la fenetre du launcher (rendu du rideau).
+    fn set_scale(&self, scale: f32);
     /// Le jeu de ce lancement est cree avec la consigne « premiere fenetre cachee » : c'est a l'hote de l'afficher a la pose.
     fn expect_hidden(&self, hidden: bool);
 }
@@ -360,6 +363,9 @@ impl HostApi for cubelink_host::GameHost {
     }
     fn set_calm(&self, calm: bool) {
         self.set_calm(calm)
+    }
+    fn set_scale(&self, scale: f32) {
+        self.set_scale(scale)
     }
     fn expect_hidden(&self, hidden: bool) {
         self.expect_hidden(hidden)
@@ -550,12 +556,18 @@ impl Stage {
     /// appliquees a la taille actuelle (a defaut : toute la zone sous la barre de titre).
     pub fn relayout(&self, window: &tauri::WebviewWindow) {
         let (Some(h), Ok(size)) = (self.host.get(), window.inner_size()) else { return };
-        let (cw, ch) = (size.width as i32, size.height as i32);
+        self.relayout_to(&**h, (size.width as i32, size.height as i32), window.scale_factor().unwrap_or(1.0));
+    }
+
+    /// Coeur de [`Stage::relayout`] (testable sans fenetre) : taille client `(largeur, hauteur)` en pixels et facteur d'echelle.
+    fn relayout_to(&self, h: &dyn HostApi, (cw, ch): (i32, i32), scale: f64) {
         let published = *lock(&self.layout);
+        // d'abord l'echelle : le redessin que provoque le recalage doit deja l'utiliser
+        h.set_scale(scale as f32);
         let (x, y, w, hgt) = match published {
             Some(l) => l.rect(cw, ch),
             None => {
-                let tb = (FALLBACK_TITLEBAR_CSS_PX * window.scale_factor().unwrap_or(1.0)).round() as i32;
+                let tb = (FALLBACK_TITLEBAR_CSS_PX * scale).round() as i32;
                 (0, tb, cw.max(1), (ch - tb).max(1))
             }
         };
@@ -757,7 +769,7 @@ impl Stage {
     }
 
     /// Test : installe un faux hote a la place de la zone de jeu native.
-    #[cfg(all(test, windows))]
+    #[cfg(test)]
     pub(crate) fn install_test_host(&self, host: Box<dyn HostApi>, sink: EventSink) {
         let _ = self.core.sink.set(sink);
         assert!(self.host.set(host).is_ok(), "hote deja installe");

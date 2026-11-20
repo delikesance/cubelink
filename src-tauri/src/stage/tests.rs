@@ -1,4 +1,5 @@
 use super::*;
+use super::fake;
 
 #[test]
 fn scene_linux_seulement_avec_x11() {
@@ -245,4 +246,17 @@ fn rectangle_jamais_vide_ni_negatif() {
     assert_eq!(Layout::from_rect(0, 45, 1600, 854, 475, 1600, 900).bottom, 0);
     let l = Layout::from_rect(10, 40, 100, 100, 0, 800, 600);
     assert_eq!(l.rect(20, 20), (10, 40, 1, 1));
+}
+
+#[test]
+fn le_recalage_transmet_l_echelle_avant_le_rectangle() {
+    let (stage, fake) = fake::FakeHost::stage();
+    let h = stage.host.get().unwrap();
+    stage.relayout_to(&**h, (1600, 900), 2.0);
+    assert_eq!(fake.scale(), Some(2.0), "l'echelle de la fenetre part vers l'hote");
+    assert_eq!(fake.rect(), Some((0, 72, 1600, 828)), "repli : barre de titre de 36 px CSS a l'echelle 2");
+    assert_eq!(fake.calls(), vec!["set_scale", "relayout"], "l'echelle d'abord : le redessin du recalage l'utilise deja");
+    // l'echelle change (autre ecran, reglage du bureau) : elle repart au recalage suivant
+    stage.relayout_to(&**h, (1600, 900), 1.0);
+    assert_eq!(fake.scale(), Some(1.0));
 }

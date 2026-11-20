@@ -11,6 +11,9 @@ struct Inner {
     now: Instant,
     ready: bool,
     calls: Vec<&'static str>,
+    /// Dernier recalage : echelle recue, rectangle.
+    scale: Option<f32>,
+    rect: Option<(i32, i32, i32, i32)>,
 }
 
 #[derive(Clone)]
@@ -18,7 +21,7 @@ pub(crate) struct FakeHost(Arc<Mutex<Inner>>);
 
 impl FakeHost {
     pub(crate) fn new() -> FakeHost {
-        FakeHost(Arc::new(Mutex::new(Inner { m: Machine::new(), now: Instant::now(), ready: false, calls: Vec::new() })))
+        FakeHost(Arc::new(Mutex::new(Inner { m: Machine::new(), now: Instant::now(), ready: false, calls: Vec::new(), scale: None, rect: None })))
     }
 
     /// Une Scene de test pilotee par ce faux hote (reglage « Jeu integre » actif, comme par defaut).
@@ -71,6 +74,16 @@ impl FakeHost {
         self.flow().curtain_on()
     }
 
+    /// Derniere echelle recue de `set_scale`.
+    pub(crate) fn scale(&self) -> Option<f32> {
+        lock(&self.0).scale
+    }
+
+    /// Dernier rectangle recu de `relayout`.
+    pub(crate) fn rect(&self) -> Option<(i32, i32, i32, i32)> {
+        lock(&self.0).rect
+    }
+
     pub(crate) fn calls(&self) -> Vec<&'static str> {
         lock(&self.0).calls.clone()
     }
@@ -81,7 +94,11 @@ impl FakeHost {
 }
 
 impl HostApi for FakeHost {
-    fn relayout(&self, _x: i32, _y: i32, _w: i32, _h: i32) {}
+    fn relayout(&self, x: i32, y: i32, w: i32, h: i32) {
+        let mut i = lock(&self.0);
+        i.calls.push("relayout");
+        i.rect = Some((x, y, w, h));
+    }
     fn begin(&self, _title: &str, _mods_dir: &Path, _profile_path: &Path) {
         lock(&self.0).ready = false;
         self.send("begin", Event::BeginLaunch);
@@ -128,6 +145,11 @@ impl HostApi for FakeHost {
     }
     fn set_calm(&self, calm: bool) {
         lock(&self.0).m.set_calm(calm);
+    }
+    fn set_scale(&self, scale: f32) {
+        let mut i = lock(&self.0);
+        i.calls.push("set_scale");
+        i.scale = Some(scale);
     }
     fn expect_hidden(&self, hidden: bool) {
         lock(&self.0).calls.push(if hidden { "expect_hidden(true)" } else { "expect_hidden(false)" });

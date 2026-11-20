@@ -191,6 +191,10 @@ export interface Services {
   /** Teste la connexion réseau entre amis (relais, UDP, routeur). */
   netTest(): Promise<NetTest>;
   friendMyCode(): Promise<FriendCode>;
+  /** Mon lien ami `cubelink://add/<code>` (même jeton que le code : un nouveau code invalide aussi les anciens liens). */
+  friendMyLink(): Promise<string>;
+  /** Lien ami reçu du système (clic sur `cubelink://add/…`) pas encore repris : le rend puis l'oublie, `null` sinon. */
+  friendTakePendingLink(): Promise<string | null>;
   friendRegenerateCode(): Promise<FriendCode>;
   friendList(): Promise<FriendWithPresence[]>;
   friendSendRequest(code: string): Promise<VerifyCode>;
@@ -270,6 +274,8 @@ export interface Services {
   onHostState(cb: (e: HostState) => void): Unsubscribe;
   onTransferProgress(cb: (p: TransferProgress) => void): Unsubscribe;
   onFriendPresence(cb: (e: PresenceEvent) => void): Unsubscribe;
+  /** Un lien ami vient d'être ouvert (Cubelink déjà lancé) : à reprendre avec `friendTakePendingLink`. */
+  onFriendLink(cb: () => void): Unsubscribe;
   onFriendRequest(cb: (r: FriendRequest) => void): Unsubscribe;
   /** Une demande reçue a été retirée sans décision (l'ami a annulé ou le délai est écoulé) : clé publique. */
   onFriendRequestRemoved(cb: (e: { public_key: string }) => void): Unsubscribe;

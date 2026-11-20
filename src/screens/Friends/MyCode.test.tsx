@@ -43,6 +43,27 @@ describe("Mon code ami", () => {
     expect(screen.queryByText("Copié")).toBeNull();
   });
 
+  it("Copier mon lien : copie le lien cubelink://add/ du service", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });
+    const svc = fake();
+    const code = await svc.friendMyCode();
+    mount(svc);
+    await screen.findByText(code);
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Copier mon lien" })); });
+    expect(writeText).toHaveBeenCalledWith(`cubelink://add/${code}`);
+    expect(screen.getByRole("button", { name: "Lien copié" })).toBeTruthy();
+  });
+
+  it("Copier mon lien : presse-papiers indisponible, message sans plantage", async () => {
+    vi.stubGlobal("navigator", { ...navigator, clipboard: undefined });
+    const svc = fake();
+    mount(svc);
+    await screen.findByLabelText(/Mon code ami : mcl1-/);
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Copier mon lien" })); });
+    expect(screen.getByText(/Copie du lien impossible/)).toBeTruthy();
+  });
+
   it("repli si le presse-papiers est indisponible", async () => {
     vi.stubGlobal("navigator", { ...navigator, clipboard: undefined });
     const svc = fake();

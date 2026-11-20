@@ -1,11 +1,12 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ShellContext } from "../../app/context";
+import { offerFriendLink, resetFriendLink } from "../../app/friendLink";
 import { createFakeServices } from "../../services/fake";
 import type { Services } from "../../services/types";
 import Add, { validateFriendCode } from "./Add";
 
-afterEach(() => { cleanup(); vi.restoreAllMocks(); });
+afterEach(() => { cleanup(); vi.restoreAllMocks(); resetFriendLink(); });
 
 const VALID = "mcl1-0123456789abcdef0123";
 let fake: ReturnType<typeof createFakeServices>;
@@ -30,6 +31,10 @@ describe("validateFriendCode", () => {
     expect(validateFriendCode(`  ${VALID}\n`)).toBeNull();
     expect(validateFriendCode(VALID.toUpperCase())).toBeNull();
     expect(validateFriendCode("launcher://add/abc")).toBeNull();
+    expect(validateFriendCode("cubelink://add/abc")).toBeNull();
+    expect(validateFriendCode("CubeLink://add/abc/")).toBeNull();
+    expect(validateFriendCode("cubelink://autre/abc")).not.toBeNull();
+    expect(validateFriendCode("https://add/abc")).not.toBeNull();
     expect(validateFriendCode("mcl1-court")).not.toBeNull();
     expect(validateFriendCode("n'importe quoi")).not.toBeNull();
   });
@@ -69,6 +74,71 @@ describe("onglet Ajouter un ami", () => {
     fireEvent.click(sendBtn());
     await screen.findByLabelText("Code de vérification : AAAA · BBBB · CCCC · DDDD");
     expect(send).toHaveBeenCalledWith("launcher://add/xyz123");
+  });
+
+  it("lien cubelink://add/… collé : envoyé tel quel", async () => {
+    const send = setup({ friendSendRequest: async () => "AAAA · BBBB · CCCC · DDDD" });
+    fireEvent.change(input(), { target: { value: `cubelink://add/${VALID}` } });
+    fireEvent.click(sendBtn());
+    await screen.findByLabelText("Code de vérification : AAAA · BBBB · CCCC · DDDD");
+    expect(send).toHaveBeenCalledWith(`cubelink://add/${VALID}`);
+  });
+
+  describe("lien ouvert depuis le système", () => {
+    it("préremplit le champ sans rien envoyer, et le lien n'est repris qu'une fois", async () => {
+      const send = setup();
+      expect(input().value).toBe("");
+      act(() => offerFriendLink(`cubelink://add/${VALID}`));
+      await waitFor(() => expect(input().value).toBe(`cubelink://add/${VALID}`));
+      expect(document.activeElement).toBe(input());
+      expect(screen.getAllByText(/rien n'est envoyé/i).length).toBeGreaterThan(0);
+      expect(sendBtn().disabled).toBe(false);
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(send).not.toHaveBeenCalled();
+      // Un geste de l'utilisateur envoie la demande, avec le code de vérification habituel.
+      fireEvent.click(sendBtn());
+      await screen.findByLabelText(/Code de vérification/);
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(send).toHaveBeenCalledWith(`cubelink://add/${VALID}`);
+    });
+
+    it("lien présent avant l'affichage de l'écran : repris au montage", async () => {
+      offerFriendLink(`cubelink://add/${VALID}`);
+      setup();
+      await waitFor(() => expect(input().value).toBe(`cubelink://add/${VALID}`));
+    });
+
+    it("lien mal formé : il remplit le champ, aucune demande ne part tant qu'on n'envoie pas, puis l'erreur du service s'affiche", async () => {
+      const send = setup();
+      act(() => offerFriendLink("cubelink://add/x"));
+      await waitFor(() => expect(input().value).toBe("cubelink://add/x"));
+      expect(send).not.toHaveBeenCalled();
+      fireEvent.click(sendBtn());
+      expect((await screen.findByRole("alert")).textContent).toMatch(/Code ami invalide/);
+    });
+
+    it("lien d'un autre schéma : refusé par le champ avant tout appel", async () => {
+      const send = setup();
+      act(() => offerFriendLink("cubelink://autre/x"));
+      await waitFor(() => expect(input().value).toBe("cubelink://autre/x"));
+      fireEvent.click(sendBtn());
+      await screen.findByText(/n'est pas reconnu/);
+      expect(send).not.toHaveBeenCalled();
+    });
+
+    it("pendant une demande en attente de réponse : l'écran n'est pas écrasé, le lien est repris après l'annulation", async () => {
+      setup();
+      fireEvent.change(input(), { target: { value: VALID } });
+      fireEvent.click(sendBtn());
+      await screen.findByLabelText(/Code de vérification/);
+      act(() => offerFriendLink("cubelink://add/mcl1-ffffffffffffffffffff"));
+      expect(screen.getByText(/Un lien d'ami est arrivé/)).toBeTruthy();
+      expect(screen.getByLabelText(/Code de vérification/)).toBeTruthy();
+      expect(input().value).toBe("");
+      fireEvent.click(screen.getByRole("button", { name: "Annuler la demande" }));
+      await waitFor(() => expect(input().value).toBe("cubelink://add/mcl1-ffffffffffffffffffff"));
+      expect(screen.queryByText(/Un lien d'ami est arrivé/)).toBeNull();
+    });
   });
 
   it("erreur du service affichée en alerte, champ conservé", async () => {

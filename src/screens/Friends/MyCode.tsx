@@ -78,6 +78,21 @@ export default function MyCode() {
     }
   };
 
+  // Le lien est demandé au moment du clic : il suit toujours le code courant (jeton compris).
+  const copyLink = async () => {
+    if (state.step !== "ready") return;
+    try {
+      const link = await services.friendMyLink();
+      if (!navigator.clipboard?.writeText) throw new Error("indisponible");
+      await navigator.clipboard.writeText(link);
+      if (alive.current) say("Lien copié");
+    } catch {
+      if (!alive.current) return;
+      if (timer.current) clearTimeout(timer.current);
+      setNotice("Copie du lien impossible : copie plutôt le code.");
+    }
+  };
+
   const regenerate = async () => {
     setBusy(true);
     setRegenError(null);
@@ -137,13 +152,16 @@ export default function MyCode() {
         {state.step === "ready" && (
           <>
             <code className="mycode-code" ref={codeRef} aria-label={`Mon code ami : ${state.code}`}>{state.code}</code>
-            <Button variant="secondary" className={notice === "Copié" ? "is-copied" : undefined} onClick={() => { void copy(); }}>{notice === "Copié" ? "Copié" : "Copier"}</Button>
+            <div className="mycode-actions">
+              <Button variant="secondary" className={notice === "Copié" ? "is-copied" : undefined} onClick={() => { void copy(); }}>{notice === "Copié" ? "Copié" : "Copier"}</Button>
+              <Button variant="secondary" className={notice === "Lien copié" ? "is-copied" : undefined} onClick={() => { void copyLink(); }}>{notice === "Lien copié" ? "Lien copié" : "Copier mon lien"}</Button>
+            </div>
           </>
         )}
       </div>
 
-      <div className="mycode-live" aria-live="polite" aria-atomic="true">{notice === "Copié" ? "" : notice}</div>
-      <span className="mycode-help">Ce code permet à ton ami de te joindre et de t'envoyer une demande&nbsp;: ne le publie pas. Trop partagé&nbsp;? Génère-en un nouveau.</span>
+      <div className="mycode-live" aria-live="polite" aria-atomic="true">{notice === "Copié" || notice === "Lien copié" ? "" : notice}</div>
+      <span className="mycode-help">Ce code permet à ton ami de te joindre et de t'envoyer une demande&nbsp;: ne le publie pas. Trop partagé&nbsp;? Génère-en un nouveau. Le lien fait la même chose&nbsp;: un clic dessus ouvre Cubelink chez ton ami (Discord ne le rend pas cliquable&nbsp;: colle plutôt le code).</span>
     </section>
   );
 }

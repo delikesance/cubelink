@@ -56,6 +56,8 @@ export function createTauriServices(): Services {
 
     netTest: () => commands.netTest(),
     friendMyCode: () => commands.friendMyCode(),
+    friendMyLink: () => commands.friendMyLink(),
+    friendTakePendingLink: () => commands.friendTakePendingLink(),
     friendRegenerateCode: () => commands.friendRegenerateCode(),
     friendList: () => commands.friendList(),
     friendSendRequest: (code) => commands.friendSendRequest(code),
@@ -118,6 +120,7 @@ export function createTauriServices(): Services {
     onHostState: (cb) => on("host://state", cb),
     onTransferProgress: (cb) => on("transfer://progress", cb),
     onFriendPresence: (cb) => on("friend://presence", cb),
+    onFriendLink: (cb) => on<null>("friend://link", () => cb()),
     onFriendRequest: (cb) => on("friend://request", cb),
     onFriendRequestRemoved: (cb) => on("friend://request_removed", cb),
     onFriendAccepted: (cb) => on("friend://accepted", cb),

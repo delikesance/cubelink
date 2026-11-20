@@ -1,20 +1,21 @@
 import { useEffect, useRef, useState } from "react";
 import "./add.css";
 import { useServices } from "../../app/context";
+import { takeFriendLink, usePendingFriendLink } from "../../app/friendLink";
 import { Button } from "../../ui";
 
 const ErrIcon = () => (
   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M12 7.5v5.5M12 16.5v.01" /></svg>
 );
 
-const CODE_RE = /^(mcl1-[A-Za-z0-9-]{16,}|launcher:\/\/add\/\S+)$/i;
+const CODE_RE = /^(mcl1-[A-Za-z0-9-]{16,}|(cubelink|launcher):\/\/add\/\S+)$/i;
 
 /** Retourne un message d'erreur, ou null si le code est valide. */
 export function validateFriendCode(raw: string): string | null {
   const v = raw.trim();
   if (!v) return "Colle le code de ton ami.";
   if (!CODE_RE.test(v)) {
-    return "Ce code n'est pas reconnu. Vérifie qu'il commence par « mcl1- » ou « launcher://add/ » et qu'il est complet.";
+    return "Ce code n'est pas reconnu. Vérifie qu'il commence par « mcl1- » ou « cubelink://add/ » et qu'il est complet.";
   }
   return null;
 }
@@ -48,6 +49,7 @@ export default function Add() {
   // Réponse à la demande envoyée : tant qu'elle est affichée, on écoute les événements du demandeur. La clé publique
   // n'est pas connue de l'interface (seulement le code) : une seule demande est suivie à l'écran à la fois.
   const waiting = status.step === "sent";
+  const busy = waiting || status.step === "sending";
   useEffect(() => {
     if (!waiting) return;
     const answer = (s: Status) => { if (alive.current) setStatus(s); };
@@ -59,6 +61,21 @@ export default function Add() {
     return () => offs.forEach((off) => off());
   }, [waiting, services]);
 
+  // Lien ami ouvert depuis le système (clic sur cubelink://add/…) : il remplit le champ, sans rien envoyer. Pendant
+  // qu'une demande est en cours, il attend (sinon on perdrait le code de vérification à comparer).
+  const incoming = usePendingFriendLink();
+  const [fromLink, setFromLink] = useState(false);
+  useEffect(() => {
+    if (!incoming || busy) return;
+    const link = takeFriendLink();
+    if (!link) return;
+    setValue(link);
+    setTouched(true);
+    setFromLink(true);
+    setStatus((s) => (s.step === "error" || s.step === "answered" ? { step: "idle" } : s));
+    inputRef.current?.focus();
+  }, [incoming, busy]);
+
   const empty = value.trim() === "";
   const fieldError = touched && !empty ? validateFriendCode(value) : null;
   const sending = status.step === "sending";
@@ -68,6 +85,7 @@ export default function Add() {
 
   const onChange = (v: string) => {
     setValue(v);
+    setFromLink(false);
     if (status.step === "error") setStatus({ step: "idle" });
   };
 
@@ -87,6 +105,7 @@ export default function Add() {
     if (sending) return;
     setTouched(true);
     if (validateFriendCode(value)) return;
+    setFromLink(false);
     setStatus({ step: "sending" });
     try {
       const sentCode = value.trim();
@@ -113,7 +132,8 @@ export default function Add() {
         : "Ta demande est restée sans réponse. Vérifie que ton ami est connecté, puis redemande-lui son code.";
 
   const live =
-    status.step === "sending" ? "Envoi de la demande…"
+    fromLink && status.step === "idle" ? "Lien d'ami reçu. Rien n'est envoyé tant que tu ne cliques pas sur « Envoyer la demande »."
+    : status.step === "sending" ? "Envoi de la demande…"
       : status.step === "sent" ? "Demande envoyée. Compare ce code avec celui de ton ami."
         : status.step === "answered" ? answeredText(status)
           : "";
@@ -145,7 +165,13 @@ export default function Add() {
         <Button variant="secondary" onClick={() => { void paste(); }} disabled={sending}>Coller</Button>
         <Button type="submit" disabled={empty} loading={sending}>Envoyer la demande</Button>
       </form>
-      <p id="add-help" className="add-help">Il commence par «&nbsp;mcl1-&nbsp;» ou par launcher://add/…</p>
+      <p id="add-help" className="add-help">Il commence par «&nbsp;mcl1-&nbsp;» ou par cubelink://add/…</p>
+      {fromLink && status.step === "idle" && (
+        <p className="add-help">Tu as ouvert un lien d'ami : rien n'est envoyé pour l'instant. Si tu connais cette personne, clique sur «&nbsp;Envoyer la demande&nbsp;».</p>
+      )}
+      {incoming && busy && (
+        <p className="add-help">Un lien d'ami est arrivé : il sera repris quand cette demande sera terminée.</p>
+      )}
       {fieldError && <p id="add-error" className="add-error"><ErrIcon />{fieldError}</p>}
       {serviceError && <p id="add-svc-error" className="add-error" role="alert"><ErrIcon />{serviceError}</p>}
 

@@ -14,6 +14,7 @@ pub mod commands_instances;
 pub mod commands_join;
 pub mod commands_settings;
 pub mod commands_update;
+pub mod deeplink;
 pub mod error;
 pub mod iroh_backend;
 pub mod last_seen;
@@ -63,6 +64,8 @@ macro_rules! commands {
             commands_art::instances_description,
             commands_friends::net_test,
             commands_friends::friend_my_code,
+            commands_friends::friend_my_link,
+            commands_friends::friend_take_pending_link,
             commands_friends::friend_regenerate_code,
             commands_friends::friend_list,
             commands_friends::friend_send_request,
@@ -271,6 +274,8 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec![background::BACKGROUND_ARG]),
         ))
+        // Lien `cubelink://add/<code>` : après l'instance unique (son option `deep-link` lui passe l'argument d'un second lancement).
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -296,6 +301,7 @@ pub fn run() {
                 }
             }
             app.manage(st.clone());
+            deeplink::setup(app, &st, test_mode);
             // Fond : icone de notification (hors mode test : fermer y quitte, comme avant), demarrage avec la session, fenetre
             // masquee tout de suite au lancement automatique.
             if !test_mode {

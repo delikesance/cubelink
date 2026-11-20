@@ -22,6 +22,14 @@
       <uap:VisualElements DisplayName="Cubelink" Description="Lanceur Minecraft avec multijoueur entre amis"
                           BackgroundColor="#131116"
                           Square150x150Logo="Assets\Square150x150Logo.png" Square44x44Logo="Assets\Square44x44Logo.png" />
+      <Extensions>
+        <!-- Lien ami cubelink://add/<code> : Windows lance Cubelink (ou l'instance ouverte) avec le lien en argument. -->
+        <uap:Extension Category="windows.protocol">
+          <uap:Protocol Name="cubelink">
+            <uap:DisplayName>Cubelink</uap:DisplayName>
+          </uap:Protocol>
+        </uap:Extension>
+      </Extensions>
     </Application>
   </Applications>
   <Capabilities>

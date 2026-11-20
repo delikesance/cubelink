@@ -36,6 +36,12 @@ Les secrets ne sont donnés qu'aux étapes `tauri build` (jamais dans l'environn
 - `deny.toml` règle `cargo deny` : licences permissives seulement, crates.io comme seule source, crates retirées refusées.
 - `scripts/ci-apt.sh` installe les dépendances système Linux de Tauri sur les runners.
 
+## Lien ami `cubelink://add/<code>`
+- Le schéma est déclaré dans `tauri.conf.json` (`plugins.deep-link.desktop.schemes`) : le bundler l'écrit dans le MSI (registre) et dans le `.desktop` des .deb/.rpm/AppImage (`MimeType=x-scheme-handler/cubelink`). `scripts/rpm-smoke.sh` vérifie le `.desktop` du .rpm.
+- MSIX : `uap:Protocol` dans `packaging/msix/AppxManifest.xml`. L'AppImage se réenregistre à chaque démarrage (`~/.local/share/applications/cubelink-handler.desktop`, `xdg-mime`) ; le MSI se réenregistre au démarrage s'il manque (clé du registre de l'utilisateur).
+- Essai réel Linux (démarrage à froid avec le lien, second lancement transmis à l'instance ouverte) : `xvfb-run -a dbus-run-session -- node e2e/linux/friend-link-real.mjs`. Non vérifié en réel : clic depuis un navigateur, registre MSI, MSIX (le lien arrive-t-il en argument de ligne de commande), .rpm.
+- Discord ne rend pas un schéma inconnu cliquable : le code `mcl1-…` reste le moyen principal de partage ; une page de redirection statique reste à faire.
+
 ## Limites connues
 - MSI : installation « par machine » (demande les droits administrateur) ; l'ancien NSIS s'installait par utilisateur.
 - Linux (.rpm) : construit en CI avec l'AppImage, puis installé par `dnf` dans un conteneur Fedora où le launcher doit tenir 20 s sous Xvfb (`scripts/rpm-smoke.sh`). Installation : `sudo dnf install ./Cubelink-<version>-1.x86_64.rpm`. Le launcher installé ainsi ne se met pas à jour seul : il signale la nouvelle version, on réinstalle le .rpm suivant.

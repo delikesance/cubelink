@@ -68,6 +68,28 @@ describe("faux service", () => {
     expect(await s.friendSendRequest(a)).toMatch(/^[0-9A-F]{4}( · [0-9A-F]{4}){3}$/);
   });
 
+  it("lien ami : mon lien porte mon code, il est accepté comme le code, et un lien ouvert se reprend une fois", async () => {
+    const s = svc();
+    const code = await s.friendMyCode();
+    expect(await s.friendMyLink()).toBe(`cubelink://add/${code}`);
+    expect(await s.friendSendRequest(`cubelink://add/${code}`)).toMatch(/^[0-9A-F]{4}/);
+    // La demande est la même que celle du code nu : la doublonner est refusée, l'annuler par le lien la libère.
+    await expect(s.friendSendRequest(code)).rejects.toThrow("déjà en cours");
+    await s.friendCancelRequest(`cubelink://add/${code}`);
+    await s.friendSendRequest(code);
+    const seen: number[] = [];
+    const off = s.onFriendLink(() => seen.push(1));
+    expect(await s.friendTakePendingLink()).toBeNull();
+    s.openFriendLink("cubelink://add/mcl1-abcdefabcdef");
+    expect(seen).toHaveLength(1);
+    expect(await s.friendTakePendingLink()).toBe("cubelink://add/mcl1-abcdefabcdef");
+    expect(await s.friendTakePendingLink()).toBeNull();
+    s.openFriendLink("cubelink://add/mcl1-xx", { pending: true });
+    expect(seen).toHaveLength(1);
+    expect(await s.friendTakePendingLink()).toBe("cubelink://add/mcl1-xx");
+    off();
+  });
+
   it("plan de jonction : 94 fichiers, 3 à recevoir", async () => {
     const plan = await svc().joinPlan("k");
     expect(plan.manifest.files).toHaveLength(94);

@@ -2,6 +2,7 @@ import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRe
 import "./shell.css";
 import { createServices, type Services } from "../services";
 import { ShellContext, type ShellContextValue } from "./context";
+import { useFriendLinkIntake, usePendingFriendLink } from "./friendLink";
 import { navigate, goBack, parseHash, takePendingFocus, useCanGoBack, useLocation, type RouteName } from "./router";
 import { TitleBar } from "./TitleBar";
 import { UpdateBanner } from "./UpdateBanner";
@@ -101,6 +102,14 @@ export function Shell({ services }: { services?: Services } = {}) {
     })();
     return () => { on = false; };
   }, [booting, svc]);
+
+  // Lien ami ouvert depuis le système : on ouvre Paramètres > Amis, où « Ajouter un ami » le reprend (champ prérempli,
+  // rien n'est envoyé). Sur l'écran de connexion il attend : on y va dès que la session est ouverte.
+  useFriendLinkIntake(svc);
+  const friendLink = usePendingFriendLink();
+  useEffect(() => {
+    if (friendLink && !booting && route !== "login") navigate("settings", { tab: "amis" });
+  }, [friendLink, booting, route]);
 
   // Focus sur le contenu à chaque changement de route (pas au premier rendu).
   useEffect(() => {

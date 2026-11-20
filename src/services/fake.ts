@@ -34,6 +34,8 @@ export interface FakeControls {
   expireRequest(publicKey: string): void;
   /** Test : la demande envoyée avec ce code reçoit une réponse (friend://accepted, friend://refused ou friend://request_expired). Sans effet si elle a été annulée. */
   answerSentRequest(code: string, answer: "accepted" | "refused" | "expired", name?: string): void;
+  /** Test : un lien ami est ouvert depuis le système (`pending: true` : au démarrage, repris au montage ; sinon événement friend://link). */
+  openFriendLink(link: string, opts?: { pending?: boolean }): void;
   /** Test : reçoit une invitation (friend://invite + friend://invites). */
   emitInvite(i: Partial<Invite> & { public_key: string }): Invite;
   /** Test : un ami demande à rejoindre ma partie (friend://join_request + friend://join_requests). */
@@ -223,6 +225,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     { name: "Efe", uuid: "61699b2e-d327-4a01-9f1e-0ea8c3f06bc6" },
   ];
   let codeN = 1;
+  let pendingLink: string | null = null;
   let settings: Settings = {
     language: "fr", default_ram_mb: 4096, java_path: null,
     trust_default: "ask", allow_relay: true, close_on_launch: false, relay_only: false, share_mods: true, discovery: true, lan_auto: true,
@@ -268,6 +271,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     launch: new Set<(s: LaunchState) => void>(),
     transfer: new Set<(p: TransferProgress) => void>(),
     presence: new Set<(e: PresenceEvent) => void>(),
+    link: new Set<() => void>(),
     request: new Set<(r: FriendRequest) => void>(),
     requestRemoved: new Set<(e: { public_key: string }) => void>(),
     accepted: new Set<(e: { public_key: string; name: string }) => void>(),
@@ -621,6 +625,8 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
 
     netTest: async () => ({ relay_connected: true, relay: "euc1-1.relay.n0.iroh.link", relay_ms: 28, udp: true, ipv6: false, direct: true, relay_only: false, partial: false }),
     friendMyCode: async () => `mcl1-${hex(codeN * 7, 24)}`,
+    friendMyLink: async () => `cubelink://add/mcl1-${hex(codeN * 7, 24)}`,
+    friendTakePendingLink: async () => { const l = pendingLink; pendingLink = null; return l; },
     friendRegenerateCode: async () => { codeN += 1; return `mcl1-${hex(codeN * 7, 24)}`; },
     friendList: async () => friends.map((f) => ({ friend: { ...f.friend }, presence: f.presence, in_game: f.in_game, last_seen: f.last_seen })),
     friendInvite: async (pk) => {
@@ -835,13 +841,15 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     },
     gameJoinFriend: async (pk, instanceId) => { gameCalls.push({ kind: "join", arg: pk, instanceId }); },
     friendSendRequest: async (code) => {
-      if (!/^mcl1-[0-9a-f]{8,}$/i.test(code.trim())) throw new Error("Code ami invalide.");
-      const key = code.trim().toLowerCase();
+      // Comme `friend_code::parse` : le lien cubelink://add/<code> (ou l'ancien launcher://add/) vaut le code.
+      const bare = code.trim().replace(/^(cubelink|launcher):\/\/add\//i, "").replace(/\/$/, "");
+      if (!/^mcl1-[0-9a-f]{8,}$/i.test(bare)) throw new Error("Code ami invalide.");
+      const key = bare.toLowerCase();
       if (sentRequests.has(key)) throw new Error("Une demande est déjà en cours pour ce pair.");
       sentRequests.add(key);
       return verifyCode(code.length);
     },
-    friendCancelRequest: async (code) => { sentRequests.delete(code.trim().toLowerCase()); },
+    friendCancelRequest: async (code) => { sentRequests.delete(code.trim().replace(/^(cubelink|launcher):\/\/add\//i, "").replace(/\/$/, "").toLowerCase()); },
     friendRequests: async ({ offset, limit, query }) => {
       const q = query?.trim().toLowerCase();
       const all = q ? requests.filter((r) => r.name.toLowerCase().includes(q)) : requests;
@@ -1019,6 +1027,10 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
       } else if (answer === "refused") emit(listeners.refused, { public_key: key });
       else emit(listeners.expired, { public_key: key });
     },
+    openFriendLink: (link, opts) => {
+      pendingLink = link;
+      if (!opts?.pending) emit(listeners.link, undefined);
+    },
     expireRequest: (pk) => {
       requests = requests.filter((x) => x.public_key !== pk);
       emit(listeners.requestRemoved, { public_key: pk });
@@ -1075,6 +1087,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     onHostState: (cb) => sub(listeners.host, cb),
     onTransferProgress: (cb) => sub(listeners.transfer, cb),
     onFriendPresence: (cb) => sub(listeners.presence, cb),
+    onFriendLink: (cb) => sub(listeners.link, cb),
     onFriendRequest: (cb) => sub(listeners.request, cb),
     onFriendRequestRemoved: (cb) => sub(listeners.requestRemoved, cb),
     onFriendAccepted: (cb) => sub(listeners.accepted, cb),

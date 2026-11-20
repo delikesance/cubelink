@@ -446,7 +446,7 @@ pub(crate) fn extract_overrides(
 
 // ---------- Import ----------
 
-fn sanitize_name(name: &str) -> String {
+pub(crate) fn sanitize_name(name: &str) -> String {
     let cleaned: String = name.chars().map(|c| if c.is_control() || "<>:\"/\\|?*".contains(c) { '-' } else { c }).collect();
     let cleaned: String = cleaned.trim().chars().take(64).collect();
     let cleaned = cleaned.trim().trim_end_matches('.').trim().to_string();

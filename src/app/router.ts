@@ -97,7 +97,20 @@ function backIndex(): number {
 
 export function canGoBack(): boolean { return backIndex() >= 0; }
 
+/**
+ * Garde de sortie : tant qu'elle est enregistrée, un retour (bouton de la barre, Alt+←, bouton souris) lui est
+ * soumis. Elle renvoie `true` pour bloquer le retour (typiquement en demandant une confirmation). Un seul
+ * propriétaire à la fois ; le désenregistreur ne retire que sa propre garde. `navigate()` n'est pas gardé.
+ */
+let backGuard: (() => boolean) | null = null;
+
+export function setBackGuard(guard: () => boolean): () => void {
+  backGuard = guard;
+  return () => { if (backGuard === guard) backGuard = null; };
+}
+
 export function goBack(fallback?: RouteName): void {
+  if (backGuard?.()) return;
   const i = backIndex();
   if (i < 0) { navigate(fallback ?? "main"); return; }
   const target = stack[i];
@@ -118,6 +131,7 @@ export function takePendingFocus(): string | null {
 export function resetHistory(): void {
   stack = [];
   pendingFocus = null;
+  backGuard = null;
   sync();
   emit();
 }

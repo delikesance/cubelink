@@ -4,9 +4,10 @@ import { ShellContext, type ShellContextValue } from "../../app/context";
 import { createFakeServices, FAKE_MANIFEST_HASH } from "../../services/fake";
 import type { Services } from "../../services";
 import type { TransferProgress } from "../../services/types";
+import { goBack as routerGoBack, resetHistory } from "../../app/router";
 import Join from "./index";
 
-afterEach(cleanup);
+afterEach(() => { cleanup(); resetHistory(); });
 
 function setup(over: Partial<Services> = {}, params: Record<string, string> = { friend: "pk-alex" }) {
   const services = { ...createFakeServices({ tickMs: 0 }), ...over };
@@ -213,6 +214,79 @@ describe("Join", () => {
     fireEvent.click(screen.getByRole("button", { name: "Oui, annuler" }));
     await waitFor(() => expect(navigate).toHaveBeenCalledWith("main"));
     expect(cancel).toHaveBeenCalled();
+  });
+
+  describe("Retour pendant le transfert (vrai routeur)", () => {
+    const back = () => act(() => { routerGoBack(); });
+
+    it("Retour, Alt+← ou souris 3 ouvrent la confirmation ; Continuer garde le transfert et le lancement auto", async () => {
+      const cancel = vi.fn(async () => {});
+      const play = vi.fn(async (_f: string, _i: string) => {});
+      const { navigate, emit } = setup({ joinCancel: cancel, joinPlay: play });
+      await startJoin();
+      emit(P());
+      expect(screen.queryByText(/Annuler l'installation/)).toBeNull();
+      back();
+      expect(screen.getByText(/Annuler l'installation/)).toBeTruthy();
+      fireEvent.click(screen.getByRole("button", { name: "Continuer l'installation" }));
+      expect(screen.queryByText(/Annuler l'installation/)).toBeNull();
+      expect(cancel).not.toHaveBeenCalled();
+      expect(navigate).not.toHaveBeenCalled();
+      // même chaîne que le Shell : Alt+← et souris passent par goBack()
+      const onKey = (e: KeyboardEvent) => { if (e.altKey && e.key === "ArrowLeft") routerGoBack(); };
+      window.addEventListener("keydown", onKey);
+      fireEvent.keyDown(window, { key: "ArrowLeft", altKey: true });
+      window.removeEventListener("keydown", onKey);
+      expect(screen.getByText(/Annuler l'installation/)).toBeTruthy();
+      fireEvent.click(screen.getByRole("button", { name: "Continuer l'installation" }));
+      // le transfert se termine : confirmation fermée, lancement automatique conservé
+      emit(P({ phase: "done", files_done: 40, bytes_done: 1_200_000_000, speed_bps: 0 }));
+      await waitFor(() => expect(play).toHaveBeenCalledTimes(1));
+      await waitFor(() => expect(navigate).toHaveBeenCalledWith("main"));
+    });
+
+    it("« Oui, annuler » : joinCancel puis accueil", async () => {
+      const cancel = vi.fn(async () => {});
+      const { navigate, emit } = setup({ joinCancel: cancel });
+      await startJoin();
+      emit(P());
+      back();
+      fireEvent.click(screen.getByRole("button", { name: "Oui, annuler" }));
+      await waitFor(() => expect(navigate).toHaveBeenCalledWith("main"));
+      expect(cancel).toHaveBeenCalledTimes(1);
+    });
+
+    it("pendant la préparation (avant le premier événement), Retour est déjà gardé", async () => {
+      setup();
+      await startJoin();
+      back();
+      expect(screen.getByText(/Annuler l'installation/)).toBeTruthy();
+    });
+
+    it("échec ou fin : la confirmation se ferme et Retour redevient libre ; Réessayer réarme la garde", async () => {
+      const { emit } = setup();
+      window.location.hash = "#/main"; resetHistory();
+      window.location.hash = "#/join?friend=pk-alex"; window.dispatchEvent(new HashChangeEvent("hashchange"));
+      await startJoin();
+      emit(P());
+      back();
+      expect(screen.getByText(/Annuler l'installation/)).toBeTruthy();
+      emit(P({ phase: "failed", error: "Réception : réponse inattendue" }));
+      expect(screen.queryByText(/Annuler l'installation/)).toBeNull();
+      back();
+      expect(window.location.hash).toBe("#/main");
+    });
+
+    it("démonté : la garde est levée", async () => {
+      const { emit, unmount } = setup();
+      window.location.hash = "#/main"; resetHistory();
+      window.location.hash = "#/join?friend=pk-alex"; window.dispatchEvent(new HashChangeEvent("hashchange"));
+      await startJoin();
+      emit(P());
+      unmount();
+      back();
+      expect(window.location.hash).toBe("#/main");
+    });
   });
 
   it("échec de joinStart : erreur sur le plan, pas de transfert", async () => {

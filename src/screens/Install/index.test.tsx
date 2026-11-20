@@ -4,9 +4,10 @@ import { ShellContext, type ShellContextValue } from "../../app/context";
 import { createFakeServices } from "../../services/fake";
 import type { Services } from "../../services";
 import type { TransferProgress } from "../../services/types";
+import { goBack, resetHistory } from "../../app/router";
 import Install from "./index";
 
-afterEach(cleanup);
+afterEach(() => { cleanup(); resetHistory(); });
 
 const P = (o: Partial<TransferProgress> & { error?: string } = {}): TransferProgress => ({
   phase: "receiving", files_done: 12, files_total: 40, bytes_done: 340_000_000, bytes_total: 1_200_000_000,
@@ -163,5 +164,16 @@ describe("Install", () => {
     const { emit, navigate } = setup();
     emit(P({ phase: "failed", error: "intégrité : aero.jar corrompu" }));
     expect(navigate).toHaveBeenCalledWith("error", { state: "bad-hash", file: "aero.jar" });
+  });
+
+  it("Retour pendant le transfert : confirmation d'annulation, puis libre après l'échec", () => {
+    const { emit, navigate } = setup();
+    emit(P());
+    act(() => { goBack(); });
+    expect(screen.getByText(/Annuler l'installation/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Continuer l'installation" }));
+    expect(navigate).not.toHaveBeenCalled();
+    emit(P({ phase: "failed", error: "Réception : réponse inattendue" }));
+    expect(screen.queryByText(/Annuler l'installation/)).toBeNull();
   });
 });

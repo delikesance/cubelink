@@ -68,6 +68,25 @@ describe("Join", () => {
     expect(btn.disabled).toBe(false);
   });
 
+  it("mods inconnus : avertissement et case de confiance dans la carte, avant les versions et le bouton", async () => {
+    setup();
+    await screen.findByText("mods/mod-maison.jar");
+    const card = document.querySelector(".join-card") as HTMLElement;
+    const warn = card.querySelector(".join-warn") as HTMLElement;
+    const body = card.querySelector(".join-body") as HTMLElement;
+    const trust = screen.getByRole("checkbox", { name: /confiance/ });
+    const btn = screen.getByRole("button", { name: "Rejoindre et jouer" });
+    const before = (a: Node, b: Node) => !!(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(card.contains(warn)).toBe(true);
+    expect(card.contains(trust)).toBe(true);
+    // Avertissement après le titre, avant les versions et le résumé ; case avant le bouton.
+    expect(before(card.querySelector(".join-who")!, warn)).toBe(true);
+    expect(before(warn, body)).toBe(true);
+    // La case est dans l'avertissement qu'elle accepte, donc visible avec la liste, et avant le bouton qu'elle débloque.
+    expect(warn.contains(trust)).toBe(true);
+    expect(before(trust, btn)).toBe(true);
+  });
+
   it("Rejoindre appelle joinStart puis affiche la progression dans la même page", async () => {
     const { services, navigate, emit } = setup({ joinPlay: vi.fn(async () => {}) });
     const spy = vi.spyOn(services, "joinStart");

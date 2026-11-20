@@ -248,6 +248,35 @@ export default function Join() {
             <p>{m.name} · {m.loader.loader} {m.loader.version} · Minecraft {m.minecraft}</p>
           </div>
         </div>
+        {toAccept > 0 && (
+          <div className="join-warn" role="note">
+            {unknown.length > 0 && (
+              <>
+                <h2>{unknown.length > 1 ? `${unknown.length} mods inconnus vont s'exécuter sur ton ordinateur` : "Un mod inconnu va s'exécuter sur ton ordinateur"}</h2>
+                <ul>{unknown.map((u) => <li key={u}>{u}</li>)}</ul>
+                <p>Ces mods ne sont pas référencés dans les catalogues : Cubelink ne peut pas les comparer à une version connue.</p>
+              </>
+            )}
+            {unchecked.length > 0 && (
+              <div data-testid="unchecked">
+                <h2>{unchecked.length > 1 ? `${unchecked.length} mods n'ont pas pu être vérifiés` : "Un mod n'a pas pu être vérifié"}</h2>
+                <ul>{unchecked.map((u) => <li key={u}>{u}</li>)}</ul>
+                <p>Cubelink n'a pas pu comparer ces jars aux catalogues (empreinte absente ou vérification impossible, par exemple sans réseau). Ils sont traités comme inconnus.</p>
+              </div>
+            )}
+            {scripts.length > 0 && (
+              <div data-testid="scripts">
+                <h2>{scripts.length > 1 ? `${scripts.length} scripts KubeJS vont s'exécuter dans le jeu` : "Un script KubeJS va s'exécuter dans le jeu"}</h2>
+                <ul>{scripts.map((u) => <li key={u}>{u}</li>)}</ul>
+              </div>
+            )}
+            <p>Ces fichiers s'exécuteront avec les mêmes droits que le jeu. L'intégrité est vérifiée, pas la sécurité : vérifie-les avant d'accepter.</p>
+          <label className="join-trust">
+            <input type="checkbox" checked={trusted} onChange={(e) => setTrusted(e.target.checked)} />
+            <span>Je fais confiance à {name} pour {scripts.length > 0 ? (toAccept > 1 ? "ces fichiers" : "ce fichier") : toAccept > 1 ? "ces mods" : "ce mod"}</span>
+          </label>
+          </div>
+        )}
         <div className="join-body">
           <strong>{plan.to_receive}&nbsp;fichiers à recevoir ({mo(plan.to_receive_bytes)}) sur {total}</strong>
           {plan.cached}&nbsp;fichiers sont déjà dans ton cache · Java {m.java_major}
@@ -309,35 +338,6 @@ export default function Join() {
       <section aria-label="Rejoindre un ami" className="join-extra">
         {card}
         {startError && <p className="join-error" role="alert" style={{ margin: 0, color: "var(--danger)" }}>{startError}</p>}
-        {ready && toAccept > 0 && (
-          <div className="join-warn enter" role="note" style={stagger(2)}>
-            {unknown.length > 0 && (
-              <>
-                <h2>{unknown.length > 1 ? `${unknown.length} mods inconnus vont s'exécuter sur ton ordinateur` : "Un mod inconnu va s'exécuter sur ton ordinateur"}</h2>
-                <ul>{unknown.map((u) => <li key={u}>{u}</li>)}</ul>
-                <p>Ces mods ne sont pas référencés dans les catalogues : Cubelink ne peut pas les comparer à une version connue.</p>
-              </>
-            )}
-            {unchecked.length > 0 && (
-              <div data-testid="unchecked">
-                <h2>{unchecked.length > 1 ? `${unchecked.length} mods n'ont pas pu être vérifiés` : "Un mod n'a pas pu être vérifié"}</h2>
-                <ul>{unchecked.map((u) => <li key={u}>{u}</li>)}</ul>
-                <p>Cubelink n'a pas pu comparer ces jars aux catalogues (empreinte absente ou vérification impossible, par exemple sans réseau). Ils sont traités comme inconnus.</p>
-              </div>
-            )}
-            {scripts.length > 0 && (
-              <div data-testid="scripts">
-                <h2>{scripts.length > 1 ? `${scripts.length} scripts KubeJS vont s'exécuter dans le jeu` : "Un script KubeJS va s'exécuter dans le jeu"}</h2>
-                <ul>{scripts.map((u) => <li key={u}>{u}</li>)}</ul>
-              </div>
-            )}
-            <p>Ces fichiers s'exécuteront avec les mêmes droits que le jeu. L'intégrité est vérifiée, pas la sécurité : vérifie-les avant d'accepter.</p>
-            <label className="join-trust">
-              <input type="checkbox" checked={trusted} onChange={(e) => setTrusted(e.target.checked)} />
-              <span>Je fais confiance à {name} pour {scripts.length > 0 ? (toAccept > 1 ? "ces fichiers" : "ce fichier") : toAccept > 1 ? "ces mods" : "ce mod"}</span>
-            </label>
-          </div>
-        )}
         {ready && alreadyTrusted.length > 0 && (
           <p className="join-note enter" data-testid="already-trusted" style={stagger(2)}>
             {alreadyTrusted.length > 1

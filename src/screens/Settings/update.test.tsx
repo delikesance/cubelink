@@ -14,7 +14,29 @@ describe("section Mise à jour", () => {
     open();
     expect(await screen.findByText(/Version installée\s*:\s*0\.1\.0/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Chercher une mise à jour" }));
-    expect(await screen.findByText("Cubelink est à jour.")).toBeTruthy();
+    expect(await screen.findByText("Cubelink est à jour. Vérifié à l'instant.")).toBeTruthy();
+  });
+
+  it("sans contrôle abouti : « aucune vérification » ; après un contrôle de fond : à jour, daté", async () => {
+    const fake = createFakeServices({ tickMs: 0 });
+    render(<Shell services={fake} />);
+    open();
+    await screen.findByText(/Version installée\s*:\s*0\.1\.0/);
+    expect(screen.getByText("Aucune vérification effectuée pour l'instant.")).toBeTruthy();
+    act(() => fake.emitUpdateState({ phase: "up_to_date", last_checked: Math.floor(Date.now() / 1000) - 2 * 3600 }));
+    expect(screen.getByText("Cubelink est à jour. Vérifié il y a 2 h.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Chercher une mise à jour" })).toBeTruthy();
+  });
+
+  it("Microsoft Store : le Store livre les mises à jour, rien à chercher", async () => {
+    const fake = createFakeServices({ tickMs: 0 });
+    render(<Shell services={fake} />);
+    open();
+    await screen.findByText(/Version installée\s*:\s*0\.1\.0/);
+    act(() => fake.emitUpdateState({ phase: "managed_by_store" }));
+    expect(screen.getByText("Les mises à jour passent par le Microsoft Store.")).toBeTruthy();
+    expect(screen.queryByText(/est à jour/)).toBeNull();
+    expect(screen.queryByRole("button", { name: "Chercher une mise à jour" })).toBeNull();
   });
 
   it("téléchargement : progression et bouton désactivé, puis prête et installation", async () => {

@@ -286,7 +286,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
   let stageSt: StageState = { attached: false, game: false, panel: false };
   const stageCalls: FakeControls["stageCalls"] = [];
   const setStage = (patch: Partial<StageState>) => { stageSt = { ...stageSt, ...patch }; emit(listeners.stage, { ...stageSt }); };
-  let updateSt: UpdateState = { phase: "idle", current: "0.1.0", version: null, notes: null, downloaded: 0, total: null, message: null, url: null };
+  let updateSt: UpdateState = { phase: "idle", current: "0.1.0", version: null, notes: null, downloaded: 0, total: null, message: null, url: null, last_checked: null };
   let updateCheckPatch: Partial<UpdateState> = { phase: "up_to_date" };
   const setUpdate = (patch: Partial<UpdateState>) => { updateSt = { ...updateSt, ...patch }; emit(listeners.update, { ...updateSt }); };
   function sub<T>(set: Set<(v: T) => void>, cb: (v: T) => void): Unsubscribe {
@@ -1024,7 +1024,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     updateCheck: async () => {
       setUpdate({ phase: "checking", message: null });
       await Promise.resolve();
-      setUpdate(updateCheckPatch);
+      setUpdate({ last_checked: Math.floor(Date.now() / 1000), ...updateCheckPatch });
       return { ...updateSt };
     },
     updateInstall: async () => {

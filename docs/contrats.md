@@ -145,7 +145,7 @@ Les types nommés (`Profile`, `TransferProgress`, `HostState`, `StageState`…) 
 | `friend://invite` | `Invite` : invitation reçue d'un ami |
 | `friend://invites` | `Invite[]` : liste complète des invitations à chaque changement |
 | `mods-fix://progress` | `{ done, total, label }` : progression de `mods_fix_apply` |
-| `update://state` | `UpdateState` : état de la mise à jour automatique du launcher |
+| `update://state` | `UpdateState` : état de la mise à jour automatique du launcher. `phase` : `idle` (aucun contrôle abouti), `checking`, `up_to_date` (aussi après un contrôle de fond, et dans le mode test), `available`, `downloading`, `ready`, `available_manual`, `error`, `managed_by_store` (installé via le Microsoft Store : rien n'est vérifié, le Store livre les mises à jour). `last_checked` : secondes Unix du dernier contrôle terminé avec un verdict, `null` tant qu'aucun n'a abouti ; un contrôle de fond en échec garde la phase précédente. |
 | `stage://state` | `StageState` (`{ attached, game, panel }`) : zone de jeu intégrée (jeu rattaché, jeu visible, panneau « en jeu » ouvert) |
 | `stage://fallback` | `{ reason, session_off }` : le jeu n'a pas pu être affiché dans Cubelink et garde sa fenêtre ; `reason` va au journal `stage.log`, jamais au joueur ; `session_off` : repli jusqu'au redémarrage de Cubelink |
 | `stage://fullscreen` | `boolean` : le jeu demande (F11) ou quitte le plein écran ; le launcher passe la fenêtre en plein écran tant que le jeu est rattaché et visible |

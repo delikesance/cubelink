@@ -1342,7 +1342,9 @@ export type TrustLevel = "ask" | "always";
 
 export type UpdatePhase = "idle" | "checking" | "up_to_date" | "available" | "downloading" | "ready" | 
 /**  Paquet géré ailleurs (Nix, dossier en lecture seule) : version vérifiée, mais ni téléchargée ni installée. */
-"available_manual" | "error";
+"available_manual" | "error" | 
+/**  Installé via le Microsoft Store : c'est lui qui livre les mises à jour, Cubelink ne vérifie rien lui-même. */
+"managed_by_store";
 
 /**  Contrat avec le front (`UpdateState` dans `src/services/types.ts`). */
 export type UpdateState = UpdateState_Serialize | UpdateState_Deserialize;
@@ -1358,6 +1360,8 @@ export type UpdateState_Deserialize = {
 	message?: string | null,
 	/**  Page de la release (phase `available_manual`). */
 	url?: string | null,
+	/**  Date (secondes Unix, UTC) du dernier contrôle terminé avec un verdict ; `None` tant qu'aucun n'a abouti. */
+	last_checked?: number | null,
 };
 
 /**  Contrat avec le front (`UpdateState` dans `src/services/types.ts`). */
@@ -1371,6 +1375,8 @@ export type UpdateState_Serialize = {
 	message: string | null,
 	/**  Page de la release (phase `available_manual`). */
 	url: string | null,
+	/**  Date (secondes Unix, UTC) du dernier contrôle terminé avec un verdict ; `None` tant qu'aucun n'a abouti. */
+	last_checked: number | null,
 };
 
 /**  Code de vérification : 4 groupes de 4 caractères hexadécimaux majuscules (ex. "3F9A · C21B · 77D0 · 5E14"). */

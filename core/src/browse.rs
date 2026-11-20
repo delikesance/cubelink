@@ -585,6 +585,16 @@ async fn plan_deps(p: &Providers, first: Vec<DepRef>, mc: Option<&str>, loader: 
     out
 }
 
+/// État « installé » d'un pack de ressources ou d'un shader dans l'instance (fichiers encore présents, d'après la provenance).
+/// Modpack et mod : résultat vide (les mods passent par `mod_fix::check_content`).
+pub fn installed_check(game_dir: &Path, kind: BrowseKind, source: BrowseSource, id: &str) -> mod_fix::ContentCheck {
+    let mut out = mod_fix::ContentCheck::default();
+    if let Some((dir, _)) = kind.dir_and_ext().filter(|_| kind != BrowseKind::Mod) {
+        out.installed = mods::files_of_project_in(game_dir, dir, source.as_str(), id).into_iter().filter(|f| game_dir.join(dir).join(f).is_file()).collect();
+    }
+    out
+}
+
 pub(crate) fn installed_project(game_dir: &Path, source: &str, id: &str) -> bool {
     let dir = game_dir.join("mods");
     mods::files_of_project(game_dir, source, id).iter().any(|f| dir.join(f).is_file() || dir.join(format!("{f}.disabled")).is_file())
@@ -683,6 +693,10 @@ pub async fn install_content(
             }
             let _ = std::fs::remove_file(mods_dir.join(format!("{}.disabled", pl.name)));
         }
+        if input.kind != BrowseKind::Mod {
+            // Pack de ressources / shader : l'ancienne version du même projet part (pas de sauvegarde : il se retélécharge).
+            mods::remove_old_versions_in(game_dir, dir, pl.source.as_str(), &pl.project_id, std::slice::from_ref(&pl.name))?;
+        }
         if let Err(e) = link_into(game_dir, &format!("{dir}/{}", pl.name), &store_root.join(&obj.rel_path)) {
             if let Some(b) = backup.take() {
                 b.rollback(game_dir);
@@ -690,11 +704,10 @@ pub async fn install_content(
             return Err(e);
         }
         index.add_ref(&obj.sha256)?;
-        let recorded = if input.kind == BrowseKind::Mod {
-            mods::record_provenance(game_dir, &[(pl.name.clone(), Provenance { source: pl.source.as_str().into(), id: pl.project_id.clone() })])
-        } else {
-            Ok(())
-        };
+        let recorded = mods::record_provenance(
+            game_dir,
+            &[(mods::provenance_key(dir, &pl.name), Provenance { source: pl.source.as_str().into(), id: pl.project_id.clone() })],
+        );
         // Le jar est posé : on consigne la sauvegarde même si la provenance n'a pas pu être écrite (`undo` retire le jar posé).
         if let Some(b) = backup {
             report.replaced.extend(b.files());
@@ -1088,7 +1101,7 @@ mod tests {
             .unwrap();
         assert_eq!(r.installed, vec!["pack.zip"]);
         assert!(e.game.join("resourcepacks/pack.zip").is_file());
-        assert!(mods::read_provenance(&e.game).is_empty());
+        assert_eq!(mods::read_provenance(&e.game)["resourcepacks/pack.zip"], Provenance { source: "modrinth".into(), id: "RP".into() });
 
         Mock::given(method("GET")).and(path("/v2/project/NONE/version")).respond_with(ResponseTemplate::new(200).set_body_json(json!([]))).mount(&mr).await;
         let err = install_content(&providers(&mr, &cf), &input(BrowseSource::Modrinth, "NONE", BrowseKind::Mod), &inst(Loader::Fabric), &e.game, &e.store, &e.index, &dlo(), &|_, _, _| {})
@@ -1096,6 +1109,60 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, Error::NotFound(_)), "{err}");
         assert!(install_content(&providers(&mr, &cf), &input(BrowseSource::Modrinth, "RP", BrowseKind::Modpack), &inst(Loader::Fabric), &e.game, &e.store, &e.index, &dlo(), &|_, _, _| {}).await.is_err());
+    }
+
+    /// Installe `file` (contenu `body`) comme version unique du projet `id` pour un pack de ressources ou un shader.
+    async fn install_pack(mr: &MockServer, cf: &MockServer, e: &Env, kind: BrowseKind, id: &str, file: &str, body: &[u8]) -> Result<InstallReport> {
+        let mut v = mr_version(mr, &format!("v-{file}"), id, file, body, json!([]), "2024-01-01T00:00:00Z");
+        v["loaders"] = json!(["minecraft"]);
+        mr.reset().await;
+        Mock::given(method("GET")).and(path(format!("/v2/project/{id}/version"))).respond_with(ResponseTemplate::new(200).set_body_json(json!([v]))).mount(mr).await;
+        serve(mr, &format!("/cdn/{file}"), body).await;
+        install_content(&providers(mr, cf), &input(BrowseSource::Modrinth, id, kind), &inst(Loader::Fabric), &e.game, &e.store, &e.index, &dlo(), &|_, _, _| {}).await
+    }
+
+    #[tokio::test]
+    async fn new_pack_version_replaces_old_and_is_tracked() {
+        let (mr, cf) = (MockServer::start().await, MockServer::start().await);
+        let e = env();
+        // Un mod du même projet (même id) et un autre shader ne doivent pas être touchés.
+        std::fs::create_dir_all(e.game.join("mods")).unwrap();
+        std::fs::write(e.game.join("mods/same-id.jar"), b"jar").unwrap();
+        mods::record_provenance(&e.game, &[("same-id.jar".into(), Provenance { source: "modrinth".into(), id: "SH".into() })]).unwrap();
+        install_pack(&mr, &cf, &e, BrowseKind::Shader, "OTHER", "other.zip", b"O").await.unwrap();
+
+        for (kind, dir) in [(BrowseKind::Shader, "shaderpacks"), (BrowseKind::Resourcepack, "resourcepacks")] {
+            install_pack(&mr, &cf, &e, kind, "SH", "pack-r5.1.zip", b"one").await.unwrap();
+            assert!(e.game.join(dir).join("pack-r5.1.zip").is_file());
+            assert_eq!(mods::files_of_project_in(&e.game, dir, "modrinth", "SH"), vec!["pack-r5.1.zip"]);
+            // Réinstaller le même fichier : un seul zip, pas d'erreur.
+            install_pack(&mr, &cf, &e, kind, "SH", "pack-r5.1.zip", b"one").await.unwrap();
+            assert_eq!(mods::files_of_project_in(&e.game, dir, "modrinth", "SH"), vec!["pack-r5.1.zip"]);
+            // Nouvelle version : l'ancienne disparaît, la provenance suit.
+            let r = install_pack(&mr, &cf, &e, kind, "SH", "pack-r5.2.zip", b"two").await.unwrap();
+            assert_eq!(r.installed, vec!["pack-r5.2.zip"]);
+            assert!(!e.game.join(dir).join("pack-r5.1.zip").exists());
+            assert_eq!(std::fs::read(e.game.join(dir).join("pack-r5.2.zip")).unwrap(), b"two");
+            assert_eq!(mods::files_of_project_in(&e.game, dir, "modrinth", "SH"), vec!["pack-r5.2.zip"]);
+        }
+        // Les deux dossiers sont indépendants, le mod et l'autre pack intacts.
+        assert!(e.game.join("shaderpacks/pack-r5.2.zip").is_file() && e.game.join("resourcepacks/pack-r5.2.zip").is_file());
+        assert!(e.game.join("shaderpacks/other.zip").is_file());
+        assert!(e.game.join("mods/same-id.jar").is_file());
+        assert_eq!(mods::files_of_project(&e.game, "modrinth", "SH"), vec!["same-id.jar"]);
+        // browse_check : l'état « installé » suit les fichiers réellement présents, par dossier et par type.
+        let chk = |k, id: &str| installed_check(&e.game, k, BrowseSource::Modrinth, id).installed;
+        assert_eq!(chk(BrowseKind::Shader, "SH"), vec!["pack-r5.2.zip"]);
+        assert_eq!(chk(BrowseKind::Resourcepack, "SH"), vec!["pack-r5.2.zip"]);
+        assert!(chk(BrowseKind::Modpack, "SH").is_empty() && chk(BrowseKind::Mod, "SH").is_empty());
+        assert!(chk(BrowseKind::Shader, "INCONNU").is_empty());
+        assert!(installed_check(&e.game, BrowseKind::Shader, BrowseSource::Curseforge, "SH").installed.is_empty());
+        std::fs::remove_file(e.game.join("shaderpacks/pack-r5.2.zip")).unwrap(); // supprimé à la main : plus « installé »
+        assert!(chk(BrowseKind::Shader, "SH").is_empty());
+        assert_eq!(chk(BrowseKind::Resourcepack, "SH"), vec!["pack-r5.2.zip"]);
+        std::fs::write(e.game.join("shaderpacks/pack-r5.2.zip"), b"two").unwrap();
+        let n = std::fs::read_dir(e.game.join("shaderpacks")).unwrap().count();
+        assert_eq!(n, 2, "pack-r5.2.zip et other.zip seulement");
     }
 
     #[tokio::test]

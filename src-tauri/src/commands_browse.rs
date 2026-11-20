@@ -116,13 +116,18 @@ impl AppState {
         browse::versions(&providers(), source, id, kind, minecraft, loader).await.map_err(|e| user_msg(&e))
     }
 
-    /// Compatibilité d'un mod avec une instance avant installation : déjà installé, version recommandée, blocages.
+    /// Mod : compatibilité avec l'instance avant installation (déjà installé, version recommandée, blocages). Pack de ressources / shader : `installed` seulement.
     pub async fn browse_check(&self, source: &str, id: &str, kind: &str, instance_id: &str, version_id: Option<&str>) -> Result<ContentCheck, String> {
         let source = BrowseSource::parse(source).map_err(|e| user_msg(&e))?;
-        if BrowseKind::parse(kind).map_err(|e| user_msg(&e))? != BrowseKind::Mod {
+        let kind = BrowseKind::parse(kind).map_err(|e| user_msg(&e))?;
+        if kind == BrowseKind::Modpack {
             return Ok(ContentCheck::default());
         }
         let (inst, dir) = self.instance_game_dir(instance_id)?;
+        if kind != BrowseKind::Mod {
+            // Pack de ressources / shader : seulement l'état « installé » (pas de simulation de compatibilité).
+            return Ok(browse::installed_check(&dir, kind, source, id));
+        }
         let p = providers();
         mod_fix::check_content(&p, &inst.minecraft, inst.loader.loader, &dir, &self.paths.store, &self.store, &DlOptions::default(), source, id, version_id)
             .await

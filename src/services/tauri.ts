@@ -48,9 +48,13 @@ export function createTauriServices(): Services {
     instancesUpdate: (id, p) =>
       commands.instancesUpdate(id, p.name ?? null, p.ram_mb ?? null, p.java_path ?? null, p.jvm_args ?? null, p.wrapper ?? null),
     instancesOpenFolder: (id) => done(commands.instancesOpenFolder(id)),
+    instancesOpenScreenshotsFolder: (id) => done(commands.instancesOpenScreenshotsFolder(id)),
     instancesLogs: (id) => commands.instancesLogs(id),
     instancesArtImage: (instanceId, file, maxPx) => commands.instancesArtImage(instanceId, file, maxPx ?? null),
     instancesArtSet: (instanceId, path, role) => commands.instancesArtSet(instanceId, path, role),
+    instancesScreenshotsList: (instanceId) => commands.instancesScreenshotsList(instanceId),
+    instancesScreenshotImage: (instanceId, file, maxPx) => commands.instancesScreenshotImage(instanceId, file, maxPx ?? null),
+    instancesScreenshotSetBanner: (instanceId, file) => commands.instancesScreenshotSetBanner(instanceId, file),
     instancesArtLookup: (instanceId, auto) => commands.instancesArtLookup(instanceId, auto ?? false),
     minecraftVersions: () => commands.minecraftVersions(),
 

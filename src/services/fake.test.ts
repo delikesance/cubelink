@@ -225,6 +225,22 @@ describe("fake : illustrations d'instance", () => {
     await expect(s.instancesArtImage("inst-aeronautics", "icon.png")).rejects.toThrow();
   });
 
+  it("captures du joueur : liste, image, bannière ; vide sans capture ; noms inconnus refusés", async () => {
+    const s = createFakeServices({ tickMs: 0 });
+    expect(await s.instancesScreenshotsList("inst-aeronautics")).toEqual([]);
+    const shots = await s.instancesScreenshotsList("inst-atm10");
+    expect(shots).toHaveLength(3);
+    expect(shots[0].modified_ms).toBeGreaterThan(shots[2].modified_ms);
+    const img = await s.instancesScreenshotImage("inst-atm10", shots[1].file);
+    expect(img.startsWith("data:image/svg+xml")).toBe(true);
+    await expect(s.instancesScreenshotImage("inst-atm10", "../x.png")).rejects.toThrow();
+    await expect(s.instancesScreenshotSetBanner("inst-atm10", "absente.png")).rejects.toThrow();
+    const u = await s.instancesScreenshotSetBanner("inst-atm10", shots[2].file);
+    expect(u.art!.screenshots[0]).toBe(shots[2].file);
+    await expect(s.instancesOpenScreenshotsFolder("inconnu")).rejects.toThrow();
+    await expect(s.instancesOpenScreenshotsFolder("inst-atm10")).resolves.toBeUndefined();
+  });
+
   it("lookup : trouve par le nom, sinon rejette", async () => {
     const s = createFakeServices({ tickMs: 0 });
     await expect(s.instancesArtLookup("inst-aeronautics")).rejects.toThrow(

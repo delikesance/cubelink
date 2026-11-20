@@ -50,15 +50,23 @@ export const commands = {
 	instancesUpdate: (id: string, name: string | null, ramMb: number | null, javaPath: string | null, jvmArgs: string | null, wrapper: string | null, options?: InvokeOptions) => __TAURI_INVOKE<Instance_Serialize>("instances_update", { id, name, ram_mb: ramMb, java_path: javaPath, jvm_args: jvmArgs, wrapper }, options),
 	/**  Ouvre le dossier de l'instance dans le gestionnaire de fichiers. */
 	instancesOpenFolder: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("instances_open_folder", { id }, options),
+	/**  Ouvre le dossier des captures d'écran du joueur (créé au besoin) dans le gestionnaire de fichiers. Lecture seule : autorisé pendant le jeu. */
+	instancesOpenScreenshotsFolder: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("instances_open_screenshots_folder", { id }, options),
 	/**  Fin de `latest.log` (ou `latest.log.old`) de l'instance. */
 	instancesLogs: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<string>("instances_logs", { id }, options),
 	/**  Data URL d'un fichier d'illustration (`icon` ou une capture), réduit à `max_px` de côté (512 par défaut). Décodage hors du thread principal. */
 	instancesArtImage: (instanceId: string, file: string, maxPx: number | null, options?: InvokeOptions) => __TAURI_INVOKE<string>("instances_art_image", { instance_id: instanceId, file, max_px: maxPx }, options),
 	/**  Remplace l'icône ou la bannière (`role` : "icon" ou "banner") par une image choisie par le joueur. Lecture et écriture hors du thread principal ; autorisé pendant le jeu (`art/` n'est pas le dossier de jeu). */
 	instancesArtSet: (instanceId: string, path: string, role: string, options?: InvokeOptions) => __TAURI_INVOKE<Instance_Serialize>("instances_art_set", { instance_id: instanceId, path, role }, options),
-	/**  Cherche l'illustration du modpack et l'applique. `auto` : recherche silencieuse de l'accueil (nom identique seulement). */
+	/**  Cherche l'illustration du modpack et l'applique. `auto` : recherche silencieuse de l'accueil (nom identique seulement) ; un échec sans correspondance est mémorisé dans `instance.json` (`art_lookup_failed_at`, non exposé) et la recherche automatique ne repart pas, sans requête, avant 7 jours (erreurs réseau non mémorisées ; renommer l'instance, poser une illustration ou `auto = false` lève le délai). */
 	instancesArtLookup: (instanceId: string, auto: boolean | null, options?: InvokeOptions) => __TAURI_INVOKE<Instance_Serialize>("instances_art_lookup", { instance_id: instanceId, auto }, options),
-	/**  Description longue du modpack, en HTML déjà nettoyé ; `None` sans projet d'origine. */
+	/**  Captures d'écran du joueur (`screenshots/` du dossier de jeu), les plus récentes d'abord (200 au plus) ; liste vide tant que le jeu n'en a pas pris. Lecture seule, hors du thread principal ; autorisé pendant le jeu. */
+	instancesScreenshotsList: (instanceId: string, options?: InvokeOptions) => __TAURI_INVOKE<PlayerShot[]>("instances_screenshots_list", { instance_id: instanceId }, options),
+	/**  Data URL d'une capture du joueur (nom de fichier de `instances_screenshots_list`), réduite à `max_px` de côté (512 par défaut). Décodage hors du thread principal. */
+	instancesScreenshotImage: (instanceId: string, file: string, maxPx: number | null, options?: InvokeOptions) => __TAURI_INVOKE<string>("instances_screenshot_image", { instance_id: instanceId, file, max_px: maxPx }, options),
+	/**  Utilise une capture du joueur comme bannière du modpack (copiée dans `art/`, 8 Mio au plus). Autorisé pendant le jeu. */
+	instancesScreenshotSetBanner: (instanceId: string, file: string, options?: InvokeOptions) => __TAURI_INVOKE<Instance_Serialize>("instances_screenshot_set_banner", { instance_id: instanceId, file }, options),
+	/**  Description longue du modpack, en HTML déjà nettoyé (images gardées seulement depuis les CDN Modrinth et CurseForge, les autres remplacées par leur texte alternatif) ; `None` sans projet d'origine. */
 	instancesDescription: (instanceId: string, options?: InvokeOptions) => __TAURI_INVOKE<string | null>("instances_description", { instance_id: instanceId }, options),
 	/**  Test de connexion réseau (Paramètres → « Tester ma connexion »). */
 	netTest: (options?: InvokeOptions) => __TAURI_INVOKE<NetTest_Serialize>("net_test", undefined, options),
@@ -1152,6 +1160,16 @@ export type NetTest_Serialize = {
 	relay_only: boolean,
 	/**  Le rapport réseau n'est pas arrivé à temps : `udp` et `direct` ne sont pas fiables. */
 	partial: boolean,
+};
+
+/**  Une capture du joueur. */
+export type PlayerShot = {
+	/**  Nom du fichier dans `screenshots/` (jamais un chemin). */
+	file: string,
+	/**  Date de modification, en millisecondes depuis l'époque Unix (0 si inconnue). */
+	modified_ms: number,
+	/**  Taille en octets. */
+	size: number,
 };
 
 export type Presence = "online" | "offline";

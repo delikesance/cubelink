@@ -478,7 +478,7 @@ fn now_secs() -> i64 {
 
 // ---------- Lecture et choix manuel ----------
 
-fn check_file_name(file: &str) -> Result<()> {
+pub(crate) fn check_file_name(file: &str) -> Result<()> {
     if file.is_empty() || file.len() > 64 || file == "." || file.contains("..") || file.contains(['/', '\\', ':', '\0']) {
         return Err(invalid("nom de fichier d'illustration invalide"));
     }

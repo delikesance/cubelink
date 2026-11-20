@@ -28,11 +28,11 @@ const openMenu = async () => {
 };
 
 describe("Page modpack", () => {
-  it("affiche le nom, la ligne de méta et les 4 onglets (Aperçu actif)", async () => {
+  it("affiche le nom, la ligne de méta et les 5 onglets (Aperçu actif)", async () => {
     setup();
     await ready();
     expect(screen.getByText(/Minecraft 1\.21\.1 · NeoForge .* · \d+ mods?/)).toBeTruthy();
-    expect(screen.getAllByRole("tab").map((t) => t.textContent)).toEqual(["Aperçu", "Mods", "Réglages", "Logs"]);
+    expect(screen.getAllByRole("tab").map((t) => t.textContent)).toEqual(["Aperçu", "Mods", "Captures", "Réglages", "Logs"]);
     expect(tab("Aperçu").getAttribute("aria-selected")).toBe("true");
     expect(screen.getByRole("button", { name: "Jouer" })).toBeTruthy();
   });
@@ -66,6 +66,8 @@ describe("Page modpack", () => {
     expect(tab("Mods").getAttribute("aria-selected")).toBe("true");
     expect(tab("Aperçu").getAttribute("tabindex")).toBe("-1");
     fireEvent.keyDown(tab("Mods"), { key: "ArrowRight" });
+    expect(tab("Captures").getAttribute("aria-selected")).toBe("true");
+    fireEvent.keyDown(tab("Captures"), { key: "ArrowRight" });
     expect(tab("Réglages").getAttribute("aria-selected")).toBe("true");
     expect(document.activeElement).toBe(tab("Réglages"));
     fireEvent.keyDown(tab("Réglages"), { key: "End" });
@@ -394,5 +396,81 @@ describe("Page modpack : onglet Logs", () => {
     fireEvent.click(screen.getByRole("button", { name: "Erreurs (1)" }));
     expect(log.querySelectorAll(".dr-line")).toHaveLength(1);
     expect(log.querySelector(".dr-line.is-error")).toBeTruthy();
+  });
+});
+
+describe("Page modpack : onglet Captures", () => {
+  const SHOTS = [
+    { file: "2026-11-20_21.14.03.png", modified_ms: Date.UTC(2026, 10, 20, 20, 14), size: 1_500_000 },
+    { file: "2026-11-19_18.00.00.png", modified_ms: Date.UTC(2026, 10, 19, 17, 0), size: 1_400_000 },
+  ];
+
+  it("sans capture : message F2, pas d'erreur, le dossier s'ouvre", async () => {
+    const open = vi.fn(async () => {});
+    setup({ instancesOpenScreenshotsFolder: open }, { id: "inst-aeronautics", tab: "captures" });
+    expect(await screen.findByText(/Aucune capture pour le moment\. Appuie sur F2 en jeu/)).toBeTruthy();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.getByRole("tabpanel").getAttribute("aria-labelledby")).toBe(tab("Captures").id);
+    fireEvent.click(screen.getByRole("button", { name: "Ouvrir le dossier" }));
+    expect(open).toHaveBeenCalledWith("inst-aeronautics");
+  });
+
+  it("liste les captures, les charge depuis la source des captures (pas celle de l'art) et ouvre la visionneuse", async () => {
+    const shotImage = vi.fn(async (_id: string, file: string) => `data:image/png;base64,${btoa(file)}`);
+    const artImage = vi.fn(async () => "data:image/png;base64,AA==");
+    setup(
+      { instancesScreenshotsList: async () => SHOTS, instancesScreenshotImage: shotImage, instancesArtImage: artImage },
+      { id: "inst-aeronautics", tab: "captures" },
+    );
+    const grid = await screen.findByRole("list", { name: "Captures" });
+    expect(within(grid).getAllByRole("listitem")).toHaveLength(2);
+    await waitFor(() => expect(shotImage).toHaveBeenCalledWith("inst-aeronautics", SHOTS[0].file, undefined));
+    expect(artImage).not.toHaveBeenCalledWith("inst-aeronautics", SHOTS[0].file, expect.anything());
+    fireEvent.click(within(grid).getAllByRole("button", { name: /^Agrandir la capture/ })[1]);
+    const viewer = await screen.findByRole("dialog");
+    expect(within(viewer).getByText("2 / 2")).toBeTruthy();
+    expect(within(viewer).getByText(SHOTS[1].file)).toBeTruthy();
+    await waitFor(() => expect(shotImage).toHaveBeenCalledWith("inst-aeronautics", SHOTS[1].file, 2048));
+  });
+
+  it("Comme bannière : appelle le service avec le nom du fichier et met l'instance à jour", async () => {
+    const setBanner = vi.fn(async (id: string, file: string): Promise<Instance> => ({
+      id, name: AERO, minecraft: "1.21.1", loader: { loader: "neoforge", version: "21.1.1" }, ram_mb: 8192, mod_count: 94, java_path: null, jvm_args: "", wrapper: "",
+      art: { source: "custom", project_id: "", title: AERO, author: "", summary: "", color: null, icon: null, screenshots: ["shot-1.png", file], page_url: null },
+    }));
+    setup({ instancesScreenshotsList: async () => SHOTS, instancesScreenshotImage: async () => "data:image/png;base64,AA==", instancesScreenshotSetBanner: setBanner }, { id: "inst-aeronautics", tab: "captures" });
+    const grid = await screen.findByRole("list", { name: "Captures" });
+    fireEvent.click(within(grid).getAllByRole("button", { name: /comme bannière$/ })[0]);
+    expect(await screen.findByText("Bannière définie.")).toBeTruthy();
+    expect(setBanner).toHaveBeenCalledWith("inst-aeronautics", SHOTS[0].file);
+    // L'aperçu (onglet Aperçu) montre maintenant les illustrations de l'instance mise à jour.
+    fireEvent.click(tab("Aperçu"));
+    expect(await screen.findByRole("region", { name: "Captures d'écran" })).toBeTruthy();
+  });
+
+  it("erreurs : liste impossible et bannière refusée s'affichent en clair", async () => {
+    setup({
+      instancesScreenshotsList: async () => { throw new Error("lecture impossible"); },
+    }, { id: "inst-aeronautics", tab: "captures" });
+    expect((await screen.findByRole("alert")).textContent).toBe("lecture impossible");
+    cleanup();
+    setup({
+      instancesScreenshotsList: async () => SHOTS, instancesScreenshotImage: async () => "data:image/png;base64,AA==",
+      instancesScreenshotSetBanner: async () => { throw new Error("image trop grosse (8 Mio maximum)"); },
+    }, { id: "inst-aeronautics", tab: "captures" });
+    const grid = await screen.findByRole("list", { name: "Captures" });
+    fireEvent.click(within(grid).getAllByRole("button", { name: /comme bannière$/ })[0]);
+    expect((await screen.findByRole("alert")).textContent).toBe("image trop grosse (8 Mio maximum)");
+  });
+
+  it("se recharge quand la fenêtre reprend le focus (capture prise en jeu)", async () => {
+    let list = [SHOTS[1]];
+    const fn = vi.fn(async () => list);
+    setup({ instancesScreenshotsList: fn, instancesScreenshotImage: async () => "data:image/png;base64,AA==" }, { id: "inst-aeronautics", tab: "captures" });
+    const grid = await screen.findByRole("list", { name: "Captures" });
+    expect(within(grid).getAllByRole("listitem")).toHaveLength(1);
+    list = SHOTS;
+    act(() => { window.dispatchEvent(new Event("focus")); });
+    await waitFor(() => expect(within(screen.getByRole("list", { name: "Captures" })).getAllByRole("listitem")).toHaveLength(2));
   });
 });

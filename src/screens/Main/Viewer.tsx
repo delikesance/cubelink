@@ -1,17 +1,18 @@
 import { useEffect, useState } from "react";
-import type { Services } from "../../services";
 import { Button, IconButton } from "../../ui";
 import { Modal } from "./Modal";
 import { ThumbStrip } from "./ArtParts";
-import { useArtImage } from "./artImage";
+import { useArtImage, type ArtImageServices, type ImageSource } from "./artImage";
 
 export interface ViewerProps {
-  services: Pick<Services, "instancesArtImage">;
+  services: ArtImageServices;
   instanceId: string;
   title: string;
   files: string[];
   start: number;
   onClose: () => void;
+  /** Illustrations du modpack (défaut) ou captures du joueur. */
+  source?: ImageSource;
 }
 
 const Chevron = ({ dir }: { dir: "l" | "r" }) => (
@@ -21,11 +22,11 @@ const Chevron = ({ dir }: { dir: "l" | "r" }) => (
 );
 
 /** Visionneuse de captures (A8) : plein écran, flèches gauche/droite, miniatures, Échap pour fermer. */
-export function Viewer({ services, instanceId, title, files, start, onClose }: ViewerProps) {
+export function Viewer({ services, instanceId, title, files, start, onClose, source = "art" }: ViewerProps) {
   const n = files.length;
   const [i, setI] = useState(Math.min(Math.max(start, 0), n - 1));
   const go = (d: number) => setI((c) => (c + d + n) % n);
-  const img = useArtImage(services, instanceId, files[i], false, 2048);
+  const img = useArtImage(services, instanceId, files[i], false, 2048, source);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -56,7 +57,7 @@ export function Viewer({ services, instanceId, title, files, start, onClose }: V
         </div>
         <IconButton variant="secondary" className="home-viewer-nav is-next" aria-label="Capture suivante" disabled={n < 2} icon={<Chevron dir="r" />} onClick={() => go(1)} />
         <p className="home-viewer-file">{files[i].split(/[\/]/).pop()}</p>
-        <ThumbStrip services={services} instanceId={instanceId} files={files} current={i} onPick={setI} />
+        <ThumbStrip services={services} instanceId={instanceId} files={files} current={i} onPick={setI} source={source} />
       </div>
     </Modal>
   );

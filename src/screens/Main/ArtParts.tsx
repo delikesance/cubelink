@@ -2,9 +2,9 @@ import "./shared.css";
 import type { CSSProperties } from "react";
 import type { Instance, Services } from "../../services";
 import { avatarColors } from "./accent";
-import { useArtImage } from "./artImage";
+import { useArtImage, type ArtImageServices, type ImageSource } from "./artImage";
 
-type ImgServices = Pick<Services, "instancesArtImage">;
+type ImgServices = ArtImageServices;
 
 /** Couleurs de la pastille d'une instance (rail, cartes). */
 export function avatarStyle(i: Instance): CSSProperties {
@@ -33,8 +33,8 @@ export function Avatar({ services, inst, className }: { services: ImgServices; i
   );
 }
 
-function Thumb({ services, instanceId, file, index, active, onPick }: { services: ImgServices; instanceId: string; file: string; index: number; active: boolean; onPick: (i: number) => void }) {
-  const img = useArtImage(services, instanceId, file, true);
+function Thumb({ services, instanceId, file, index, active, onPick, source }: { services: ImgServices; instanceId: string; file: string; index: number; active: boolean; onPick: (i: number) => void; source: ImageSource }) {
+  const img = useArtImage(services, instanceId, file, true, undefined, source);
   return (
     <button
       type="button" ref={img.ref} className={`home-thumb${active ? " is-active" : ""}`}
@@ -47,11 +47,11 @@ function Thumb({ services, instanceId, file, index, active, onPick }: { services
   );
 }
 
-/** Bande de miniatures de la visionneuse. */
-export function ThumbStrip({ services, instanceId, files, current, onPick }: { services: ImgServices; instanceId: string; files: string[]; current: number; onPick: (i: number) => void }) {
+/** Bande de miniatures de la visionneuse. `source` : illustrations du modpack (défaut) ou captures du joueur. */
+export function ThumbStrip({ services, instanceId, files, current, onPick, source = "art" }: { services: ImgServices; instanceId: string; files: string[]; current: number; onPick: (i: number) => void; source?: ImageSource }) {
   return (
     <div className="home-thumbs" role="group" aria-label="Captures d'écran">
-      {files.map((f, i) => <Thumb key={f} services={services} instanceId={instanceId} file={f} index={i} active={i === current} onPick={onPick} />)}
+      {files.map((f, i) => <Thumb key={f} services={services} instanceId={instanceId} file={f} index={i} active={i === current} onPick={onPick} source={source} />)}
     </div>
   );
 }

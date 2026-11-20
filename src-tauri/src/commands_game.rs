@@ -137,21 +137,16 @@ impl AppState {
         self.instances.get(id).map_err(|e| user_msg(&e))?;
         let dir = self.instances.game_dir(id).map_err(|e| user_msg(&e))?;
         std::fs::create_dir_all(&dir).map_err(|_| "impossible de créer le dossier de jeu".to_string())?;
-        if crate::test_hooks::hooks().test_mode {
-            return Ok(());
-        }
-        let program = if cfg!(windows) {
-            "explorer"
-        } else if cfg!(target_os = "macos") {
-            "open"
-        } else {
-            "xdg-open"
-        };
-        std::process::Command::new(program)
-            .arg(&dir)
-            .spawn()
-            .map(|_| ())
-            .map_err(|_| "impossible d'ouvrir le dossier".to_string())
+        open_in_file_manager(&dir)
+    }
+
+    /// Ouvre le dossier des captures d'écran du joueur (créé s'il n'existe pas encore) dans le gestionnaire de fichiers.
+    pub fn instances_open_screenshots_folder(&self, id: &str) -> Result<(), String> {
+        check_id(id)?;
+        self.instances.get(id).map_err(|e| user_msg(&e))?;
+        let dir = core_lib::shots::screenshots_dir(&self.instances, id).map_err(|e| user_msg(&e))?;
+        std::fs::create_dir_all(&dir).map_err(|_| "impossible de créer le dossier des captures".to_string())?;
+        open_in_file_manager(&dir)
     }
 
     /// Fin du dernier log (`latest.log`, sinon sa rotation `.old`) ; chaîne vide s'il n'y en a pas.
@@ -166,6 +161,25 @@ impl AppState {
         }
         Ok(String::new())
     }
+}
+
+/// Ouvre un dossier dans le gestionnaire de fichiers (sans effet en mode test).
+fn open_in_file_manager(dir: &std::path::Path) -> Result<(), String> {
+    if crate::test_hooks::hooks().test_mode {
+        return Ok(());
+    }
+    let program = if cfg!(windows) {
+        "explorer"
+    } else if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    std::process::Command::new(program)
+        .arg(dir)
+        .spawn()
+        .map(|_| ())
+        .map_err(|_| "impossible d'ouvrir le dossier".to_string())
 }
 
 /// Délai maximal pour que le jeu en cours se ferme (kill propre 5 s, puis forcé).
@@ -463,6 +477,13 @@ pub fn instances_open_folder(state: State<'_, Arc<AppState>>, id: String) -> Res
     state.instances_open_folder(&id)
 }
 
+/// Ouvre le dossier des captures d'écran du joueur (créé au besoin) dans le gestionnaire de fichiers. Lecture seule : autorisé pendant le jeu.
+#[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
+pub fn instances_open_screenshots_folder(state: State<'_, Arc<AppState>>, id: String) -> Result<(), String> {
+    state.instances_open_screenshots_folder(&id)
+}
+
 /// Fin de `latest.log` (ou `latest.log.old`) de l'instance.
 #[tauri::command(rename_all = "snake_case")]
 #[specta::specta(rename_all = "snake_case")]
@@ -478,6 +499,16 @@ mod tests {
 
     fn vanilla() -> LoaderSpec {
         LoaderSpec { loader: Loader::Vanilla, version: String::new() }
+    }
+
+    /// Le dossier des captures n'est ouvert que pour une instance existante (pas de chemin construit depuis un id invalide).
+    #[test]
+    fn dossier_des_captures_refuse_id_invalide_ou_inconnu() {
+        let dir = tempfile::tempdir().unwrap();
+        let (st, _) = test_state(dir.path());
+        assert!(st.instances_open_screenshots_folder("../x").is_err());
+        assert!(st.instances_open_screenshots_folder("inexistante").is_err());
+        assert!(!dir.path().join("screenshots").exists());
     }
 
     #[test]

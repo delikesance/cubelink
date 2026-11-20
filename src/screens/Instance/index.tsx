@@ -1,4 +1,4 @@
-// Page d'un modpack (route `instance?id=…&tab=…`) : en-tête (jouer, amis sur le pack), onglets Aperçu · Mods · Réglages · Logs.
+// Page d'un modpack (route `instance?id=…&tab=…`) : en-tête (jouer, amis sur le pack), onglets Aperçu · Mods · Captures · Réglages · Logs.
 import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import "./instance.css";
 import { useScreenTitle, useShell } from "../../app/context";
@@ -16,6 +16,7 @@ import { LogsPanel } from "../Main/LogsPanel";
 import { Modal } from "../Main/Modal";
 import { ModsPanel } from "../Main/ModsPanel";
 import { ICONS, Icon } from "../../ui";
+import { ScreenshotsPanel } from "./ScreenshotsPanel";
 import { SettingsDialog } from "../Main/SettingsDialog";
 import { Viewer } from "../Main/Viewer";
 
@@ -35,6 +36,7 @@ const clock = (ms: number) => {
 const TABS = [
   { id: "apercu", label: "Aperçu" },
   { id: "mods", label: "Mods" },
+  { id: "captures", label: "Captures" },
   { id: "reglages", label: "Réglages" },
   { id: "logs", label: "Logs" },
 ] as const;
@@ -356,6 +358,7 @@ export default function InstancePage() {
             autoFix={autoFix} onAutoFixed={() => setAutoFix(false)}
           />
         )}
+        {tab === "captures" && <ScreenshotsPanel services={services} instance={inst} onInstance={patchInstance} />}
         {tab === "reglages" && (
           <SettingsDialog
             key={inst.id} instance={inst} onSave={save}

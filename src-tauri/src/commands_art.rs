@@ -7,6 +7,7 @@
 use std::sync::Arc;
 
 use core_lib::art;
+use core_lib::shots::{self, PlayerShot};
 use core_lib::types::Instance;
 use tauri::State;
 
@@ -48,6 +49,34 @@ impl AppState {
             .map_err(|e| user_msg(&e))
     }
 
+    pub async fn instances_screenshots_list(&self, instance_id: &str) -> Result<Vec<PlayerShot>, String> {
+        self.art_id(instance_id)?;
+        let (store, id) = (self.instances.clone(), instance_id.to_string());
+        tokio::task::spawn_blocking(move || shots::list_player_shots(&store, &id))
+            .await
+            .map_err(|_| "lecture interrompue".to_string())?
+            .map_err(|e| user_msg(&e))
+    }
+
+    pub async fn instances_screenshot_image(&self, instance_id: &str, file: &str, max_px: Option<u32>) -> Result<String, String> {
+        self.art_id(instance_id)?;
+        let (store, id, file) = (self.instances.clone(), instance_id.to_string(), file.to_string());
+        let _slot = DECODE_SLOTS.acquire().await.map_err(|_| "lecture interrompue".to_string())?;
+        tokio::task::spawn_blocking(move || shots::player_shot_data_url(&store, &id, &file, max_px))
+            .await
+            .map_err(|_| "lecture interrompue".to_string())?
+            .map_err(|e| user_msg(&e))
+    }
+
+    pub async fn instances_screenshot_set_banner(&self, instance_id: &str, file: &str) -> Result<Instance, String> {
+        self.art_id(instance_id)?;
+        let (store, id, file) = (self.instances.clone(), instance_id.to_string(), file.to_string());
+        tokio::task::spawn_blocking(move || shots::set_screenshot_as_banner(&store, &id, &file))
+            .await
+            .map_err(|_| "écriture interrompue".to_string())?
+            .map_err(|e| user_msg(&e))
+    }
+
     pub async fn instances_description(&self, instance_id: &str) -> Result<Option<String>, String> {
         self.art_id(instance_id)?;
         art::instance_description(&providers(), &self.instances, instance_id).await.map_err(|e| user_msg(&e))
@@ -73,14 +102,35 @@ pub async fn instances_art_set(state: State<'_, Arc<AppState>>, instance_id: Str
     state.instances_art_set(&instance_id, &path, &role).await
 }
 
-/// Description longue du modpack, en HTML déjà nettoyé ; `None` sans projet d'origine.
+/// Captures d'écran du joueur (`screenshots/` du dossier de jeu), les plus récentes d'abord (200 au plus) ; liste vide tant que le jeu n'en a pas pris. Lecture seule, hors du thread principal ; autorisé pendant le jeu.
+#[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
+pub async fn instances_screenshots_list(state: State<'_, Arc<AppState>>, instance_id: String) -> Result<Vec<PlayerShot>, String> {
+    state.instances_screenshots_list(&instance_id).await
+}
+
+/// Data URL d'une capture du joueur (nom de fichier de `instances_screenshots_list`), réduite à `max_px` de côté (512 par défaut). Décodage hors du thread principal.
+#[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
+pub async fn instances_screenshot_image(state: State<'_, Arc<AppState>>, instance_id: String, file: String, max_px: Option<u32>) -> Result<String, String> {
+    state.instances_screenshot_image(&instance_id, &file, max_px).await
+}
+
+/// Utilise une capture du joueur comme bannière du modpack (copiée dans `art/`, 8 Mio au plus). Autorisé pendant le jeu.
+#[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
+pub async fn instances_screenshot_set_banner(state: State<'_, Arc<AppState>>, instance_id: String, file: String) -> Result<Instance, String> {
+    state.instances_screenshot_set_banner(&instance_id, &file).await
+}
+
+/// Description longue du modpack, en HTML déjà nettoyé (images gardées seulement depuis les CDN Modrinth et CurseForge, les autres remplacées par leur texte alternatif) ; `None` sans projet d'origine.
 #[tauri::command(rename_all = "snake_case")]
 #[specta::specta(rename_all = "snake_case")]
 pub async fn instances_description(state: State<'_, Arc<AppState>>, instance_id: String) -> Result<Option<String>, String> {
     state.instances_description(&instance_id).await
 }
 
-/// Cherche l'illustration du modpack et l'applique. `auto` : recherche silencieuse de l'accueil (nom identique seulement).
+/// Cherche l'illustration du modpack et l'applique. `auto` : recherche silencieuse de l'accueil (nom identique seulement) ; un échec sans correspondance est mémorisé dans `instance.json` (`art_lookup_failed_at`, non exposé) et la recherche automatique ne repart pas, sans requête, avant 7 jours (erreurs réseau non mémorisées ; renommer l'instance, poser une illustration ou `auto = false` lève le délai).
 #[tauri::command(rename_all = "snake_case")]
 #[specta::specta(rename_all = "snake_case")]
 pub async fn instances_art_lookup(state: State<'_, Arc<AppState>>, instance_id: String, auto: Option<bool>) -> Result<Instance, String> {
@@ -109,6 +159,35 @@ mod tests {
         assert_eq!(u.art.unwrap().icon.as_deref(), Some("icon.png"));
         assert!(st.instances_art_image(&i.id, "icon.png", None).await.unwrap().starts_with("data:image/png;base64,"));
         assert!(st.instances_art_image(&i.id, "instance.json", None).await.is_err());
+    }
+
+    /// Le joueur prend ses captures dans `screenshots/` : liste, miniature, bannière, de bout en bout sur le disque.
+    #[tokio::test]
+    async fn commandes_captures_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let (st, _) = test_state(dir.path());
+        let i = st.instances.create("Pack", "1.21.1", LoaderSpec { loader: Loader::Vanilla, version: String::new() }, 2048).unwrap();
+        assert!(st.instances_screenshots_list(&i.id).await.unwrap().is_empty(), "pas encore de dossier : liste vide");
+        assert!(st.instances_screenshots_list("../x").await.is_err());
+        assert!(st.instances_screenshot_image("../x", "a.png", None).await.is_err());
+        assert!(st.instances_screenshot_set_banner("../x", "a.png").await.is_err());
+        let shots = st.instances.game_dir(&i.id).unwrap().join("screenshots");
+        std::fs::create_dir_all(&shots).unwrap();
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(1920, 1080, |x, y| image::Rgb([x as u8, y as u8, 3])))
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        std::fs::write(shots.join("2026-11-20_10.00.00.png"), png.into_inner()).unwrap();
+        std::fs::write(shots.join("notes.txt"), b"x").unwrap();
+        let l = st.instances_screenshots_list(&i.id).await.unwrap();
+        assert_eq!(l.iter().map(|s| s.file.as_str()).collect::<Vec<_>>(), ["2026-11-20_10.00.00.png"]);
+        let url = st.instances_screenshot_image(&i.id, &l[0].file, None).await.unwrap();
+        assert!(url.starts_with("data:image/jpeg;base64,"));
+        assert!(st.instances_screenshot_image(&i.id, "../instance.json", None).await.is_err());
+        assert!(st.instances_screenshot_image(&i.id, "notes.txt", None).await.is_err());
+        let u = st.instances_screenshot_set_banner(&i.id, &l[0].file).await.unwrap();
+        assert_eq!(u.art.unwrap().screenshots, ["shot-1.png"]);
+        assert!(st.instances.art_dir(&i.id).unwrap().join("shot-1.png").is_file());
     }
 
     /// Régression #81 : le décodage d'une grosse image ne doit pas bloquer l'exécuteur (sur le thread principal de

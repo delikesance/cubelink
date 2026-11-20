@@ -10,11 +10,11 @@ import type * as B from "./bindings";
 // Le front reçoit la première et envoie la seconde.
 export type {
   AccountInfo, AccountKind, BrowseKind, BrowseSource, BrowseVersion, FixFailure, Friend, FriendCode, FriendRequest,
-  LaunchPhase, Loader, LoaderSpec, ModEntry, Presence, Profile, StageState, TransferPhase, TrustLevel, UpdatePhase,
+  LaunchPhase, Loader, LoaderSpec, ModEntry, PlayerShot, Presence, Profile, StageState, TransferPhase, TrustLevel, UpdatePhase,
   VerifyCode, VersionVerdict,
 } from "./bindings";
 import type {
-  BrowseKind, BrowseSource, BrowseVersion, FriendCode, FriendRequest, LoaderSpec, ModEntry, Presence, Profile, StageState,
+  BrowseKind, BrowseSource, BrowseVersion, FriendCode, FriendRequest, LoaderSpec, ModEntry, PlayerShot, Presence, Profile, StageState,
   VerifyCode,
 } from "./bindings";
 
@@ -177,11 +177,19 @@ export interface Services {
   instancesDelete(id: string): Promise<void>;
   instancesUpdate(id: string, patch: InstancePatch): Promise<Instance>;
   instancesOpenFolder(id: string): Promise<void>;
+  /** Ouvre `screenshots/` (créé au besoin) dans le gestionnaire de fichiers. */
+  instancesOpenScreenshotsFolder(id: string): Promise<void>;
   instancesLogs(id: string): Promise<string>;
   /** Data URL d'un fichier d'illustration (`icon` ou une capture de `art.screenshots`). */
   /** `maxPx` : côté maximal de la miniature (64..2048, 512 par défaut) ; grand pour un fond ou une visionneuse. */
   instancesArtImage(instanceId: string, file: string, maxPx?: number): Promise<string>;
   instancesArtSet(instanceId: string, path: string, role: "icon" | "banner"): Promise<Instance>;
+  /** Captures du joueur (`screenshots/` du dossier de jeu), les plus récentes d'abord ; vide tant que le jeu n'en a pas pris. */
+  instancesScreenshotsList(instanceId: string): Promise<PlayerShot[]>;
+  /** Data URL d'une capture du joueur (`file` vient de `instancesScreenshotsList`) ; `maxPx` comme `instancesArtImage`. */
+  instancesScreenshotImage(instanceId: string, file: string, maxPx?: number): Promise<string>;
+  /** Copie une capture du joueur dans `art/` comme bannière du modpack. */
+  instancesScreenshotSetBanner(instanceId: string, file: string): Promise<Instance>;
   /** `auto` : recherche silencieuse de l'accueil (nom identique seulement, jamais pour une instance créée à la main). */
   instancesArtLookup(instanceId: string, auto?: boolean): Promise<Instance>;
   /** Description longue du modpack (HTML déjà nettoyé côté Rust), null sans projet d'origine. */

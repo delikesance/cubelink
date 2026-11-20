@@ -2,7 +2,7 @@ import { validateOfflineName } from "./accounts";
 import { HEARTH_EULA_REQUIRED } from "./types";
 import type {
   AccountInfo, AccountsState, BrowseHit, BrowseInstallResult, BrowseKind, BrowseProgressEvent, BrowseSource, BrowseVersion, FixPlan, FixProgressEvent, FixResult, ModCheck, ModEntry, ModIssue,
-  CreateInstanceInput, DeviceCode, HostState, Invite, JoinAnswer, JoinRequest, ImportWarningEvent, LaunchLogEvent, FriendRequest, FriendWithPresence, Instance, InstanceArt,
+  CreateInstanceInput, DeviceCode, HostState, Invite, JoinAnswer, JoinRequest, ImportWarningEvent, LaunchLogEvent, FriendRequest, FriendWithPresence, Instance, InstanceArt, PlayerShot,
   JoinPlan, LaunchState, Manifest, PresenceEvent, UnknownModsEvent, Profile, Services, Settings,
   StageFallback, StageState, TransferProgress, Unsubscribe, UpdateState,
   HearthCard, HearthDetail, HearthHandover, HearthHostPrompt, HearthInvite, HearthMember, HearthMemberLite,
@@ -242,6 +242,10 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     art: makeArt("prominence", "Prominence II", "Moosniffer", "#c0392b", "modrinth"),
   }];
   const artOf = (id: string) => need(id);
+  // Captures du joueur (`screenshots/`) : « All the Mods 10 » en a trois, les autres aucune (état vide).
+  const playerShots = new Map<string, PlayerShot[]>([
+    ["inst-atm10", [1, 2, 3].map((n) => ({ file: `2025-10-0${4 - n}_21.${10 + n}.04.png`, modified_ms: (NOW - n * 86400) * 1000, size: 1_800_000 + n * 1000 }))],
+  ]);
   let requests: FriendRequest[] = Array.from({ length: requestCount }, (_, i) => makeRequest(i));
   const friends: FriendWithPresence[] = [
     { friend: { public_key: hex(1, 64), name: "Alex", trust: "ask", added_at: NOW - 86400 }, presence: "online", in_game: true, last_seen: null },
@@ -603,6 +607,24 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
       return { ...inst };
     },
     instancesOpenFolder: async (id) => { need(id); },
+    instancesOpenScreenshotsFolder: async (id) => { need(id); },
+    instancesScreenshotsList: async (id) => {
+      need(id);
+      return (playerShots.get(id) ?? []).map((p) => ({ ...p }));
+    },
+    instancesScreenshotImage: async (id, file) => {
+      need(id);
+      const shot = (playerShots.get(id) ?? []).find((p) => p.file === file);
+      if (!shot) throw new Error("Capture introuvable.");
+      return svgImage("#3a7d44", file.replace(/\.png$/, ""), file);
+    },
+    instancesScreenshotSetBanner: async (id, file) => {
+      const inst = artOf(id);
+      if (!(playerShots.get(id) ?? []).some((p) => p.file === file)) throw new Error("Capture introuvable.");
+      const art = inst.art ?? { ...makeArt(`custom-${id}`, inst.name, "", "#6c5ce7", "custom"), icon: null, screenshots: [] };
+      inst.art = { ...art, title: inst.name, screenshots: [file, ...art.screenshots.filter((x) => x !== file)] };
+      return { ...inst };
+    },
     instancesLogs: async (id) => {
       need(id);
       return (logs.get(id) ?? ["[Cubelink] Aucun lancement pour le moment."]).join("\n");

@@ -27,6 +27,7 @@ pub mod version_range;
 pub mod mod_check;
 pub mod mod_fix;
 pub mod art;
+pub mod shots;
 pub mod skin;
 pub mod world;
 pub mod hearth;

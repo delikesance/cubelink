@@ -134,6 +134,8 @@ pub fn quit_app(app: &AppHandle, st: &Arc<AppState>) {
         }
         // Un serveur de groupe encore actif est arrêté proprement (monde publié, bail relâché).
         st.hearth_stop_all().await;
+        // Dates « vu en ligne » encore en attente d'écriture.
+        st.last_seen.flush();
         app.exit(0);
     });
 }

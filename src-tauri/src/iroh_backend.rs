@@ -489,6 +489,10 @@ impl IrohBackend {
         let psink: p2p_lib::presence::EventSink = Arc::new(move |e| {
             // En ligne ou qui vient de partir : l'ami était là à cet instant.
             seen.touch(&hex::encode(e.public_key), crate::state::now_secs());
+            if e.presence == Presence::Offline {
+                // Le départ arrive en général moins d'une minute après la dernière écriture : l'écrire tout de suite.
+                seen.flush();
+            }
             emit("friend://presence", serde_json::json!({ "public_key": hex::encode(e.public_key), "presence": e.presence, "in_game": e.in_game }));
         });
         // Adresses mémorisées lors d'une session précédente : disponibles dès la première sonde.

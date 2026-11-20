@@ -1,5 +1,6 @@
 //! Coque Tauri. Propriété : tâche U13 (commandes), selon docs/contrats.md.
 
+pub mod app_log;
 pub mod authz;
 pub mod background;
 pub mod bindings;
@@ -249,6 +250,7 @@ pub fn run() {
             let written = std::fs::create_dir_all(&root).and_then(|_| std::fs::write(&conf, core_lib::launch_run::FONTCONFIG_NO_COLRV1_XML));
             match written {
                 Ok(()) => std::env::set_var("FONTCONFIG_FILE", &conf),
+                // Avant `app_log::init` (le dossier de donnees Tauri n'est connu qu'en `setup`) : stderr, la seule sortie disponible ici.
                 Err(e) => eprintln!("[Cubelink] masquage des polices COLRv1 impossible : {e}"),
             }
         }
@@ -279,6 +281,7 @@ pub fn run() {
                 Some(d) => d.clone(),
                 None => app.path().app_data_dir()?,
             };
+            app_log::init(&root);
             let handle = app.handle().clone();
             let sink: state::EventSink = Arc::new(move |name, payload| {
                 let _ = handle.emit(name, payload);
@@ -359,7 +362,7 @@ pub fn run() {
                 tauri::async_runtime::spawn(async move {
                     tokio::time::sleep(std::time::Duration::from_secs(4)).await;
                     if let Err(e) = st.instances_launch(&id).await {
-                        eprintln!("[Cubelink] lancement automatique : {e}");
+                        tracing::error!("lancement automatique : {e}");
                     }
                 });
             }
@@ -371,7 +374,7 @@ pub fn run() {
                         pending.ready(be);
                     }
                     Err(e) => {
-                        eprintln!("démarrage du réseau P2P impossible : {e}");
+                        tracing::error!("démarrage du réseau P2P impossible : {e}");
                         pending.failed(e);
                     }
                 }

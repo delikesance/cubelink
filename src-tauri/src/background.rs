@@ -70,6 +70,7 @@ fn hide_main(app: &AppHandle, st: &AppState) {
         let _ = w.hide();
     }
     st.stage.flush_log();
+    crate::app_log::flush();
     if !crate::test_hooks::hooks().test_mode && take_first_notice(&st.paths.root) {
         let _ = app
             .notification()
@@ -113,6 +114,7 @@ pub fn on_close_requested(app: &AppHandle, st: &Arc<AppState>) {
         if EXIT_PENDING.load(Ordering::SeqCst) {
             // Un serveur de groupe encore actif est arrêté proprement (monde publié, bail relâché).
             st.hearth_stop_all().await;
+            crate::app_log::flush();
             app.exit(0);
         }
     });
@@ -134,6 +136,7 @@ pub fn quit_app(app: &AppHandle, st: &Arc<AppState>) {
         }
         // Un serveur de groupe encore actif est arrêté proprement (monde publié, bail relâché).
         st.hearth_stop_all().await;
+        crate::app_log::flush();
         app.exit(0);
     });
 }
@@ -176,8 +179,8 @@ pub fn try_setup_tray(app: &AppHandle, st: Arc<AppState>) {
     let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| setup_tray(app, st)));
     match res {
         Ok(Ok(())) => {}
-        Ok(Err(e)) => eprintln!("[Cubelink] icone de la zone de notification : {e}"),
-        Err(_) => eprintln!("[Cubelink] icone de la zone de notification indisponible : fermer la fenetre quittera Cubelink"),
+        Ok(Err(e)) => tracing::warn!("icone de la zone de notification : {e}"),
+        Err(_) => tracing::warn!("icone de la zone de notification indisponible : fermer la fenetre quittera Cubelink"),
     }
 }
 
@@ -197,7 +200,7 @@ pub fn apply_autostart(app: &AppHandle) {
         _ => Ok(()),
     };
     if let Err(e) = res {
-        eprintln!("[Cubelink] démarrage avec la session : {e}");
+        tracing::warn!("démarrage avec la session : {e}");
     }
 }
 

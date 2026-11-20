@@ -142,6 +142,7 @@ Workspace Rust `core` (logique), `p2p` (réseau), `src-tauri` (commandes et int�
 | Profil invité, mods inconnus | fait | `core/src/guest.rs`, `unknown_mods.rs` |
 | Tunnel de jeu | fait | `p2p/src/tunnel.rs` |
 | Relais (réglages, indices du code) | fait | `p2p/src/relay.rs` |
+| Journal applicatif (`logs/cubelink.log`) | fait : tout ce que Cubelink, le coeur, le P2P et Iroh disent par `tracing` ; 1 Mo puis `cubelink.log.1` (~2 Mo au plus) ; chaque ligne passe par `sanitize` ; `CUBELINK_LOG=debug` (syntaxe `EnvFilter`) pour diagnostiquer ; les panics y vont aussi | `src-tauri/src/app_log.rs` |
 | Installeur Windows | NSIS + CLI Tauri (`target/release/bundle/nsis/`) | |
 
 Tests : `npm test` (clippy `-D warnings`, `cargo test --workspace`, `tsc`, vitest) ; `npm run e2e` (Playwright, scénarios `e2e/01` à `11`).

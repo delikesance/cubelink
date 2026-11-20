@@ -1179,6 +1179,8 @@ dependencies = [
  "tauri-specta",
  "tempfile",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
  "wiremock",
 ]
 

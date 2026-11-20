@@ -110,7 +110,7 @@ export const commands = {
 	browseSearch: (query: BrowseQuery_Deserialize, options?: InvokeOptions) => __TAURI_INVOKE<BrowsePage_Serialize>("browse_search", { query }, options),
 	/**  Versions d'un projet du catalogue, filtrées par version de Minecraft et loader. */
 	browseVersions: (source: string, id: string, kind: string, minecraft: string | null, loader: string | null, options?: InvokeOptions) => __TAURI_INVOKE<BrowseVersion[]>("browse_versions", { source, id, kind, minecraft, loader }, options),
-	/**  Installe un projet du catalogue (nouvelle instance pour un modpack). Progression par `browse://progress`. */
+	/**  Installe un projet du catalogue (nouvelle instance pour un modpack). Un mod remplace les jars du même mod déjà présents sous un autre nom (modpack, ajout manuel) : ils vont dans `mods/.cubelink-backup/<id>/` (restaurables avec `mods_fix_undo` sur cet id ; le résultat de `browse_install` ne le renvoie pas encore, donc l'interface n'offre pas d'annulation). Une dépendance déjà fournie par un jar activé sous un autre nom est ignorée. Progression par `browse://progress`. */
 	browseInstall: (input: BrowseInstallInput_Deserialize, options?: InvokeOptions) => __TAURI_INVOKE<BrowseInstallResult_Serialize>("browse_install", { input }, options),
 	/**  Mods d'une instance (activés ou non). */
 	modsList: (instanceId: string, options?: InvokeOptions) => __TAURI_INVOKE<ModEntry[]>("mods_list", { instance_id: instanceId }, options),

@@ -21,6 +21,7 @@ use serde::Deserialize;
 use zip::ZipArchive;
 
 use crate::instance::InstanceStore;
+use crate::mods::{self, Provenance};
 use crate::providers::curseforge::CfDownload;
 use crate::providers::curseforge::{CfResolver, CDN_HOSTS, MAX_FILE_BYTES};
 use crate::providers::modrinth_api::{FileHashes, VersionFile};
@@ -56,6 +57,32 @@ pub struct MrpackFile {
     pub unverified: bool,
     /// Fichier CurseForge : un échec de téléchargement n'est pas fatal (le mod est listé comme manquant).
     pub tolerant: bool,
+    /// Projet d'origine (Modrinth : déduit de l'URL du CDN ; CurseForge : `projectID` du manifeste).
+    /// Sert à renseigner `.cubelink-mods.json` pour les jars posés sous `mods/`.
+    pub provenance: Option<Provenance>,
+}
+
+/// Projet Modrinth d'un fichier d'index, déduit de son URL de téléchargement.
+/// Le CDN officiel sert `https://cdn.modrinth.com/data/<project_id>/versions/<version>/<fichier>` : l'identifiant est
+/// celui que renvoie l'API, sans requête réseau. Hôte exact et identifiant strictement validés : une provenance fausse
+/// ferait supprimer les jars d'un autre projet par `remove_old_versions`. Autre hôte (GitHub...) : aucune provenance.
+fn modrinth_project_from_url(urls: &[String]) -> Option<Provenance> {
+    urls.iter().find_map(|u| {
+        let url = reqwest::Url::parse(u).ok()?;
+        if url.scheme() != "https" || url.host_str() != Some("cdn.modrinth.com") || url.port().is_some() {
+            return None;
+        }
+        let mut seg = url.path_segments()?;
+        let (data, id, versions) = (seg.next()?, seg.next()?, seg.next()?);
+        let valid = (1..=16).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric());
+        (data == "data" && versions == "versions" && valid).then(|| Provenance { source: "modrinth".into(), id: id.to_string() })
+    })
+}
+
+/// Nom du jar si `path` est de la forme `mods/<nom>.jar` (un seul niveau).
+fn mod_jar_name(path: &str) -> Option<&str> {
+    let name = path.strip_prefix("mods/")?;
+    (!name.contains('/') && name.to_ascii_lowercase().ends_with(".jar")).then_some(name)
 }
 
 impl MrpackFile {
@@ -282,6 +309,7 @@ fn parse_index_bytes(bytes: &[u8]) -> Result<MrpackIndex> {
         if f.hashes.sha1.is_empty() && f.hashes.sha512.is_empty() {
             return Err(invalid(format!("{} : aucun hash", f.path)));
         }
+        let provenance = modrinth_project_from_url(&f.downloads);
         files.push(MrpackFile {
             path: f.path,
             sha1: f.hashes.sha1,
@@ -291,6 +319,7 @@ fn parse_index_bytes(bytes: &[u8]) -> Result<MrpackIndex> {
             env: f.env,
             unverified: false,
             tolerant: false,
+            provenance,
         });
     }
     Ok(MrpackIndex { name: raw.name, version_id: raw.version_id, minecraft, loader, files })
@@ -547,6 +576,8 @@ async fn run_import(
         pack.files.iter().filter(|f| !f.client_unsupported() && !(f.tolerant && in_overrides.contains(&f.path.to_ascii_lowercase()))).collect();
     let total = files.len() as u32;
     let mut done = 0u32;
+    // Provenance des jars posés, écrite en une fois après la boucle (l'ordre d'arrivée est aléatoire).
+    let mut provenance: Vec<(String, Provenance)> = Vec::new();
     let mut results = stream::iter(files.iter().copied())
         .map(|f| {
             let dl = &dl;
@@ -572,6 +603,9 @@ async fn run_import(
         link_into(&game_dir, &f.path, &src).map_err(|e| with_file_ctx(&f.path, e))?;
         index.add_ref(&obj.sha256)?;
         installed.push(obj.sha256);
+        if let (Some(name), Some(p)) = (mod_jar_name(&f.path), &f.provenance) {
+            provenance.push((name.to_string(), p.clone()));
+        }
         done += 1;
         if let Some(p) = progress {
             p(done, total);
@@ -581,7 +615,11 @@ async fn run_import(
     if cancel.load(Ordering::SeqCst) {
         return Err(Error::Cancelled);
     }
-    extract_overrides(archive, plan, &game_dir, opts, cancel)
+    extract_overrides(archive, plan, &game_dir, opts, cancel)?;
+    // Un override qui remplace un jar du pack en change le contenu : on n'en garde pas la provenance.
+    provenance.retain(|(name, _)| !in_overrides.contains(&format!("mods/{name}").to_ascii_lowercase()));
+    // Sans cette provenance, les dépendances du catalogue, les mises à jour et `remove_old_versions` ignorent ces mods.
+    mods::record_provenance(&game_dir, &provenance)
 }
 
 // ---------- CurseForge et zip générique ----------
@@ -768,7 +806,8 @@ pub async fn import_curseforge(
             Ok((path, url, sha1, size)) => {
                 if seen_paths.insert(path.to_ascii_lowercase()) {
                     let unverified = sha1.is_empty();
-                    files.push(MrpackFile { path, sha1, sha512: String::new(), downloads: vec![url], file_size: size, env: None, unverified, tolerant: true });
+                    let provenance = Some(Provenance { source: "curseforge".into(), id: p.to_string() });
+                    files.push(MrpackFile { path, sha1, sha512: String::new(), downloads: vec![url], file_size: size, env: None, unverified, tolerant: true, provenance });
                 }
             }
         }
@@ -1225,6 +1264,158 @@ mod tests {
         let r = import_curseforge(&pack, &cf, &e.instances, &e.store, &e.idx, &opts(), None, Arc::new(AtomicBool::new(true))).await;
         assert!(matches!(r, Err(Error::Cancelled)));
         assert!(e.instances.list().is_empty());
+    }
+
+    // ---------- Provenance (#51) ----------
+
+    fn prov(source: &str, id: &str) -> Provenance {
+        Provenance { source: source.into(), id: id.into() }
+    }
+
+    fn urls(u: &str) -> Vec<String> {
+        vec![u.to_string()]
+    }
+
+    #[test]
+    fn modrinth_project_from_cdn_url() {
+        let ok = urls("https://cdn.modrinth.com/data/P7dR8mSH/versions/abcd1234/fabric-api-0.92.2+1.20.1.jar");
+        assert_eq!(modrinth_project_from_url(&ok), Some(prov("modrinth", "P7dR8mSH")));
+        // Le premier miroir reconnu gagne.
+        let mixed = vec!["https://github.com/x/y/releases/download/1/a.jar".to_string(), ok[0].clone()];
+        assert_eq!(modrinth_project_from_url(&mixed), Some(prov("modrinth", "P7dR8mSH")));
+        for bad in [
+            "https://github.com/x/y/releases/download/1/a.jar",
+            "https://cdn.modrinth.com.evil.tld/data/P7dR8mSH/versions/v/a.jar",
+            "https://evil.tld/cdn.modrinth.com/data/P7dR8mSH/versions/v/a.jar",
+            "https://user@cdn.modrinth.com:8443/data/P7dR8mSH/versions/v/a.jar",
+            "http://cdn.modrinth.com/data/P7dR8mSH/versions/v/a.jar",
+            "https://cdn.modrinth.com/other/P7dR8mSH/versions/v/a.jar",
+            "https://cdn.modrinth.com/data//versions/v/a.jar",
+            "https://cdn.modrinth.com/data/P7d..R8mSH/versions/v/a.jar",
+            "https://cdn.modrinth.com/data/P7dR8mSHP7dR8mSHX/versions/v/a.jar",
+            "https://cdn.modrinth.com/data/P7dR8mSH/files/v/a.jar",
+            "https://cdn.modrinth.com/data/P7dR8mSH",
+            "pas une url",
+        ] {
+            assert_eq!(modrinth_project_from_url(&urls(bad)), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn index_files_carry_modrinth_provenance_only_for_the_official_cdn() {
+        let content: &[u8] = b"x";
+        let files = vec![
+            file_json("mods/fabric-api.jar", "https://cdn.modrinth.com/data/P7dR8mSH/versions/v1/fabric-api.jar", content),
+            file_json("mods/gh.jar", "https://github.com/x/y/releases/download/1/gh.jar", content),
+        ];
+        let idx = parse_index_bytes(&index_json(serde_json::json!({"minecraft": "1.21.1"}), files)).unwrap();
+        assert_eq!(idx.files[0].provenance, Some(prov("modrinth", "P7dR8mSH")));
+        assert_eq!(idx.files[1].provenance, None);
+    }
+
+    #[test]
+    fn mod_jar_name_only_for_direct_jars() {
+        assert_eq!(mod_jar_name("mods/a.jar"), Some("a.jar"));
+        assert_eq!(mod_jar_name("mods/A.JAR"), Some("A.JAR"));
+        assert_eq!(mod_jar_name("mods/sub/a.jar"), None);
+        assert_eq!(mod_jar_name("mods/a.jar.disabled"), None);
+        assert_eq!(mod_jar_name("resourcepacks/a.zip"), None);
+        assert_eq!(mod_jar_name("config/a.jar"), None);
+    }
+
+    /// Import d'un index construit à la main (les URL loopback ne sont pas celles du CDN Modrinth) :
+    /// exerce vraiment `run_import` (téléchargement, magasin, écriture de `.cubelink-mods.json`).
+    async fn import_with_provenance(e: &Env, files: Vec<(&str, &str, Option<Provenance>)>, zip_entries: &[(&str, &[u8])], cancel: bool) -> Result<(Instance, Vec<String>)> {
+        let mut entries: Vec<(&str, &[u8])> = vec![(INDEX_NAME, b"{}")];
+        entries.extend_from_slice(zip_entries);
+        let zip = build_zip(e.tmp.path(), &entries);
+        let files = files
+            .into_iter()
+            .map(|(path, file, provenance)| {
+                let content = if file == "a.jar" { A } else { B };
+                MrpackFile {
+                    path: path.into(),
+                    sha1: String::new(),
+                    sha512: sha512(content),
+                    downloads: vec![format!("{}/{file}", e.server.uri())],
+                    file_size: content.len() as u64,
+                    env: None,
+                    unverified: false,
+                    tolerant: false,
+                    provenance,
+                }
+            })
+            .collect();
+        let pack = MrpackIndex { name: "Mon Pack".into(), version_id: String::new(), minecraft: "1.20.1".into(), loader: LoaderSpec { loader: Loader::Fabric, version: "0.16.5".into() }, files };
+        let archive = open_zip(&zip)?;
+        import_pack(pack, archive, &Layout::mrpack(), &e.instances, &e.store, &e.idx, &opts(), None, Arc::new(AtomicBool::new(cancel))).await
+    }
+
+    #[tokio::test]
+    async fn import_records_provenance_of_mod_jars() {
+        let e = env().await;
+        let files = vec![
+            ("mods/a.jar", "a.jar", Some(prov("modrinth", "P7dR8mSH"))),
+            ("mods/b.jar", "b.jar", None),
+            // Hors mods/ : jamais de provenance, même si l'index en porte une.
+            ("resourcepacks/a.zip", "a.jar", Some(prov("modrinth", "RPRPRPRP"))),
+        ];
+        let (inst, _) = import_with_provenance(&e, files, &[], false).await.unwrap();
+        let g = e.instances.game_dir(&inst.id).unwrap();
+        let map = mods::read_provenance(&g);
+        assert_eq!(map.len(), 1, "{map:?}");
+        assert_eq!(map["a.jar"], prov("modrinth", "P7dR8mSH"));
+        // Conséquence du ticket : la dépendance est vue comme installée, et seul ce projet.
+        assert!(crate::browse::installed_project(&g, "modrinth", "P7dR8mSH"));
+        assert!(!crate::browse::installed_project(&g, "modrinth", "RPRPRPRP"));
+        assert_eq!(mods::files_of_project(&g, "modrinth", "P7dR8mSH"), vec!["a.jar".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn import_without_any_provenance_writes_no_file() {
+        let e = env().await;
+        let (inst, _) = import_with_provenance(&e, vec![("mods/a.jar", "a.jar", None)], &[], false).await.unwrap();
+        let g = e.instances.game_dir(&inst.id).unwrap();
+        assert!(mods::read_provenance(&g).is_empty());
+        assert!(!g.parent().unwrap().join(".cubelink-mods.json").exists() && !g.join(".cubelink-mods.json").exists());
+    }
+
+    #[tokio::test]
+    async fn import_drops_provenance_of_jar_replaced_by_override() {
+        let e = env().await;
+        let files = vec![("mods/a.jar", "a.jar", Some(prov("modrinth", "AAAAAAAA"))), ("mods/b.jar", "b.jar", Some(prov("modrinth", "BBBBBBBB")))];
+        let (inst, _) = import_with_provenance(&e, files, &[("overrides/mods/a.jar", b"autre contenu")], false).await.unwrap();
+        let g = e.instances.game_dir(&inst.id).unwrap();
+        assert_eq!(std::fs::read(g.join("mods/a.jar")).unwrap(), b"autre contenu");
+        let map = mods::read_provenance(&g);
+        assert_eq!(map.keys().collect::<Vec<_>>(), vec!["b.jar"]);
+    }
+
+    #[tokio::test]
+    async fn cancelled_import_leaves_no_instance_nor_provenance() {
+        let e = env().await;
+        let r = import_with_provenance(&e, vec![("mods/a.jar", "a.jar", Some(prov("modrinth", "P7dR8mSH")))], &[], true).await;
+        assert!(matches!(r, Err(Error::Cancelled)));
+        assert!(e.instances.list().is_empty());
+    }
+
+    #[tokio::test]
+    async fn curseforge_import_records_project_id_without_network_lookup() {
+        let e = env().await;
+        Mock::given(method("GET")).and(path("/files/0/1/ok.jar")).respond_with(ResponseTemplate::new(200).set_body_bytes(b"ok".to_vec())).mount(&e.server).await;
+        Mock::given(method("GET")).and(path("/files/0/2/pack.zip")).respond_with(ResponseTemplate::new(200).set_body_bytes(b"rp".to_vec())).mount(&e.server).await;
+        cf_redirect(&e, 9, 1, "/files/0/1/ok.jar").await;
+        cf_redirect(&e, 10, 2, "/files/0/2/pack.zip").await;
+        // Projet 11 : introuvable, donc manquant et sans provenance.
+        Mock::given(method("GET")).and(path("/api/v1/mods/11/files/3/download")).respond_with(ResponseTemplate::new(404)).mount(&e.server).await;
+        let manifest = cf_manifest(serde_json::json!([{"projectID": 9, "fileID": 1}, {"projectID": 10, "fileID": 2}, {"projectID": 11, "fileID": 3}]));
+        let pack = build_zip(e.tmp.path(), &[("manifest.json", &manifest)]);
+        let r = run_cf(&e, &pack).await.unwrap();
+        let g = e.instances.game_dir(&r.instance.id).unwrap();
+        let map = mods::read_provenance(&g);
+        assert_eq!(map.len(), 1, "{map:?}");
+        assert_eq!(map["ok.jar"], prov("curseforge", "9"));
+        assert!(crate::browse::installed_project(&g, "curseforge", "9"));
     }
 
     #[test]

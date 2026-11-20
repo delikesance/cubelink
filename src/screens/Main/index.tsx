@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import "./main.css";
 import { useScreenTitle, useShell } from "../../app/context";
-import { peekImportWarning, setImportWarning } from "../../app/importWarning";
-import type { FriendWithPresence, HostState, Instance, Invite } from "../../services";
+import { importWarningText, peekImportWarning, setImportWarning } from "../../app/importWarning";
+import type { FriendWithPresence, HostState, ImportWarningEvent, Instance, Invite } from "../../services";
 import { errMsg, useLaunch } from "../../app/useLaunch";
 import { Button, IconButton } from "../../ui";
 import { Avatar } from "./ArtParts";
@@ -64,12 +64,12 @@ export default function Main() {
   const ctx = useContextMenu();
   /** Modpack dont la suppression attend confirmation (clic droit > Supprimer). */
   const [toDelete, setToDelete] = useState<Instance | null>(null);
-  const [warning, setWarning] = useState<string[] | null>(() => peekImportWarning());
+  const [warning, setWarning] = useState<ImportWarningEvent | null>(() => peekImportWarning());
 
   useScreenTitle(null);
 
   useEffect(() => { setImportWarning(null); }, []);
-  useEffect(() => services.onImportWarning((e) => { if (e.missing.length) setWarning(e.missing); }), [services]);
+  useEffect(() => services.onImportWarning((e) => { if (e.missing.length || e.skipped.length) setWarning(e); }), [services]);
 
   useEffect(() => {
     let alive = true;
@@ -243,10 +243,7 @@ export default function Main() {
         {actionError && <p className="home-err" role="alert">{actionError}</p>}
         {warning && instances && instances.length > 0 && (
           <div className="home-warn enter" role="status">
-            <span>
-              Import terminé, mais {warning.length} mod{warning.length > 1 ? "s" : ""} introuvable{warning.length > 1 ? "s" : ""} :{" "}
-              {warning.slice(0, 5).join(", ")}{warning.length > 5 ? `… (+${warning.length - 5})` : ""}.
-            </span>
+            <span>{importWarningText(warning)}</span>
             <Button variant="secondary" onClick={() => setWarning(null)}>Ignorer</Button>
           </div>
         )}

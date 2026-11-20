@@ -276,6 +276,12 @@ export function Detail({ hit, services, minecraft, loader, instance, installed, 
                   <ul>{result.missing.map((m) => <li key={m}>{m}</li>)}</ul>
                 </>
               )}
+              {result.skipped.length > 0 && (
+                <>
+                  <p className="br-warn">{result.skipped.length} fichier{result.skipped.length > 1 ? "s" : ""} du pack {result.skipped.length > 1 ? "ont" : "a"} été ignoré{result.skipped.length > 1 ? "s" : ""} par sécurité :</p>
+                  <ul>{result.skipped.map((m) => <li key={m}>{m}</li>)}</ul>
+                </>
+              )}
             </div>
           )}
         </div>

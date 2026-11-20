@@ -84,8 +84,8 @@ export interface TransferErrorDetails { step: string; message: string; details: 
 /** Événement launch://log : une ligne de sortie du jeu. */
 export interface LaunchLogEvent { id: string; line: string }
 
-/** Événement import://warning : mods introuvables lors d'un import. */
-export interface ImportWarningEvent { missing: string[] }
+/** Événement import://warning : mods introuvables et fichiers du pack ignorés par sécurité (`chemin (raison)`) lors d'un import. */
+export interface ImportWarningEvent { missing: string[]; skipped: string[] }
 
 export interface FixProgressEvent { done: number; total: number; label: string }
 export interface BrowseProgressEvent { done: number; total: number; label: string }

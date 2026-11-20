@@ -43,17 +43,28 @@ describe("Main : échec du lancement rapide", () => {
 
 describe("Main : avertissement d'import", () => {
   it("affiche un bandeau non bloquant pour les mods manquants", async () => {
-    let push: (e: { missing: string[] }) => void = () => {};
+    let push: (e: { missing: string[]; skipped: string[] }) => void = () => {};
     setup({ onImportWarning: (cb) => { push = cb; return () => {}; } });
     await screen.findByRole("group", { name: "Instances" });
-    act(() => push({ missing: ["sodium", "iris"] }));
+    act(() => push({ missing: ["sodium", "iris"], skipped: [] }));
     expect(screen.getByText(/2 mods introuvables : sodium, iris/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Ignorer" }));
     expect(screen.queryByText(/introuvables/)).toBeNull();
   });
 
+  it("liste les fichiers du pack ignorés par sécurité, avec leur raison", async () => {
+    let push: (e: { missing: string[]; skipped: string[] }) => void = () => {};
+    setup({ onImportWarning: (cb) => { push = cb; return () => {}; } });
+    await screen.findByRole("group", { name: "Instances" });
+    act(() => push({ missing: [], skipped: ["start.sh (extension exécutable)"] }));
+    expect(screen.getByText(/1 fichier du pack a été ignoré par sécurité : start\.sh \(extension exécutable\)/)).toBeTruthy();
+    expect(screen.queryByText(/introuvable/)).toBeNull();
+    act(() => push({ missing: ["jei"], skipped: ["a.dll (extension exécutable)", "b.sh (extension exécutable)"] }));
+    expect(screen.getByText(/1 mod introuvable : jei\. 2 fichiers du pack ont été ignorés par sécurité : a\.dll/)).toBeTruthy();
+  });
+
   it("reprend l'avertissement reçu pendant l'import (écran Create)", async () => {
-    setImportWarning(["jei"]);
+    setImportWarning({ missing: ["jei"], skipped: [] });
     setup();
     expect(await screen.findByText(/1 mod introuvable : jei/)).toBeTruthy();
   });

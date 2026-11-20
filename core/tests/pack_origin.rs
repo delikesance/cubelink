@@ -47,7 +47,7 @@ async fn imported_mrpack_gets_exact_origin_and_art_not_the_homonym() {
     // Vrai .mrpack sur le disque, importé par le vrai flux d'import.
     let file = write_mrpack(d.path(), "pack");
     let opts = ImportOptions { allowed_hosts: vec!["127.0.0.1".into()], allow_http: true, ..Default::default() };
-    let inst = mrpack::import(&file, &instances, &store, &index, &opts, None, Arc::new(AtomicBool::new(false))).await.unwrap();
+    let inst = mrpack::import(&file, &instances, &store, &index, &opts, None, Arc::new(AtomicBool::new(false))).await.unwrap().instance;
     assert_eq!(inst.pack, None);
     assert_eq!(std::fs::read(instances.game_dir(&inst.id).unwrap().join("config/x.toml")).unwrap(), b"a=1");
 

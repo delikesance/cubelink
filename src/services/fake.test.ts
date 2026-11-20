@@ -138,6 +138,14 @@ describe("fake : gestion des instances", () => {
     expect(got).toEqual([["sodium", "iris"]]);
   });
 
+  it("signale les fichiers du pack ignorés à l'import", async () => {
+    const s = createFakeServices({ tickMs: 0 });
+    const got: string[][] = [];
+    s.onImportWarning((e) => got.push(e.skipped));
+    await s.instancesImportMrpack("pack-ignore.mrpack");
+    expect(got).toEqual([["start.sh (extension exécutable)", "emotes/a.png (dossier non géré)"]]);
+  });
+
   it("parcourir : pagination, filtre, non téléchargeables, versions", async () => {
     const s = svc();
     for (const source of ["curseforge", "modrinth"] as const) {

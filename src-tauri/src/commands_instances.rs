@@ -280,6 +280,13 @@ fn is_failure(ev: &LaunchEvent) -> bool {
     matches!(ev, LaunchEvent::Failed { .. }) || matches!(ev, LaunchEvent::Exited { code } if *code != 0)
 }
 
+/// Ce qu'un import signale en plus de l'instance : mods CurseForge introuvables et fichiers du pack écartés par sécurité.
+#[derive(Debug, Default)]
+pub(crate) struct ImportNotes {
+    pub missing: Vec<String>,
+    pub skipped: Vec<String>,
+}
+
 struct GameGuard(Arc<AppState>);
 impl Drop for GameGuard {
     fn drop(&mut self) {
@@ -315,6 +322,8 @@ impl AppState {
 
     /// Importe un modpack : `.mrpack` (Modrinth), zip CurseForge (`manifest.json`, sans clé API ; les mods introuvables sont signalés par `import://warning`) ou
     /// zip générique (contenu d'instance brut, avec nom / version de Minecraft / loader choisis par l'utilisateur).
+    /// Les fichiers du pack écartés par sécurité (exécutables, noms interdits, dossiers non gérés) ne font pas échouer
+    /// l'import : ils sont listés dans `import://warning.skipped`.
     pub async fn instances_import_mrpack(
         &self,
         path: &str,
@@ -323,14 +332,14 @@ impl AppState {
         loader: Option<LoaderSpec>,
         ram_mb: Option<u32>,
     ) -> Result<Instance, String> {
-        let (inst, missing) = self.import_pack_file(path, name, minecraft, loader, ram_mb, None, None).await?;
-        if !missing.is_empty() {
-            self.emit_event("import://warning", &serde_json::json!({ "missing": missing }));
+        let (inst, notes) = self.import_pack_file(path, name, minecraft, loader, ram_mb, None, None).await?;
+        if !notes.missing.is_empty() || !notes.skipped.is_empty() {
+            self.emit_event("import://warning", &serde_json::json!({ "missing": notes.missing, "skipped": notes.skipped }));
         }
         Ok(inst)
     }
 
-    /// Cœur de l'import : renvoie l'instance et les mods CurseForge introuvables (sans émettre d'événement).
+    /// Cœur de l'import : renvoie l'instance, les mods CurseForge introuvables et les fichiers écartés (sans émettre d'événement).
     ///
     /// `origin` : projet et version du catalogue quand l'appelant les connaît (installation depuis Parcourir).
     /// Sans `origin`, un `.mrpack` est reconnu par son empreinte SHA-1 auprès de Modrinth (meilleur effort :
@@ -345,7 +354,7 @@ impl AppState {
         ram_mb: Option<u32>,
         progress: Option<core_lib::mrpack::FilesProgress>,
         origin: Option<PackOrigin>,
-    ) -> Result<(Instance, Vec<String>), String> {
+    ) -> Result<(Instance, ImportNotes), String> {
         let file = validate_mrpack_path(path)?;
         // Sans choix : « Par défaut » (la valeur globale, lue à chaque lancement).
         let ram_mb = ram_mb.unwrap_or(core_lib::instance::RAM_DEFAULT);
@@ -370,24 +379,17 @@ impl AppState {
         let cancel = Arc::new(AtomicBool::new(false));
         // Les futurs d'import ne sont pas prouvés `Send` par rustc : on les exécute sur un thread dédié.
         let handle = tokio::runtime::Handle::current();
-        let mut missing: Vec<String> = Vec::new();
         let result = match kind {
             PackKind::Modrinth => tokio::task::spawn_blocking(move || {
                 handle.block_on(mrpack::import(&file, &instances, &store_root, &index, &opts, progress, cancel))
             })
             .await,
             PackKind::CurseForge => {
-                let r = tokio::task::spawn_blocking(move || {
+                tokio::task::spawn_blocking(move || {
                     let cf = crate::commands_browse::cf_resolver();
                     handle.block_on(mrpack::import_curseforge(&file, &cf, &instances, &store_root, &index, &opts, progress, cancel))
                 })
-                .await;
-                r.map(|res| {
-                    res.map(|c| {
-                        missing = c.missing;
-                        c.instance
-                    })
-                })
+                .await
             }
             PackKind::Plain => {
                 let (Some(minecraft), Some(loader)) = (minecraft, loader) else {
@@ -404,14 +406,16 @@ impl AppState {
                 .await
             }
         };
-        let inst = result.map_err(|_| "import interrompu".to_string())?.map_err(|e| user_msg(&e))?;
+        let report = result.map_err(|_| "import interrompu".to_string())?.map_err(|e| user_msg(&e))?;
+        let notes = ImportNotes { missing: report.missing, skipped: report.skipped };
+        let inst = report.instance;
         let noop: Progress = Arc::new(|_| {});
         if let Err(e) = ensure_game(&self.paths, &inst, self.settings_get().java_path, noop).await {
             let _ = self.instances.delete(&inst.id);
             return Err(user_msg(&e));
         }
         let inst = self.attach_pack_origin(&crate::commands_browse::providers(), inst, origin, hash_target).await;
-        Ok((inst, missing))
+        Ok((inst, notes))
     }
 
     /// Enregistre l'origine du modpack sur l'instance importée : celle de l'appelant si elle est connue, sinon
@@ -733,7 +737,7 @@ pub async fn instances_create(
     state.instances_create(name, minecraft, loader, ram_mb).await
 }
 
-/// Importe un .mrpack, un zip CurseForge ou un zip brut (les champs facultatifs ne servent qu'au zip brut). Avertissements par `import://warning`. Un `.mrpack` est reconnu auprès de Modrinth par son SHA-1 (meilleur effort, borné à 20 s, silencieux hors ligne) : s'il est connu, `Instance.pack` reçoit son projet et sa version, sinon `pack` reste absent et l'import réussit quand même.
+/// Importe un .mrpack, un zip CurseForge ou un zip brut (les champs facultatifs ne servent qu'au zip brut). Avertissements par `import://warning` : mods introuvables (`missing`) et fichiers du pack écartés par sécurité sans faire échouer l'import (`skipped` : exécutables, noms interdits, dossiers non gérés ; `..`, chemin absolu et lien symbolique restent refusés). Un `.mrpack` est reconnu auprès de Modrinth par son SHA-1 (meilleur effort, borné à 20 s, silencieux hors ligne) : s'il est connu, `Instance.pack` reçoit son projet et sa version, sinon `pack` reste absent et l'import réussit quand même.
 #[tauri::command(rename_all = "snake_case")]
 #[specta::specta(rename_all = "snake_case")]
 pub async fn instances_import_mrpack(

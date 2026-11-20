@@ -105,6 +105,9 @@ pub struct MrpackIndex {
     pub minecraft: String,
     pub loader: LoaderSpec,
     pub files: Vec<MrpackFile>,
+    /// Fichiers de l'index refusés par la politique de chemins (extension exécutable, dossier non géré…) : ni
+    /// téléchargés ni installés, listés avec leur raison (`chemin (raison)`).
+    pub skipped: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -192,8 +195,21 @@ pub fn has_dangerous_ext(name: &str) -> bool {
     }
 }
 
-/// Valide un chemin relatif du pack (séparateur `/` uniquement). Retourne le premier segment.
-fn validate_rel(path: &str) -> Result<&str> {
+/// Verdict sur un chemin relatif du pack.
+#[derive(Debug, PartialEq, Eq)]
+enum PathCheck<'a> {
+    /// Chemin sûr ; porte son premier segment.
+    Ok(&'a str),
+    /// Chemin refusé par la politique mais sans intention d'évasion : l'entrée est écartée (jamais écrite) et listée
+    /// avec cette raison, l'import continue.
+    Skip(&'static str),
+}
+
+/// Classe un chemin relatif du pack. `Err` seulement pour une tentative d'évasion (chemin vide ou absolu, segment
+/// `..` quel que soit le séparateur, `/` ou `\`) : le pack entier est alors refusé. Tout autre défaut (extension
+/// exécutable, `:`, caractère de contrôle, segment vide, `.` ou finissant par `.` ou espace, antislash) donne `Skip` :
+/// une entrée écartée n'est jamais écrite sur le disque, donc la tolérance reste sûre.
+fn check_rel(path: &str) -> Result<PathCheck<'_>> {
     let bad = |why: &str| invalid(format!("chemin du pack refusé ({why}) : {path:?}"));
     if path.is_empty() {
         return Err(bad("vide"));
@@ -201,35 +217,64 @@ fn validate_rel(path: &str) -> Result<&str> {
     if path.starts_with('/') {
         return Err(bad("absolu"));
     }
+    if path.split(['/', '\\']).any(|seg| seg == "..") {
+        return Err(bad("segment '..'"));
+    }
     if path.contains('\\') {
-        return Err(bad("antislash"));
+        return Ok(PathCheck::Skip("antislash dans le nom"));
     }
     if path.contains(':') {
-        return Err(bad("lettre de lecteur ou flux"));
+        return Ok(PathCheck::Skip("lettre de lecteur ou flux"));
     }
     if path.chars().any(|c| c.is_control()) {
-        return Err(bad("caractère de contrôle"));
+        return Ok(PathCheck::Skip("caractère de contrôle"));
     }
     for seg in path.split('/') {
-        if seg.is_empty() || seg == "." || seg == ".." {
-            return Err(bad("segment vide, '.' ou '..'"));
+        if seg.is_empty() || seg == "." {
+            return Ok(PathCheck::Skip("segment vide ou '.'"));
         }
         if seg.ends_with('.') || seg.ends_with(' ') {
-            return Err(bad("segment finissant par '.' ou espace"));
+            return Ok(PathCheck::Skip("nom finissant par '.' ou espace"));
         }
     }
     if has_dangerous_ext(path) {
-        return Err(bad("extension exécutable"));
+        return Ok(PathCheck::Skip("extension exécutable"));
     }
-    Ok(path.split('/').next().unwrap_or(path))
+    Ok(PathCheck::Ok(path.split('/').next().unwrap_or(path)))
 }
 
-fn validate_file_path(path: &str) -> Result<()> {
-    let first = validate_rel(path)?;
-    if !path.contains('/') || !FILE_DIRS.contains(&first) {
-        return Err(invalid(format!("chemin du pack hors des dossiers autorisés ({}) : {path:?}", FILE_DIRS.join(", "))));
+/// Variante stricte de `check_rel` : un `Skip` devient une erreur (chemin qui ne peut pas être écarté, comme le
+/// dossier d'overrides déclaré par un manifeste).
+fn validate_rel(path: &str) -> Result<&str> {
+    match check_rel(path)? {
+        PathCheck::Ok(first) => Ok(first),
+        PathCheck::Skip(why) => Err(invalid(format!("chemin du pack refusé ({why}) : {path:?}"))),
     }
-    Ok(())
+}
+
+/// Comme `check_rel`, pour un fichier de l'index : il doit en plus se trouver dans un des `FILE_DIRS`.
+fn check_file_path(path: &str) -> Result<PathCheck<'_>> {
+    Ok(match check_rel(path)? {
+        PathCheck::Ok(first) if path.contains('/') && FILE_DIRS.contains(&first) => PathCheck::Ok(first),
+        PathCheck::Ok(_) => PathCheck::Skip("dossier non géré"),
+        skip => skip,
+    })
+}
+
+/// Nombre maximal de fichiers ignorés rapportés (un pack serveur peut en embarquer des milliers).
+const MAX_SKIPPED_REPORTED: usize = 200;
+
+/// Ligne lisible d'un fichier ignoré : `chemin (raison)`.
+fn skipped_line(path: &str, why: &str) -> String {
+    format!("{path} ({why})")
+}
+
+/// Trie, dédoublonne et plafonne la liste des fichiers ignorés.
+fn finish_skipped(mut list: Vec<String>) -> Vec<String> {
+    list.sort();
+    list.dedup();
+    list.truncate(MAX_SKIPPED_REPORTED);
+    list
 }
 
 fn check_url(url: &str, opts: &ImportOptions) -> Result<()> {
@@ -306,9 +351,13 @@ fn parse_index_bytes(bytes: &[u8]) -> Result<MrpackIndex> {
     }
     let loader = loader_from(&raw.dependencies)?;
     let mut files = Vec::with_capacity(raw.files.len());
+    let mut skipped = Vec::new();
     let mut seen = HashSet::new();
     for f in raw.files {
-        validate_file_path(&f.path)?;
+        if let PathCheck::Skip(why) = check_file_path(&f.path)? {
+            skipped.push(skipped_line(&f.path, why));
+            continue;
+        }
         if !seen.insert(f.path.to_ascii_lowercase()) {
             return Err(invalid(format!("chemin dupliqué dans le pack : {:?}", f.path)));
         }
@@ -331,7 +380,7 @@ fn parse_index_bytes(bytes: &[u8]) -> Result<MrpackIndex> {
             provenance,
         });
     }
-    Ok(MrpackIndex { name: raw.name, version_id: raw.version_id, minecraft, loader, files })
+    Ok(MrpackIndex { name: raw.name, version_id: raw.version_id, minecraft, loader, files, skipped })
 }
 
 /// Lit et valide `modrinth.index.json`.
@@ -360,9 +409,19 @@ struct OverrideEntry {
     rel: String,
 }
 
+/// Résultat de la planification : les entrées à extraire et celles écartées (avec leur raison).
+struct OverridePlan {
+    entries: Vec<OverrideEntry>,
+    skipped: Vec<String>,
+}
+
 /// Valide toutes les entrées d'overrides (zip-slip, extensions, bombe) sans rien écrire.
-/// Retourne les entrées dans l'ordre d'application (`overrides/` puis `client-overrides/`).
-fn plan_overrides(archive: &mut ZipArchive<File>, opts: &ImportOptions, layout: &Layout) -> Result<Vec<OverrideEntry>> {
+/// Retourne les entrées dans l'ordre d'application (`overrides/` puis `client-overrides/`). Une entrée refusée par la
+/// politique de chemins (extension exécutable, nom interdit) est écartée et listée ; l'évasion (`..`, chemin absolu),
+/// le lien symbolique et la bombe de décompression font échouer l'import. Une entrée écartée ne compte pas dans les
+/// limites de taille : elle n'est jamais extraite.
+fn plan_overrides(archive: &mut ZipArchive<File>, opts: &ImportOptions, layout: &Layout) -> Result<OverridePlan> {
+    let mut skipped = Vec::new();
     let mut common = Vec::new();
     let mut client = Vec::new();
     let mut total: u64 = 0;
@@ -387,12 +446,17 @@ fn plan_overrides(archive: &mut ZipArchive<File>, opts: &ImportOptions, layout: 
         let is_dir = name.ends_with('/');
         let rel = prefix.trim_end_matches('/');
         if is_dir {
+            // Un dossier au nom refusé est simplement ignoré : ses fichiers sont revérifiés un à un (le chemin complet
+            // porte le même segment) et écartés à leur tour.
             if !rel.is_empty() {
-                validate_rel(rel)?;
+                check_rel(rel)?;
             }
             continue;
         }
-        validate_rel(rel)?;
+        if let PathCheck::Skip(why) = check_rel(rel)? {
+            skipped.push(skipped_line(rel, why));
+            continue;
+        }
         let size = e.size();
         let comp = e.compressed_size();
         if size >= 1024 * 1024 && comp > 0 && size / comp > opts.max_ratio {
@@ -410,7 +474,7 @@ fn plan_overrides(archive: &mut ZipArchive<File>, opts: &ImportOptions, layout: 
         }
     }
     common.extend(client);
-    Ok(common)
+    Ok(OverridePlan { entries: common, skipped })
 }
 
 fn extract_overrides(
@@ -502,7 +566,8 @@ async fn fetch_file(file: &MrpackFile, store_root: &Path, index: &StoreIndex, dl
     Err(with_file_ctx(&file.path, last))
 }
 
-/// Importe un `.mrpack` : crée l'instance, télécharge et installe les fichiers, extrait les overrides.
+/// Importe un `.mrpack` : crée l'instance, télécharge et installe les fichiers, extrait les overrides. Les fichiers
+/// refusés par la politique de chemins sont écartés et listés dans `ImportReport::skipped`.
 #[allow(clippy::too_many_arguments)]
 pub async fn import(
     zip_path: &Path,
@@ -512,7 +577,7 @@ pub async fn import(
     opts: &ImportOptions,
     progress: Option<FilesProgress>,
     cancel: Arc<AtomicBool>,
-) -> Result<Instance> {
+) -> Result<ImportReport> {
     let mut archive = open_zip(zip_path)?;
     let bytes = read_index_json(&mut archive)?;
     let pack = parse_index_bytes(&bytes)?;
@@ -521,7 +586,7 @@ pub async fn import(
             check_url(u, opts)?;
         }
     }
-    import_pack(pack, archive, &Layout::mrpack(), instances, store_root, index, opts, progress, cancel).await.map(|(i, _)| i)
+    import_pack(pack, archive, &Layout::mrpack(), instances, store_root, index, opts, progress, cancel).await
 }
 
 /// Crée l'instance décrite par `pack`, installe ses fichiers puis extrait les overrides de `layout`.
@@ -536,8 +601,8 @@ async fn import_pack(
     opts: &ImportOptions,
     progress: Option<FilesProgress>,
     cancel: Arc<AtomicBool>,
-) -> Result<(Instance, Vec<String>)> {
-    let plan = plan_overrides(&mut archive, opts, layout)?;
+) -> Result<ImportReport> {
+    let OverridePlan { entries: plan, skipped: skipped_overrides } = plan_overrides(&mut archive, opts, layout)?;
     if cancel.load(Ordering::SeqCst) {
         return Err(Error::Cancelled);
     }
@@ -551,7 +616,11 @@ async fn import_pack(
     let mut missing: Vec<String> = Vec::new();
     let res = run_import(&instance, &pack, &mut archive, &plan, instances, store_root, index, opts, &progress, &cancel, &mut installed, &mut missing).await;
     match res {
-        Ok(()) => instances.get(&instance.id).map(|i| (i, missing)),
+        Ok(()) => instances.get(&instance.id).map(|instance| {
+            let mut skipped = pack.skipped;
+            skipped.extend(skipped_overrides);
+            ImportReport { instance, missing, skipped: finish_skipped(skipped) }
+        }),
         Err(e) => {
             for sha in &installed {
                 let _ = index.release_ref(sha);
@@ -724,12 +793,15 @@ fn cf_loader(m: &CfMinecraft) -> Result<LoaderSpec> {
     Ok(LoaderSpec { loader, version: version.to_string() })
 }
 
-/// Résultat d'un import CurseForge : l'instance et les mods qu'on n'a pas pu récupérer.
+/// Résultat d'un import : l'instance, les mods qu'on n'a pas pu récupérer et les fichiers du pack écartés.
 #[derive(Debug, Clone)]
-pub struct CfImportResult {
+pub struct ImportReport {
     pub instance: Instance,
-    /// Descriptions lisibles des mods manquants (nom de fichier, ou `projet X / fichier Y`).
+    /// Mods CurseForge non récupérés (nom de fichier, ou `projet X / fichier Y`).
     pub missing: Vec<String>,
+    /// Fichiers du pack écartés par sécurité, un par ligne `chemin (raison)` : extension exécutable, nom
+    /// interdit, dossier non géré. Triés, sans doublon, plafonnés à `MAX_SKIPPED_REPORTED`.
+    pub skipped: Vec<String>,
 }
 
 /// Importe un zip CurseForge SANS clé API. Les `.jar` déjà dans les overrides ne sont pas
@@ -746,7 +818,7 @@ pub async fn import_curseforge(
     opts: &ImportOptions,
     progress: Option<FilesProgress>,
     cancel: Arc<AtomicBool>,
-) -> Result<CfImportResult> {
+) -> Result<ImportReport> {
     let mut archive = open_zip(zip_path)?;
     let m = read_cf_manifest(&mut archive).ok_or_else(|| invalid("manifest.json CurseForge invalide"))?;
     let loader = cf_loader(&m.minecraft)?;
@@ -766,6 +838,7 @@ pub async fn import_curseforge(
     // Beaucoup de petits fichiers : la latence domine, on parallélise davantage (résolution et téléchargement).
     opts.concurrency = opts.concurrency.max(16);
     let mut missing: Vec<String> = Vec::new();
+    let mut skipped: Vec<String> = Vec::new();
     let mut files = Vec::with_capacity(entries.len());
     let mut seen_paths = HashSet::new();
     // Avec une clé de développeur : une seule requête résout tous les mods (URL + SHA-1). Sinon, ou pour
@@ -798,8 +871,11 @@ pub async fn import_curseforge(
                 check_url(&d.url, opts_ref)?;
                 let dir = if d.file_name.to_ascii_lowercase().ends_with(".zip") { "resourcepacks" } else { "mods" };
                 let path = format!("{dir}/{}", d.file_name);
-                validate_file_path(&path)?;
-                Ok::<_, Error>((path, d.url, sha1, size))
+                // Un nom de fichier refusé par la politique de chemins n'est pas un mod « introuvable » : il est écarté.
+                if let PathCheck::Skip(why) = check_file_path(&path)? {
+                    return Ok::<_, Error>(Err(skipped_line(&path, why)));
+                }
+                Ok::<_, Error>(Ok((path, d.url, sha1, size)))
             }
             .await;
             ((p, f), r)
@@ -812,7 +888,11 @@ pub async fn import_curseforge(
                 tracing::warn!("mod CurseForge {p}/{f} non résolu : {e}");
                 missing.push(format!("projet {p} / fichier {f}"));
             }
-            Ok((path, url, sha1, size)) => {
+            Ok(Err(line)) => {
+                tracing::warn!("fichier CurseForge {p}/{f} écarté : {line}");
+                skipped.push(line);
+            }
+            Ok(Ok((path, url, sha1, size))) => {
                 if seen_paths.insert(path.to_ascii_lowercase()) {
                     let unverified = sha1.is_empty();
                     let provenance = Some(Provenance { source: "curseforge".into(), id: p.to_string() });
@@ -825,11 +905,12 @@ pub async fn import_curseforge(
     if cancel.load(Ordering::SeqCst) {
         return Err(Error::Cancelled);
     }
-    let pack = MrpackIndex { name: m.name, version_id: String::new(), minecraft: m.minecraft.version.trim().to_string(), loader, files };
+    let pack = MrpackIndex { name: m.name, version_id: String::new(), minecraft: m.minecraft.version.trim().to_string(), loader, files, skipped };
     let layout = Layout { common: format!("{overrides}/"), client: None };
-    let (instance, dl_missing) = import_pack(pack, archive, &layout, instances, store_root, index, &opts, progress, cancel).await?;
-    missing.extend(dl_missing);
-    Ok(CfImportResult { instance, missing })
+    let mut report = import_pack(pack, archive, &layout, instances, store_root, index, &opts, progress, cancel).await?;
+    missing.extend(std::mem::take(&mut report.missing));
+    report.missing = missing;
+    Ok(report)
 }
 
 /// Dossier racine du contenu d'un zip générique, avec `/` final (vide si le contenu est à la racine).
@@ -877,7 +958,8 @@ fn plain_root(archive: &mut ZipArchive<File>) -> String {
     root
 }
 
-/// Importe un zip sans métadonnées : son contenu est extrait tel quel dans l'instance.
+/// Importe un zip sans métadonnées : son contenu est extrait tel quel dans l'instance (hors fichiers écartés par
+/// la politique de chemins, listés dans `ImportReport::skipped`).
 pub async fn import_plain(
     zip_path: &Path,
     spec: &PlainSpec,
@@ -886,7 +968,7 @@ pub async fn import_plain(
     index: &StoreIndex,
     opts: &ImportOptions,
     cancel: Arc<AtomicBool>,
-) -> Result<Instance> {
+) -> Result<ImportReport> {
     let mut archive = open_zip(zip_path)?;
     let root = plain_root(&mut archive);
     let pack = MrpackIndex {
@@ -895,9 +977,10 @@ pub async fn import_plain(
         minecraft: spec.minecraft.clone(),
         loader: spec.loader.clone(),
         files: Vec::new(),
+        skipped: Vec::new(),
     };
     let layout = Layout { common: root, client: None };
-    import_pack(pack, archive, &layout, instances, store_root, index, opts, None, cancel).await.map(|(i, _)| i)
+    import_pack(pack, archive, &layout, instances, store_root, index, opts, None, cancel).await
 }
 
 #[cfg(test)]
@@ -969,8 +1052,12 @@ mod tests {
         }
     }
 
-    async fn run(e: &Env, pack: &Path, o: &ImportOptions) -> Result<Instance> {
+    async fn run_report(e: &Env, pack: &Path, o: &ImportOptions) -> Result<ImportReport> {
         import(pack, &e.instances, &e.store, &e.idx, o, None, Arc::new(AtomicBool::new(false))).await
+    }
+
+    async fn run(e: &Env, pack: &Path, o: &ImportOptions) -> Result<Instance> {
+        run_report(e, pack, o).await.map(|r| r.instance)
     }
 
     fn std_files(e: &Env) -> Vec<serde_json::Value> {
@@ -988,7 +1075,7 @@ mod tests {
         let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
         let s2 = seen.clone();
         let prog: FilesProgress = Arc::new(move |d, t| s2.lock().unwrap().push((d, t)));
-        let inst = import(&pack, &e.instances, &e.store, &e.idx, &opts(), Some(prog), Arc::new(AtomicBool::new(false))).await.unwrap();
+        let inst = import(&pack, &e.instances, &e.store, &e.idx, &opts(), Some(prog), Arc::new(AtomicBool::new(false))).await.unwrap().instance;
         assert_eq!(inst.name, "Mon Pack");
         assert_eq!(inst.minecraft, "1.21.1");
         assert_eq!(inst.loader, LoaderSpec { loader: Loader::Fabric, version: "0.16.5".into() });
@@ -1057,16 +1144,52 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bad_pack_paths_rejected() {
+    async fn escaping_pack_paths_rejected() {
         let e = env().await;
         let url = format!("{}/a.jar", e.server.uri());
-        for bad in ["../evil.jar", "mods/../../evil.jar", "/etc/x.jar", "mods\\a.jar", "C:/x.jar", "mods/x.exe", "saves/x.dat", "a.jar", "mods//a.jar"] {
+        for bad in ["../evil.jar", "mods/../../evil.jar", "/etc/x.jar", "mods\\..\\evil.jar", "mods/a/../../../x.jar", ""] {
             let idxj = index_json(serde_json::json!({"minecraft": "1.21.1"}), vec![file_json(bad, &url, A)]);
             let pack = build_zip(e.tmp.path(), &[(INDEX_NAME, &idxj)]);
             assert!(matches!(run(&e, &pack, &opts()).await, Err(Error::Invalid(_))), "{bad}");
             assert!(parse_index(&pack).is_err(), "{bad}");
         }
         assert!(e.instances.list().is_empty());
+    }
+
+    #[tokio::test]
+    async fn refused_index_files_are_skipped_and_reported() {
+        let e = env().await;
+        let url = format!("{}/a.jar", e.server.uri());
+        let refused = ["mods\\a.jar", "C:/x.jar", "mods/x.exe", "saves/x.dat", "a.jar", "mods//a.jar", "emotes/a.png", "config/run.sh"];
+        let mut files = vec![file_json("mods/a.jar", &url, A)];
+        files.extend(refused.iter().map(|p| file_json(p, &url, A)));
+        let idxj = index_json(serde_json::json!({"minecraft": "1.21.1"}), files);
+        let pack = build_zip(e.tmp.path(), &[(INDEX_NAME, &idxj)]);
+        let parsed = parse_index(&pack).unwrap();
+        assert_eq!(parsed.files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(), ["mods/a.jar"]);
+        assert_eq!(parsed.skipped.len(), refused.len(), "{:?}", parsed.skipped);
+        let r = run_report(&e, &pack, &opts()).await.unwrap();
+        let g = e.instances.game_dir(&r.instance.id).unwrap();
+        assert_eq!(std::fs::read(g.join("mods/a.jar")).unwrap(), A);
+        assert!(!g.join("mods/x.exe").exists() && !g.join("emotes").exists() && !g.join("saves").exists() && !g.join("config/run.sh").exists());
+        assert!(r.missing.is_empty());
+        assert_eq!(r.skipped.len(), refused.len());
+        assert!(r.skipped.contains(&"mods/x.exe (extension exécutable)".to_string()), "{:?}", r.skipped);
+        assert!(r.skipped.contains(&"emotes/a.png (dossier non géré)".to_string()), "{:?}", r.skipped);
+        assert!(r.skipped.contains(&"C:/x.jar (lettre de lecteur ou flux)".to_string()), "{:?}", r.skipped);
+    }
+
+    #[tokio::test]
+    async fn duplicate_and_unverifiable_files_still_rejected() {
+        let e = env().await;
+        let url = format!("{}/a.jar", e.server.uri());
+        let idxj = index_json(serde_json::json!({"minecraft": "1.21.1"}), vec![file_json("mods/a.jar", &url, A), file_json("mods/A.jar", &url, A)]);
+        let pack = build_zip(e.tmp.path(), &[(INDEX_NAME, &idxj)]);
+        assert!(matches!(parse_index(&pack), Err(Error::Invalid(_))));
+        // Un fichier écarté n'est pas contrôlé plus loin : pas d'erreur pour une URL absente.
+        let idxj = index_json(serde_json::json!({"minecraft": "1.21.1"}), vec![serde_json::json!({"path": "mods/x.exe", "hashes": {}, "downloads": []})]);
+        let pack = build_zip(e.tmp.path(), &[(INDEX_NAME, &idxj)]);
+        assert_eq!(parse_index(&pack).unwrap().skipped.len(), 1);
     }
 
     #[test]
@@ -1084,15 +1207,80 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dangerous_and_slip_overrides_rejected() {
+    async fn slip_overrides_rejected() {
         let e = env().await;
         let idxj = index_json(serde_json::json!({"minecraft": "1.21.1"}), vec![]);
-        for bad in ["overrides/run.exe", "overrides/scripts/x.BAT", "overrides/a.dll", "overrides/p.ps1", "overrides/c.cmd", "overrides/evil.hta", "overrides/mods/x.reg", "overrides/a/p.PIF", "overrides/s.cpl", "overrides/w.wsf", "overrides/j.jse", "overrides/m.msc", "overrides/x.desktop", "overrides/App.AppImage", "overrides/../evil.txt", "overrides/a/../../evil.txt", "overrides/a\\..\\evil.txt", "overrides//abs.txt", "overrides/C:evil.txt"] {
-            let pack = build_zip(e.tmp.path(), &[(INDEX_NAME, &idxj), (bad, b"x")]);
+        for bad in ["overrides/../evil.txt", "overrides/a/../../evil.txt", "overrides/a\\..\\evil.txt", "overrides//abs.txt", "client-overrides/../evil.txt"] {
+            let pack = build_zip(e.tmp.path(), &[(INDEX_NAME, &idxj), ("overrides/config/ok.toml", b"a=1"), (bad, b"x")]);
             assert!(matches!(run(&e, &pack, &opts()).await, Err(Error::Invalid(_))), "{bad}");
         }
         assert!(e.instances.list().is_empty());
         assert!(!e.tmp.path().join("evil.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn symlink_override_rejected() {
+        let e = env().await;
+        let idxj = index_json(serde_json::json!({"minecraft": "1.21.1"}), vec![]);
+        let p = e.tmp.path().join("link.mrpack");
+        let mut w = zip::ZipWriter::new(File::create(&p).unwrap());
+        w.start_file(INDEX_NAME, SimpleFileOptions::default()).unwrap();
+        w.write_all(&idxj).unwrap();
+        w.add_symlink("overrides/config/link", "/etc/passwd", SimpleFileOptions::default()).unwrap();
+        w.finish().unwrap();
+        assert!(matches!(run(&e, &p, &opts()).await, Err(Error::Invalid(ref m)) if m.contains("lien symbolique")));
+        assert!(e.instances.list().is_empty());
+    }
+
+    #[tokio::test]
+    async fn dangerous_overrides_are_skipped_and_reported() {
+        let e = env().await;
+        let idxj = index_json(serde_json::json!({"minecraft": "1.21.1"}), vec![]);
+        let refused = [
+            "overrides/start.sh", "overrides/a/x.DLL", "overrides/C:evil.txt", "overrides/run.exe", "overrides/scripts/x.BAT", "overrides/p.ps1",
+            "overrides/evil.hta", "overrides/App.AppImage", "overrides/bad /x.txt", "client-overrides/launch.cmd",
+        ];
+        let mut entries: Vec<(&str, &[u8])> = vec![(INDEX_NAME, &idxj), ("overrides/config/ok.toml", b"a=1"), ("client-overrides/options.txt", b"fov:70")];
+        entries.extend(refused.iter().map(|n| (*n, b"x" as &[u8])));
+        let pack = build_zip(e.tmp.path(), &entries);
+        let r = run_report(&e, &pack, &opts()).await.unwrap();
+        let g = e.instances.game_dir(&r.instance.id).unwrap();
+        assert_eq!(std::fs::read(g.join("config/ok.toml")).unwrap(), b"a=1");
+        assert_eq!(std::fs::read(g.join("options.txt")).unwrap(), b"fov:70");
+        for gone in ["start.sh", "a/x.DLL", "C:evil.txt", "run.exe", "scripts/x.BAT", "p.ps1", "evil.hta", "App.AppImage", "bad /x.txt", "launch.cmd"] {
+            assert!(!g.join(gone).exists(), "{gone} a été écrit");
+        }
+        assert_eq!(r.skipped.len(), refused.len(), "{:?}", r.skipped);
+        assert!(r.skipped.contains(&"start.sh (extension exécutable)".to_string()), "{:?}", r.skipped);
+        assert!(r.skipped.contains(&"a/x.DLL (extension exécutable)".to_string()), "{:?}", r.skipped);
+        assert!(r.skipped.contains(&"C:evil.txt (lettre de lecteur ou flux)".to_string()), "{:?}", r.skipped);
+        assert!(r.skipped.windows(2).all(|w| w[0] < w[1]), "triés et sans doublon");
+        assert!(r.missing.is_empty());
+    }
+
+    #[tokio::test]
+    async fn skipped_override_does_not_count_in_zip_bomb_limits() {
+        let e = env().await;
+        let idxj = index_json(serde_json::json!({"minecraft": "1.21.1"}), vec![]);
+        // 4 Mio de zéros : très compressible, rejeté sous un nom normal, mais écarté (jamais extrait) sous un nom refusé.
+        let zeros = vec![0u8; 4 * 1024 * 1024];
+        let pack = build_zip(e.tmp.path(), &[(INDEX_NAME, &idxj), ("overrides/big.bin", &zeros)]);
+        assert!(run(&e, &pack, &opts()).await.is_err());
+        let pack = build_zip(e.tmp.path(), &[(INDEX_NAME, &idxj), ("overrides/big.sh", &zeros)]);
+        let r = run_report(&e, &pack, &opts()).await.unwrap();
+        assert_eq!(r.skipped, ["big.sh (extension exécutable)"]);
+    }
+
+    #[tokio::test]
+    async fn skipped_list_is_capped() {
+        let e = env().await;
+        let idxj = index_json(serde_json::json!({"minecraft": "1.21.1"}), vec![]);
+        let names: Vec<String> = (0..MAX_SKIPPED_REPORTED + 30).map(|i| format!("overrides/s/{i:04}.sh")).collect();
+        let mut entries: Vec<(&str, &[u8])> = vec![(INDEX_NAME, &idxj)];
+        entries.extend(names.iter().map(|n| (n.as_str(), b"x" as &[u8])));
+        let pack = build_zip(e.tmp.path(), &entries);
+        let r = run_report(&e, &pack, &opts()).await.unwrap();
+        assert_eq!(r.skipped.len(), MAX_SKIPPED_REPORTED);
     }
 
     #[tokio::test]
@@ -1163,8 +1351,12 @@ mod tests {
         PlainSpec { name: "Zip Pack".into(), minecraft: "1.20.1".into(), loader: LoaderSpec { loader: Loader::Forge, version: "47.2.0".into() } }
     }
 
-    async fn run_plain(e: &Env, pack: &Path) -> Result<Instance> {
+    async fn run_plain_report(e: &Env, pack: &Path) -> Result<ImportReport> {
         import_plain(pack, &plain_spec(), &e.instances, &e.store, &e.idx, &opts(), Arc::new(AtomicBool::new(false))).await
+    }
+
+    async fn run_plain(e: &Env, pack: &Path) -> Result<Instance> {
+        run_plain_report(e, pack).await.map(|r| r.instance)
     }
 
     #[tokio::test]
@@ -1185,16 +1377,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn plain_zip_at_root_and_dangerous_rejected() {
+    async fn plain_zip_at_root_and_dangerous_skipped() {
         let e = env().await;
         let pack = build_zip(e.tmp.path(), &[("mods/a.jar", A), ("options.txt", b"fov:70")]);
         let inst = run_plain(&e, &pack).await.unwrap();
         let g = e.instances.game_dir(&inst.id).unwrap();
         assert_eq!(std::fs::read(g.join("mods/a.jar")).unwrap(), A);
         assert_eq!(std::fs::read(g.join("options.txt")).unwrap(), b"fov:70");
-        let bad = build_zip(e.tmp.path(), &[("mods/a.jar", A), ("evil.exe", b"MZ")]);
-        assert!(run_plain(&e, &bad).await.is_err());
+        let bad = build_zip(e.tmp.path(), &[("mods/a.jar", A), ("evil.exe", b"MZ"), ("../evil.txt", b"x")]);
+        assert!(run_plain(&e, &bad).await.is_err(), "l'évasion reste refusée");
         assert_eq!(e.instances.list().len(), 1, "pas d'instance en trop après échec");
+        let bad = build_zip(e.tmp.path(), &[("mods/a.jar", A), ("evil.exe", b"MZ")]);
+        let r = run_plain_report(&e, &bad).await.unwrap();
+        let g = e.instances.game_dir(&r.instance.id).unwrap();
+        assert!(g.join("mods/a.jar").exists() && !g.join("evil.exe").exists());
+        assert_eq!(r.skipped, ["evil.exe (extension exécutable)"]);
     }
 
     fn cf_manifest(files: serde_json::Value) -> Vec<u8> {
@@ -1213,7 +1410,7 @@ mod tests {
             .await;
     }
 
-    async fn run_cf(e: &Env, pack: &Path) -> Result<CfImportResult> {
+    async fn run_cf(e: &Env, pack: &Path) -> Result<ImportReport> {
         let cf = CfResolver::with_base_url(e.server.uri());
         import_curseforge(pack, &cf, &e.instances, &e.store, &e.idx, &opts(), None, Arc::new(AtomicBool::new(false))).await
     }
@@ -1260,6 +1457,23 @@ mod tests {
         miss.sort();
         assert_eq!(miss, vec!["gone.jar", "projet 2 / fichier 2", "projet 3 / fichier 3"]);
         assert_eq!(e.instances.list().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn curseforge_refused_file_name_and_script_override_are_skipped() {
+        let e = env().await;
+        Mock::given(method("GET")).and(path("/files/0/1/ok.jar")).respond_with(ResponseTemplate::new(200).set_body_bytes(b"ok".to_vec())).mount(&e.server).await;
+        cf_redirect(&e, 1, 1, "/files/0/1/ok.jar").await;
+        cf_redirect(&e, 5, 5, "/files/0/5/evil.exe").await;
+        let manifest = cf_manifest(serde_json::json!([{"projectID": 1, "fileID": 1}, {"projectID": 5, "fileID": 5}]));
+        let pack = build_zip(e.tmp.path(), &[("manifest.json", &manifest), ("overrides/start.sh", b"#!/bin/sh"), ("overrides/config/y.toml", b"b=2")]);
+        let r = run_cf(&e, &pack).await.unwrap();
+        let g = e.instances.game_dir(&r.instance.id).unwrap();
+        assert_eq!(std::fs::read(g.join("mods/ok.jar")).unwrap(), b"ok");
+        assert_eq!(std::fs::read(g.join("config/y.toml")).unwrap(), b"b=2");
+        assert!(!g.join("start.sh").exists() && !g.join("mods/evil.exe").exists());
+        assert!(r.missing.is_empty(), "{:?}", r.missing);
+        assert_eq!(r.skipped, ["mods/evil.exe (extension exécutable)", "start.sh (extension exécutable)"]);
     }
 
     #[tokio::test]
@@ -1369,9 +1583,11 @@ mod tests {
                 }
             })
             .collect();
-        let pack = MrpackIndex { name: "Mon Pack".into(), version_id: String::new(), minecraft: "1.20.1".into(), loader: LoaderSpec { loader: Loader::Fabric, version: "0.16.5".into() }, files };
+        let pack = MrpackIndex { name: "Mon Pack".into(), version_id: String::new(), minecraft: "1.20.1".into(), loader: LoaderSpec { loader: Loader::Fabric, version: "0.16.5".into() }, files, skipped: vec![] };
         let archive = open_zip(&zip)?;
-        import_pack(pack, archive, &Layout::mrpack(), &e.instances, &e.store, &e.idx, &opts(), None, Arc::new(AtomicBool::new(cancel))).await
+        import_pack(pack, archive, &Layout::mrpack(), &e.instances, &e.store, &e.idx, &opts(), None, Arc::new(AtomicBool::new(cancel)))
+            .await
+            .map(|r| (r.instance, r.missing))
     }
 
     #[tokio::test]

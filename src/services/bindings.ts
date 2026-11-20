@@ -36,7 +36,7 @@ export const commands = {
 	instancesList: (options?: InvokeOptions) => __TAURI_INVOKE<Instance_Serialize[]>("instances_list", undefined, options),
 	/**  Crée une instance vide. */
 	instancesCreate: (name: string, minecraft: string, loader: LoaderSpec, ramMb: number, options?: InvokeOptions) => __TAURI_INVOKE<Instance_Serialize>("instances_create", { name, minecraft, loader, ram_mb: ramMb }, options),
-	/**  Importe un .mrpack, un zip CurseForge ou un zip brut (les champs facultatifs ne servent qu'au zip brut). Avertissements par `import://warning`. Un `.mrpack` est reconnu auprès de Modrinth par son SHA-1 (meilleur effort, borné à 20 s, silencieux hors ligne) : s'il est connu, `Instance.pack` reçoit son projet et sa version, sinon `pack` reste absent et l'import réussit quand même. */
+	/**  Importe un .mrpack, un zip CurseForge ou un zip brut (les champs facultatifs ne servent qu'au zip brut). Avertissements par `import://warning` : mods introuvables (`missing`) et fichiers du pack écartés par sécurité sans faire échouer l'import (`skipped` : exécutables, noms interdits, dossiers non gérés ; `..`, chemin absolu et lien symbolique restent refusés). Un `.mrpack` est reconnu auprès de Modrinth par son SHA-1 (meilleur effort, borné à 20 s, silencieux hors ligne) : s'il est connu, `Instance.pack` reçoit son projet et sa version, sinon `pack` reste absent et l'import réussit quand même. */
 	instancesImportMrpack: (path: string, name: string | null, minecraft: string | null, loader: LoaderSpec | null, ramMb: number | null, options?: InvokeOptions) => __TAURI_INVOKE<Instance_Serialize>("instances_import_mrpack", { path, name, minecraft, loader, ram_mb: ramMb }, options),
 	/**  Lance l'instance. Progression par `launch://state`, sortie du jeu par `launch://log`. */
 	instancesLaunch: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("instances_launch", { id }, options),
@@ -298,6 +298,8 @@ export type BrowseInstallResult_Deserialize = {
 	/**  Noms des fichiers posés dans l'instance (modpack : vide). */
 	installed: string[],
 	missing: string[],
+	/**  Fichiers du modpack écartés par sécurité (exécutables, noms interdits, dossiers non gérés), avec leur raison. */
+	skipped: string[],
 };
 
 export type BrowseInstallResult_Serialize = {
@@ -305,6 +307,8 @@ export type BrowseInstallResult_Serialize = {
 	/**  Noms des fichiers posés dans l'instance (modpack : vide). */
 	installed: string[],
 	missing: string[],
+	/**  Fichiers du modpack écartés par sécurité (exécutables, noms interdits, dossiers non gérés), avec leur raison. */
+	skipped: string[],
 };
 
 export type BrowseKind = "modpack" | "mod" | "resourcepack" | "shader";

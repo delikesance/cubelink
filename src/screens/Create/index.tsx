@@ -95,7 +95,7 @@ export default function Create({ pickMrpack }: CreateProps = {}) {
     return () => { cancelled = true; };
   }, [services]);
 
-  useEffect(() => services.onImportWarning((e) => setImportWarning(e.missing)), [services]);
+  useEffect(() => services.onImportWarning((e) => setImportWarning(e)), [services]);
 
   const back = useBack("main");
   const backRef = useRef(back);

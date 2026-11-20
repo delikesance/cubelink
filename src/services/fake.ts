@@ -532,7 +532,8 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     },
     instancesImportMrpack: async (path) => {
       if (!/\.(mrpack|zip)$/i.test(path)) throw new Error("Fichier .mrpack ou .zip attendu.");
-      if (/manquant|missing/i.test(path)) emit(listeners.warning, { missing: ["sodium", "iris"] });
+      if (/manquant|missing/i.test(path)) emit(listeners.warning, { missing: ["sodium", "iris"], skipped: [] });
+      if (/ignore|skipped/i.test(path)) emit(listeners.warning, { missing: [], skipped: ["start.sh (extension exécutable)", "emotes/a.png (dossier non géré)"] });
       const inst: Instance = {
         ...noExtras, id: `inst-${instances.length + 1}`, name: "Pack importé", minecraft: "1.21.1",
         loader: { loader: "fabric", version: "0.16.5" }, ram_mb: 4096, mod_count: 12,
@@ -900,7 +901,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
         instances.push(inst);
         return {
           instance: { ...inst }, installed: [`${slug(hit.name)}.mrpack`],
-          missing: hit.source === "curseforge" ? ["mod-exclusif"] : [],
+          missing: hit.source === "curseforge" ? ["mod-exclusif"] : [], skipped: [],
         };
       }
       const inst = need(input.instance_id ?? instances[0]?.id ?? "");
@@ -911,7 +912,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
         if (!list.some((m) => m.file === file)) list.push({ file, enabled: true, size: 1_200_000, custom: false });
         syncCount(inst.id);
       }
-      return { instance: { ...inst }, installed: [file], missing: [] };
+      return { instance: { ...inst }, installed: [file], missing: [], skipped: [] };
     },
     browseCheck: async (source, id, kind, instanceId, versionId) => {
       const hit = HITS.find((h) => h.source === source && h.id === id && h.kind === kind);

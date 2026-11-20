@@ -21,7 +21,7 @@ function setup(over: Record<string, unknown> = {}, params: Record<string, string
     ...base,
     browseSearch: vi.fn(async (): Promise<BrowsePage> => ({ hits: [hit()], total: 1 })),
     browseVersions: vi.fn(async () => [version()]),
-    browseInstall: vi.fn(async () => ({ instance: inst, installed: ["a.jar"], missing: [] })),
+    browseInstall: vi.fn(async () => ({ instance: inst, installed: ["a.jar"], missing: [], skipped: [] })),
     browseCheck: vi.fn(async () => ({ installed: [], recommended: "v1", verdicts: [{ version_id: "v1", ok: true, problems: [] }], blockers: [] })),
     onBrowseProgress: vi.fn(() => () => {}),
     instancesList: vi.fn(async () => [inst]),
@@ -236,9 +236,11 @@ describe("Parcourir : fiche et installation", () => {
     await act(async () => { emit({ done: 1, total: 4, label: "Téléchargement de sodium.jar" }); });
     expect(screen.getByText("Téléchargement de sodium.jar")).toBeTruthy();
     expect(screen.getByRole("progressbar").getAttribute("aria-valuenow")).toBe("25");
-    await act(async () => { resolve({ instance: inst, installed: ["sodium.jar"], missing: ["lib.jar"] }); });
+    await act(async () => { resolve({ instance: inst, installed: ["sodium.jar"], missing: ["lib.jar"], skipped: ["run.sh (extension exécutable)"] }); });
     expect(await screen.findByText(/1 élément installé dans « Mon monde »/)).toBeTruthy();
     expect(screen.getByText("lib.jar")).toBeTruthy();
+    expect(screen.getByText(/1 fichier du pack a été ignoré par sécurité/)).toBeTruthy();
+    expect(screen.getByText("run.sh (extension exécutable)")).toBeTruthy();
     expect(svc.browseInstall).toHaveBeenCalledWith(expect.objectContaining({ kind: "mod", instance_id: "i1" }));
   });
 

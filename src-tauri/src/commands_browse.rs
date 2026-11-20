@@ -69,6 +69,8 @@ pub struct BrowseInstallResult {
     /// Noms des fichiers posés dans l'instance (modpack : vide).
     pub installed: Vec<String>,
     pub missing: Vec<String>,
+    /// Fichiers du modpack écartés par sécurité (exécutables, noms interdits, dossiers non gérés), avec leur raison.
+    pub skipped: Vec<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -166,7 +168,7 @@ impl AppState {
             .await
             .map_err(|e| user_msg(&e))?;
         let instance = self.instances.get(id).map_err(|e| user_msg(&e))?;
-        Ok(BrowseInstallResult { instance, installed: report.installed, missing: report.missing })
+        Ok(BrowseInstallResult { instance, installed: report.installed, missing: report.missing, skipped: Vec::new() })
     }
 
     async fn install_modpack(&self, p: &Providers, input: &BrowseInstallInput, dl: &DlOptions) -> Result<BrowseInstallResult, String> {
@@ -185,11 +187,11 @@ impl AppState {
         });
         let res = self.import_pack_file(&file.display().to_string(), None, None, None, input.ram_mb, Some(progress), Some(origin)).await;
         let _ = std::fs::remove_dir_all(&tmp);
-        let (instance, missing) = res?;
+        let (instance, notes) = res?;
         // Illustrations : meilleur effort, un échec n'affecte jamais l'installation. L'origine est déjà posée sur
         // l'instance (import_pack_file) : elles ne sont pas cherchées par nom.
         let instance = core_lib::art::try_apply_art(p, &self.instances, instance, input.source, &input.id).await;
-        Ok(BrowseInstallResult { instance, installed: Vec::new(), missing })
+        Ok(BrowseInstallResult { instance, installed: Vec::new(), missing: notes.missing, skipped: notes.skipped })
     }
 
     pub async fn mods_list(&self, instance_id: &str) -> Result<Vec<ModEntry>, String> {

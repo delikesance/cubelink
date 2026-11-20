@@ -398,6 +398,45 @@ pub fn effective_heads(g: &p2p_lib::hearth::version::VersionGraph, state: &Group
 // Le runtime
 // ---------------------------------------------------------------------------------------------------------
 
+/// Mémoire des têtes inconnues déjà tentées, par (groupe, pair). Sans elle, une tête qu'on n'arrive pas à rattraper
+/// (version d'un ex-membre, évincée, rejetée) relancerait le rattrapage à chaque `Hello` du pair.
+#[derive(Default)]
+struct UnknownMemo {
+    tried: HashMap<(GroupId, PeerKey), BTreeSet<VersionId>>,
+}
+
+impl UnknownMemo {
+    /// Borne par pair : au-delà, on repart de zéro plutôt que de grossir sans fin.
+    const MAX_PER_PEER: usize = 256;
+
+    /// Vrai si `unknown` contient une tête jamais tentée auprès de ce pair (et la note comme tentée). Un ensemble
+    /// vide, identique ou plus petit que ce qui a été tenté rend faux.
+    fn claim(&mut self, key: (GroupId, PeerKey), unknown: &BTreeSet<VersionId>) -> bool {
+        if unknown.is_empty() {
+            return false;
+        }
+        let tried = self.tried.entry(key).or_default();
+        if unknown.is_subset(tried) {
+            return false;
+        }
+        if tried.len() + unknown.len() > Self::MAX_PER_PEER {
+            tried.clear();
+        }
+        tried.extend(unknown.iter().copied());
+        true
+    }
+
+    /// Oublie ce pair (hors ligne, rattrapage en échec) : la prochaine tête inconnue sera retentée.
+    fn forget(&mut self, key: &(GroupId, PeerKey)) {
+        self.tried.remove(key);
+    }
+
+    /// Oublie tout un groupe (des opérations ont changé qui peut signer : une tête écartée peut devenir valide).
+    fn forget_group(&mut self, gid: &GroupId) {
+        self.tried.retain(|(g, _), _| g != gid);
+    }
+}
+
 pub struct HearthRuntime {
     me: PeerKey,
     identity: Arc<Identity>,
@@ -410,6 +449,8 @@ pub struct HearthRuntime {
     groups: Mutex<HashMap<GroupId, Arc<Mutex<Group>>>>,
     leases: Mutex<LeaseTable>,
     status: Mutex<HashMap<(GroupId, PeerKey), MemberStatus>>,
+    /// Têtes inconnues qu'on a déjà tenté de rattraper auprès de chaque pair : le rattrapage complet n'est pas relancé à chaque `Hello`.
+    unknown_tried: Mutex<UnknownMemo>,
     meta: Mutex<Meta>,
     invites: Mutex<Vec<PendingInvite>>,
     /// Invitations reçues (ami, secondes Unix) sur les dernières 24 h : quota par ami, même si elles sont écartées.
@@ -589,6 +630,7 @@ impl HearthRuntime {
             groups: Mutex::new(groups),
             leases: Mutex::new(LeaseTable::new()),
             status: Mutex::new(HashMap::new()),
+            unknown_tried: Mutex::new(UnknownMemo::default()),
             meta: Mutex::new(meta),
             invites: Mutex::new(Vec::new()),
             invite_log: Mutex::new(Vec::new()),
@@ -1078,6 +1120,7 @@ impl HearthRuntime {
         let ok = matches!(r, Ok(Ok(())));
         if !ok {
             lock(&self.status).entry((gid, key)).or_default().online = false;
+            lock(&self.unknown_tried).forget(&(gid, key));
         }
         ok
     }
@@ -1108,10 +1151,11 @@ impl HearthRuntime {
             let ops = conn.fetch_ops(&gid, seq).await.map_err(|e| e.to_string())?;
             self.apply_ops(gid, &ops)?;
         }
-        let missing = self.with_group(&gid, |g| st.heads.iter().any(|h| !g.graph().contains(h)))?;
-        if missing {
+        let missing = self.claim_unknown(&gid, &key, &st.heads);
+        if self.with_group(&gid, |g| st.heads.iter().any(|h| !g.graph().contains(h)))? {
             let after = self.with_group(&gid, |g| g.heads().iter().filter_map(|h| g.graph().get(h)).map(|v| v.header.number).min().unwrap_or(0))?;
-            let vs = conn.fetch_versions(&gid, after.saturating_sub(1)).await.map_err(|e| e.to_string())?;
+            let known = |id: &VersionId| self.with_group(&gid, |g| g.graph().contains(id)).unwrap_or(false);
+            let vs = conn.fetch_versions_reaching(&gid, after.saturating_sub(1), &st.heads, known, missing).await.map_err(|e| e.to_string())?;
             self.with_group(&gid, |g| g.add_versions(vs).map(|_| ()).map_err(|e| e.to_string()))??;
         }
         // Sa version = ce qu'il peut servir en entier : un en-tête sans contenu ne dit pas qu'il est « à jour ».
@@ -1142,12 +1186,37 @@ impl HearthRuntime {
 
     /// Reprend auprès de `key` les opérations et les versions qui nous manquent.
     pub async fn pull_from(self: &Arc<Self>, gid: GroupId, key: PeerKey) -> Result<(), String> {
+        self.pull_from_wanting(gid, key, &[], false).await
+    }
+
+    /// Les têtes de `wanted` qu'on ne connaît pas encore, et si c'est la première fois qu'on les demande à `key`
+    /// (alors le rattrapage peut aller jusqu'au repli complet de [`Self::pull_from_wanting`]).
+    fn claim_unknown(&self, gid: &GroupId, key: &PeerKey, wanted: &[VersionId]) -> bool {
+        let unknown: BTreeSet<VersionId> =
+            self.with_group(gid, |g| wanted.iter().filter(|h| !g.graph().contains(h)).copied().collect()).unwrap_or_default();
+        lock(&self.unknown_tried).claim((*gid, *key), &unknown)
+    }
+
+    /// Comme [`Self::pull_from`], en visant les têtes `wanted` : le seuil de numéro de `GetVersions` vient de nos
+    /// versions, alors qu'une branche basse (n° 31 à 33 quand le groupe est à la n° 50) est sous ce seuil. Avec `full`,
+    /// si une tête voulue reste hors d'atteinte on redemande tous les en-têtes (voir `fetch_versions_reaching`).
+    pub async fn pull_from_wanting(self: &Arc<Self>, gid: GroupId, key: PeerKey, wanted: &[VersionId], full: bool) -> Result<(), String> {
+        let r = self.pull_inner(gid, key, wanted, full).await;
+        if r.is_err() {
+            // Rien n'a abouti : la prochaine occasion retentera.
+            lock(&self.unknown_tried).forget(&(gid, key));
+        }
+        r
+    }
+
+    async fn pull_inner(self: &Arc<Self>, gid: GroupId, key: PeerKey, wanted: &[VersionId], full: bool) -> Result<(), String> {
         let conn = self.connect(&key).await?;
         let seq = self.with_group(&gid, |g| g.state().op_seq)?;
         let ops = conn.fetch_ops(&gid, seq).await.map_err(|e| e.to_string())?;
         self.apply_ops(gid, &ops)?;
         let after = self.with_group(&gid, |g| g.graph().iter().map(|(_, v)| v.header.number).max().unwrap_or(0))?;
-        let vs = conn.fetch_versions(&gid, after.saturating_sub(1)).await.map_err(|e| e.to_string())?;
+        let known = |id: &VersionId| self.with_group(&gid, |g| g.graph().contains(id)).unwrap_or(false);
+        let vs = conn.fetch_versions_reaching(&gid, after.saturating_sub(1), wanted, known, full).await.map_err(|e| e.to_string())?;
         self.with_group(&gid, |g| g.add_versions(vs).map(|_| ()).map_err(|e| e.to_string()))??;
         self.emit_state();
         Ok(())
@@ -1163,6 +1232,8 @@ impl HearthRuntime {
                 let before = g.state().clone();
                 g.append_ops(ops).map(|_| (before, g.state().clone())).map_err(|e| e.to_string())
             })??;
+        // Qui peut signer a peut-être changé : une tête écartée jusque-là mérite un nouvel essai.
+        lock(&self.unknown_tried).forget_group(&gid);
         self.after_change(&before, &after);
         if ops.iter().any(|o| matches!(o.op, GroupOp::Leave)) && before.members != after.members {
             self.after_leave(&after);
@@ -1595,13 +1666,14 @@ impl HearthDelegate for HearthRuntime {
             .flatten();
         lock(&self.status).insert((*group, from), MemberStatus { online: true, op_seq, latest, announced: announced.to_vec() });
         self.mark_seen(group, &from);
-        let (mine, known) = self
-            .with_group(group, |g| (g.state().op_seq, heads.iter().all(|h| g.graph().contains(h))))
-            .unwrap_or((0, true));
-        if op_seq > mine || !known {
-            let (rt, gid) = (self.arc(), *group);
+        let mine = self.with_group(group, |g| g.state().op_seq).unwrap_or(0);
+        // Une tête inconnue ne relance le rattrapage qu'une fois par pair (sinon chaque `Hello` le relancerait sans fin
+        // pour une tête qu'on n'arrive pas à obtenir).
+        let fresh = self.claim_unknown(group, &from, heads);
+        if op_seq > mine || fresh {
+            let (rt, gid, heads) = (self.arc(), *group, heads.to_vec());
             spawn(async move {
-                let _ = rt.pull_from(gid, from).await;
+                let _ = rt.pull_from_wanting(gid, from, &heads, fresh).await;
                 rt.sync_heads(gid, Some(from)).await;
             });
         }
@@ -1616,11 +1688,13 @@ impl HearthDelegate for HearthRuntime {
             (lock(&self.leases).observe(g.state(), g.graph(), &from, lease, Instant::now()), unknown_base)
         });
         let Ok((r, unknown_base)) = r else { return };
-        if unknown_base {
-            // Une base inconnue est d'abord synchronisée (elle ne donne aucun avantage en attendant).
+        // Une base inconnue est d'abord synchronisée (elle ne donne aucun avantage en attendant), une fois par base et par
+        // pair : le bail est renouvelé toutes les quelques secondes.
+        let wanted: Vec<VersionId> = base.into_iter().collect();
+        if unknown_base && self.claim_unknown(&gid, &from, &wanted) {
             let rt = self.arc();
             spawn(async move {
-                let _ = rt.pull_from(gid, from).await;
+                let _ = rt.pull_from_wanting(gid, from, &wanted, true).await;
                 rt.sync_heads(gid, Some(from)).await;
             });
         }
@@ -1670,10 +1744,12 @@ impl HearthDelegate for HearthRuntime {
                 );
             }
         }
-        if version.is_some() {
+        if let Some(v) = version {
             let rt = self.arc();
+            let wanted = [v];
+            let full = self.claim_unknown(&gid, &from, &wanted);
             spawn(async move {
-                let _ = rt.pull_from(gid, from).await;
+                let _ = rt.pull_from_wanting(gid, from, &wanted, full).await;
                 rt.sync_heads(gid, Some(from)).await;
             });
         }
@@ -1745,8 +1821,10 @@ impl HearthDelegate for HearthRuntime {
             if !unknown_parent {
                 return Err(why.clone());
             }
+            let wanted: Vec<VersionId> = v.header.parent.into_iter().collect();
+            let full = self.claim_unknown(&gid, &from, &wanted);
             spawn(async move {
-                if rt.pull_from(gid, from).await.is_ok() && rt.version(&gid, &v.id()).is_some() {
+                if rt.pull_from_wanting(gid, from, &wanted, full).await.is_ok() && rt.version(&gid, &v.id()).is_some() {
                     let _ = rt.fetch_version(gid, &v, Some(from)).await;
                 }
             });
@@ -3141,6 +3219,38 @@ mod tests {
         assert_eq!(blocking_days(false, false, Some(30), false), None);
         // Le monde de sa version est déjà complet ici : son absence ne bloque rien, pas de bannière.
         assert_eq!(blocking_days(false, true, Some(30), true), None);
+    }
+
+    #[test]
+    fn tetes_inconnues_tentees_une_seule_fois_par_pair() {
+        let (g, p, q) = (GroupId([1; 16]), [2u8; 32], [3u8; 32]);
+        let id = |n: u8| VersionId([n; 32]);
+        let set = |ns: &[u8]| ns.iter().map(|n| id(*n)).collect::<BTreeSet<_>>();
+        let mut m = UnknownMemo::default();
+        assert!(!m.claim((g, p), &set(&[])), "rien d'inconnu : rien à tenter");
+        // Premier `Hello` avec une tête inconnue : on tente ; les suivants identiques ne relancent rien.
+        assert!(m.claim((g, p), &set(&[33])));
+        for _ in 0..5 {
+            assert!(!m.claim((g, p), &set(&[33])));
+        }
+        // Un autre pair est indépendant.
+        assert!(m.claim((g, q), &set(&[33])));
+        // Une nouvelle tête inconnue : un essai de plus ; un sous-ensemble de ce qui a été tenté, non.
+        assert!(m.claim((g, p), &set(&[33, 40])));
+        assert!(!m.claim((g, p), &set(&[40])));
+        // Pair hors ligne ou rattrapage en échec : on retente.
+        m.forget(&(g, p));
+        assert!(m.claim((g, p), &set(&[33])));
+        // Des opérations appliquées (qui peut signer a changé) : tout le groupe est retenté.
+        m.forget_group(&g);
+        assert!(m.claim((g, p), &set(&[33])) && m.claim((g, q), &set(&[33])));
+        // Borne : on repart de zéro plutôt que de grossir sans fin.
+        let many: BTreeSet<VersionId> = (0..=255u8).map(id).collect();
+        assert!(m.claim((g, p), &many));
+        let fresh = VersionId([0, 1].iter().cycle().take(32).copied().collect::<Vec<u8>>().try_into().unwrap());
+        assert!(m.claim((g, p), &BTreeSet::from([fresh])), "un id nouveau au-delà de la borne : essai de plus");
+        assert!(!m.claim((g, p), &BTreeSet::from([fresh])));
+        assert!(m.tried[&(g, p)].len() <= UnknownMemo::MAX_PER_PEER);
     }
 
     #[test]

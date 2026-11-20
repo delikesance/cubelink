@@ -18,7 +18,7 @@
 //! |---|---|---|
 //! | `Hello { group_id, op_seq, heads, complete_heads? }` | `Status { op_seq, heads, complete_heads?, lease? }` | état d'un membre (sonde, 60 s) |
 //! | `GetOps { group_id, after }` | `Ops { ops, more }` | rattraper la chaîne (par pages) |
-//! | `GetVersions { group_id, after_number }` | `Versions { versions, more }` | rattraper les en-têtes (par pages) |
+//! | `GetVersions { group_id, after_number }` | `Versions { versions, more }` | rattraper les en-têtes (par pages ; repli depuis 0 si une tête annoncée reste hors d'atteinte, voir `fetch_versions_reaching`) |
 //! | `LeaseClaim { claim }` | `ClaimAck` ou `ClaimConflict { conflict }` | première phase de la prise du bail |
 //! | `Lease { lease }` (signé) | `Ack` | annonce ou renouvellement du bail |
 //! | `LeaseRelease { group_id, lease_id, last_seq, reason, version? }` | `Ack` | fin de partie (pierre tombale) |
@@ -733,6 +733,27 @@ impl HearthConn {
         }
     }
 
+    /// Comme [`Self::fetch_versions`], mais jusqu'aux têtes `wanted` : le seuil `after_number` vient de NOS numéros, or une
+    /// branche courte et basse (n° 31 à 33 pendant que le groupe est à la n° 50) a des numéros sous ce seuil et ne serait
+    /// jamais servie. Si, une fois le lot reçu, une tête voulue ne remonte toujours pas à une version qu'on connaît
+    /// (`known`), on redemande tous les en-têtes depuis 0 (borné par `MAX_VERSIONS`) : c'est le « on remonte les
+    /// parents jusqu'à un ancêtre connu » de `hearth-et-si`, sans nouveau message réseau (un ancien pair répond pareil).
+    /// `full` à `false` : pas de repli (déjà tenté pour ces têtes). Si le repli échoue, le premier lot est rendu.
+    pub async fn fetch_versions_reaching(
+        &self,
+        group: &GroupId,
+        after_number: u64,
+        wanted: &[VersionId],
+        known: impl Fn(&VersionId) -> bool + Sync,
+        full: bool,
+    ) -> Result<Vec<SignedVersion>, NetError> {
+        let batch = self.fetch_versions(group, after_number).await?;
+        if !full || after_number == 0 || unresolved_heads(&known, &batch, wanted).is_empty() {
+            return Ok(batch);
+        }
+        Ok(self.fetch_versions(group, 0).await.unwrap_or(batch))
+    }
+
     /// Annonce ou renouvelle le bail.
     pub async fn send_lease(&self, lease: &Lease) -> Result<(), NetError> {
         self.call_ack(&Request::Lease { lease: lease.clone() }).await
@@ -813,6 +834,28 @@ impl HearthConn {
     }
 }
 
+/// Parmi `wanted`, les têtes qui ne remontent pas à une version connue (`known`) en suivant les parents dans `batch` :
+/// les insérer telles quelles échouerait (parent inconnu) ou ne les trouverait pas du tout.
+pub fn unresolved_heads(known: &dyn Fn(&VersionId) -> bool, batch: &[SignedVersion], wanted: &[VersionId]) -> Vec<VersionId> {
+    let by_id: std::collections::HashMap<VersionId, &SignedVersion> = batch.iter().map(|v| (v.id(), v)).collect();
+    let resolves = |head: &VersionId| {
+        let mut cur = Some(*head);
+        // Les identifiants sont des empreintes (pas de cycle) ; la borne protège d'un lot absurde.
+        for _ in 0..=by_id.len() {
+            let Some(id) = cur else { return true };
+            if known(&id) {
+                return true;
+            }
+            match by_id.get(&id) {
+                Some(v) => cur = v.header.parent,
+                None => return false,
+            }
+        }
+        false
+    };
+    wanted.iter().filter(|h| !resolves(h)).copied().collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::model::{testutil, GroupOp, HearthSigner};
@@ -835,6 +878,60 @@ mod tests {
             total_size: 1,
         };
         SignedVersion::sign(&k, header).unwrap()
+    }
+
+    /// Une chaîne de versions numérotées `from..=to` dont la première a pour parent `parent`.
+    fn chain(from: u64, to: u64, parent: Option<VersionId>, tag: u8) -> Vec<SignedVersion> {
+        let k = testutil::key(1);
+        let mut out: Vec<SignedVersion> = Vec::new();
+        let mut parent = parent;
+        for n in from..=to {
+            let header = VersionHeader {
+                group_id: GroupId([1; 16]),
+                number: n,
+                parent,
+                epoch: 0,
+                author: k.peer_key(),
+                pack_hash: "a".repeat(64),
+                created_at: 1,
+                played_secs: 1,
+                kind: VersionKind::Session,
+                collection: [tag; 32],
+                total_size: 1,
+            };
+            let v = SignedVersion::sign(&k, header).unwrap();
+            parent = Some(v.id());
+            out.push(v);
+        }
+        out
+    }
+
+    #[test]
+    fn unresolved_heads_follow_parents_to_a_known_ancestor() {
+        let main = chain(1, 50, None, 1);
+        let low = chain(31, 33, Some(main[29].id()), 2); // n° 31 à 33, parent n° 30
+        let known: std::collections::HashSet<VersionId> = main.iter().map(SignedVersion::id).collect();
+        let known = |id: &VersionId| known.contains(id);
+        let (head_main, head_low) = (main[49].id(), low[2].id());
+        let wanted = [head_main, head_low];
+
+        // Le lot « après 49 » ne contient pas la branche basse : sa tête reste à résoudre.
+        assert_eq!(unresolved_heads(&known, &[], &wanted), vec![head_low]);
+        // Le lot complet la contient, et son parent (n° 30) est connu : tout est résolu.
+        assert!(unresolved_heads(&known, &low, &wanted).is_empty());
+        // Tête présente mais sa lignée est coupée (n° 32 seule, parent n° 31 absent) : non résolue.
+        assert_eq!(unresolved_heads(&known, &low[1..], &wanted), vec![head_low]);
+        // Rien à chercher.
+        assert!(unresolved_heads(&known, &[], &[head_main]).is_empty());
+        assert!(unresolved_heads(&known, &[], &[]).is_empty());
+    }
+
+    #[test]
+    fn unresolved_heads_accept_a_root_chain_in_the_batch() {
+        let all = chain(1, 3, None, 1);
+        let none = |_: &VersionId| false;
+        assert!(unresolved_heads(&none, &all, &[all[2].id()]).is_empty());
+        assert_eq!(unresolved_heads(&none, &all[1..], &[all[2].id()]).len(), 1);
     }
 
     #[test]

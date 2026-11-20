@@ -59,14 +59,14 @@ impl AppState {
     }
 }
 
-/// Data URL d'un fichier d'illustration (`icon` ou une capture), réduit à `max_px` de côté (512 par défaut).
+/// Data URL d'un fichier d'illustration (`icon` ou une capture), réduit à `max_px` de côté (512 par défaut). Décodage hors du thread principal.
 #[tauri::command(rename_all = "snake_case")]
 #[specta::specta(rename_all = "snake_case")]
 pub async fn instances_art_image(state: State<'_, Arc<AppState>>, instance_id: String, file: String, max_px: Option<u32>) -> Result<String, String> {
     state.instances_art_image(&instance_id, &file, max_px).await
 }
 
-/// Remplace l'icône ou la bannière (`role` : "icon" ou "banner") par une image choisie par le joueur.
+/// Remplace l'icône ou la bannière (`role` : "icon" ou "banner") par une image choisie par le joueur. Lecture et écriture hors du thread principal ; autorisé pendant le jeu (`art/` n'est pas le dossier de jeu).
 #[tauri::command(rename_all = "snake_case")]
 #[specta::specta(rename_all = "snake_case")]
 pub async fn instances_art_set(state: State<'_, Arc<AppState>>, instance_id: String, path: String, role: String) -> Result<Instance, String> {

@@ -52,9 +52,9 @@ export const commands = {
 	instancesOpenFolder: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("instances_open_folder", { id }, options),
 	/**  Fin de `latest.log` (ou `latest.log.old`) de l'instance. */
 	instancesLogs: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<string>("instances_logs", { id }, options),
-	/**  Data URL d'un fichier d'illustration (`icon` ou une capture), réduit à `max_px` de côté (512 par défaut). */
+	/**  Data URL d'un fichier d'illustration (`icon` ou une capture), réduit à `max_px` de côté (512 par défaut). Décodage hors du thread principal. */
 	instancesArtImage: (instanceId: string, file: string, maxPx: number | null, options?: InvokeOptions) => __TAURI_INVOKE<string>("instances_art_image", { instance_id: instanceId, file, max_px: maxPx }, options),
-	/**  Remplace l'icône ou la bannière (`role` : "icon" ou "banner") par une image choisie par le joueur. */
+	/**  Remplace l'icône ou la bannière (`role` : "icon" ou "banner") par une image choisie par le joueur. Lecture et écriture hors du thread principal ; autorisé pendant le jeu (`art/` n'est pas le dossier de jeu). */
 	instancesArtSet: (instanceId: string, path: string, role: string, options?: InvokeOptions) => __TAURI_INVOKE<Instance_Serialize>("instances_art_set", { instance_id: instanceId, path, role }, options),
 	/**  Cherche l'illustration du modpack et l'applique. `auto` : recherche silencieuse de l'accueil (nom identique seulement). */
 	instancesArtLookup: (instanceId: string, auto: boolean | null, options?: InvokeOptions) => __TAURI_INVOKE<Instance_Serialize>("instances_art_lookup", { instance_id: instanceId, auto }, options),

@@ -43,9 +43,124 @@ fn clean_word(w: &str) -> String {
     }
 }
 
+/// Dossiers connus à masquer même sans séparateur de chemin derrière (profil, données).
+/// Lus une seule fois dans l'environnement ; les valeurs trop courtes ou égales à une racine sont ignorées.
+fn home_prefixes() -> &'static [String] {
+    static P: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    P.get_or_init(|| {
+        let vars = ["HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "CUBELINK_DATA_DIR"];
+        let mut v: Vec<String> = vars
+            .iter()
+            .filter_map(std::env::var_os)
+            .filter_map(|o| o.into_string().ok())
+            .map(|s| s.trim_end_matches(['/', '\\']).to_string())
+            .filter(|s| s.chars().count() >= 4)
+            .collect();
+        v.sort_by_key(|s| std::cmp::Reverse(s.len()));
+        v.dedup();
+        v
+    })
+}
+
+fn is_sep(c: char) -> bool {
+    c == '/' || c == '\\'
+}
+
+/// Début de chemin en `i` (déjà à une frontière de mot) : renvoie `(fin_du_préfixe, unix)`.
+fn path_start(c: &[char], i: usize, prefixes: &[String]) -> Option<(usize, bool)> {
+    for p in prefixes {
+        let pc: Vec<char> = p.chars().collect();
+        if c[i..].starts_with(&pc) {
+            let end = i + pc.len();
+            // Le préfixe doit s'arrêter là : fin de mot ou séparateur.
+            if c.get(end).is_none_or(|&x| is_sep(x) || x.is_whitespace() || ",;:)]\"'»".contains(x)) {
+                return Some((end, !p.contains('\\')));
+            }
+        }
+    }
+    let at = |k: usize| c.get(i + k).copied();
+    if at(0).is_some_and(|x| x.is_ascii_alphabetic()) && at(1) == Some(':') && at(2).is_some_and(is_sep) {
+        return Some((i + 3, false));
+    }
+    if at(0) == Some('\\') && at(1) == Some('\\') {
+        return Some((i + 2, false));
+    }
+    if at(0) == Some('/') && at(1).is_some_and(|x| !x.is_whitespace() && x != '/') {
+        let rest = c[i + 1..].iter().take_while(|x| !x.is_whitespace());
+        if rest.into_iter().any(|&x| x == '/') {
+            return Some((i + 1, true));
+        }
+    }
+    None
+}
+
+/// Fin (exclue) du chemin commencé avant `from`. Les espaces sont inclus tant que le mot suivant
+/// porte un séparateur de chemin ; on s'arrête au premier séparateur de phrase.
+fn path_end(c: &[char], from: usize, unix: bool) -> usize {
+    let has_sep = |w: &[char]| {
+        let s: String = w.iter().collect();
+        !s.contains("://") && w.iter().any(|&x| if unix { x == '/' } else { is_sep(x) })
+    };
+    let mut j = from;
+    while j < c.len() {
+        let x = c[j];
+        if matches!(x, '"' | '\'' | ')' | ']' | ',' | ';' | '»' | '\n' | '\r' | ':') {
+            break;
+        }
+        if x.is_whitespace() {
+            let mut k = j;
+            while k < c.len() && c[k].is_whitespace() && c[k] != '\n' && c[k] != '\r' {
+                k += 1;
+            }
+            let mut e = k;
+            while e < c.len() && !c[e].is_whitespace() {
+                e += 1;
+            }
+            if k < c.len() && c[k] != '\n' && has_sep(&c[k..e]) {
+                j = k;
+                continue;
+            }
+            break;
+        }
+        j += 1;
+    }
+    j
+}
+
+/// Masque les chemins sur le message entier, espaces compris (`C:\Users\Jean Dupont\...`).
+/// Limite connue : un dernier segment avec espace sans séparateur derrière et hors des dossiers
+/// connus (`/data/mon fichier.txt`) n'est masqué que jusqu'au premier espace.
+fn mask_paths(msg: &str, prefixes: &[String]) -> String {
+    let c: Vec<char> = msg.chars().collect();
+    let mut out = String::with_capacity(msg.len());
+    let mut i = 0;
+    while i < c.len() {
+        let boundary = i == 0 || c[i - 1].is_whitespace() || "\"'([«=,".contains(c[i - 1]);
+        if boundary {
+            if let Some((after, unix)) = path_start(&c, i, prefixes) {
+                let mut end = path_end(&c, after, unix);
+                while end > after && c[end - 1] == '.' {
+                    end -= 1;
+                }
+                out.extend(["<chemin>"]);
+                i = end.max(i + 1);
+                continue;
+            }
+        }
+        out.push(c[i]);
+        i += 1;
+    }
+    out
+}
+
 /// Remplace les chemins absolus et les chaînes ressemblant à un jeton.
 pub fn sanitize(msg: &str) -> String {
-    msg.split_inclusive(char::is_whitespace)
+    sanitize_with(msg, home_prefixes())
+}
+
+fn sanitize_with(msg: &str, prefixes: &[String]) -> String {
+    mask_paths(msg, prefixes)
+        .split_inclusive(char::is_whitespace)
         .map(|w| {
             let t = w.trim_end();
             format!("{}{}", clean_word(t), &w[t.len()..])
@@ -71,5 +186,61 @@ mod tests {
     fn garde_les_hash() {
         let h = "a".repeat(64);
         assert!(sanitize(&format!("hash {h}")).contains(&h));
+    }
+
+    fn p(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn masque_chemins_avec_espaces() {
+        let s = sanitize("introuvable : C:\\Users\\Jean Dupont\\AppData\\Roaming\\app.cubelink.launcher\\x.json");
+        assert_eq!(s, "introuvable : <chemin>");
+        let s = sanitize("lecture de /home/jean dupont/.local/share/x ok");
+        assert_eq!(s, "lecture de <chemin> ok");
+        assert_eq!(sanitize("\\\\srv\\partage nom\\f.txt"), "<chemin>");
+        assert_eq!(sanitize("C:\\Users\\Léa Müller\\x"), "<chemin>");
+        assert_eq!(sanitize("C:\\Users\\A B\\x et /home/c d/y ok"), "<chemin> et <chemin> ok");
+    }
+
+    #[test]
+    fn garde_le_texte_autour_du_chemin() {
+        assert_eq!(sanitize("C:\\Users\\Jean Dupont\\a.json: refusé"), "<chemin>: refusé");
+        assert_eq!(sanitize("fichier /tmp/x/y: permission denied"), "fichier <chemin>: permission denied");
+        assert_eq!(sanitize("échec (\"C:\\Users\\Jean Dupont\\a.json\"), puis"), "échec (\"<chemin>\"), puis");
+        assert_eq!(sanitize("C:\\Users\\bob et ok"), "<chemin> et ok");
+        assert_eq!(sanitize("voir /home/bob/a. Suite"), "voir <chemin>. Suite");
+    }
+
+    #[test]
+    fn ne_masque_pas_le_reste() {
+        assert_eq!(sanitize("lecture/écriture a/b"), "lecture/écriture a/b");
+        assert_eq!(sanitize("https://x/y z/w"), "https://x/y z/w");
+        assert_eq!(sanitize("C:\\a\\b https://cdn.x/y.jar"), "<chemin> https://cdn.x/y.jar");
+    }
+
+    #[test]
+    fn masque_les_dossiers_connus() {
+        let px = p(&["/home/jean dupont"]);
+        assert_eq!(sanitize_with("introuvable /home/jean dupont", &px), "introuvable <chemin>");
+        // Résidu documenté : le dernier segment avec espace n'est masqué que jusqu'à l'espace,
+        // mais le profil (nom, arborescence) ne fuit pas.
+        let r = sanitize_with("lire /home/jean dupont/Mon fichier.txt", &px);
+        assert!(!r.contains("dupont") && !r.contains("jean") && !r.contains("Mon"), "{r}");
+        assert_eq!(sanitize_with("dossier=/home/jean dupont, ok", &px), "dossier=<chemin>, ok");
+        // Le préfixe doit s'arrêter à une frontière : `dupontage` n'est pas le dossier connu.
+        assert_eq!(sanitize_with("/home/jean dupontage", &px), "<chemin> dupontage");
+    }
+
+    #[test]
+    fn erreur_disque_reelle_dans_un_dossier_avec_espace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("Jean Dupont").join("AppData");
+        std::fs::create_dir_all(&dir).unwrap();
+        let fichier = dir.join("absent.json");
+        let io = std::fs::read(&fichier).unwrap_err();
+        let msg = user_msg(&Error::NotFound(format!("{} : {io}", fichier.display())));
+        assert!(!msg.contains("Jean") && !msg.contains("Dupont") && !msg.contains("AppData"), "{msg}");
+        assert!(msg.starts_with("introuvable : <chemin>"), "{msg}");
     }
 }

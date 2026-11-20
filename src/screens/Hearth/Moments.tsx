@@ -75,6 +75,8 @@ function InviteMoment({ services }: { services: Services }) {
 /** L'hôte a arrêté le serveur pendant que tu jouais : tu peux prendre le relais. */
 function HandoverMoment({ services, e, onClose }: { services: Services; e: HearthHandover; onClose: () => void }) {
   const { run, error, busy, eula } = useHearthRun(services);
+  // Une seule modale à la fois (P8) : le contrat remplace la proposition, qui revient s'il est refusé.
+  if (eula) return eula;
   return (
     <Modal title="L'hôte a arrêté le serveur" onClose={onClose}>
       <div className="home-modal-text hearth-moment">
@@ -86,7 +88,6 @@ function HandoverMoment({ services, e, onClose }: { services: Services; e: Heart
         <Button variant="secondary" onClick={onClose}>Fermer</Button>
         <Button loading={busy} data-autofocus onClick={() => { void run(async () => { await services.hearthPlay(e.group_id); onClose(); }); }}>Reprendre le serveur</Button>
       </div>
-      {eula}
     </Modal>
   );
 }

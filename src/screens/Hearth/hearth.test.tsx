@@ -214,6 +214,24 @@ describe("Moments du groupe", () => {
     expect(services.hearthCalls.map((c) => c.kind)).toEqual(["Play"]);
   });
 
+  it("passation : le contrat remplace la proposition, Échap le ferme sans fermer la proposition", async () => {
+    const services = createFakeServices({ tickMs: 0 });
+    services.seedHearth({ id: "g1", name: "Les copains" });
+    render(<HearthMoments services={services} />);
+    await act(async () => {});
+    act(() => { services.emitHearthHandover({ group_id: "g1", name: "Les copains", from_name: "Alex" }); });
+    fireEvent.click(within(await screen.findByRole("dialog", { name: "L'hôte a arrêté le serveur" })).getByRole("button", { name: "Reprendre le serveur" }));
+    await screen.findByRole("dialog", { name: "Contrat d'utilisation de Minecraft" });
+    // Une seule modale à la fois (P8).
+    expect(screen.getAllByRole("dialog")).toHaveLength(1);
+    fireEvent.keyDown(document, { key: "Escape" });
+    await screen.findByRole("dialog", { name: "L'hôte a arrêté le serveur" });
+    expect(screen.queryByRole("dialog", { name: "Contrat d'utilisation de Minecraft" })).toBeNull();
+    // Un second Échap ferme la proposition.
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
   it("serveur resté ouvert : arrêter, ou garder (et toujours garder)", async () => {
     const services = createFakeServices({ tickMs: 0 });
     services.seedHearth({ id: "g1", name: "Les copains", state: "hosting" });

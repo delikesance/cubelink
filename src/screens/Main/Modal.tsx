@@ -3,6 +3,13 @@ import { useEffect, useId, useRef, type KeyboardEvent, type ReactNode } from "re
 
 const FOCUSABLE = 'a[href],button:not(:disabled),input:not(:disabled),select:not(:disabled),textarea:not(:disabled),[tabindex]:not([tabindex="-1"])';
 
+/**
+ * Modales ouvertes, la dernière montée en haut : Échap ne ferme que celle du dessus.
+ * Limite connue : deux modales montées dans le même commit s'empilent dans l'ordre des effets
+ * (l'enfant avant le parent). Les empilements réels s'ouvrent après un clic, donc dans le bon ordre.
+ */
+const openModals: symbol[] = [];
+
 export interface ModalProps {
   title: string;
   onClose: () => void;
@@ -28,11 +35,20 @@ export function Modal({ title, onClose, role = "dialog", fullscreen, children }:
   }, []);
 
   useEffect(() => {
+    const id = Symbol("modal");
+    openModals.push(id);
     const onEsc = (e: globalThis.KeyboardEvent) => {
-      if (e.key === "Escape" && !e.defaultPrevented) { e.preventDefault(); closeRef.current(); }
+      if (e.key === "Escape" && !e.defaultPrevented && openModals[openModals.length - 1] === id) {
+        e.preventDefault();
+        closeRef.current();
+      }
     };
     document.addEventListener("keydown", onEsc);
-    return () => document.removeEventListener("keydown", onEsc);
+    return () => {
+      document.removeEventListener("keydown", onEsc);
+      const i = openModals.indexOf(id);
+      if (i >= 0) openModals.splice(i, 1);
+    };
   }, []);
 
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {

@@ -328,7 +328,7 @@ impl AppState {
         }
         if !self.skip_game_install.load(Ordering::SeqCst) {
             phase(TransferPhase::Launching);
-            let java = lock(&self.settings).java_path.clone();
+            let java = crate::install::JavaSetting::global(lock(&self.settings).java_path.clone());
             let prog: crate::install::Progress = Arc::new(|_| {});
             if let Err(e) = crate::install::ensure_game(&self.paths, &inst, java, prog).await {
                 let _ = guest::remove_guest_instance(&self.instances, &inst.id, &self.store);

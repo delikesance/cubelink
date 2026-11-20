@@ -25,7 +25,7 @@ Les catalogues ne servent qu'à **construire sa propre instance** avant de jouer
 ### Fonctionnement du join
 1. L'hôte publie un **manifeste** : version de Minecraft, loader + version exacte, et pour chaque fichier nom, taille, hash (SHA-256).
 2. L'invité compare avec son **cache local** (stockage adressé par hash). Seuls les fichiers manquants sont demandés à l'hôte, par chunks vérifiés par hash.
-3. Le launcher crée un **profil invité isolé** : installe le bon loader, place les mods en hardlink depuis le cache, adapte la version de Java, lance le jeu. L'instance perso n'est pas touchée.
+3. Le launcher crée un **profil invité isolé** : installe le bon loader, place les mods en hardlink depuis le cache, adapte la version de Java (le Java des Paramètres n'est retenu que si sa version convient, sinon sélection ou installation automatique ; un Java propre à l'instance est imposé), lance le jeu. L'instance perso n'est pas touchée.
 4. Le manifeste inclut aussi configs, resource packs et shaders (certains mods exigent des configs identiques).
 
 ### Risques à gérer

@@ -176,6 +176,34 @@ pub fn run_java_version(java: &Path) -> Option<String> {
     Some(s)
 }
 
+/// Verdict sur un Java choisi à la main (réglage global ou propre à l'instance) pour une version de Minecraft.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfiguredJava {
+    /// La version majeure convient (mêmes règles que [`select_for`]).
+    Fits,
+    /// La version majeure ne convient pas : `found` est celle que la JVM annonce.
+    Mismatch { found: u32 },
+    /// `java -version` n'a rien d'exploitable (wrapper, sortie inhabituelle) : on ne peut pas juger.
+    Unprobeable,
+}
+
+/// Sonde `java` avec l'exécuteur `run` et le compare à `required` : pure, testable sans JVM.
+pub fn check_configured_with<F>(java: &Path, required: u32, run: F) -> ConfiguredJava
+where
+    F: FnOnce(&Path) -> Option<String>,
+{
+    match probe_with(java, run) {
+        None => ConfiguredJava::Unprobeable,
+        Some(p) if select_for(required, std::slice::from_ref(&p)).is_some() => ConfiguredJava::Fits,
+        Some(p) => ConfiguredJava::Mismatch { found: p.major },
+    }
+}
+
+/// Comme [`check_configured_with`] avec le vrai `java -version` (lance un processus : à appeler hors du fil asynchrone).
+pub fn check_configured(java: &Path, required: u32) -> ConfiguredJava {
+    check_configured_with(java, required, run_java_version)
+}
+
 /// Dossiers de recherche usuels + dossier de runtimes du launcher.
 pub fn default_search_dirs(launcher_runtimes_dir: &Path) -> Vec<PathBuf> {
     let mut v = vec![launcher_runtimes_dir.to_path_buf()];
@@ -234,6 +262,27 @@ pub fn select_for(required_major: u32, installs: &[JavaInstall]) -> Option<&Java
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn says(v: &'static str) -> impl FnOnce(&Path) -> Option<String> {
+        move |_| Some(format!("openjdk version \"{v}\" 2024-01-01\nOpenJDK Runtime Environment"))
+    }
+
+    #[test]
+    fn java_choisi_a_la_main_compare_a_la_version_requise() {
+        let j = Path::new("/x/java");
+        // 17 pour 21 : refusé ; 21 pour 21 : accepté ; 21 pour 17 : accepté (>= 17) ; 16 -> 17 accepté.
+        assert_eq!(check_configured_with(j, 21, says("17.0.9")), ConfiguredJava::Mismatch { found: 17 });
+        assert_eq!(check_configured_with(j, 21, says("21.0.2")), ConfiguredJava::Fits);
+        assert_eq!(check_configured_with(j, 17, says("21.0.2")), ConfiguredJava::Fits);
+        assert_eq!(check_configured_with(j, 16, says("17.0.9")), ConfiguredJava::Fits);
+        // En dessous de 16 on exige la version exacte (1.12.2 Forge : Java 8 seulement).
+        assert_eq!(check_configured_with(j, 8, says("21.0.2")), ConfiguredJava::Mismatch { found: 21 });
+        assert_eq!(check_configured_with(j, 8, says("1.8.0_392")), ConfiguredJava::Fits);
+        assert_eq!(check_configured_with(j, 21, says("1.8.0_392")), ConfiguredJava::Mismatch { found: 8 });
+        // Sortie illisible ou exécution impossible : on ne juge pas.
+        assert_eq!(check_configured_with(j, 21, |_| Some("n'importe quoi".into())), ConfiguredJava::Unprobeable);
+        assert_eq!(check_configured_with(j, 21, |_| None), ConfiguredJava::Unprobeable);
+    }
 
     fn fake_jre(root: &Path, name: &str, release: Option<&str>, macos: bool) -> PathBuf {
         let dir = root.join(name);

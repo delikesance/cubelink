@@ -69,7 +69,7 @@ export function SettingsDialog({ instance, onSave, onClose, onOpenFolder, onDele
           <RamPicker value={ram} onChange={(mb) => { setRam(mb); setSaved(false); }} defaultMb={defaultRam} disabled={busy} />
         </div>
 
-        <Field label="Chemin de Java (facultatif)" id={`${uid}-java`} hint="Vide : Cubelink choisit et installe la bonne version.">
+        <Field label="Chemin de Java (facultatif)" id={`${uid}-java`} hint="Vide : le Java des Paramètres s'il convient, sinon Cubelink choisit et installe la bonne version. Rempli : imposé, et le lancement échoue si la version ne convient pas.">
           {(p) => <Input {...p} type="text" value={java} autoComplete="off" placeholder="Automatique" onChange={(e) => setJava(e.target.value)} />}
         </Field>
         <Field label="Arguments JVM" id={`${uid}-jvm`}>

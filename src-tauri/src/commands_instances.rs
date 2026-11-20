@@ -14,7 +14,7 @@ use core_lib::types::{Instance, Loader, LoaderSpec, Profile};
 use tauri::State;
 
 use crate::error::{sanitize, user_msg};
-use crate::install::{ensure_game, ensure_game_with, resolve_loader_version, safe_version, Progress};
+use crate::install::{ensure_game, ensure_game_with, resolve_loader_version, safe_version, JavaSetting, Progress};
 use crate::state::{lock, AppState};
 
 pub(crate) fn valid_id(id: &str) -> bool {
@@ -303,7 +303,7 @@ impl AppState {
         let spec = LoaderSpec { loader: loader.loader, version };
         let inst = self.instances.create(name.trim(), &minecraft, spec, ram_mb).map_err(|e| user_msg(&e))?;
         let _ = self.instances.mark_custom(&inst.id);
-        let java = self.settings_get().java_path;
+        let java = JavaSetting::global(self.settings_get().java_path);
         let noop: Progress = Arc::new(|_| {});
         match ensure_game(&self.paths, &inst, java, noop).await {
             Ok(_) => Ok(inst),
@@ -400,7 +400,7 @@ impl AppState {
         };
         let inst = result.map_err(|_| "import interrompu".to_string())?.map_err(|e| user_msg(&e))?;
         let noop: Progress = Arc::new(|_| {});
-        match ensure_game(&self.paths, &inst, self.settings_get().java_path, noop).await {
+        match ensure_game(&self.paths, &inst, JavaSetting::global(self.settings_get().java_path), noop).await {
             Ok(_) => Ok((inst, missing)),
             Err(e) => {
                 let _ = self.instances.delete(&inst.id);
@@ -555,7 +555,7 @@ impl AppState {
         let me = self.clone();
         let pid = id.clone();
         let progress: Progress = Arc::new(move |m| me.emit_state(&pid, LaunchPhase::Preparing, Some(m)));
-        let java_setting = inst.java_path.clone().filter(|j| !j.trim().is_empty()).or_else(|| self.settings_get().java_path);
+        let java_setting = JavaSetting::for_instance(inst.java_path.as_deref(), self.settings_get().java_path);
         let prepared = match ensure_game_with(&self.paths, &inst, java_setting, progress, cancel.clone()).await {
             Ok(p) => p,
             Err(core_lib::types::Error::Cancelled) => return true,

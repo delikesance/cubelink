@@ -1200,7 +1200,7 @@ impl HearthRuntime {
             on_progress: Some(on_progress),
             previous_total,
             confirmed,
-            free_bytes: free_space(&self.root),
+            free_bytes: core_lib::disk::free_space(&self.root),
             ..FetchOptions::default()
         };
         let res = world.fetch(&net.endpoint, &gid, &addrs, &coll, v.header.total_size, &opts).await;
@@ -2825,32 +2825,6 @@ impl HearthRuntime {
 fn blocking_days(author_is_me: bool, is_member: bool, unseen_days: Option<u32>) -> Option<u32> {
     let days = unseen_days?;
     (!author_is_me && is_member && days >= CONTINUE_AFTER_DAYS).then_some(days)
-}
-
-/// Espace libre (octets) sur le disque qui porte `path`, s'il se mesure ; `None` sinon (la vérification est alors
-/// sautée, jamais un refus).
-pub fn free_space(path: &Path) -> Option<u64> {
-    #[cfg(windows)]
-    {
-        use std::os::windows::ffi::OsStrExt;
-        #[link(name = "kernel32")]
-        extern "system" {
-            fn GetDiskFreeSpaceExW(dir: *const u16, available: *mut u64, total: *mut u64, free: *mut u64) -> i32;
-        }
-        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
-        let mut available = 0u64;
-        // SAFETY : `wide` est une chaîne terminée par zéro qui vit pendant l'appel ; les pointeurs de sortie inutiles sont nuls
-        // (permis par l'API) et `available` est un entier valide.
-        let ok = unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut available, std::ptr::null_mut(), std::ptr::null_mut()) };
-        (ok != 0).then_some(available)
-    }
-    #[cfg(not(windows))]
-    {
-        let out = std::process::Command::new("df").arg("-Pk").arg(path).output().ok()?;
-        let text = String::from_utf8_lossy(&out.stdout);
-        let kib: u64 = text.lines().nth(1)?.split_whitespace().nth(3)?.parse().ok()?;
-        kib.checked_mul(1024)
-    }
 }
 
 /// Taille d'un dossier, bornée (un dossier immense ne fige pas l'écran).

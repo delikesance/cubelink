@@ -8,7 +8,7 @@ import type { FriendWithPresence, HearthDetail, HearthProposal, Instance, Servic
 import { Select, BackButton, Badge, Button, Card, Icon, ICONS, StatusDot } from "../../ui";
 import { Avatar } from "../Friends/Avatar";
 import { Modal } from "../Main/Modal";
-import { crashText, voiceText, errText, fmtDate, fmtPlayed, fmtSize, mainAction, plural, resumeLabel, stateHint, stateText } from "./format";
+import { crashText, voiceText, errText, exportText, fmtDate, fmtPlayed, fmtSize, mainAction, plural, resumeLabel, stateHint, stateText } from "./format";
 import { useHearthRun } from "./usePlay";
 
 const TABS = [["membres", "Membres"], ["historique", "Historique"], ["reglages", "Réglages"]] as const;
@@ -29,12 +29,27 @@ const PROPOSAL_LABEL = (p: HearthProposal): string => {
 const SYNC_LABEL = { ok: "À jour", behind: "En retard", unknown: "Pas encore vérifié" } as const;
 
 /** `run` peut rendre une seconde confirmation à enchaîner (elle remplace celle-ci au lieu de la fermer). */
-interface Confirm { title: string; text: string; action: string; danger?: boolean; busyText?: string; run: () => Promise<void | Confirm> }
+interface Confirm {
+  title: string; text: string; action: string; danger?: boolean; busyText?: string;
+  /** Avant de perdre le monde de ce PC : propose de l'exporter en solo d'abord (sans changer l'action de la boîte). */
+  exportFirst?: boolean;
+  run: () => Promise<void | Confirm>;
+}
 
 /** Boîte de confirmation d'une action qu'on ne peut pas défaire d'un clic. */
-function ConfirmDialog({ c, onClose }: { c: Confirm; onClose: (next?: Confirm) => void }) {
+function ConfirmDialog({ c, onClose, exporter }: { c: Confirm; onClose: (next?: Confirm) => void; exporter?: () => Promise<string> }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [exporting, setExporting] = useState(false);
+  const [exported, setExported] = useState<string | null>(null);
+  const exportNow = async () => {
+    if (!exporter) return;
+    setExporting(true);
+    setError(null);
+    try { setExported(await exporter()); }
+    catch (e) { setError(errText(e)); }
+    finally { setExporting(false); }
+  };
   const go = async () => {
     setBusy(true);
     try { const next = await c.run(); setBusy(false); setError(null); onClose(next ?? undefined); }
@@ -43,6 +58,14 @@ function ConfirmDialog({ c, onClose }: { c: Confirm; onClose: (next?: Confirm) =
   return (
     <Modal title={c.title} role="alertdialog" onClose={() => onClose()}>
       <p className="home-modal-text" role={busy && c.busyText ? "status" : undefined}>{busy && c.busyText ? c.busyText : c.text}</p>
+      {c.exportFirst && exporter && (
+        <div className="hearth-export">
+          <p className="hearth-hint">Tu peux d'abord exporter le monde en solo : il reste dans les mondes de ton jeu, même après.</p>
+          {exported ? <p className="hearth-hint" role="status">{exported}</p> : (
+            <Button variant="secondary" loading={exporting} disabled={busy} onClick={() => { void exportNow(); }}>Exporter en monde solo</Button>
+          )}
+        </div>
+      )}
       {error && <p className="hearth-err" role="alert">{error}</p>}
       <div className="home-modal-foot">
         <Button variant="secondary" data-autofocus onClick={() => onClose()}>Annuler</Button>
@@ -144,10 +167,24 @@ function Members({ d, services, friends, ask, onError, leave }: { d: HearthDetai
   );
 }
 
-function History({ d, services, ask }: { d: HearthDetail; services: Services; ask: (c: Confirm) => void }) {
+function History({ d, services, ask, exportWorld, playFrom }: { d: HearthDetail; services: Services; ask: (c: Confirm) => void; exportWorld: (versionId?: string) => Promise<string>; playFrom: (versionId: string) => void }) {
+  const [exporting, setExporting] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [done, setDone] = useState<string | null>(null);
+  const exportRow = async (versionId: string) => {
+    setExporting(versionId); setError(null); setDone(null);
+    try { setDone(await exportWorld(versionId)); }
+    catch (e) { setError(errText(e)); }
+    finally { setExporting(null); }
+  };
+  // Jouer depuis une ancienne version : possible seulement avec l'instance du groupe et sans fourche ni partie en cours.
+  const canPlayFrom = d.card.can_host && (d.card.state === "idle" || d.card.state === "blocked") && d.fork.length === 0;
   const KIND = { session: "Partie", checkpoint: "Point de reprise", restore: "Restauration" } as const;
   if (d.versions.length === 0) return <p className="hearth-empty">Aucune version pour l'instant : la première apparaîtra à la fin d'une partie.</p>;
   return (
+    <>
+    {done && <p className="hearth-hint" role="status">{done}</p>}
+    {error && <p className="hearth-err" role="alert">{error}</p>}
     <ul className="hearth-rows" aria-label="Versions du monde">
       {d.versions.map((v) => (
         <li key={v.id} className="hearth-row">
@@ -169,16 +206,39 @@ function History({ d, services, ask }: { d: HearthDetail; services: Services; as
               })}
             >Restaurer</Button>
           )}
+          {!v.is_head && v.available && canPlayFrom && (
+            <Button
+              variant="secondary" aria-label={`Jouer depuis la version ${v.number}`}
+              onClick={() => ask({
+                title: `Jouer depuis la version ${v.number} ?`, action: "Jouer depuis cette version",
+                text: `Le serveur démarre sur ton PC avec le monde de la version ${v.number}, pas la dernière. Le groupe aura alors deux versions du monde : la tienne, partie de la n° ${v.number}, et la dernière. Vous choisirez laquelle garder depuis cette page, et l'autre reste dans l'historique.`,
+                run: async () => { playFrom(v.id); },
+              })}
+            >Jouer depuis cette version</Button>
+          )}
+          {v.available && d.card.instance_id && (
+            <Button variant="secondary" aria-label={`Exporter la version ${v.number} en monde solo`} loading={exporting === v.id} onClick={() => { void exportRow(v.id); }}>Exporter</Button>
+          )}
         </li>
       ))}
     </ul>
+    </>
   );
 }
 
-function Settings({ d, services, instances, ask, onError }: { d: HearthDetail; services: Services; instances: Instance[]; ask: (c: Confirm) => void; onError: (m: string) => void }) {
+function Settings({ d, services, instances, ask, onError, exportWorld }: { d: HearthDetail; services: Services; instances: Instance[]; ask: (c: Confirm) => void; onError: (m: string) => void; exportWorld: (versionId?: string) => Promise<string> }) {
   const id = d.card.id;
   const [inst, setInst] = useState("");
   const pick = inst || d.card.instance_id || instances[0]?.id || "";
+  const [exporting, setExporting] = useState(false);
+  const [exported, setExported] = useState<string | null>(null);
+  const canExport = !!d.card.instance_id && d.versions.some((v) => v.available);
+  const exportNow = async () => {
+    setExporting(true); setExported(null);
+    try { setExported(await exportWorld()); }
+    catch (e) { onError(errText(e)); }
+    finally { setExporting(false); }
+  };
   return (
     <div className="hearth-settings">
       <section className="hearth-block" aria-label="Modpack">
@@ -201,6 +261,20 @@ function Settings({ d, services, instances, ask, onError }: { d: HearthDetail; s
             >Proposer la mise à jour au groupe</Button>
           </div>
         )}
+      </section>
+      <section className="hearth-block" aria-label="Monde solo">
+        <div className="hearth-block-head">
+          <h2>Monde solo</h2>
+          <p className="hearth-meta">
+            Récupère le monde du groupe, avec ton joueur, comme un monde solo de ton jeu : tu peux y jouer sans le groupe ou le garder avant de partir.
+            C'est une copie : le groupe n'est pas touché, et un monde déjà exporté n'est jamais remplacé.
+          </p>
+        </div>
+        <div className="hearth-add">
+          <Button variant="secondary" loading={exporting} disabled={!canExport} onClick={() => { void exportNow(); }}>Exporter en monde solo</Button>
+        </div>
+        {!canExport && <p className="hearth-hint">{d.card.instance_id ? "Aucune version complète n'est sur ce PC pour l'instant." : "Choisis d'abord l'instance de ce groupe : l'export s'écrit dans ses mondes."}</p>}
+        {exported && <p className="hearth-hint" role="status">{exported}</p>}
       </section>
       <section className="hearth-block" aria-label="Serveur">
         <div className="hearth-block-head">
@@ -259,7 +333,7 @@ export default function ServerPage({ id }: { id: string }) {
   const ask = (x: Confirm) => setConfirm(wrap(x));
   // Suppression locale : seul choix explicite de l'utilisateur, jamais un repli automatique (#57). Rien n'est annoncé au groupe.
   const deleteWorld = (title: string, text: string, action: string): Confirm => wrap({
-    title, text, action, danger: true,
+    title, text, action, danger: true, exportFirst: true,
     run: async () => { await services.hearthForget(c.id); navigate("main"); },
   });
   const lastMember = () => deleteWorld(
@@ -278,7 +352,7 @@ export default function ServerPage({ id }: { id: string }) {
   const notSent = (): Confirm => wrap({
     title: "Ta dernière partie n'est pas encore partie",
     text: "Aucun ami ne l'a reçue : si tu quittes maintenant, elle sera perdue pour le groupe. Tu peux attendre qu'un ami soit connecté et réessayer.",
-    action: "Quitter quand même", danger: true,
+    action: "Quitter quand même", danger: true, exportFirst: true,
     busyText: "Quitter le groupe…",
     run: () => leaveNow(true),
   });
@@ -286,7 +360,7 @@ export default function ServerPage({ id }: { id: string }) {
   const unpublished = (): Confirm => wrap({
     title: "Une partie n'a pas été publiée",
     text: "Tu as une fin de partie gardée de côté sur ce PC, que personne d'autre n'a reçue. Si tu quittes maintenant, elle est supprimée avec le monde. Tu peux d'abord la publier ou la supprimer depuis cette page.",
-    action: "Quitter quand même", danger: true,
+    action: "Quitter quand même", danger: true, exportFirst: true,
     busyText: "Quitter le groupe…",
     run: () => leaveNow(true),
   });
@@ -306,13 +380,18 @@ export default function ServerPage({ id }: { id: string }) {
     // Seul dans le groupe : le texte « le serveur continue pour les autres » serait faux, et Quitter serait refusé.
     if (detail.members.length <= 1) { setConfirm(lastMember()); return; }
     ask({
-      title: `Quitter « ${c.name} » ?`, action: "Quitter", danger: true,
+      title: `Quitter « ${c.name} » ?`, action: "Quitter", danger: true, exportFirst: true,
       text: "Le monde copié sur ce PC est supprimé. Le serveur continue pour les autres membres, même si c'est toi qui l'as créé. Tu pourras être réinvité plus tard.",
       busyText: "Envoi de ta dernière partie aux autres membres avant de quitter… Ça peut prendre quelques minutes.",
       run: () => leaveNow(false),
     });
   };
   const shownError = error ?? runError;
+  // Exporter : écrit un monde solo dans l'instance du groupe et rend la phrase à afficher (la page n'est pas rechargée : rien ne change dans le groupe).
+  const exportWorld = async (versionId?: string): Promise<string> => exportText(await services.hearthExportSolo(c.id, versionId), detail.settings.instance_name);
+  const canExport = !!c.instance_id && detail.versions.some((v) => v.available);
+  const exporter = canExport ? () => exportWorld() : undefined;
+  const playFrom = (versionId: string) => { void run(() => services.hearthPlayFromVersion(c.id, versionId), c.id); };
 
   return (
     <div className="hearth-page">
@@ -442,11 +521,11 @@ export default function ServerPage({ id }: { id: string }) {
         </div>
         <div id="hearth-panel" role="tabpanel" aria-labelledby={`hearth-tab-${tab}`} className="hearth-panel">
           {tab === "membres" && <Members d={detail} services={services} friends={friends} ask={ask} onError={setError} leave={leave} />}
-          {tab === "historique" && <History d={detail} services={services} ask={ask} />}
-          {tab === "reglages" && <Settings d={detail} services={services} instances={instances} ask={ask} onError={setError} />}
+          {tab === "historique" && <History d={detail} services={services} ask={ask} exportWorld={exportWorld} playFrom={playFrom} />}
+          {tab === "reglages" && <Settings d={detail} services={services} instances={instances} ask={ask} onError={setError} exportWorld={exportWorld} />}
         </div>
       </Card>
-      {confirm && <ConfirmDialog c={confirm} onClose={(next) => setConfirm(next ?? null)} />}
+      {confirm && <ConfirmDialog c={confirm} onClose={(next) => setConfirm(next ?? null)} exporter={exporter} />}
       {eula}
     </div>
   );

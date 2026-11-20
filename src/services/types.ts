@@ -137,6 +137,7 @@ export type HearthProposal = Omit<B.HearthProposal_Serialize, "kind"> & {
   kind: "continue_without" | "add_member" | "remove_member" | "pack_update" | "set_governance" | "leave";
 };
 export type HearthBlocker = B.HearthBlocker;
+export type HearthExport = B.HearthExport;
 export type HearthBranch = B.HearthBranch;
 export type HearthSettings = B.HearthSettings_Serialize;
 export type HearthDetail = Omit<B.HearthDetail_Serialize, "members" | "versions" | "proposals"> & {
@@ -319,6 +320,10 @@ export interface Services {
   hearthConfirmHost(id: string): Promise<void>;
   /** Repart de la dernière version complète quand `hearthPlay` a rejeté avec `head_unavailable` : crée une fourche quand l'auteur revient. */
   hearthPlayFromPrevious(id: string): Promise<void>;
+  /** « Jouer depuis cette version » : démarre le serveur ici depuis une version complète de l'historique (pas la dernière) ; la partie en fait une branche, et le groupe a deux versions à départager. Rejette avec `eula_required` ou `confirm_host|…` comme `hearthPlay`. */
+  hearthPlayFromVersion(id: string, versionId: string): Promise<void>;
+  /** « Exporter en monde solo » : copie une version complète (`versionId`, sinon la version actuelle, ou la dernière complète sur ce PC) dans les mondes de l'instance liée, sous « <groupe> (export du groupe) », avec mon joueur remis dedans. Ne remplace jamais un monde existant. */
+  hearthExportSolo(id: string, versionId?: string): Promise<HearthExport>;
   hearthStop(id: string): Promise<void>;
   hearthUncleanChoice(id: string, choice: HearthUncleanChoice): Promise<void>;
   /** Associe le modpack du groupe à une instance locale. */

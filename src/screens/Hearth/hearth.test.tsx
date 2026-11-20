@@ -589,6 +589,103 @@ describe("Page du serveur", () => {
     expect(screen.getAllByText(/contenu libéré de ce PC/)).toHaveLength(1);
   });
 
+  const threeVersions = [
+    { id: "v3", number: 3, kind: "session", author: "k", author_name: "Alex", created_at: 1_760_000_100, played_secs: 3600, total_size: 400_000_000, is_head: true, side_branch: false, available: true },
+    { id: "v2", number: 2, kind: "checkpoint", author: "k", author_name: "Noor", created_at: 1_760_000_000, played_secs: 900, total_size: 390_000_000, is_head: false, side_branch: false, available: true },
+    { id: "v1", number: 1, kind: "session", author: "k", author_name: "Noor", created_at: 1_750_000_000, played_secs: 900, total_size: 380_000_000, is_head: false, side_branch: false, available: false },
+  ] as const;
+
+  it("Historique : Exporter une version complète écrit un monde solo sans rien changer au groupe (#101)", async () => {
+    const { services } = page({ id: "g1" }, { id: "g1", name: "Les copains" });
+    services.setHearthDetail("g1", { versions: [...threeVersions] });
+    fireEvent.click(await screen.findByRole("tab", { name: "Historique" }));
+    expect(screen.queryByRole("button", { name: "Exporter la version 1 en monde solo" })).toBeNull();
+    fireEvent.click(await screen.findByRole("button", { name: "Exporter la version 2 en monde solo" }));
+    await screen.findByText(/Monde exporté : « Les copains \(export du groupe\) » \(version 2\), dans les mondes de Create: Aeronautics/);
+    fireEvent.click(screen.getByRole("button", { name: "Exporter la version 3 en monde solo" }));
+    await screen.findByText(/« Les copains \(export du groupe\) 2 » \(version 3\)/);
+    expect(services.hearthCalls).toEqual([{ kind: "ExportSolo", args: ["g1", "v2"] }, { kind: "ExportSolo", args: ["g1", "v3"] }]);
+    expect(screen.getByText(/Version 3 · Partie · actuelle/)).toBeTruthy();
+  });
+
+  it("Réglages : Exporter en monde solo prend la dernière version, et dit quand c'est la dernière complète (#101)", async () => {
+    const { services } = page({ id: "g1" }, { id: "g1", name: "Les copains" });
+    services.setHearthDetail("g1", { versions: threeVersions.map((v) => ({ ...v, available: v.number === 2 })) });
+    fireEvent.click(await screen.findByRole("tab", { name: "Réglages" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Exporter en monde solo" }));
+    const msg = await screen.findByText(/Monde exporté : « Les copains \(export du groupe\) » \(version 2\)/);
+    expect(msg.textContent).toMatch(/La dernière version n'est pas complète sur ce PC : c'est la version 2, la dernière complète/);
+    expect(services.hearthCalls).toEqual([{ kind: "ExportSolo", args: ["g1"] }]);
+  });
+
+  it("Réglages : sans instance liée, l'export est désactivé et dit pourquoi (#101)", async () => {
+    page({ id: "g1" }, { id: "g1", name: "Les copains", instance_id: null, can_host: false, state: "pack_missing" });
+    fireEvent.click(await screen.findByRole("tab", { name: "Réglages" }));
+    expect((await screen.findByRole("button", { name: "Exporter en monde solo" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText(/Choisis d'abord l'instance de ce groupe/)).toBeTruthy();
+  });
+
+  it("Historique : Jouer depuis cette version explique la fourche, demande confirmation, puis lance (#101)", async () => {
+    const { services } = page({ id: "g1" }, { id: "g1", name: "Les copains" });
+    services.setHearthEula(true);
+    services.setHearthDetail("g1", { versions: [...threeVersions] });
+    fireEvent.click(await screen.findByRole("tab", { name: "Historique" }));
+    expect(screen.queryByRole("button", { name: "Jouer depuis la version 1" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Jouer depuis la version 3" })).toBeNull();
+    fireEvent.click(await screen.findByRole("button", { name: "Jouer depuis la version 2" }));
+    const dlg = await screen.findByRole("alertdialog");
+    expect(within(dlg).getByText(/deux versions du monde/)).toBeTruthy();
+    fireEvent.click(within(dlg).getByRole("button", { name: "Annuler" }));
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+    expect(services.hearthCalls).toEqual([]);
+    fireEvent.click(screen.getByRole("button", { name: "Jouer depuis la version 2" }));
+    fireEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Jouer depuis cette version" }));
+    await waitFor(() => expect(services.hearthCalls).toEqual([{ kind: "PlayFromVersion", args: ["g1", "v2"] }]));
+  });
+
+  it("Historique : Jouer depuis cette version est masqué pendant une partie, sans instance ou avec une fourche (#101)", async () => {
+    const { services } = page({ id: "g1" }, { id: "g1", name: "Les copains", state: "hosted" });
+    services.setHearthDetail("g1", { versions: [...threeVersions] });
+    fireEvent.click(await screen.findByRole("tab", { name: "Historique" }));
+    expect(await screen.findByRole("button", { name: "Exporter la version 2 en monde solo" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Jouer depuis la version 2" })).toBeNull();
+  });
+
+  it("Quitter : propose d'exporter le monde d'abord, sans changer l'action de la boîte (#101)", async () => {
+    const { services, s } = twoMembers("g11");
+    const dlg = await clickQuitter();
+    expect(within(dlg).getByText(/Tu peux d'abord exporter le monde en solo/)).toBeTruthy();
+    fireEvent.click(within(dlg).getByRole("button", { name: "Exporter en monde solo" }));
+    await within(dlg).findByText(/Monde exporté : « Les copains \(export du groupe\) »/);
+    expect(within(dlg).queryByRole("button", { name: "Exporter en monde solo" })).toBeNull();
+    expect(services.hearthCalls).toEqual([{ kind: "ExportSolo", args: ["g11"] }]);
+    expect(s.navigate).not.toHaveBeenCalled();
+    fireEvent.click(within(dlg).getByRole("button", { name: "Quitter" }));
+    await waitFor(() => expect(services.hearthCalls.map((c) => c.kind)).toEqual(["ExportSolo", "Leave"]));
+  });
+
+  it("Supprimer de ce PC (dernier membre) : l'export reste proposé, et une erreur d'export s'affiche sans bloquer la suppression (#101)", async () => {
+    const services = createFakeServices({ tickMs: 0 });
+    services.seedHearth({ id: "g12", name: "Les copains" }, { members: [{ ...me }] });
+    services.hearthExportSolo = async () => { throw new Error("Disque plein."); };
+    const s = shell(services, { id: "g12" });
+    render(<ShellContext.Provider value={s.value}><Hearth /></ShellContext.Provider>);
+    const dlg = await clickQuitter();
+    fireEvent.click(within(dlg).getByRole("button", { name: "Exporter en monde solo" }));
+    await within(dlg).findByText("Disque plein.");
+    fireEvent.click(within(dlg).getByRole("button", { name: "Supprimer le monde" }));
+    await waitFor(() => expect(services.hearthCalls).toEqual([{ kind: "Forget", args: ["g12"] }]));
+  });
+
+  it("Quitter sans instance liée : pas d'export proposé (#101)", async () => {
+    const services = createFakeServices({ tickMs: 0 });
+    services.seedHearth({ id: "g13", name: "Les copains", instance_id: null, can_host: false, state: "pack_missing" }, { members: [{ ...me }, { ...noor }] });
+    const s = shell(services, { id: "g13" });
+    render(<ShellContext.Provider value={s.value}><Hearth /></ShellContext.Provider>);
+    const dlg = await clickQuitter();
+    expect(within(dlg).queryByText(/exporter le monde/)).toBeNull();
+  });
+
   it("Réglages : garder le serveur, proposer la mise à jour du modpack (pas de bouton Quitter ici)", async () => {
     const { services, navigate } = page({ id: "g1" }, { id: "g1", name: "Les copains" });
     fireEvent.click(await screen.findByRole("tab", { name: "Réglages" }));

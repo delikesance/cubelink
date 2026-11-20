@@ -323,6 +323,8 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
   let hearthOn = true;
   let hearthN = 0;
   const hearthCalls: Array<{ kind: string; args: unknown[] }> = [];
+  /** Exports déjà faits par groupe : le deuxième prend le suffixe « 2 », comme le vrai (jamais d'écrasement). */
+  const hearthExports = new Map<string, number>();
   const liteOf = (pk: string): HearthMemberLite => {
     const f = friends.find((x) => x.friend.public_key === pk);
     return { public_key: pk, name: f?.friend.name ?? "Ami", online: f?.presence === "online" };
@@ -706,6 +708,33 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
       if (!hearthEula) throw new Error(HEARTH_EULA_REQUIRED);
       hearthHeadMissing = null;
       hearthLaunch(id, ["Mise à jour du monde", "Démarrage du serveur", "Ouverture de Minecraft"], { state: "hosting", host: { ...ME }, players: 1, unclean: null });
+    },
+    hearthPlayFromVersion: async (id, versionId) => {
+      hearthCalls.push({ kind: "PlayFromVersion", args: [id, versionId] });
+      const g = hearthCard(id);
+      const v = g.versions.find((x) => x.id === versionId);
+      if (!v) throw new Error("cette version n'existe plus");
+      if (!v.available) throw new Error(`Le contenu de la version ${v.number} n'est plus sur ce PC : elle ne peut pas servir de départ.`);
+      if (v.is_head) throw new Error("C'est déjà la version actuelle : clique sur Jouer.");
+      if (!hearthEula) throw new Error(HEARTH_EULA_REQUIRED);
+      hearthLaunch(id, ["Mise à jour du monde", "Démarrage du serveur", "Ouverture de Minecraft"], { state: "hosting", host: { ...ME }, players: 1, unclean: null });
+    },
+    hearthExportSolo: async (id, versionId) => {
+      hearthCalls.push({ kind: "ExportSolo", args: versionId === undefined ? [id] : [id, versionId] });
+      const g = hearthCard(id);
+      if (!g.card.instance_id) throw new Error("Choisis d'abord l'instance de ce groupe : l'export s'écrit dans ses mondes.");
+      let v = versionId === undefined ? g.versions.find((x) => x.is_head) : g.versions.find((x) => x.id === versionId);
+      if (!v) throw new Error("cette version n'existe plus");
+      let fallback = false;
+      if (versionId !== undefined && !v.available) throw new Error(`Le contenu de la version ${v.number} n'est plus sur ce PC : elle ne peut pas être exportée.`);
+      if (versionId === undefined && !v.available) {
+        v = g.versions.find((x) => x.available && !x.is_head);
+        if (!v) throw new Error("aucune version de ce monde n'est complète sur ce PC : il faut d'abord la recevoir");
+        fallback = true;
+      }
+      hearthExports.set(id, (hearthExports.get(id) ?? 0) + 1);
+      const n = hearthExports.get(id)!;
+      return { world_name: `${g.card.name} (export du groupe)${n > 1 ? ` ${n}` : ""}`, version_number: v.number, fallback, has_player: true };
     },
     hearthStop: async (id) => {
       hearthCalls.push({ kind: "Stop", args: [id] });

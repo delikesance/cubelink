@@ -1,4 +1,4 @@
-import { HEARTH_CONFIRM_HOST, HEARTH_EULA_REQUIRED, HEARTH_HEAD_UNAVAILABLE, type HearthCard } from "../../services/types";
+import { HEARTH_CONFIRM_HOST, HEARTH_EULA_REQUIRED, HEARTH_HEAD_UNAVAILABLE, type HearthCard, type HearthExport } from "../../services/types";
 
 export const errText = (e: unknown): string => (e instanceof Error ? e.message : typeof e === "string" ? e : "Une erreur est survenue.");
 
@@ -59,6 +59,16 @@ export function fmtPlayed(secs: number): string {
 
 export function fmtDate(sec: number): string {
   return new Date(sec * 1000).toLocaleString("fr-FR", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+}
+
+/** Ce que dit l'écran après « Exporter en monde solo » : où est le monde, quelle version, et ce qui sort de l'ordinaire. */
+export function exportText(e: HearthExport, instanceName: string | null): string {
+  const where = instanceName ? `dans les mondes de ${instanceName}` : "dans les mondes de l'instance du groupe";
+  return [
+    `Monde exporté : « ${e.world_name} » (version ${e.version_number}), ${where}. Ouvre le jeu : il est dans ta liste de mondes solo.`,
+    e.fallback ? `La dernière version n'est pas complète sur ce PC : c'est la version ${e.version_number}, la dernière complète, qui a été exportée.` : "",
+    e.has_player ? "" : "Ton joueur n'était pas dans ce monde : tu apparaîtras au point de départ.",
+  ].filter(Boolean).join(" ");
 }
 
 export const plural = (n: number, one: string, many: string): string => `${n} ${n > 1 ? many : one}`;

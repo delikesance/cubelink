@@ -38,6 +38,8 @@ export interface FakeControls {
   dropFiles(paths: string[]): void;
   /** Test : émet un événement host://state. */
   emitHostState(e: HostState): void;
+  /** Test : une demande reçue expire (retirée sans décision) : friend://request_removed. */
+  expireRequest(publicKey: string): void;
   /** Test : reçoit une invitation (friend://invite + friend://invites). */
   emitInvite(i: Partial<Invite> & { public_key: string }): Invite;
   /** Test : un ami demande à rejoindre ma partie (friend://join_request + friend://join_requests). */
@@ -284,6 +286,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     transfer: new Set<(p: TransferProgress) => void>(),
     presence: new Set<(e: PresenceEvent) => void>(),
     request: new Set<(r: FriendRequest) => void>(),
+    requestRemoved: new Set<(e: { public_key: string }) => void>(),
     unknown: new Set<(e: UnknownModsEvent) => void>(),
     log: new Set<(e: LaunchLogEvent) => void>(),
     browse: new Set<(e: BrowseProgressEvent) => void>(),
@@ -917,6 +920,10 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
       requests = requests.filter((x) => x.public_key !== pk);
     },
     friendRefuseAll: async () => { const n = requests.length; requests = []; return n; },
+    friendRemove: async (pk) => {
+      const i = friends.findIndex((f) => f.friend.public_key === pk);
+      if (i >= 0) friends.splice(i, 1);
+    },
 
     joinPlan: async (): Promise<JoinPlan> => {
       // Comme le backend : disque d'abord (reçu + 1 Gio de marge), puis compte hors ligne actif.
@@ -1085,6 +1092,10 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     },
     dropFiles: (paths) => emit(listeners.drop, paths),
     emitHostState: (e) => emit(listeners.host, e),
+    expireRequest: (pk) => {
+      requests = requests.filter((x) => x.public_key !== pk);
+      emit(listeners.requestRemoved, { public_key: pk });
+    },
     emitInvite: (p) => {
       inviteN += 1;
       const f = friends.find((x) => x.friend.public_key === p.public_key);
@@ -1142,6 +1153,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     onTransferProgress: (cb) => sub(listeners.transfer, cb),
     onFriendPresence: (cb) => sub(listeners.presence, cb),
     onFriendRequest: (cb) => sub(listeners.request, cb),
+    onFriendRequestRemoved: (cb) => sub(listeners.requestRemoved, cb),
     onFriendInvite: (cb) => sub(listeners.invite, cb),
     onFriendInvites: (cb) => sub(listeners.invites, cb),
     onFriendCodeChanged: (cb) => sub(listeners.codeChanged, () => cb()),

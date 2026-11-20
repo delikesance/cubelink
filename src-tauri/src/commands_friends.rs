@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use core_lib::types::{Friend, FriendCode, FriendRequest, Presence, VerifyCode};
+use core_lib::types::{Error, Friend, FriendCode, FriendRequest, Presence, VerifyCode};
 use p2p_lib::friend_code::{self, FriendCodePayload};
 use serde::Serialize;
 use tauri::State;
@@ -36,23 +36,43 @@ fn valid_key(k: &str) -> Result<(), String> {
     }
 }
 
+/// Écrit le jeton (hex) de façon atomique : fichier temporaire puis renommage.
+fn write_token(path: &std::path::Path, token: &friend_code::Token) -> std::io::Result<()> {
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, hex::encode(token))?;
+    std::fs::rename(&tmp, path)
+}
+
 impl AppState {
-    fn code_epoch(&self) -> u32 {
-        std::fs::read_to_string(&self.paths.epoch_file)
+    /// Jeton courant du code ami. En mémoire d'abord ; sinon lu dans le fichier ; sinon (premier lancement, ou
+    /// migration depuis l'ancien `friend_code_epoch`) tiré au hasard : les anciens codes sont alors périmés, ce
+    /// qui est voulu.
+    pub fn code_token(&self) -> friend_code::Token {
+        let mut cur = lock(&self.code_token);
+        if let Some(t) = *cur {
+            return t;
+        }
+        let stored = std::fs::read_to_string(&self.paths.code_token_file)
             .ok()
-            .and_then(|s| s.trim().parse::<u32>().ok())
-            .unwrap_or_else(|| {
-                let e = now_secs() as u32;
-                let _ = std::fs::write(&self.paths.epoch_file, e.to_string());
-                e
-            })
+            .and_then(|s| hex::decode(s.trim()).ok())
+            .and_then(|b| friend_code::Token::try_from(b).ok());
+        let token = stored.unwrap_or_else(|| {
+            let t = friend_code::new_token();
+            // Écriture ratée : le jeton reste valable pour cette session (le code affiché et le jeton
+            // accepté restent identiques) ; au prochain lancement, un nouveau sera tiré.
+            let _ = write_token(&self.paths.code_token_file, &t);
+            let _ = std::fs::remove_file(&self.paths.legacy_epoch_file);
+            t
+        });
+        *cur = Some(token);
+        token
     }
 
-    fn encode_code(&self, epoch: u32) -> FriendCode {
+    fn encode_code(&self, token: friend_code::Token) -> FriendCode {
         let (relay, addrs) = self.backend().code_hints();
         FriendCode(friend_code::encode(&FriendCodePayload {
             public_key: self.identity.public_key().to_bytes(),
-            epoch,
+            token,
             relay,
             addrs,
         }))
@@ -66,13 +86,22 @@ impl AppState {
     }
 
     pub fn friend_my_code(&self) -> FriendCode {
-        self.encode_code(self.code_epoch())
+        self.encode_code(self.code_token())
     }
 
     pub fn friend_regenerate_code(&self) -> Result<FriendCode, String> {
-        let next = (now_secs() as u32).max(self.code_epoch().saturating_add(1));
-        std::fs::write(&self.paths.epoch_file, next.to_string())
-            .map_err(|_| "impossible d'enregistrer le nouveau code".to_string())?;
+        let next = friend_code::new_token();
+        // Le verrou est pris avant l'écriture : un `code_token()` concurrent (premier lancement) ne peut pas
+        // écraser le fichier avec un autre jeton que celui de la mémoire.
+        let mut cur = lock(&self.code_token);
+        // Écrit d'abord : si le disque refuse, ni le code affiché ni le jeton accepté ne changent.
+        write_token(&self.paths.code_token_file, &next).map_err(|_| "impossible d'enregistrer le nouveau code".to_string())?;
+        let _ = std::fs::remove_file(&self.paths.legacy_epoch_file);
+        *cur = Some(next);
+        drop(cur);
+        // Effet immédiat sur le réseau : l'ancien code ne permet plus de NOUVELLE demande. Les amis déjà
+        // acceptés et les demandes déjà admises ne sont pas touchés.
+        self.backend().set_code_token(next);
         Ok(self.encode_code(next))
     }
 
@@ -94,7 +123,11 @@ impl AppState {
 
     /// Validation locale du code (sans réseau) : format, pas soi-même, pas déjà ami.
     pub fn check_friend_code(&self, code: &str) -> Result<FriendCodePayload, String> {
-        let payload = friend_code::parse(code).map_err(|_| "code ami invalide : vérifiez qu'il commence par mcl1-".to_string())?;
+        let payload = friend_code::parse(code).map_err(|e| match e {
+            // Code d'une autre version : le dire plutôt que « invalide » (le code est correct, le format a changé).
+            Error::Invalid(m) if m == friend_code::LEGACY_CODE_MSG || m == friend_code::NEWER_CODE_MSG => m,
+            _ => "code ami invalide : vérifiez qu'il commence par mcl1-".to_string(),
+        })?;
         let key = payload.public_key.iter().map(|b| format!("{b:02x}")).collect::<String>();
         if key == self.identity.public_key_hex() {
             return Err("c'est votre propre code ami".into());
@@ -146,6 +179,24 @@ impl AppState {
         Ok(())
     }
 
+    /// Retire un ami : il disparaît de la base (adresses comprises), perd l'accès d'invité en cours, et tout ce qui
+    /// venait de lui est oublié (invitations, demandes à rejoindre, demande d'ami en file, dernière présence).
+    /// Sans l'amitié, la sonde de présence est refusée et la revérification du tunnel (500 ms) coupe sa connexion.
+    /// Idempotent : un ami déjà retiré n'est pas une erreur. Les groupes Hearth ne sont pas touchés.
+    pub fn friend_remove(&self, public_key: &str) -> Result<(), String> {
+        valid_key(public_key)?;
+        let key = public_key;
+        // Base d'abord : sans l'amitié, `may_join` refuse déjà, même si la révocation arrivait après.
+        self.friends.remove_friend(key).map_err(|e| user_msg(&e))?;
+        if let Some(k) = hex::decode(key).ok().and_then(|b| <[u8; 32]>::try_from(b).ok()) {
+            self.access.revoke_guest(&k);
+        }
+        self.last_seen.forget(key);
+        self.invites_forget_friend(key);
+        self.friends.remove_request(key).map_err(|e| user_msg(&e))?;
+        Ok(())
+    }
+
     /// Refuse toutes les demandes. Les 20 premiers demandeurs sont prévenus (refus signé via le protocole ami,
     /// 3 s max chacun, au mieux) ; les autres, et ceux injoignables, sont simplement retirés localement.
     pub async fn friend_refuse_all(&self) -> Result<usize, String> {
@@ -169,14 +220,14 @@ pub async fn net_test(state: State<'_, Arc<AppState>>) -> Result<crate::p2p_back
     state.backend().net_test().await
 }
 
-/// Mon code ami (`mcl1-…`).
+/// Mon code ami (`mcl1-…`, format v2) : clé publique, **jeton aléatoire de 16 octets** (fichier `p2p/friend_code_token`, créé au premier appel), indices de connexion. Ce n'est pas un secret d'authentification (le code se partage) : le jeton sert à couper les anciens codes.
 #[tauri::command(rename_all = "snake_case")]
 #[specta::specta(rename_all = "snake_case")]
 pub fn friend_my_code(state: State<'_, Arc<AppState>>) -> Result<FriendCode, String> {
     Ok(state.friend_my_code())
 }
 
-/// Génère un nouveau code ami (l'ancien ne marche plus).
+/// Génère un nouveau jeton (écrit sur disque avant tout changement, puis pris en compte tout de suite par le réseau) et renvoie le nouveau code. L'ancien code est refusé pour les **nouvelles** demandes d'ami ; les amis déjà acceptés et les demandes déjà reçues ne sont pas touchés. La clé publique ne change pas : l'appareil reste joignable par la connexion de base (présence). L'ancien fichier `friend_code_epoch` est ignoré et supprimé : les codes `mcl1-` d'avant le jeton (version 1) sont périmés.
 #[tauri::command(rename_all = "snake_case")]
 #[specta::specta(rename_all = "snake_case")]
 pub fn friend_regenerate_code(state: State<'_, Arc<AppState>>) -> Result<FriendCode, String> {
@@ -190,7 +241,7 @@ pub fn friend_list(state: State<'_, Arc<AppState>>) -> Result<Vec<FriendWithPres
     state.friend_list()
 }
 
-/// Envoie une demande d'ami à partir de son code ; renvoie le code de vérification à comparer.
+/// Envoie une demande d'ami à partir de son code ; renvoie le code de vérification à comparer. Erreurs propres au jeton : code d'une ancienne version (sans jeton, refusé sans connexion : « Ce code ami vient d'une ancienne version de Cubelink… »), code d'une version plus récente, code révoqué par l'hôte (« Ce code ami n'est plus valide : demande à ton ami de te renvoyer son code actuel. »).
 #[tauri::command(rename_all = "snake_case")]
 #[specta::specta(rename_all = "snake_case")]
 pub async fn friend_send_request(state: State<'_, Arc<AppState>>, code: String) -> Result<VerifyCode, String> {
@@ -209,14 +260,14 @@ pub fn friend_requests(
     state.friend_requests(offset, limit, query)
 }
 
-/// Accepte une demande d'ami.
+/// Accepte une demande d'ami. Si la demande n'est plus décidable (expirée, redémarrage), la ligne est retirée et l'erreur est « Cette demande a expiré : demande à ton ami de la renvoyer. »
 #[tauri::command(rename_all = "snake_case")]
 #[specta::specta(rename_all = "snake_case")]
 pub async fn friend_accept(state: State<'_, Arc<AppState>>, public_key: String) -> Result<(), String> {
     state.friend_accept(&public_key).await
 }
 
-/// Refuse une demande d'ami.
+/// Refuse une demande d'ami. Réussit aussi si la demande a expiré (la ligne est simplement retirée).
 #[tauri::command(rename_all = "snake_case")]
 #[specta::specta(rename_all = "snake_case")]
 pub async fn friend_refuse(state: State<'_, Arc<AppState>>, public_key: String) -> Result<(), String> {
@@ -228,6 +279,13 @@ pub async fn friend_refuse(state: State<'_, Arc<AppState>>, public_key: String) 
 #[specta::specta(rename_all = "snake_case")]
 pub async fn friend_refuse_all(state: State<'_, Arc<AppState>>) -> Result<usize, String> {
     state.friend_refuse_all().await
+}
+
+/// Retire un ami : accès d'invité en cours révoqué (le tunnel se coupe, la sonde de présence est refusée), invitations, demandes à rejoindre et demande en file de cet ami oubliées. Réussit aussi s'il n'est déjà plus ami ; les groupes Hearth ne sont pas touchés.
+#[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
+pub fn friend_remove(state: State<'_, Arc<AppState>>, public_key: String) -> Result<(), String> {
+    state.friend_remove(&public_key)
 }
 
 #[cfg(test)]
@@ -263,15 +321,120 @@ mod tests {
     }
 
     #[test]
-    fn regeneration_change_le_code() {
+    fn regeneration_change_le_code_et_le_jeton() {
         let dir = tempfile::tempdir().unwrap();
         let (st, _) = test_state(dir.path());
         let a = st.friend_my_code();
         assert_eq!(a, st.friend_my_code());
+        let t_a = friend_code::parse(&a.0).unwrap().token;
         let b = st.friend_regenerate_code().unwrap();
         assert_ne!(a, b);
         assert_eq!(b, st.friend_my_code());
-        assert!(friend_code::parse(&b.0).is_ok());
+        let t_b = friend_code::parse(&b.0).unwrap().token;
+        assert_ne!(t_a, t_b);
+        // Persisté : un nouvel état sur le même dossier retrouve le même jeton.
+        assert_eq!(std::fs::read_to_string(&st.paths.code_token_file).unwrap(), hex::encode(t_b));
+        let (st2, _) = test_state(dir.path());
+        assert_eq!(friend_code::parse(&st2.friend_my_code().0).unwrap().token, t_b);
+    }
+
+    #[test]
+    fn migration_de_l_ancien_fichier_epoch_donne_un_jeton_neuf() {
+        let dir = tempfile::tempdir().unwrap();
+        let (st, _) = test_state(dir.path());
+        std::fs::write(&st.paths.legacy_epoch_file, "1700000000").unwrap();
+        let t = friend_code::parse(&st.friend_my_code().0).unwrap().token;
+        assert_eq!(std::fs::read_to_string(&st.paths.code_token_file).unwrap(), hex::encode(t));
+        assert!(!st.paths.legacy_epoch_file.exists(), "ancien fichier supprimé");
+        // Un fichier de jeton illisible est remplacé, jamais interprété.
+        let dir2 = tempfile::tempdir().unwrap();
+        let (st2, _) = test_state(dir2.path());
+        std::fs::write(&st2.paths.code_token_file, "pas un jeton").unwrap();
+        let t2 = friend_code::parse(&st2.friend_my_code().0).unwrap().token;
+        assert_eq!(std::fs::read_to_string(&st2.paths.code_token_file).unwrap(), hex::encode(t2));
+    }
+
+    #[test]
+    fn regeneration_previent_le_backend_et_echec_d_ecriture_ne_change_rien() {
+        use p2p_lib::friend_code::Token;
+        use std::sync::Mutex;
+        struct Rec(Mutex<Vec<Token>>);
+        impl crate::p2p_backend::P2pBackend for Rec {
+            fn presence(&self, _k: &str) -> Presence {
+                Presence::Offline
+            }
+            fn set_code_token(&self, t: Token) {
+                lock(&self.0).push(t);
+            }
+            fn send_request(&self, _t: FriendCodePayload, _n: String) -> crate::p2p_backend::BoxFuture<'_, Result<VerifyCode, String>> {
+                Box::pin(async { Err("non".to_string()) })
+            }
+            fn fetch_manifest(&self, _k: String) -> crate::p2p_backend::BoxFuture<'_, Result<crate::p2p_backend::HostManifest, String>> {
+                Box::pin(async { Err("non".to_string()) })
+            }
+            fn receive_files(
+                &self,
+                _k: String,
+                _id: String,
+                _p: p2p_lib::transfer::plan::Plan,
+                _pr: crate::p2p_backend::ProgressFn,
+                _c: Arc<crate::p2p_backend::TransferControl>,
+            ) -> crate::p2p_backend::BoxFuture<'_, Result<(), Error>> {
+                Box::pin(async { Err(Error::Other("non".to_string())) })
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let (st, _) = test_state(dir.path());
+        let rec = Arc::new(Rec(Mutex::new(vec![])));
+        st.set_backend(rec.clone());
+        assert_eq!(lock(&rec.0).len(), 1, "le backend reçoit le jeton courant à son branchement");
+        let before = st.friend_my_code();
+        let next = st.friend_regenerate_code().unwrap();
+        let sent = lock(&rec.0).clone();
+        assert_eq!(sent.len(), 2);
+        assert_eq!(sent[1], friend_code::parse(&next.0).unwrap().token);
+        // Disque qui refuse : le code et le jeton accepté ne changent pas, le backend n'est pas prévenu.
+        std::fs::remove_file(&st.paths.code_token_file).unwrap();
+        std::fs::create_dir(&st.paths.code_token_file).unwrap();
+        std::fs::create_dir(st.paths.code_token_file.with_extension("tmp")).unwrap();
+        let e = st.friend_regenerate_code().unwrap_err();
+        assert!(e.contains("impossible d'enregistrer"), "{e}");
+        assert_eq!(st.friend_my_code(), next);
+        assert_ne!(before, next);
+        assert_eq!(lock(&rec.0).len(), 2);
+    }
+
+    #[test]
+    fn code_d_une_ancienne_version_recoit_un_message_dedie() {
+        let dir = tempfile::tempdir().unwrap();
+        let (st, _) = test_state(dir.path());
+        // Code v1 valide (CRC correct) : version 1, epoch u32, clé, relais vide, 0 adresse.
+        let mut buf = vec![1u8, 0, 0, 0, 7];
+        buf.extend_from_slice(&[5; 32]);
+        buf.extend_from_slice(&[0, 0]);
+        let mut crc = 0xFFFF_FFFFu32;
+        for &b in &buf {
+            crc ^= u32::from(b);
+            for _ in 0..8 {
+                crc = if crc & 1 != 0 { (crc >> 1) ^ 0xEDB8_8320 } else { crc >> 1 };
+            }
+        }
+        buf.extend_from_slice(&(!crc).to_be_bytes());
+        // Base32 minuscule sans remplissage (RFC 4648).
+        let alphabet = b"abcdefghijklmnopqrstuvwxyz234567";
+        let bits: String = buf.iter().map(|b| format!("{b:08b}")).collect();
+        let body: String = bits
+            .as_bytes()
+            .chunks(5)
+            .map(|c| {
+                let v = c.iter().fold(0usize, |acc, &x| acc << 1 | usize::from(x == b'1')) << (5 - c.len());
+                alphabet[v] as char
+            })
+            .collect();
+        let code = format!("mcl1-{body}");
+        let e = st.check_friend_code(&code).unwrap_err();
+        assert_eq!(e, friend_code::LEGACY_CODE_MSG);
+        assert!(e.contains("ancienne version") && e.contains("mettre l'application à jour"));
     }
 
     #[tokio::test]
@@ -296,5 +459,74 @@ mod tests {
         st.friend_refuse(&"b".repeat(64)).await.unwrap();
         assert_eq!(st.friend_refuse_all().await.unwrap(), 1);
         assert!(st.friend_accept("pas-une-cle").await.is_err());
+    }
+
+    fn add_friend(st: &AppState, c: char) -> String {
+        let key = c.to_string().repeat(64);
+        st.friends
+            .add_friend(&Friend { public_key: key.clone(), name: format!("Ami-{c}"), trust: core_lib::types::TrustLevel::Ask, added_at: 1 })
+            .unwrap();
+        key
+    }
+
+    #[tokio::test]
+    async fn retrait_d_un_ami_oublie_tout_ce_qui_venait_de_lui() {
+        let dir = tempfile::tempdir().unwrap();
+        let (st, events) = test_state(dir.path());
+        let (a, b) = (add_friend(&st, 'a'), add_friend(&st, 'b'));
+        let bytes = |c: u8| [c; 32];
+        st.friends.set_friend_addr(&a, &p2p_lib::friends_db::PeerAddr { relay: None, addrs: vec!["1.2.3.4:5".into()] }).unwrap();
+        st.access.allow_friend(&bytes(0xaa));
+        st.access.allow_friend(&bytes(0xbb));
+        st.last_seen.touch(&a, 5000);
+        st.last_seen.touch(&b, 5000);
+        for k in [&a, &b] {
+            st.invite_received(k, p2p_lib::invite::InviteMessage { world_name: "M".into(), minecraft: "1.21.1".into(), expires_at: now_secs() + 60, revoke: false, pack: None, icon: None });
+            st.join_request_received(k);
+        }
+        st.friends
+            .upsert_request(&FriendRequest { public_key: a.clone(), name: "Ami-a".into(), verify_code: Vc("3F9A · C21B · 77D0 · 5E14".into()), received_at: 1 }, Direction::In)
+            .unwrap();
+
+        st.friend_remove(&a).unwrap();
+
+        assert!(!st.friends.is_friend(&a).unwrap());
+        assert_eq!(st.friends.get_friend_addr(&a).unwrap(), None, "adresse oubliée");
+        assert!(!st.access.contains(&bytes(0xaa)), "accès d'invité révoqué");
+        assert!(st.access.contains(&bytes(0xbb)), "l'autre ami n'est pas touché");
+        assert_eq!(st.last_seen.get(&a), None);
+        assert_eq!(st.last_seen.get(&b), Some(5000));
+        assert_eq!(st.friend_invites().iter().map(|i| i.public_key.clone()).collect::<Vec<_>>(), std::slice::from_ref(&b));
+        assert_eq!(st.friend_join_requests().iter().map(|r| r.public_key.clone()).collect::<Vec<_>>(), std::slice::from_ref(&b));
+        assert_eq!(st.friend_requests(0, 10, None).unwrap().total, 0);
+        let list = st.friend_list().unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].friend.public_key, b);
+        assert!(events.lock().unwrap().iter().any(|(n, _)| n == "friend://invites"));
+    }
+
+    #[test]
+    fn retrait_idempotent_et_cle_invalide_refusee() {
+        let dir = tempfile::tempdir().unwrap();
+        let (st, _) = test_state(dir.path());
+        let a = add_friend(&st, 'a');
+        st.friend_remove(&a).unwrap();
+        st.friend_remove(&a).unwrap();
+        st.friend_remove(&"c".repeat(64)).unwrap();
+        assert!(st.friend_remove("pas-une-cle").unwrap_err().contains("invalide"));
+        assert!(st.friend_remove(&"A".repeat(64)).is_err(), "majuscules refusées comme ailleurs");
+    }
+
+    #[test]
+    fn retrait_garde_l_acces_de_groupe() {
+        let dir = tempfile::tempdir().unwrap();
+        let (st, _) = test_state(dir.path());
+        let a = add_friend(&st, 'a');
+        let g = p2p_lib::hearth::model::GroupId([1; 16]);
+        st.access.allow_friend(&[0xaa; 32]);
+        st.access.allow_members(g, [[0xaa; 32]]);
+        st.friend_remove(&a).unwrap();
+        assert!(st.access.contains(&[0xaa; 32]), "il reste membre du groupe");
+        assert!(!st.access.allows(&crate::authz::SessionTarget::Solo, &[0xaa; 32]));
     }
 }

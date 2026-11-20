@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import "./mycode.css";
 import { useServices } from "../../app/context";
 import { Button } from "../../ui";
+import { useEscapeCancel } from "../../ui/useEscapeCancel";
 
 type State =
   | { step: "loading" }
@@ -32,6 +33,9 @@ export default function MyCode() {
       if (timer.current) clearTimeout(timer.current);
     };
   }, []);
+
+  // Échap annule la confirmation (sans quitter Paramètres) ; avalé sans effet pendant la régénération.
+  useEscapeCancel(confirming, () => { if (!busy) setConfirming(false); });
 
   const load = useCallback(async () => {
     setState({ step: "loading" });
@@ -121,7 +125,7 @@ export default function MyCode() {
 
       {confirming && (
         <div className="mycode-confirm" role="group" aria-label="Confirmer le nouveau code">
-          <p>Ton ancien code ne fonctionnera plus. Tes amis actuels ne sont pas affectés. Continuer&nbsp;?</p>
+          <p>Ton ancien code ne permettra plus de t'envoyer de nouvelles demandes d'ami. Tes amis actuels ne sont pas affectés. Ta clé ne change pas : ton appareil reste joignable par la connexion de base. Continuer&nbsp;?</p>
           <div className="mycode-actions">
             <Button variant="danger" onClick={() => { void regenerate(); }} loading={busy}>Générer un nouveau code</Button>
             <Button variant="secondary" onClick={() => setConfirming(false)} disabled={busy}>Annuler</Button>
@@ -147,7 +151,7 @@ export default function MyCode() {
       </div>
 
       <div className="mycode-live" aria-live="polite" aria-atomic="true">{notice === "Copié" ? "" : notice}</div>
-      <span className="mycode-help">Ce code ne contient aucun secret. Il permet à ton ami de te joindre&nbsp;: ne le publie pas.</span>
+      <span className="mycode-help">Ce code permet à ton ami de te joindre et de t'envoyer une demande&nbsp;: ne le publie pas. Trop partagé&nbsp;? Génère-en un nouveau.</span>
     </section>
   );
 }

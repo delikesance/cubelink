@@ -76,6 +76,12 @@ impl SessionAccess {
         }
     }
 
+    /// Retire l'accès d'invité (monde solo) de ce pair. Les groupes Hearth ne sont pas touchés : l'appartenance à un
+    /// groupe ne dépend pas de l'amitié (voir `docs/hearth.md`).
+    pub fn revoke_guest(&self, key: &PeerKey) {
+        lock(&self.inner).guests.remove(key);
+    }
+
     /// Fin de la partie d'un groupe : plus aucun accès à ce groupe. Le monde solo partagé en parallèle n'est pas touché.
     pub fn close_group(&self, group: &GroupId) {
         let mut sets = lock(&self.inner);

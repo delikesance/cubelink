@@ -240,6 +240,8 @@ export interface Services {
   friendAccept(publicKey: string): Promise<void>;
   friendRefuse(publicKey: string): Promise<void>;
   friendRefuseAll(): Promise<number>;
+  /** Retire un ami : accès en cours révoqués, invitations et demandes de cet ami oubliées. Réussit s'il n'est déjà plus ami. */
+  friendRemove(publicKey: string): Promise<void>;
   /** Invite un ami dans mon monde ouvert (rejette en français si aucun monde n'est ouvert). */
   friendInvite(publicKey: string): Promise<void>;
   /** Invitations reçues en attente. */
@@ -322,6 +324,8 @@ export interface Services {
   onTransferProgress(cb: (p: TransferProgress) => void): Unsubscribe;
   onFriendPresence(cb: (e: PresenceEvent) => void): Unsubscribe;
   onFriendRequest(cb: (r: FriendRequest) => void): Unsubscribe;
+  /** Une demande reçue a été retirée sans décision (l'ami a annulé ou le délai est écoulé) : clé publique. */
+  onFriendRequestRemoved(cb: (e: { public_key: string }) => void): Unsubscribe;
   onFriendInvite(cb: (i: Invite) => void): Unsubscribe;
   /** Liste complète des invitations à chaque changement. */
   onFriendInvites(cb: (l: Invite[]) => void): Unsubscribe;

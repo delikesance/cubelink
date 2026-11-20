@@ -114,6 +114,9 @@ pub trait P2pBackend: Send + Sync {
     fn code_hints(&self) -> (Option<String>, Vec<String>) {
         (None, vec![])
     }
+    /// Jeton courant de notre code ami : seules les nouvelles demandes qui le portent sont admises. Appelé à
+    /// chaque régénération du code.
+    fn set_code_token(&self, _token: p2p_lib::friend_code::Token) {}
     /// Envoie une demande d'ami ; renvoie le code de vérification à comparer.
     fn send_request(&self, target: FriendCodePayload, my_name: String) -> BoxFuture<'_, Result<VerifyCode, String>>;
     /// Accepte une demande reçue (décision signée + ami créé). `None` : non géré, l'appelant le fait en local.

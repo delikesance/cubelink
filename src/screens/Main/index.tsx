@@ -18,6 +18,7 @@ import { useModCheckGate } from "../../app/useModCheck";
 import { Modal } from "./Modal";
 import { HearthSection } from "../Hearth/HearthSection";
 import { HearthMoments } from "../Hearth/Moments";
+import { RemoveFriendDialog } from "../Friends/RemoveFriend";
 
 const LOADERS: Record<string, string> = {
   vanilla: "Vanilla", neoforge: "NeoForge", fabric: "Fabric", quilt: "Quilt", forge: "Forge",
@@ -63,6 +64,8 @@ export default function Main() {
   const ctx = useContextMenu();
   /** Modpack dont la suppression attend confirmation (clic droit > Supprimer). */
   const [toDelete, setToDelete] = useState<Instance | null>(null);
+  /** Ami dont le retrait attend confirmation (clic droit > Retirer des amis). */
+  const [toRemove, setToRemove] = useState<FriendWithPresence | null>(null);
   const [warning, setWarning] = useState<string[] | null>(() => peekImportWarning());
   /** Cause de l'échec de préparation du jeu après un import : l'instance est là, le jeu viendra au premier lancement. */
   const [deferred, setDeferred] = useState<string | null>(() => peekPrepareDeferred());
@@ -98,6 +101,10 @@ export default function Main() {
     return () => { alive = false; off(); };
   }, [services]);
   useEffect(() => services.onFriendRequest(() => setRequests((n) => (n ?? 0) + 1)), [services]);
+  // Demande expirée ou annulée : on relit le total plutôt que de décrémenter à l'aveugle.
+  useEffect(() => services.onFriendRequestRemoved(() => {
+    services.friendRequests({ offset: 0, limit: 1 }).then((p) => setRequests(p.total), () => {});
+  }), [services]);
 
   const homeRef = useRef<HTMLDivElement>(null);
   // Focus cohérent au retour sur l'accueil : première tuile une fois chargé, sauf si le focus est déjà ailleurs.
@@ -198,6 +205,7 @@ export default function Main() {
     if (on && inviteOk && !g) items.push({ key: "invite", label: "Inviter dans ma partie", icon: <Icon d={ICONS.userPlus} />, onSelect: () => invite(key) });
     items.push({ key: "copy", label: "Copier le pseudo", icon: <Icon d={ICONS.copy} />, separator: items.length > 0, onSelect: () => copy(f.friend.name) });
     items.push({ key: "manage", label: "Gérer mes amis", icon: <Icon d={ICONS.friends} />, onSelect: () => navigate("settings", { tab: "amis" }) });
+    items.push({ key: "remove", label: "Retirer des amis", icon: <Icon d={ICONS.trash} />, danger: true, separator: true, onSelect: () => setToRemove(f) });
     return items;
   };
   const sessionMenu = (g: Invite): MenuItem[] => [
@@ -426,6 +434,13 @@ export default function Main() {
       {ctx.menu}
       {gate.modal}
       <HearthMoments services={services} />
+      {toRemove && (
+        <RemoveFriendDialog
+          services={services} friend={toRemove.friend}
+          onClose={() => setToRemove(null)}
+          onRemoved={(k) => { setFriends((l) => l.filter((f) => f.friend.public_key !== k)); setToRemove(null); }}
+        />
+      )}
       {toDelete && (
         <Modal title="Supprimer l'instance ?" role="alertdialog" onClose={() => setToDelete(null)}>
           <p className="home-modal-text">L'instance « {toDelete.name} » et ses fichiers (mondes, configuration) seront supprimés définitivement.</p>

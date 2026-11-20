@@ -197,6 +197,17 @@ impl AppState {
         changed
     }
 
+    /// Un ami vient d'être retiré : oublie ses invitations reçues, ses demandes à rejoindre (reçues ou en cours
+    /// d'envoi) et l'invitation qu'on lui a envoyée.
+    pub(crate) fn invites_forget_friend(&self, key: &str) {
+        self.invite_remove(|i| i.public_key == key);
+        // Le demandeur en attente reçoit un refus plutôt que de patienter jusqu'à l'expiration.
+        self.backend().answer_join_request(key, false);
+        self.join_request_ended(key);
+        lock(&self.join_requests_out).remove(key);
+        lock(&self.invites_sent).remove(key);
+    }
+
     /// Retire les invitations échues à `now` (secondes) ; émet `friend://invites` si la file a changé.
     pub fn invites_purge_expired(&self, now: i64) {
         self.invite_remove(|i| i.expires_at <= now);

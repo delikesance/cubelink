@@ -482,10 +482,12 @@ impl IrohBackend {
                     let _ = acc_tx.send(k);
                 }
             }
+            FriendEvent::RequestRemoved(k) => emit("friend://request_removed", serde_json::json!({ "public_key": k })),
             FriendEvent::Refused(_) => {}
         });
         let friends_svc = FriendService::attach(endpoint.clone(), st.identity.clone(), st.friends.clone(), sink, opts.friend.clone())
             .map_err(|e| user_msg(&e))?;
+        friends_svc.set_code_token(st.code_token());
 
         // Présence.
         let emit = st.emit.clone();
@@ -921,6 +923,10 @@ impl P2pBackend for IrohBackend {
         // donc chez quiconque le reçoit (un ami). L'adresse ouverte sur la box et l'IPv6 globale passent en premier.
         let info = relay::endpoint_addr_info(&self.endpoint.addr(), self.mapped_addr());
         (None, info.addrs)
+    }
+
+    fn set_code_token(&self, token: friend_code::Token) {
+        self.friends_svc.set_code_token(token);
     }
 
     fn send_request(&self, target: FriendCodePayload, my_name: String) -> BoxFuture<'_, std::result::Result<VerifyCode, String>> {

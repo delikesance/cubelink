@@ -802,6 +802,52 @@ mod tests {
         svc_c.stop().await;
     }
 
+    /// Retrait réel (#54) : vrai QUIC en boucle locale, vraie base SQLite sur disque. Tant que B est ami de A il reçoit
+    /// un PONG ; dès que A le retire de sa base, A ne lui répond plus.
+    #[tokio::test]
+    async fn ami_retire_ne_recoit_plus_de_pong() {
+        use core_lib::types::{Friend, TrustLevel};
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(FriendsDb::open(dir.path().join("friends.db")).unwrap());
+        let (sink_a, _) = collector();
+        let (sink_b, _) = collector();
+        let ep_a = Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled).bind().await.unwrap();
+        let (ep_b, _) = node(None).await;
+        let (key_a, key_b) = (*ep_a.id().as_bytes(), *ep_b.id().as_bytes());
+        db.add_friend(&Friend { public_key: hex::encode(key_b), name: "B".into(), trust: TrustLevel::Ask, added_at: 1 }).unwrap();
+
+        let svc_a = PresenceService::start_with_config(
+            ep_a.clone(),
+            db.clone(),
+            sink_a,
+            PresenceConfig { interval: Duration::from_secs(3600), ..fast_cfg() },
+        );
+        let router_a = Router::builder(ep_a.clone()).accept(PRESENCE_ALPN, svc_a.handler()).spawn();
+        let svc_b = PresenceService::start_with_config(ep_b.clone(), Friends::new(vec![key_a]), sink_b, fast_cfg());
+        svc_b.add_addr(ep_a.addr());
+
+        assert_eq!(svc_b.probe_now(key_a).await, Presence::Online, "ami : PONG");
+
+        assert!(db.remove_friend(&hex::encode(key_b)).unwrap());
+        assert_eq!(svc_b.probe_now(key_a).await, Presence::Online, "un échec isolé ne suffit pas (hystérésis)");
+        assert_eq!(svc_b.probe_now(key_a).await, Presence::Offline, "retiré : plus de PONG");
+
+        // Bas niveau : A ferme sans un octet.
+        let conn = ep_b.connect(ep_a.addr(), PRESENCE_ALPN).await.unwrap();
+        let got = async {
+            let (mut s, mut r) = conn.open_bi().await.ok()?;
+            s.write_all(PING).await.ok()?;
+            let mut buf = [0u8; 5];
+            r.read_exact(&mut buf).await.ok()
+        }
+        .await;
+        assert!(got.is_none());
+
+        router_a.shutdown().await.unwrap();
+        svc_a.stop().await;
+        svc_b.stop().await;
+    }
+
     #[test]
     fn friends_db_adapter() {
         use core_lib::types::{Friend, TrustLevel};

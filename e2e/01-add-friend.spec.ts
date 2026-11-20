@@ -88,3 +88,29 @@ test('T1 negatif : code invalide, soi-meme, refus', async ({ world }) => {
   await gotoRoute(appA, 'main');
   await expect(appA.page.getByRole('complementary', { name: 'Amis' }).getByText("Aucun ami pour l'instant.")).toBeVisible();
 });
+
+test('T1 retrait : A retire B, B n\'obtient plus de PONG et A n\'a plus d\'ami', async ({ world }) => {
+  const { appA, appB } = world;
+  await loginBoth(world);
+  const codeA = await readMyCode(appA);
+  await sendRequest(appB, codeA);
+  await expect(appB.page.getByLabel(/^Code de vérification : /)).toBeVisible({ timeout: 30_000 });
+  await expect.poll(async () => (await invoke<{ items: { public_key: string }[] }>(appA.page, 'friend_requests', { offset: 0, limit: 5, query: null })).items.length, { timeout: 30_000 }).toBe(1);
+  const keyB = (await invoke<{ items: { public_key: string }[] }>(appA.page, 'friend_requests', { offset: 0, limit: 5, query: null })).items[0].public_key;
+  await invoke(appA.page, 'friend_accept', { public_key: keyB });
+  for (const app of [appA, appB]) {
+    await expect.poll(async () => (await invoke<{ presence: string }[]>(app.page, 'friend_list'))[0]?.presence, { timeout: 60_000 }).toBe('online');
+  }
+
+  // A retire B depuis Paramètres > Amis : confirmation, puis la liste se vide.
+  await gotoRoute(appA, 'friends');
+  await appA.page.getByRole('button', { name: `Retirer ${NAME_B} de mes amis` }).click();
+  const dialog = appA.page.getByRole('alertdialog', { name: 'Retirer cet ami ?' });
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole('button', { name: 'Retirer' }).click();
+  await expect(appA.page.getByText(`${NAME_B} n'est plus dans tes amis.`)).toBeVisible();
+  expect((await invoke<unknown[]>(appA.page, 'friend_list')).length).toBe(0);
+
+  // Chez B, la sonde de A n'obtient plus de PONG : A apparaît hors ligne.
+  await expect.poll(async () => (await invoke<{ presence: string }[]>(appB.page, 'friend_list'))[0]?.presence, { timeout: 120_000 }).toBe('offline');
+});

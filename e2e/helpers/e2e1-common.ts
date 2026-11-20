@@ -64,14 +64,14 @@ export async function makeFriends(a: App, b: App): Promise<void> {
 }
 
 const B32 = 'abcdefghijklmnopqrstuvwxyz234567';
-/** Cle publique (hex) contenue dans un code ami : version(1) epoch(4) cle(32), base32 sans remplissage. */
+/** Cle publique (hex) contenue dans un code ami : version(1) jeton(16) cle(32), base32 sans remplissage. */
 export function keyOfCode(code: string): string {
   const raw = code.replace(/^mcl1-/, '').replace(/-/g, '');
   let bits = '';
   for (const ch of raw) bits += B32.indexOf(ch).toString(2).padStart(5, '0');
   const bytes: number[] = [];
   for (let i = 0; i + 8 <= bits.length; i += 8) bytes.push(parseInt(bits.slice(i, i + 8), 2));
-  return Buffer.from(bytes.slice(5, 37)).toString('hex');
+  return Buffer.from(bytes.slice(17, 49)).toString('hex');
 }
 
 /** Nombre de fichiers (recursif) sous un dossier, 0 s'il n'existe pas. */

@@ -143,8 +143,8 @@ pub struct EndpointAddrInfo {
 
 impl EndpointAddrInfo {
     /// Construit le payload de code ami (à passer à `friend_code::encode`).
-    pub fn into_payload(self, public_key: [u8; 32], epoch: u32) -> FriendCodePayload {
-        FriendCodePayload { public_key, epoch, relay: None, addrs: self.addrs }
+    pub fn into_payload(self, public_key: [u8; 32], token: friend_code::Token) -> FriendCodePayload {
+        FriendCodePayload { public_key, token, relay: None, addrs: self.addrs }
     }
 }
 
@@ -234,7 +234,7 @@ mod tests {
             let c = a2.accept().await.unwrap().await.unwrap();
             c.closed().await;
         });
-        let payload = endpoint_addr_info(&a.addr(), None).into_payload(*a.id().as_bytes(), 0);
+        let payload = endpoint_addr_info(&a.addr(), None).into_payload(*a.id().as_bytes(), [0; friend_code::TOKEN_LEN]);
         assert!(!payload.addrs.is_empty(), "le code doit porter les IP");
         assert!(payload.relay.is_none(), "le code ne porte plus de relais");
         let target = endpoint_addr_from_payload(&friend_code::parse(&friend_code::encode(&payload)).unwrap()).unwrap();
@@ -255,7 +255,7 @@ mod tests {
             .with_ip_addr("192.168.1.5:4001".parse().unwrap());
         let info = endpoint_addr_info(&addr, None);
         assert_eq!(info.addrs, ["192.168.1.5:4001", "127.0.0.1:4000"], "non-loopback d'abord");
-        let payload = info.into_payload(*id.as_bytes(), 0);
+        let payload = info.into_payload(*id.as_bytes(), [0; friend_code::TOKEN_LEN]);
         assert!(payload.relay.is_none(), "un relais de l'adresse n'entre jamais dans le code");
         let parsed = friend_code::parse(&friend_code::encode(&payload)).unwrap();
         let back = endpoint_addr_from_payload(&parsed).unwrap();
@@ -269,7 +269,7 @@ mod tests {
     fn old_friend_code_relay_is_ignored() {
         let payload = FriendCodePayload {
             public_key: [3u8; 32],
-            epoch: 1,
+            token: [1; friend_code::TOKEN_LEN],
             relay: Some("euc1-1.relay.n0.iroh.link".into()),
             addrs: vec!["192.168.1.5:4001".into()],
         };

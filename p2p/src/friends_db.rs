@@ -478,6 +478,12 @@ impl FriendsDb {
         Ok(n > 0)
     }
 
+    /// Supprime les demandes reçues (`In`) ; renvoie leur nombre. Au démarrage : décider d'une demande
+    /// exige le flux de l'ami, qui n'existe plus après un arrêt, donc ces lignes ne sont plus décidables.
+    pub fn remove_incoming_requests(&self) -> Result<usize> {
+        self.lock().execute("DELETE FROM requests WHERE direction = ?1", params![Direction::In.as_str()]).map_err(db)
+    }
+
     /// Supprime toutes les demandes (« tout refuser ») ; renvoie leur nombre.
     pub fn remove_all_requests(&self) -> Result<usize> {
         self.lock().execute("DELETE FROM requests", []).map_err(db)
@@ -659,6 +665,17 @@ mod tests {
         assert_eq!(d.remove_all_requests().unwrap(), 9);
         assert_eq!(d.remove_all_requests().unwrap(), 0);
         assert_eq!(d.request_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn remove_incoming_keeps_outgoing() {
+        let d = FriendsDb::open_in_memory().unwrap();
+        d.upsert_request(&req(1, "a", 1), Direction::In).unwrap();
+        d.upsert_request(&req(2, "b", 1), Direction::In).unwrap();
+        d.upsert_request(&req(3, "c", 1), Direction::Out).unwrap();
+        assert_eq!(d.remove_incoming_requests().unwrap(), 2);
+        assert_eq!(d.remove_incoming_requests().unwrap(), 0);
+        assert_eq!(d.request_count().unwrap(), 1);
     }
 
     #[test]

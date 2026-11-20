@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import "./requests.css";
 import { useServices } from "../../app/context";
 import { Button } from "../../ui";
+import { useEscapeCancel } from "../../ui/useEscapeCancel";
 import type { FriendRequest, Services } from "../../services/types";
 
 const PAGE = 20;
@@ -31,7 +32,7 @@ function Avatar({ name }: { name: string }) {
   return <span className="rq-avatar" aria-hidden="true">{name.slice(0, 1).toUpperCase()}</span>;
 }
 
-export default function Requests() {
+export default function Requests({ onAnswered }: { onAnswered?: (accepted: boolean) => void } = {}) {
   const services: Services = useServices();
   const [items, setItems] = useState<FriendRequest[]>([]);
   const [total, setTotal] = useState(0);
@@ -51,6 +52,8 @@ export default function Requests() {
   const queryRef = useRef("");
   const cancelRef = useRef<HTMLButtonElement>(null);
   queryRef.current = query;
+  const itemsRef = useRef<FriendRequest[]>([]);
+  itemsRef.current = items;
 
   useEffect(() => {
     const t = setTimeout(() => setQuery(input.trim()), DEBOUNCE_MS);
@@ -88,7 +91,30 @@ export default function Requests() {
     setNotice(`Nouvelle demande de ${r.name}.`);
   }), [services]);
 
+  useEffect(() => services.onFriendRequestRemoved(({ public_key }) => {
+    const gone = itemsRef.current.find((x) => x.public_key === public_key);
+    if (!gone) {
+      // Hors de la page chargée (ou filtrée) : on resynchronise les totaux au lieu de les deviner.
+      const q = queryRef.current;
+      void services.friendRequests({ offset: 0, limit: 1, query: q || undefined }).then((p) => setTotal(p.total), () => {});
+      void services.friendRequests({ offset: 0, limit: 1 }).then((p) => setGrand(p.total), () => {});
+      return;
+    }
+    setGrand((g) => Math.max(0, g - 1));
+    setTotal((t) => Math.max(0, t - 1));
+    setItems((list) => list.filter((x) => x.public_key !== public_key));
+    setOpenKey((k) => {
+      if (k !== public_key) return k;
+      const list = itemsRef.current;
+      const idx = list.findIndex((x) => x.public_key === public_key);
+      return (list[idx + 1] ?? list[idx - 1] ?? null)?.public_key ?? null;
+    });
+    setNotice(`La demande de ${gone.name} a expiré.`);
+  }), [services]);
+
   useEffect(() => { if (confirming) cancelRef.current?.focus(); }, [confirming]);
+  // Échap annule la confirmation (sans quitter Paramètres) ; avalé sans effet pendant le refus.
+  useEscapeCancel(confirming, () => { if (!bulkBusy) setConfirming(false); });
 
   const loadMore = async () => {
     const id = seq.current;
@@ -122,6 +148,7 @@ export default function Requests() {
       setTotal((t) => Math.max(0, t - 1));
       setGrand((g) => Math.max(0, g - 1));
       setOpenKey((k) => (k === r.public_key ? (rest[idx] ?? rest[idx - 1] ?? null)?.public_key ?? null : k));
+      onAnswered?.(accept);
       setNotice(accept ? `${r.name} est maintenant ton ami.` : `Demande de ${r.name} refusée.`);
     } catch (e) {
       setError(messageOf(e));

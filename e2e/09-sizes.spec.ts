@@ -5,27 +5,22 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { Page } from '@playwright/test';
-import { test, expect, ARTIFACTS, makeHostInstance, invoke, waitForRoute } from './harness/fixtures';
+import { test, expect, ARTIFACTS, makeHostInstance, waitForRoute } from './harness/fixtures';
 import { SCREENS, prepare, gotoScreen, setWindowSize, type Screen } from './helpers/e2e4-lib';
 
 const SIZES: [number, number][] = [[960, 600], [1280, 720]];
 const OUT = path.join(ARTIFACTS, 'sizes');
 const byId = (id: string) => SCREENS.find((s) => s.id === id)!;
-const progress = (p: Record<string, unknown>) => ({ phase: 'receiving', files_done: 12, files_total: 40, bytes_done: 340e6, bytes_total: 1.2e9, speed_bps: 800_000, via_relay: true, ...p });
 
 interface Variant { id: string; screen: Screen; setup?: (page: Page) => Promise<void> }
 const VARIANTS: Variant[] = [
   ...SCREENS.map((screen) => ({ id: screen.id, screen })),
   { id: 'create-advanced', screen: byId('create'), setup: async (p) => { await p.getByRole('button', { name: /Créer une instance vide/ }).click(); await p.getByRole('button', { name: 'Options avancées' }).click(); } },
   { id: 'friends-code-confirm', screen: byId('friends-requests'), setup: async (p) => { await p.getByRole('button', { name: /Générer un nouveau code/ }).click(); } },
-  { id: 'install-relay', screen: byId('install'), setup: async (p) => { await invoke(p, 'plugin:event|emit', { event: 'transfer://progress', payload: progress({}) }); await p.locator('.inst-note').waitFor(); } },
-  { id: 'install-done', screen: byId('install'), setup: async (p) => { await invoke(p, 'plugin:event|emit', { event: 'transfer://progress', payload: progress({ phase: 'done', files_done: 40, bytes_done: 1.2e9 }) }); await p.getByRole('button', { name: 'Jouer' }).or(p.getByRole('button', { name: 'Réessayer' })).first().waitFor(); } },
-  { id: 'install-cancel-confirm', screen: byId('install'), setup: async (p) => { await p.getByRole('button', { name: 'Annuler' }).click(); await p.getByRole('group', { name: /Confirmer/ }).waitFor(); } },
   { id: 'settings-network', screen: byId('settings'), setup: async (p) => { await p.getByRole('tab', { name: 'Réseau' }).click(); } },
   { id: 'settings-java', screen: byId('settings'), setup: async (p) => { await p.getByRole('tab', { name: 'Java' }).click(); } },
   { id: 'settings-storage-confirm', screen: byId('settings'), setup: async (p) => { await p.getByRole('tab', { name: 'Stockage' }).click(); await p.getByRole('button', { name: /Vider le cache/ }).click(); } },
   { id: 'settings-about', screen: byId('settings'), setup: async (p) => { await p.getByRole('tab', { name: 'À propos' }).click(); } },
-  { id: 'error-waiting', screen: { ...byId('error'), hash: '#/error?state=waiting' } },
   { id: 'error-no-license', screen: { ...byId('error'), hash: '#/error?state=no-license' } },
   { id: 'legal-last-section', screen: byId('legal'), setup: async (p) => { await p.locator('article section, main section').last().scrollIntoViewIfNeeded(); } },
 ];

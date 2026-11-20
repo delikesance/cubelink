@@ -118,7 +118,7 @@ export async function startJoinViaUi(page: Page) {
   const trust = page.getByRole('checkbox');
   if (await trust.count()) await trust.check();
   await go.click();
-  await expect(page.locator('#inst-title')).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole('progressbar')).toBeVisible({ timeout: 15_000 });
 }
 
 export interface Progress { phase: string; files_done: number; files_total: number; bytes_done: number; bytes_total: number }

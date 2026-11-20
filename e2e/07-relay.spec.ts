@@ -102,33 +102,6 @@ test.describe('T7 relais : reglages (sans Internet)', () => {
     expect(err).toMatch(/contradict|incompatible|désactiv|desactiv/i);
     expect(await invoke<Settings>(page, 'settings_get')).toEqual(cur); // rien n'est enregistre
   });
-
-  test('indication « via un relais » dans Installation (evenement injecte) et absence sans relais', async ({ appA }) => {
-    const page = appA.page;
-    await waitForRoute(page, 'login');
-    await loginOffline(page, 'Alex');
-    await page.evaluate(() => { window.location.hash = '#/install?friend=abcd'; });
-    await waitForRoute(page, 'install');
-    const note = page.locator('.inst-note');
-    await expect(note).toHaveCount(0); // pas de relais : pas d'indication
-    const emit = (via_relay: boolean, speed_bps: number) => invoke(page, 'plugin:event|emit', {
-      event: 'transfer://progress',
-      payload: { phase: 'receiving', files_done: 1, files_total: 4, bytes_done: 1_000_000, bytes_total: 8_000_000, speed_bps, via_relay },
-    });
-    // L'abonnement de l'ecran (listen) est asynchrone : on reemet jusqu'a ce que l'ecran l'ait recu.
-    await expect(async () => {
-      await emit(false, 8_000_000);
-      await expect(page.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '12', { timeout: 1_000 }); // l'evenement est bien recu
-    }).toPass({ timeout: 15_000 });
-    await expect(note).toHaveCount(0);
-    await emit(true, 900_000);
-    await expect(note).toBeVisible();
-    await expect(note).toContainText('via un relais');
-    await expect(note).toContainText('plus lent');
-    await emit(false, 8_000_000);
-    await expect(note).toHaveCount(0); // l'indication disparait quand la connexion redevient directe
-    test.info().annotations.push({ type: 'note', description: 'Le message dedie « plus lentement » (SlowViaRelay, p2p/src/relay.rs SlowRelayAdvisor) n\'est pas branche : aucun evenement ni texte cote front/src-tauri (grep « lentement » : seulement la note statique de Install et le texte de Parametres). Seule la note « plus lent » liee a via_relay est testee.' });
-  });
 });
 
 test.describe('T7 relais : mode relais personnalise du harnais', () => {

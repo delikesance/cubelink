@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Shell, useScreenTitle } from "./shell";
 import { buildHash, navigate, parseHash, goBack, canGoBack, resetHistory } from "./router";
@@ -86,6 +86,17 @@ describe("routeur", () => {
       expect((await field()).value).toBe(LINK);
       expect(screen.getByRole("main").getAttribute("data-route")).toBe("settings");
     });
+  });
+
+  it("lien ami pendant un transfert : l'utilisateur reste sur l'écran, le lien est repris à la sortie", async () => {
+    const LINK = "cubelink://add/mcl1-0123456789abcdef0123";
+    const svc = createFakeServices({ tickMs: 0 });
+    render(<Shell services={svc} />);
+    go("#/join");
+    await act(async () => { svc.openFriendLink(LINK); });
+    expect(document.getElementById("contenu")?.getAttribute("data-route")).toBe("join");
+    go("#/main");
+    await waitFor(() => expect(document.getElementById("contenu")?.getAttribute("data-route")).toBe("settings"));
   });
 
   it("route inconnue : repli sur login", () => {

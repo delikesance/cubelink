@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import "./add.css";
 import { useServices } from "../../app/context";
 import { takeFriendLink, usePendingFriendLink } from "../../app/friendLink";
+import { clearOutgoing, trackOutgoing, type Outgoing, useOutgoing, useOutgoingIntake } from "../../app/outgoingRequest";
 import { Button } from "../../ui";
 
 const ErrIcon = () => (
@@ -26,11 +27,10 @@ function messageOf(e: unknown): string {
   return raw;
 }
 
+/** Envoi en cours ou en erreur ; la demande envoyée (en attente ou répondue) vit dans `outgoingRequest`. */
 type Status =
   | { step: "idle" }
   | { step: "sending" }
-  | { step: "sent"; verify: string; code: string }
-  | { step: "answered"; kind: "accepted" | "refused" | "expired"; name?: string }
   | { step: "error"; message: string };
 
 export default function Add() {
@@ -46,20 +46,11 @@ export default function Add() {
     return () => { alive.current = false; };
   }, []);
 
-  // Réponse à la demande envoyée : tant qu'elle est affichée, on écoute les événements du demandeur. La clé publique
-  // n'est pas connue de l'interface (seulement le code) : une seule demande est suivie à l'écran à la fois.
-  const waiting = status.step === "sent";
+  // Demande envoyée et sa réponse : suivies hors de l'écran (le Shell écoute aussi), pour ne rien perdre si on le quitte.
+  useOutgoingIntake(services);
+  const outgoing = useOutgoing();
+  const waiting = outgoing?.step === "sent";
   const busy = waiting || status.step === "sending";
-  useEffect(() => {
-    if (!waiting) return;
-    const answer = (s: Status) => { if (alive.current) setStatus(s); };
-    const offs = [
-      services.onFriendAccepted(({ name }) => answer({ step: "answered", kind: "accepted", name })),
-      services.onFriendRefused(() => answer({ step: "answered", kind: "refused" })),
-      services.onFriendRequestExpired(() => answer({ step: "answered", kind: "expired" })),
-    ];
-    return () => offs.forEach((off) => off());
-  }, [waiting, services]);
 
   // Lien ami ouvert depuis le système (clic sur cubelink://add/…) : il remplit le champ, sans rien envoyer. Pendant
   // qu'une demande est en cours, il attend (sinon on perdrait le code de vérification à comparer).
@@ -72,9 +63,10 @@ export default function Add() {
     setValue(link);
     setTouched(true);
     setFromLink(true);
-    setStatus((s) => (s.step === "error" || s.step === "answered" ? { step: "idle" } : s));
+    setStatus((s) => (s.step === "error" ? { step: "idle" } : s));
+    if (outgoing?.step === "answered") clearOutgoing();
     inputRef.current?.focus();
-  }, [incoming, busy]);
+  }, [incoming, busy, outgoing]);
 
   const empty = value.trim() === "";
   const fieldError = touched && !empty ? validateFriendCode(value) : null;
@@ -102,18 +94,21 @@ export default function Add() {
   };
 
   const submit = async () => {
-    if (sending) return;
+    if (busy) return;
     setTouched(true);
     if (validateFriendCode(value)) return;
     setFromLink(false);
+    clearOutgoing();
     setStatus({ step: "sending" });
     try {
       const sentCode = value.trim();
       const verify = await services.friendSendRequest(sentCode);
+      // Suivie même si l'écran a été quitté pendant l'envoi : la demande est partie, sa réponse doit être retrouvée.
+      trackOutgoing(verify, sentCode);
       if (!alive.current) return;
       setValue("");
       setTouched(false);
-      setStatus({ step: "sent", verify, code: sentCode });
+      setStatus({ step: "idle" });
     } catch (e) {
       if (alive.current) setStatus({ step: "error", message: messageOf(e) });
     }
@@ -121,21 +116,22 @@ export default function Add() {
 
   const cancel = async (code: string) => {
     try { await services.friendCancelRequest(code); } catch { /* idempotent : rien de plus à faire */ }
+    clearOutgoing();
     if (!alive.current) return;
     setStatus({ step: "idle" });
     inputRef.current?.focus();
   };
 
-  const answeredText = (s: Extract<Status, { step: "answered" }>) =>
+  const answeredText = (s: Extract<Outgoing, { step: "answered" }>) =>
     s.kind === "accepted" ? `${s.name || "Ton ami"} a accepté ta demande. Vous êtes amis.`
       : s.kind === "refused" ? "Ta demande n'a pas été acceptée."
         : "Ta demande est restée sans réponse. Vérifie que ton ami est connecté, puis redemande-lui son code.";
 
   const live =
-    fromLink && status.step === "idle" ? "Lien d'ami reçu. Rien n'est envoyé tant que tu ne cliques pas sur « Envoyer la demande »."
+    fromLink && status.step === "idle" && !outgoing ? "Lien d'ami reçu. Rien n'est envoyé tant que tu ne cliques pas sur « Envoyer la demande »."
     : status.step === "sending" ? "Envoi de la demande…"
-      : status.step === "sent" ? "Demande envoyée. Compare ce code avec celui de ton ami."
-        : status.step === "answered" ? answeredText(status)
+      : outgoing?.step === "sent" ? "Demande envoyée. Compare ce code avec celui de ton ami."
+        : outgoing?.step === "answered" ? answeredText(outgoing)
           : "";
 
   return (
@@ -163,10 +159,10 @@ export default function Add() {
           disabled={sending}
         />
         <Button variant="secondary" onClick={() => { void paste(); }} disabled={sending}>Coller</Button>
-        <Button type="submit" disabled={empty} loading={sending}>Envoyer la demande</Button>
+        <Button type="submit" disabled={empty || waiting} loading={sending}>Envoyer la demande</Button>
       </form>
       <p id="add-help" className="add-help">Il commence par «&nbsp;mcl1-&nbsp;» ou par cubelink://add/…</p>
-      {fromLink && status.step === "idle" && (
+      {fromLink && status.step === "idle" && !outgoing && (
         <p className="add-help">Tu as ouvert un lien d'ami : rien n'est envoyé pour l'instant. Si tu connais cette personne, clique sur «&nbsp;Envoyer la demande&nbsp;».</p>
       )}
       {incoming && busy && (
@@ -175,19 +171,19 @@ export default function Add() {
       {fieldError && <p id="add-error" className="add-error"><ErrIcon />{fieldError}</p>}
       {serviceError && <p id="add-svc-error" className="add-error" role="alert"><ErrIcon />{serviceError}</p>}
 
-      {status.step === "sent" && (
+      {outgoing?.step === "sent" && (
         <div className="add-sent">
           <p className="add-ok">Demande envoyée. Compare ce code avec celui de ton ami.</p>
-          <code className="add-verify" aria-label={`Code de vérification : ${status.verify}`}>{status.verify}</code>
-          <p className="add-help">Les deux codes doivent être identiques. Sinon, annule la demande puis redemande-la.</p>
+          <code className="add-verify" aria-label={`Code de vérification : ${outgoing.verify}`}>{outgoing.verify}</code>
+          <p className="add-help">Les deux codes doivent être identiques. Sinon, annule la demande puis redemande-la : une seule demande peut attendre à la fois.</p>
           <div className="add-sent-actions">
-            <Button variant="secondary" onClick={() => { void cancel(status.code); }}>Annuler la demande</Button>
+            <Button variant="secondary" onClick={() => { void cancel(outgoing.code); }}>Annuler la demande</Button>
           </div>
         </div>
       )}
-      {status.step === "answered" && (
-        <div className={`add-sent${status.kind === "accepted" ? "" : " add-sent-neutral"}`}>
-          <p className={status.kind === "accepted" ? "add-ok" : "add-help"}>{answeredText(status)}</p>
+      {outgoing?.step === "answered" && (
+        <div className={`add-sent${outgoing.kind === "accepted" ? "" : " add-sent-neutral"}`}>
+          <p className={outgoing.kind === "accepted" ? "add-ok" : "add-help"}>{answeredText(outgoing)}</p>
         </div>
       )}
 

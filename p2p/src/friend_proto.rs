@@ -539,6 +539,9 @@ impl Shared {
         }
         let written = write_frame(send, &msg).await;
         let _ = send.finish();
+        // Décision écrite : le pair n'est plus « actif », il peut redemander tout de suite (sinon son renvoi après un refus
+        // échouerait pendant l'attente de fermeture ci-dessous).
+        drop(adm);
         if written.is_ok() {
             // Attend que A ait lu et fermé la connexion avant de libérer la connexion.
             let _ = tokio::time::timeout(Duration::from_secs(5), conn.closed()).await;

@@ -62,6 +62,17 @@ pub fn setup(app: &tauri::App, st: &Arc<AppState>, test_mode: bool) {
     }
 }
 
+/// Chemin de l'exécutable courant (vide si inconnu).
+fn exe_path() -> String {
+    std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default()
+}
+
+/// Paquet MSIX : le lien est déclaré par le manifeste (`uap:Protocol`) ; écrire une clé de registre pointant vers
+/// l'exécutable empaqueté (`WindowsApps`) risquerait de masquer l'activation du paquet.
+fn is_msix_path(exe: &str) -> bool {
+    exe.to_lowercase().contains("\\windowsapps\\")
+}
+
 /// Déclare Cubelink auprès du système comme gestionnaire de `cubelink://`. Les paquets (MSI, MSIX, .deb, .rpm) le font
 /// déjà à l'installation ; ceci couvre ce qu'ils ne font pas : l'AppImage (son chemin change quand on la déplace, d'où
 /// un réenregistrement à chaque démarrage, sur un fil à part car il lance `xdg-mime`) et un MSI posé avant ce correctif.
@@ -73,7 +84,7 @@ fn register(app: &AppHandle) {
                 eprintln!("[Cubelink] enregistrement du lien cubelink:// impossible : {e}");
             }
         });
-    } else if cfg!(windows) && !app.deep_link().is_registered(LINK_SCHEME).unwrap_or(false) {
+    } else if cfg!(windows) && !is_msix_path(&exe_path()) && !app.deep_link().is_registered(LINK_SCHEME).unwrap_or(false) {
         if let Err(e) = app.deep_link().register(LINK_SCHEME) {
             eprintln!("[Cubelink] enregistrement du lien cubelink:// impossible : {e}");
         }
@@ -98,6 +109,13 @@ mod tests {
         for other in ["--background", "https://add/mcl1-abcd", "launcher://add/mcl1-abcd", "cubelink:/add", "cubelink", "mcl1-aaaa-bbbb", "é"] {
             assert_eq!(friend_link([other]), None, "{other}");
         }
+    }
+
+    #[test]
+    fn msix_path_is_not_registered_by_hand() {
+        assert!(is_msix_path(r"C:\Program Files\WindowsApps\Cubelink_1.0_x64__abc\cubelink.exe"));
+        assert!(!is_msix_path(r"C:\Program Files\Cubelink\cubelink.exe"));
+        assert!(!is_msix_path("/usr/bin/cubelink"));
     }
 
     #[test]

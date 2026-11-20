@@ -1,26 +1,35 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ShellContext } from "../../app/context";
 import { offerFriendLink, resetFriendLink } from "../../app/friendLink";
+import { resetOutgoing, useOutgoingIntake } from "../../app/outgoingRequest";
 import { createFakeServices } from "../../services/fake";
 import type { Services } from "../../services/types";
 import Add, { validateFriendCode } from "./Add";
 
-afterEach(() => { cleanup(); vi.restoreAllMocks(); resetFriendLink(); });
+afterEach(() => { cleanup(); vi.restoreAllMocks(); resetFriendLink(); resetOutgoing(); });
 
 const VALID = "mcl1-0123456789abcdef0123";
 let fake: ReturnType<typeof createFakeServices>;
+
+let services: Services;
+let unmountAdd: () => void = () => {};
+
+function mount() {
+  const r = render(
+    <ShellContext.Provider value={{ services, route: "friends", params: {}, navigate: vi.fn(), setTitle: vi.fn(), goBack: vi.fn(), canGoBack: false } as never}>
+      <Add />
+    </ShellContext.Provider>,
+  );
+  unmountAdd = r.unmount;
+}
 
 function setup(over: Partial<Services> = {}) {
   const base = createFakeServices({ tickMs: 0 });
   fake = base;
   const send = vi.fn(over.friendSendRequest ?? base.friendSendRequest);
-  const services = { ...base, ...over, friendSendRequest: send } as Services;
-  render(
-    <ShellContext.Provider value={{ services, route: "friends", params: {}, navigate: vi.fn(), setTitle: vi.fn(), goBack: vi.fn(), canGoBack: false } as never}>
-      <Add />
-    </ShellContext.Provider>,
-  );
+  services = { ...base, ...over, friendSendRequest: send } as Services;
+  mount();
   return send;
 }
 const input = () => screen.getByLabelText("Code ami de ton ami") as HTMLInputElement;
@@ -180,12 +189,33 @@ describe("onglet Ajouter un ami", () => {
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
-  it("sans annulation, un renvoi au même pair est refusé « déjà en cours »", async () => {
+  it("pendant qu'une demande attend, on ne peut pas en envoyer une autre (une seule est suivie)", async () => {
+    const send = setup();
+    await sendValid();
+    fireEvent.change(input(), { target: { value: "mcl1-fedcba98765432100123" } });
+    expect(sendBtn().disabled).toBe(true);
+    fireEvent.submit(input().closest("form")!);
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("refus reçu hors de l'écran : retrouvé au retour, sans bouton Annuler ni blocage du renvoi", async () => {
     setup();
     await sendValid();
-    fireEvent.change(input(), { target: { value: VALID } });
-    fireEvent.click(sendBtn());
-    expect((await screen.findByRole("alert")).textContent).toMatch(/déjà en cours/);
+    unmountAdd();
+    renderHook(() => useOutgoingIntake(services)); // le Shell écoute pendant que l'écran est fermé
+    act(() => fake.answerSentRequest(VALID, "refused"));
+    mount();
+    expect((await screen.findAllByText("Ta demande n'a pas été acceptée.")).length).toBeGreaterThan(0);
+    expect(screen.queryByRole("button", { name: "Annuler la demande" })).toBeNull();
+  });
+
+  it("demande en attente au retour sur l'écran : le code de vérification et « Annuler » sont toujours là", async () => {
+    setup();
+    await sendValid();
+    unmountAdd();
+    mount();
+    expect(screen.getByLabelText(/Code de vérification/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Annuler la demande" })).toBeTruthy();
   });
 
   it("acceptée : le nom de l'ami est annoncé", async () => {

@@ -501,7 +501,8 @@ impl Stage {
     }
 
     /// Transmet a l'hote la preference systeme « afficher les animations » (relue a chaque lancement : pas besoin de
-    /// surveiller les changements de reglages de Windows).
+    /// surveiller les changements de reglages de Windows). Linux : la lecture est bornee a 200 ms, au-dela la derniere valeur
+    /// connue sert et la lecture se termine en arriere-plan (prise en compte au lancement suivant).
     fn refresh_calm(&self, h: &dyn HostApi, first: bool) {
         #[cfg(any(windows, target_os = "linux"))]
         let calm = cubelink_host::system::reduced_motion();

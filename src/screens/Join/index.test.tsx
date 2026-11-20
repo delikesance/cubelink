@@ -191,6 +191,80 @@ describe("Join", () => {
     expect((screen.getByRole("checkbox", { name: /confiance/ }) as HTMLInputElement).checked).toBe(false);
   });
 
+  it("panneau de transfert : barre accessible, annonce live limitée à la phase, préparation et lancement", async () => {
+    const { emit } = setup();
+    await startJoin();
+    expect(screen.getByRole("status").textContent).toBe("Préparation en cours");
+    emit(P());
+    const bar = screen.getByRole("progressbar");
+    expect(bar.getAttribute("aria-valuemin")).toBe("0");
+    expect(bar.getAttribute("aria-valuemax")).toBe("100");
+    expect((bar.getAttribute("aria-valuetext") ?? "").replace(/[\u202f\u00a0]/g, " ")).toContain("12 / 40 fichiers · 340 Mo / 1,2 Go · 8 Mo/s");
+    const live = screen.getByRole("status");
+    expect(live.textContent).toBe("Réception des fichiers");
+    emit(P({ files_done: 20, bytes_done: 500_000_000 }));
+    expect(live.textContent).toBe("Réception des fichiers");
+    emit(P({ phase: "verifying" }));
+    expect(live.textContent).toBe("Vérification d'intégrité");
+    emit(P({ phase: "launching" }));
+    expect(live.textContent).toBe("Lancement du jeu");
+    expect(screen.queryByRole("button", { name: "Pause" })).toBeNull();
+  });
+
+  it("via un relais : la note apparaît seulement quand le transfert passe par un relais", async () => {
+    const { emit } = setup();
+    await startJoin();
+    emit(P());
+    expect(screen.queryByText(/via un relais/)).toBeNull();
+    emit(P({ via_relay: true }));
+    expect(screen.getByText(/via un relais/)).toBeTruthy();
+  });
+
+  it("pause puis reprise : joinPause / joinResume, l'étape en cours reste la réception", async () => {
+    const pause = vi.fn(async () => {});
+    const resume = vi.fn(async () => {});
+    const { emit } = setup({ joinPause: pause, joinResume: resume });
+    await startJoin();
+    emit(P());
+    fireEvent.click(screen.getByRole("button", { name: "Pause" }));
+    await waitFor(() => expect(pause).toHaveBeenCalled());
+    emit(P({ phase: "paused", speed_bps: 0 }));
+    expect(screen.getByRole("status").textContent).toBe("Transfert en pause");
+    expect(screen.getByText("2. Réception des fichiers").closest("li")?.getAttribute("aria-current")).toBe("step");
+    fireEvent.click(screen.getByRole("button", { name: "Reprendre" }));
+    await waitFor(() => expect(resume).toHaveBeenCalled());
+  });
+
+  it("échec : message réel, bloc Détails et chemin du journal", async () => {
+    let det: (e: { step: string; message: string; details: string; log_file: string }) => void = () => {};
+    const { emit } = setup({ onTransferErrorDetails: (c: typeof det) => { det = c; return () => {}; } } as never);
+    await startJoin();
+    act(() => det({ step: "Réception", message: "Réception : réponse inattendue de l'hôte", details: "étape: Réception | détail: reset", log_file: "C:\\logs\\join-errors.log" }));
+    emit(P({ phase: "failed", error: "Réception : réponse inattendue de l'hôte" }));
+    expect((await screen.findByRole("alert")).textContent).toMatch(/^Réception : réponse inattendue de l'hôte/);
+    expect(screen.getByText("Détails")).toBeTruthy();
+    expect(screen.getByLabelText("Détails de l'erreur").textContent).toContain("détail: reset");
+    expect(screen.getByRole("button", { name: "Copier" })).toBeTruthy();
+    expect(screen.getByText(/join-errors\.log/)).toBeTruthy();
+  });
+
+  it("échec sur Java ou le réseau : message réel sur place, jamais pris pour un départ de l'ami", async () => {
+    const { navigate, emit } = setup();
+    await startJoin();
+    emit(P({ phase: "failed", error: "Java 21 introuvable : l'ami attend" }));
+    expect(screen.getByRole("alert").textContent).toContain("Java 21 introuvable");
+    expect(screen.queryByText(/s'est déconnecté/)).toBeNull();
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it("mods inconnus reçus pendant le transfert (transfer://unknown_mods) : liste affichée", async () => {
+    let push: (e: { instance_id: string; unknown_mods: string[] }) => void = () => {};
+    setup({ onUnknownMods: (cb) => { push = cb; return () => {}; } });
+    await startJoin();
+    act(() => push({ instance_id: "i1", unknown_mods: ["mods/maison-recue.jar"] }));
+    expect(screen.getByRole("note").textContent).toContain("mods/maison-recue.jar");
+  });
+
   it("échec inconnu : message réel, Retour à l'accueil", async () => {
     const { navigate, emit } = setup();
     await startJoin();

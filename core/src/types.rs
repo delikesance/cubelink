@@ -403,31 +403,25 @@ pub struct TransferProgress {
     pub bytes_total: u64,
     /// Octets par seconde, 0 si inconnu.
     pub speed_bps: u64,
-    /// Vrai si le transfert passe par un relais.
-    pub via_relay: bool,
     /// Message d'échec (phase `failed`), en français.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
 /// Paramètres de l'application (écran Paramètres). Forme alignée sur `src/services/types.ts`.
+///
+/// #55 : les anciens champs `allow_relay`, `relay_only` (relais publics n0) et `discovery` (découverte n0) n'existent
+/// plus. Un ancien `settings.json` qui les contient se charge sans erreur (champs inconnus ignorés) et ils
+/// disparaissent à la réécriture.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct Settings {
     pub language: String,
     pub default_ram_mb: u32,
     pub java_path: Option<String>,
     pub trust_default: TrustLevel,
-    pub allow_relay: bool,
     pub close_on_launch: bool,
-    /// Réglage du design : toujours passer par le relais.
-    pub relay_only: bool,
     /// Réglage du design : envoyer des mods à mes amis.
     pub share_mods: bool,
-    /// Découverte d'adresses publique (pkarr + DNS n0) : retrouver un ami dont l'adresse a changé.
-    /// Publie la clé publique, le relais et les IP auprès de n0. Lu à la création de l'endpoint
-    /// (redémarrage requis). `true` par défaut (fichiers de réglages anciens : `true`).
-    #[serde(default = "default_discovery")]
-    pub discovery: bool,
     /// Ouvrir automatiquement mon monde solo au réseau local (agent Java Cubelink, instances `Own`) pour que mes
     /// amis puissent le rejoindre sans manipulation. `true` par défaut (fichiers de réglages anciens : `true`).
     #[serde(default = "default_lan_auto")]
@@ -462,10 +456,6 @@ fn default_overlay_hotkey() -> String {
     DEFAULT_OVERLAY_HOTKEY.to_string()
 }
 
-fn default_discovery() -> bool {
-    true
-}
-
 fn default_lan_auto() -> bool {
     true
 }
@@ -489,9 +479,21 @@ mod tests {
         assert!(s.overlay_enabled);
         assert!(!s.open_to_all_friends, "anciens réglages : pas d'invitation automatique de tous les amis");
         assert_eq!(s.overlay_hotkey, "Ctrl+Shift+C");
-        assert!(s.discovery && s.lan_auto);
+        assert!(s.lan_auto);
         assert!(s.embedded_game);
         assert!(s.start_with_os);
+    }
+
+    /// #55 : les réglages `discovery`, `allow_relay` et `relay_only` (n0) n'existent plus ; un ancien fichier qui les
+    /// contient se charge sans erreur et ils disparaissent à la réécriture.
+    #[test]
+    fn anciens_reglages_n0_sont_ignores_puis_supprimes() {
+        let old = r#"{"language":"fr","default_ram_mb":4096,"java_path":null,"trust_default":"ask","allow_relay":true,"close_on_launch":false,"relay_only":true,"share_mods":true,"discovery":true}"#;
+        let s: Settings = serde_json::from_str(old).unwrap();
+        let rewritten = serde_json::to_string(&s).unwrap();
+        for k in ["discovery", "allow_relay", "relay_only"] {
+            assert!(!rewritten.contains(k), "{k} : {rewritten}");
+        }
     }
 
     #[test]

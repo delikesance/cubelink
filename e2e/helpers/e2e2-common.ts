@@ -80,7 +80,7 @@ export async function setupHostAndGuest(world: Pick<World, 'appA' | 'appB' | 'se
     await waitForRoute(app.page, 'login');
     const s = await invoke<Record<string, unknown>>(app.page, 'settings_get');
     await invoke(app.page, 'settings_set', { settings: { ...s, close_on_launch: false } });
-    if (Object.keys(extraEnv).length) browsers.push(await restartApp(app, world, 'disabled', extraEnv));
+    if (Object.keys(extraEnv).length) browsers.push(await restartApp(app, world, extraEnv));
   }
   await waitForRoute(appA.page, 'login'); await waitForRoute(appB.page, 'login');
   await loginOffline(appA.page, 'Hote');
@@ -149,7 +149,7 @@ function killTree(pid: number | undefined) {
  * Arrete l'app (arbre complet) puis la relance avec le MEME dossier de donnees (meme identite) et le meme profil WebView2.
  * Met a jour app.proc / app.page ; le nettoyage de la fixture tue le nouveau processus.
  */
-export async function restartApp(app: App, world: Pick<World, 'servers' | 'binary'>, relayMode = 'disabled', extraEnv: Record<string, string> = {}) {
+export async function restartApp(app: App, world: Pick<World, 'servers' | 'binary'>, extraEnv: Record<string, string> = {}) {
   const { servers, binary } = world;
   killTree(app.proc.pid);
   await sleep(1500);
@@ -168,7 +168,7 @@ export async function restartApp(app: App, world: Pick<World, 'servers' | 'binar
     CUBELINK_AUTH_XSTS_URL: servers.auth.base, CUBELINK_AUTH_MC_URL: servers.auth.base,
     CUBELINK_MOJANG_META_URL: servers.mojang.base, CUBELINK_FABRIC_META_URL: servers.mojang.base,
     CUBELINK_ADOPTIUM_URL: servers.mojang.base, CUBELINK_MODRINTH_API_URL: servers.modrinth.base,
-    CUBELINK_JAVA_PATH: FAKE_JAVA, CUBELINK_SKIP_JAVA_PROBE: '1', CUBELINK_RELAY_MODE: relayMode, ...extraEnv,
+    CUBELINK_JAVA_PATH: FAKE_JAVA, CUBELINK_SKIP_JAVA_PROBE: '1', ...extraEnv,
   };
   const log: string[] = [];
   const proc = spawn(binary, [], { env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: false, cwd: ROOT });

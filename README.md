@@ -34,7 +34,7 @@ Pas de compte Cubelink, pas de serveur à louer, pas de téléchargement manuel.
 | | |
 |---|---|
 | **Rejoindre en un clic** | Le profil invité est isolé de tes instances : le bon loader, la bonne version de Java, les mods de l'hôte (configs, `kubejs/` et `defaultconfigs/` compris). Seuls les fichiers qui te manquent sont transférés, par morceaux vérifiés par hash (SHA-256). |
-| **Pair-à-pair** | Connexions QUIC directes entre amis ([Iroh](https://www.iroh.computer/)), avec hole punching. Un relais sans état n'intervient qu'en dernier recours. |
+| **Pair-à-pair** | Connexions QUIC directes entre amis ([Iroh](https://www.iroh.computer/)), sans relais ni annuaire tiers (aucun serveur n'est contacté pour relier deux amis). Le port est ouvert sur la box (UPnP). Limite assumée : deux amis tous deux derrière un NAT strict ou un CGNAT, sans IPv6 ni UPnP, peuvent ne pas se joindre, en attendant la découverte par DHT Mainline (#136) et des relais Cubelink. |
 | **Modpacks et mods** | Parcourir Modrinth et CurseForge, installer un modpack, importer un `.mrpack`, activer, retirer ou ajouter des mods à une instance. |
 | **Cache par hash** | Un fichier n'est téléchargé qu'une seule fois, puis partagé entre les instances par lien physique. |
 | **Compte Microsoft** | Connexion directe entre ton appareil et Microsoft : Cubelink ne voit jamais ton mot de passe. Plusieurs comptes possibles. |
@@ -58,7 +58,7 @@ Détails du flux de release : [`docs/release.md`](docs/release.md).
 
 ## Comment ça marche
 
-<img src="docs/images/p2p.svg" alt="Connexion QUIC directe entre l'hôte et l'invité, relais sans état en secours" width="100%" />
+<img src="docs/images/p2p.svg" alt="Connexion QUIC directe entre l'hôte et l'invité, sans relais" width="100%" />
 
 Chaque lanceur embarque un nœud P2P, un store de blobs adressé par hash, une base SQLite locale (amis, index du cache) et un tunnel QUIC ↔ `localhost` pour que Minecraft se connecte au monde de l'hôte ouvert en LAN. L'identité d'un joueur est une paire de clés ed25519 générée au premier lancement.
 
@@ -71,7 +71,7 @@ Pour aller plus loin : [`docs/architecture.md`](docs/architecture.md) (décision
 | Dossier | Contenu |
 |---|---|
 | `core/` (`cubelink-core`) | Logique du jeu : auth Microsoft/Xbox/Minecraft, manifestes Mojang, Java, loaders (Fabric, Quilt, Forge, NeoForge), cache, Modrinth/CurseForge, import `.mrpack`, profil invité. Contient aussi l'**agent LAN** Java (`core/resources/lan-agent/`). |
-| `p2p/` (`cubelink-p2p`) | Réseau : identité, code ami, présence, transfert par hash, tunnel de jeu, relais (Iroh/QUIC). |
+| `p2p/` (`cubelink-p2p`) | Réseau : identité, code ami, présence, transfert par hash, tunnel de jeu, ouverture de port (Iroh/QUIC, sans relais). |
 | `host/` (`cubelink-host`) | « La Scène » sous Windows et Linux (X11) : adoption de la fenêtre du jeu, rideau, repli. |
 | `src-tauri/` (`cubelink`) | L'application Tauri : commandes, intégration, mises à jour. |
 | `src/` | Interface React/TypeScript : écrans (`screens/`), composants (`ui/`), services, tokens de design (`styles/`). |
@@ -161,9 +161,8 @@ Le dépôt est prêt pour les agents : [`CLAUDE.md`](CLAUDE.md) décrit le flux 
 - [x] Refonte de l'interface, distribution via le Microsoft Store
 - [x] La Scène : le jeu dans la fenêtre du lanceur (Windows, Linux X11)
 - [ ] Essai réel à deux machines distantes, pour valider le jeu à plusieurs de bout en bout
-- [ ] Relais auto-hébergé et plafonné (aujourd'hui : relais publics d'Iroh)
 - [ ] Validation de la version Linux
-- [ ] Découverte publique optionnelle des amis (décision de confidentialité à prendre)
+- [ ] Retrouver un ami dont l'adresse a changé par la DHT Mainline, sans serveur tiers (aujourd'hui : indices du code ami et adresses mémorisées)
 
 L'état détaillé vit dans [`plan.md`](plan.md) et [`docs/architecture.md`](docs/architecture.md).
 

@@ -9,7 +9,6 @@ use core_lib::types::{Loader, LoaderSpec, TransferProgress};
 use cubelink_app::iroh_backend::{start_app, IrohBackend, IrohOptions};
 use cubelink_app::state::{AppState, EventSink};
 use p2p_lib::presence::PresenceConfig;
-use p2p_lib::relay::RelayChoice;
 
 pub type Events = Arc<Mutex<Vec<(String, serde_json::Value)>>>;
 
@@ -31,8 +30,7 @@ impl Node {
         let ev = events.clone();
         let sink: EventSink = Arc::new(move |n, v| ev.lock().unwrap().push((n.to_string(), v)));
         let opts = IrohOptions {
-            relay: RelayChoice::Disabled,
-            advertise_addrs: Some(true),
+            portmap: false,
             presence: PresenceConfig {
                 interval: presence_interval,
                 timeout: Duration::from_secs(2),

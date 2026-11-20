@@ -45,7 +45,7 @@ python3 - "$DATA/settings.json" <<'PY'
 import json,sys
 p=sys.argv[1]; s=json.load(open(p)) if __import__('os').path.exists(p) else None
 if s is None:
-    print("pas de settings.json, cree"); s={"language":"fr","default_ram_mb":4096,"java_path":None,"trust_default":"ask","allow_relay":True,"close_on_launch":False,"relay_only":False,"share_mods":True}
+    print("pas de settings.json, cree"); s={"language":"fr","default_ram_mb":4096,"java_path":None,"trust_default":"ask","close_on_launch":False,"share_mods":True}
 s["start_with_os"]=False; json.dump(s,open(p,"w"))
 PY
 $BIN --background > /tmp/app3.log 2>&1 & P3=$!

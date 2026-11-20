@@ -119,6 +119,7 @@ export function createTauriServices(): Services {
     onFriendRequest: (cb) => on("friend://request", cb),
     onFriendInvite: (cb) => on("friend://invite", cb),
     onFriendInvites: (cb) => on("friend://invites", cb),
+    onFriendCodeChanged: (cb) => on("friend://code_changed", () => cb()),
     onFriendJoinRequest: (cb) => on("friend://join_request", cb),
     onFriendJoinRequests: (cb) => on("friend://join_requests", cb),
     hearthList: () => commands.hearthList(),

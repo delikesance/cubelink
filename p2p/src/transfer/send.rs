@@ -254,11 +254,6 @@ pub trait BlobTransport: Send + Sync {
         on_bytes: &(dyn Fn(u64) + Send + Sync),
         cancel: &AtomicBool,
     ) -> impl Future<Output = Result<()>> + Send;
-
-    /// Vrai si le chemin vers `peer` passe par un relais (inconnu : faux).
-    fn via_relay(&self, _peer: &str) -> bool {
-        false
-    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -477,7 +472,6 @@ mod iroh_impl {
         store: FsStore,
         protected: Arc<Protected>,
         peers: Mutex<HashMap<PeerId, EndpointAddr>>,
-        relayed: Mutex<HashMap<PeerId, bool>>,
         router: Mutex<Option<Router>>,
         /// Connexions QUIC réutilisées d'un fichier à l'autre, par pair et par ALPN (contrôle, blobs) : une
         /// poignée de main par transfert au lieu de deux par fichier, et UN contrôle de congestion partagé par
@@ -514,7 +508,6 @@ mod iroh_impl {
                 store,
                 protected,
                 peers: Mutex::new(HashMap::new()),
-                relayed: Mutex::new(HashMap::new()),
                 router: Mutex::new(None),
                 conns: Mutex::new(HashMap::new()),
                 connecting: tokio::sync::Mutex::new(()),
@@ -583,8 +576,6 @@ mod iroh_impl {
             // export vers `dest`. Le flux de contrôle `send` reste ouvert jusqu'à la fin : l'hôte tient le créneau
             // de concurrence de ce fichier jusque-là (lâché sur erreur, le flux se termine tout seul).
             let conn = self.conn(peer, addr, iroh_blobs::ALPN).await?;
-            let relayed = conn.paths().iter().any(|p| p.is_selected() && p.is_relay());
-            lock(&self.relayed).insert(peer.to_string(), relayed);
             // Protégé du ramasse-miettes jusqu'à la fin de l'export ; supprimé du magasin au passage suivant.
             let _keep = InflightGuard::new(&self.protected, hash);
             let r = self.get_blob(&conn, hash, req, on_bytes, cancel).await;
@@ -909,10 +900,6 @@ mod iroh_impl {
                 self.forget(peer, CONTROL_ALPN, &ctl);
             }
             r
-        }
-
-        fn via_relay(&self, peer: &str) -> bool {
-            lock(&self.relayed).get(peer).copied().unwrap_or(false)
         }
     }
 

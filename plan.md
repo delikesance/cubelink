@@ -3,7 +3,7 @@
 > Mis à jour le 2026-11-10. Architecture et décisions : `docs/architecture.md` (état d'implémentation en §8). Contrats front/back : `docs/contrats.md`.
 
 ## Contexte
-Launcher Minecraft (Tauri/Rust + React) avec catalogues Modrinth/CurseForge, cache de mods par hash, et join d'un ami en P2P : le launcher installe le loader et les mods exacts de l'hôte, sans serveur central (seulement un relais sans état).
+Launcher Minecraft (Tauri/Rust + React) avec catalogues Modrinth/CurseForge, cache de mods par hash, et join d'un ami en P2P : le launcher installe le loader et les mods exacts de l'hôte, sans serveur central ni relais (n0 retiré complètement, #55).
 
 ## Statut des phases
 
@@ -13,7 +13,7 @@ Launcher Minecraft (Tauri/Rust + React) avec catalogues Modrinth/CurseForge, cac
 | 1 | MVP solo : auth, Mojang, Java, loaders, cache, Modrinth, UI | fait |
 | 2 | CurseForge et import de modpacks (`.mrpack`) | fait (couverture CurseForge à revérifier) |
 | 3 | Social P2P : identité, code ami, présence, manifeste, transfert, profil invité, tunnel, sécurité des mods | fait |
-| 4 | Infra : relais auto-hébergé, plafonnement, mises à jour via GitHub Releases | non fait (relais publics Iroh par défaut) |
+| 4 | Infra : plafonnement, mises à jour via GitHub Releases (pas de relais auto-hébergé : aucune infra tierce ni propre) | non fait (aucun relais : n0 retiré, #55 ; relais Cubelink à décider) |
 | 5 | Refonte UX/UI et corrections (voir ci-dessous) | en cours : design en validation, code non lancé |
 
 ## Phase 5 : refonte et corrections
@@ -39,10 +39,10 @@ Chaque tâche a un livrable vérifiable (code, tests, rapport). Tests et lint pa
 
 ## Vérification
 - `npm test` : clippy `-D warnings`, `cargo test --workspace`, `tsc --noEmit`, vitest.
-- `npm run e2e` : scénarios Playwright `e2e/01` à `11` (ajout d'ami, join, installation, lancement, mod inconnu, échecs, relais, accessibilité, tailles, parcourir, art).
+- `npm run e2e` : scénarios Playwright `e2e/01` à `11` (ajout d'ami, join, installation, lancement, mod inconnu, échecs, réseau sans relais, accessibilité, tailles, parcourir, art).
 - Test réel sur deux machines pour le P2P (ajout d'ami par code, join avec manifeste, hashes identiques, mod maison absent des catalogues).
 
 ## Points ouverts
 - Politique de limitation du relais.
-- Hébergement d'un relais auto-hébergé (phase 4).
+- Découverte d'adresses sans tiers par la DHT Mainline (#136) ; aucun relais auto-hébergé n'est prévu.
 - Voir aussi `docs/architecture.md` §7.

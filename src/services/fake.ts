@@ -221,7 +221,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
   let codeN = 1;
   let settings: Settings = {
     language: "fr", default_ram_mb: 4096, java_path: null,
-    trust_default: "ask", allow_relay: true, close_on_launch: false, relay_only: false, share_mods: true, discovery: true, lan_auto: true,
+    trust_default: "ask", close_on_launch: false, share_mods: true, lan_auto: true,
     overlay_enabled: true, overlay_hotkey: "Ctrl+Shift+C", embedded_game: true, start_with_os: true, open_to_all_friends: false,
   };
   // Champs que Rust renvoie toujours (voir `Instance` dans bindings.ts), vides par défaut.
@@ -272,6 +272,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     host: new Set<(e: HostState) => void>(),
     invite: new Set<(i: Invite) => void>(),
     invites: new Set<(l: Invite[]) => void>(),
+    codeChanged: new Set<(v: void) => void>(),
     joinRequest: new Set<(r: JoinRequest) => void>(),
     joinRequests: new Set<(l: JoinRequest[]) => void>(),
     update: new Set<(s: UpdateState) => void>(),
@@ -454,7 +455,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
       phase,
       files_done: Math.floor(ratio * files_total), files_total,
       bytes_done: Math.floor(ratio * bytes_total), bytes_total,
-      speed_bps: phase === "receiving" ? 1_500_000 : 0, via_relay: false,
+      speed_bps: phase === "receiving" ? 1_500_000 : 0,
     };
   }
   function stopTimer() { if (timer) { clearInterval(timer); timer = null; } }
@@ -609,7 +610,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     },
     minecraftVersions: async () => ["1.21.4", "1.21.1", "1.20.6", "1.20.1", "1.19.4", "1.18.2"],
 
-    netTest: async () => ({ relay_connected: true, relay: "euc1-1.relay.n0.iroh.link", relay_ms: 28, udp: true, ipv6: false, direct: true, relay_only: false, partial: false }),
+    netTest: async () => ({ ipv6: false, ipv4_public: false, port_mapped: true }),
     friendMyCode: async () => `mcl1-${hex(codeN * 7, 24)}`,
     friendRegenerateCode: async () => { codeN += 1; return `mcl1-${hex(codeN * 7, 24)}`; },
     friendList: async () => friends.map((f) => ({ friend: { ...f.friend }, presence: f.presence, in_game: f.in_game, last_seen: f.last_seen })),
@@ -1044,6 +1045,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     onFriendRequest: (cb) => sub(listeners.request, cb),
     onFriendInvite: (cb) => sub(listeners.invite, cb),
     onFriendInvites: (cb) => sub(listeners.invites, cb),
+    onFriendCodeChanged: (cb) => sub(listeners.codeChanged, () => cb()),
     onFriendJoinRequest: (cb) => sub(listeners.joinRequest, cb),
     onFriendJoinRequests: (cb) => sub(listeners.joinRequests, cb),
     onUnknownMods: (cb) => sub(listeners.unknown, cb),

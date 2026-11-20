@@ -73,55 +73,31 @@ export const SECTIONS = [
 ] as const;
 export type SectionId = (typeof SECTIONS)[number]["id"];
 
-/** Région lisible d'un relais n0 (« euc1-1.relay.n0.iroh.link » → « Europe »). */
-function relayPlace(host: string | null): string {
-  const h = (host ?? "").toLowerCase();
-  if (h.startsWith("eu")) return "Europe";
-  if (h.startsWith("us")) return "Amérique du Nord";
-  if (h.startsWith("ap")) return "Asie-Pacifique";
-  return host ?? "";
-}
-
 export type NetTone = "ok" | "warn" | "danger" | "neutral";
 /** Un point vérifié : `ok` null = non mesuré ou sans objet. */
 export interface NetCheck { label: string; ok: boolean | null; detail: string }
 /** Verdict lisible d'un coup d'œil : niveau (couleur + icône + mot), ce que ça change, puis le détail. */
 export interface NetVerdict { tone: NetTone; label: string; summary: string; checks: NetCheck[] }
 
+/**
+ * Aucun relais ni serveur tiers : tes amis ne te joignent que par une adresse directe (IPv6 globale, IPv4 publique ou
+ * port ouvert sur ta box). On ne peut pas vérifier depuis l'appareil qu'un pare-feu ne la filtre pas : d'où
+ * « probablement ». Sans aucune de ces adresses, tu ne peux te connecter qu'à un ami qui, lui, est joignable.
+ */
 export function netVerdict(t: NetTest): NetVerdict {
-  const where = relayPlace(t.relay);
-  const relayDetail = t.relay_connected
-    ? ["joignable", where, t.relay_ms != null ? `${t.relay_ms} ms` : ""].filter(Boolean).join(" · ")
-    : "injoignable";
-  const direct: NetCheck = t.relay_only
-    ? { label: "Connexion directe", ok: null, detail: "désactivée par ton réglage" }
-    : t.partial
-      ? { label: "Connexion directe", ok: null, detail: "pas encore mesurée" }
-      : !t.udp
-        ? { label: "Connexion directe", ok: false, detail: "bloquée par un pare-feu (UDP filtré)" }
-        : t.direct === false
-          ? { label: "Connexion directe", ok: false, detail: "gênée par ton routeur" }
-          : { label: "Connexion directe", ok: true, detail: "possible" };
-  const relay: NetCheck = { label: "Relais de secours", ok: t.relay_connected, detail: relayDetail };
-  const checks = [direct, relay];
+  const checks: NetCheck[] = [
+    { label: "Adresse IPv6", ok: t.ipv6, detail: t.ipv6 ? "publique, disponible" : "indisponible chez ton fournisseur ou sur ta box" },
+    { label: "Adresse IPv4 publique", ok: t.ipv4_public, detail: t.ipv4_public ? "portée directement par ton appareil" : "non (derrière une box ou un CGNAT)" },
+    { label: "Port ouvert sur la box", ok: t.port_mapped, detail: t.port_mapped ? "ouvert automatiquement (UPnP)" : "non ouvert (UPnP, NAT-PMP et PCP absents ou désactivés)" },
+  ];
   const v = (tone: NetTone, label: string, summary: string): NetVerdict => ({ tone, label, summary, checks });
-
-  if (!t.relay_connected && (!t.udp || t.relay_only)) {
-    return v("danger", "Hors ligne", t.relay_only
-      ? "Personne ne peut te rejoindre : le relais est injoignable et tu as choisi de toujours passer par lui."
-      : "Personne ne peut te rejoindre. Vérifie ta connexion Internet ou ton pare-feu.");
+  if (t.port_mapped) {
+    return v("ok", "Joignable", "Ta box a ouvert le port : tes amis peuvent se connecter directement à toi, sans serveur intermédiaire.");
   }
-  if (t.relay_only) return v("ok", "Relais uniquement", "Comme demandé, tout passe par le relais : tes amis te rejoignent, un peu plus lentement.");
-  if (t.partial) return v("neutral", "Test incomplet", "La mesure n'est pas terminée. Réessaie dans quelques secondes.");
-  if (!t.udp) return v("warn", "Limitée", "Tes amis peuvent te rejoindre, mais tout passe par le relais : plus lent.");
-  if (t.direct === false) {
-    return t.relay_connected
-      ? v("warn", "Correcte", "Tes amis peuvent te rejoindre ; certaines parties passeront par le relais, un peu plus lent.")
-      : v("danger", "Fragile", "Certains amis risquent de ne pas pouvoir te rejoindre.");
+  if (t.ipv6 || t.ipv4_public) {
+    return v("ok", "Probablement joignable", "Tu as une adresse publique : tes amis devraient pouvoir se connecter directement à toi, sauf si un pare-feu la bloque.");
   }
-  return t.relay_connected
-    ? v("ok", "Excellente", "Tout est bon : tes amis peuvent te rejoindre directement, sans ralentissement.")
-    : v("warn", "Bonne", "Connexion directe possible, mais sans secours si le routeur d'un ami la bloque.");
+  return v("warn", "Peu joignable", "Tes amis ne peuvent pas se connecter à toi, sauf sur le même réseau local. Toi, tu peux rejoindre un ami qui est joignable. Active l'UPnP sur ta box ou l'IPv6 pour y remédier.");
 }
 
 /** Icônes Iconoir (trait) : réussite, avertissement, échec, non mesuré. */
@@ -386,7 +362,7 @@ export default function Settings({ testConnection, clearCache }: SettingsProps =
       </div>
 
       <div {...panel("reseau")}>
-        <p className="set-sub">Connexion directe quand c'est possible, sinon via un relais (un serveur intermédiaire public, plus lent).</p>
+        <p className="set-sub">Cubelink se connecte à tes amis en direct, sans serveur intermédiaire. Pour que deux amis puissent se joindre, au moins l'un des deux doit être joignable (IPv6 ou port ouvert sur la box).</p>
         <Card className="set-list">
           <div className="set-row">
             <div className="set-txt">
@@ -397,14 +373,6 @@ export default function Settings({ testConnection, clearCache }: SettingsProps =
             </div>
             <Button variant="secondary" disabled={netBusy} onClick={() => void runTest()}>{netBusy ? "Test en cours…" : "Tester ma connexion"}</Button>
           </div>
-          <label className="set-row" style={{ cursor: "pointer" }}>
-            <div className="set-txt"><b>Passer toujours par le relais</b><span>Utiliser uniquement le relais&nbsp;: tes amis ne voient pas ton adresse IP, mais le relais la voit. Les transferts seront plus lents.</span></div>
-            <input type="checkbox" className="set-check" disabled={dis} checked={!!settings?.relay_only} onChange={(e) => void update({ relay_only: e.target.checked })} />
-          </label>
-          <label className="set-row" style={{ cursor: "pointer" }}>
-            <div className="set-txt"><b>Retrouver mes amis même si leur adresse change</b><span>Publie ta présence via les serveurs n0 pour que tes amis te retrouvent. Désactive pour rester totalement privé. Appliqué au prochain démarrage.</span></div>
-            <input type="checkbox" className="set-check" disabled={dis} checked={settings?.discovery !== false} onChange={(e) => void update({ discovery: e.target.checked })} />
-          </label>
           <label className="set-row" style={{ cursor: "pointer" }}>
             <div className="set-txt"><b>Ouvrir mon monde au réseau local automatiquement</b><span>Quand tu entres dans un monde solo, Cubelink l'ouvre pour que tes amis puissent te rejoindre. Appliqué au prochain lancement du jeu.</span></div>
             <input type="checkbox" className="set-check" disabled={dis} checked={settings?.lan_auto !== false} onChange={(e) => void update({ lan_auto: e.target.checked })} />
@@ -449,7 +417,7 @@ export default function Settings({ testConnection, clearCache }: SettingsProps =
         </Card>
         <details className="set-more">
           <summary>En savoir plus</summary>
-          <p>Ce test ne garantit pas la connexion directe avec chaque ami&nbsp;: certains réseaux l'empêchent, et Cubelink passe alors par le relais.</p>
+          <p>Il n'y a plus de serveur intermédiaire&nbsp;: si ni toi ni ton ami n'êtes joignables (réseau très fermé, sans IPv6 ni UPnP), vous ne pourrez pas vous connecter, en attendant la découverte par DHT Mainline et les relais Cubelink (prévus).</p>
         </details>
       </div>
 

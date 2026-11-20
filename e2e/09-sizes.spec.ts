@@ -11,7 +11,7 @@ import { SCREENS, prepare, gotoScreen, setWindowSize, type Screen } from './help
 const SIZES: [number, number][] = [[960, 600], [1280, 720]];
 const OUT = path.join(ARTIFACTS, 'sizes');
 const byId = (id: string) => SCREENS.find((s) => s.id === id)!;
-const progress = (p: Record<string, unknown>) => ({ phase: 'receiving', files_done: 12, files_total: 40, bytes_done: 340e6, bytes_total: 1.2e9, speed_bps: 800_000, via_relay: true, ...p });
+const progress = (p: Record<string, unknown>) => ({ phase: 'receiving', files_done: 12, files_total: 40, bytes_done: 340e6, bytes_total: 1.2e9, speed_bps: 800_000, ...p });
 
 interface Variant { id: string; screen: Screen; setup?: (page: Page) => Promise<void> }
 const VARIANTS: Variant[] = [

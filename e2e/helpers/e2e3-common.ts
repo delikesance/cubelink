@@ -85,7 +85,7 @@ export function killApp(app: App): void {
  * Relance l'application avec le MEME dossier de donnees (meme identite), profil WebView2 et port CDP.
  * Met a jour app.proc / app.page ; le nettoyage de la fixture tue le nouveau processus.
  */
-export async function restartApp(world: Pick<World, 'servers' | 'binary'>, app: App, relayMode = 'disabled'): Promise<void> {
+export async function restartApp(world: Pick<World, 'servers' | 'binary'>, app: App): Promise<void> {
   const { servers, binary } = world;
   killApp(app);
   await sleep(1500);
@@ -104,7 +104,7 @@ export async function restartApp(world: Pick<World, 'servers' | 'binary'>, app: 
     CUBELINK_MOJANG_META_URL: servers.mojang.base, CUBELINK_FABRIC_META_URL: servers.mojang.base, CUBELINK_ADOPTIUM_URL: servers.mojang.base,
     CUBELINK_MODRINTH_API_URL: servers.modrinth.base,
     CUBELINK_JAVA_PATH: path.join(ROOT, 'tests-fixtures', 'mojang', 'fake-java.cmd'),
-    CUBELINK_SKIP_JAVA_PROBE: '1', CUBELINK_RELAY_MODE: relayMode,
+    CUBELINK_SKIP_JAVA_PROBE: '1',
   };
   const proc = spawn(binary, [], { env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: false, cwd: ROOT });
   proc.stdout!.on('data', (d) => app.log.push(String(d)));

@@ -324,6 +324,19 @@ pub struct HearthVersion {
     pub available: bool,
 }
 
+/// Résultat de « Exporter en monde solo » (`hearth_export_solo`, docs/hearth.md § 8).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+pub struct HearthExport {
+    /// Nom du dossier créé dans `saves/` de l'instance (aussi le nom du monde dans la liste du jeu).
+    pub world_name: String,
+    /// Numéro de la version exportée.
+    pub version_number: u64,
+    /// La dernière version n'était pas complète sur ce PC : c'est la dernière version complète qui a été exportée.
+    pub fallback: bool,
+    /// Ton joueur (position, inventaire) a été remis dans le monde ; sinon tu apparais au point de départ.
+    pub has_player: bool,
+}
+
 /// Décision du groupe en attente de votes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct HearthProposal {

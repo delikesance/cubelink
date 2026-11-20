@@ -166,6 +166,10 @@ export const commands = {
 	hearthUncleanChoice: (id: string, choice: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_unclean_choice", { id, choice }, options),
 	/**  Jouer depuis la dernière version complète quand le contenu de la dernière version n'est chez personne de joignable. */
 	hearthPlayFromPrevious: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_play_from_previous", { id }, options),
+	/**  Jouer depuis une version complète choisie dans l'historique (branche : fourche à résoudre). */
+	hearthPlayFromVersion: (id: string, versionId: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_play_from_version", { id, version_id: versionId }, options),
+	/**  Exporter une version du monde du groupe en monde solo, dans les mondes de l'instance liée. */
+	hearthExportSolo: (id: string, versionId: string | null, options?: InvokeOptions) => __TAURI_INVOKE<HearthExport>("hearth_export_solo", { id, version_id: versionId }, options),
 	/**  Associe l'instance locale du modpack au groupe. */
 	hearthSetInstance: (id: string, instanceId: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_set_instance", { id, instance_id: instanceId }, options),
 	/**  Propose d'ajouter un ami au groupe. */
@@ -673,6 +677,18 @@ export type HearthDetail_Serialize = {
 export type HearthEula = {
 	accepted: boolean,
 	url: string,
+};
+
+/**  Résultat de « Exporter en monde solo » (`hearth_export_solo`, docs/hearth.md § 8). */
+export type HearthExport = {
+	/**  Nom du dossier créé dans `saves/` de l'instance (aussi le nom du monde dans la liste du jeu). */
+	world_name: string,
+	/**  Numéro de la version exportée. */
+	version_number: number,
+	/**  La dernière version n'était pas complète sur ce PC : c'est la dernière version complète qui a été exportée. */
+	fallback: boolean,
+	/**  Ton joueur (position, inventaire) a été remis dans le monde ; sinon tu apparais au point de départ. */
+	has_player: boolean,
 };
 
 /**  Invitation à un groupe reçue d'un ami (événement `hearth://invites`). */

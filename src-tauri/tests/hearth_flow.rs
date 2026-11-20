@@ -1897,3 +1897,125 @@ async fn file_d_envoi_refus_explicite_d_une_version_trop_grosse() {
         p.stop().await;
     }
 }
+
+const ALICE_UUID: &str = "0123456789abcdef0123456789abcdef";
+const ALICE_UUID_DASHED: &str = "01234567-89ab-cdef-0123-456789abcdef";
+
+/// Un vrai monde de serveur dédié : `level.dat` et fichier joueur en NBT gzip (le joueur a `n` niveaux d'expérience).
+fn nbt_world(dir: &Path, n: i32) {
+    use core_lib::hearth::nbt::{write_gz, Nbt, Tag};
+    let k = |s: &str| s.as_bytes().to_vec();
+    std::fs::create_dir_all(dir.join("region")).unwrap();
+    std::fs::create_dir_all(dir.join("playerdata")).unwrap();
+    let level = Tag::Compound(vec![(
+        k("Data"),
+        Tag::Compound(vec![(k("LevelName"), Tag::String(k("world"))), (k("DataVersion"), Tag::Int(3955)), (k("ModTag"), Tag::LongArray(vec![1, 2, 3]))]),
+    )]);
+    write_gz(&dir.join("level.dat"), &Nbt { name: vec![], root: level }).unwrap();
+    let player = Tag::Compound(vec![(k("XpLevel"), Tag::Int(n)), (k("Pos"), Tag::List(6, vec![Tag::Double(1.5), Tag::Double(70.0), Tag::Double(-2.0)]))]);
+    write_gz(&dir.join(format!("playerdata/{ALICE_UUID_DASHED}.dat")), &Nbt { name: vec![], root: player }).unwrap();
+    std::fs::write(dir.join("region/r.0.0.mca"), (0..50_000u32).map(|i| (i as u8).wrapping_add(n as u8)).collect::<Vec<u8>>()).unwrap();
+    std::fs::write(dir.join("session.lock"), b"verrou").unwrap();
+}
+
+/// « Exporter en monde solo » et « Jouer depuis cette version », sur de vrais fichiers : le monde d'une version est copié
+/// dans les mondes de l'instance sous « <groupe> (export du groupe) » avec le joueur remis dans `Data.Player`, jamais par
+/// dessus un monde existant, et une version dont le contenu a été libéré est refusée. Jouer depuis une ancienne version
+/// complète démarre le serveur depuis elle et fait apparaître une fourche à la fin de la partie.
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn exporter_en_monde_solo_et_jouer_depuis_une_version() {
+    use core_lib::hearth::nbt::{read_gz, Tag};
+    let (peers, g, id) = group_of(&["Alice", "Bob"]).await;
+    let (a, b) = (&peers[0], &peers[1]);
+    *lock(&a.node.st.profile) = Some(core_lib::types::Profile::Online { name: "Alice".into(), uuid: ALICE_UUID.into() });
+    let mut vs: Vec<p2p_lib::hearth::version::SignedVersion> = Vec::new();
+    for n in 1..=3 {
+        let d = a.dir.path().join(format!("monde-{n}"));
+        nbt_world(&d, n * 10);
+        let parent = vs.last().map(|v| (v.id(), v.header.number));
+        let v = a.rt().publish_version(g, &d, VersionKind::Session, parent, 60).await.unwrap();
+        wait_for("monde complet chez Bob", 40, || b.rt().head(&g).is_some_and(|h| h.id() == v.id() && b.rt().world_complete(&h))).await;
+        vs.push(v);
+    }
+    let saves = a.node.st.instances.game_dir(&a.instance).unwrap().join("saves");
+    let xp = |dir: &Path| -> Option<Tag> {
+        let mut l = read_gz(&dir.join("level.dat")).unwrap();
+        l.root.get_mut("Data").unwrap().get_mut("Player").and_then(|p| p.get_mut("XpLevel").map(|t| t.clone()))
+    };
+    let level_name = |dir: &Path| -> Tag {
+        let mut l = read_gz(&dir.join("level.dat")).unwrap();
+        l.root.get_mut("Data").unwrap().get_mut("LevelName").unwrap().clone()
+    };
+
+    // 1. Sans version : la dernière (n° 3), joueur remis dans level.dat, rien d'exclu, copie fidèle au magasin.
+    let e1 = a.node.st.hearth_export_solo(&id, None).await.unwrap();
+    assert_eq!((e1.world_name.as_str(), e1.version_number, e1.fallback, e1.has_player), ("Les copains (export du groupe)", 3, false, true));
+    let w1 = saves.join(&e1.world_name);
+    assert_eq!(xp(&w1), Some(Tag::Int(30)), "Data.Player vient de playerdata/<uuid>.dat de la n° 3");
+    assert_eq!(level_name(&w1), Tag::String(b"Les copains (export du groupe)".to_vec()));
+    let mut l = read_gz(&w1.join("level.dat")).unwrap();
+    assert_eq!(l.root.get_mut("Data").unwrap().get_mut("ModTag"), Some(&mut Tag::LongArray(vec![1, 2, 3])), "les tags inconnus passent tels quels");
+    let files: Vec<String> = read_tree(&w1).into_iter().map(|(n, _)| n).collect();
+    assert!(files.contains(&"region/r.0.0.mca".to_string()) && files.contains(&format!("playerdata/{ALICE_UUID_DASHED}.dat")));
+    assert!(!files.iter().any(|n| n == "session.lock"), "le verrou de session n'est pas exporté");
+    assert_eq!(std::fs::read(w1.join("region/r.0.0.mca")).unwrap(), std::fs::read(a.dir.path().join("monde-3/region/r.0.0.mca")).unwrap());
+    assert!(!std::fs::read_dir(&saves).unwrap().flatten().any(|e| e.file_name().to_string_lossy().starts_with('.')), "aucun dossier temporaire ne traîne");
+
+    // 2. Un monde du joueur qui porte déjà ce nom n'est jamais remplacé : l'export suivant prend un autre nom. Une version
+    //    précise s'exporte avec son propre joueur.
+    std::fs::write(w1.join("note.txt"), b"a moi").unwrap();
+    let e2 = a.node.st.hearth_export_solo(&id, Some(&vs[0].id().to_hex())).await.unwrap();
+    assert_eq!((e2.world_name.as_str(), e2.version_number), ("Les copains (export du groupe) 2", 1));
+    assert_eq!(xp(&saves.join(&e2.world_name)), Some(Tag::Int(10)));
+    assert_eq!(std::fs::read(w1.join("note.txt")).unwrap(), b"a moi", "le premier export est intact");
+    assert_eq!(a.node.st.hearth_export_solo(&id, Some(&vs[1].id().to_hex())).await.unwrap().world_name, "Les copains (export du groupe) 3");
+
+    // 3. Un autre compte (pas de fichier joueur à son UUID) : le monde s'exporte quand même, sans `Data.Player`.
+    *lock(&a.node.st.profile) = Some(core_lib::types::Profile::Online { name: "Zoe".into(), uuid: "ffffffffffffffffffffffffffffffff".into() });
+    let e4 = a.node.st.hearth_export_solo(&id, None).await.unwrap();
+    assert!(!e4.has_player);
+    assert_eq!(xp(&saves.join(&e4.world_name)), None);
+    *lock(&a.node.st.profile) = Some(core_lib::types::Profile::Online { name: "Alice".into(), uuid: ALICE_UUID.into() });
+
+    // 4. Refus clairs : version inconnue, identifiant invalide, groupe désactivé.
+    assert!(a.node.st.hearth_export_solo(&id, Some(&"00".repeat(32))).await.unwrap_err().contains("n'existe plus"));
+    assert!(a.node.st.hearth_export_solo(&id, Some("zz")).await.is_err());
+    assert_eq!(std::fs::read_dir(&saves).unwrap().count(), 4, "les refus n'ont rien créé");
+
+    // 5. La n° 1 est libérée de ce PC (plus de 14 jours, ni tête ni parent) : « Exporter » et « Jouer depuis cette version »
+    //    la refusent sans rien écrire ; la tête et les versions complètes restent exportables.
+    wait_for("file d'envoi vidée", 40, || a.rt().pending_outbox() == 0).await;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    a.rt().gc_versions_at(g, now + 15 * 86_400).await;
+    assert!(!a.rt().world_complete(&vs[0]) && a.rt().world_complete(&vs[1]) && a.rt().world_complete(&vs[2]));
+    let err = a.node.st.hearth_export_solo(&id, Some(&vs[0].id().to_hex())).await.unwrap_err();
+    assert!(err.contains("n'est plus sur ce PC"), "{err}");
+    assert_eq!(std::fs::read_dir(&saves).unwrap().count(), 4);
+    let err = a.node.st.hearth_play_from_version(&id, &vs[0].id().to_hex()).await.unwrap_err();
+    assert!(err.contains("n'est plus sur ce PC"), "{err}");
+    let err = a.node.st.hearth_play_from_version(&id, &vs[2].id().to_hex()).await.unwrap_err();
+    assert!(err.contains("clique sur Jouer"), "la version actuelle se joue avec Jouer : {err}");
+    assert!(a.runner.calls.lock().unwrap().is_empty(), "aucun refus n'a démarré de serveur");
+
+    // 6. Jouer depuis la n° 2 : le serveur part de son monde, et la partie, une fois publiée, fait une fourche avec la n° 3.
+    a.rt().probe_all().await;
+    a.node.st.hearth_play_from_version(&id, &vs[1].id().to_hex()).await.unwrap();
+    assert_eq!(a.state_of(&g), HearthStateKind::Hosting);
+    let served = read_tree(&a.rt().server_dir(&g).join("world"));
+    let from_v2 = std::fs::read(a.dir.path().join("monde-2/region/r.0.0.mca")).unwrap();
+    assert!(served.iter().any(|(n, d)| n == "region/r.0.0.mca" && *d == from_v2), "le serveur sert le monde de la n° 2, pas celui de la n° 3");
+    assert!(a.node.st.hearth_play_from_version(&id, &vs[1].id().to_hex()).await.unwrap_err().contains("tourne déjà"));
+    a.close_game();
+    wait_for("serveur arrêté", 30, || a.state_of(&g) != HearthStateKind::Hosting).await;
+    assert!(a.rt().is_fork(&g), "la partie depuis la n° 2 est une branche à côté de la n° 3");
+    let heads: Vec<u64> = { let mut h: Vec<u64> = a.rt().heads_of(&g).unwrap().iter().map(|v| v.header.number).collect(); h.sort(); h };
+    assert_eq!(heads, vec![3, 3]);
+    let err = a.node.st.hearth_play_from_version(&id, &vs[1].id().to_hex()).await.unwrap_err();
+    assert!(err.contains("Deux versions du monde"), "pas de seconde branche tant que la fourche est ouverte : {err}");
+    // Avec une fourche, l'export sans version demande de choisir ; avec une version, il marche.
+    assert!(a.node.st.hearth_export_solo(&id, None).await.unwrap_err().contains("Deux versions"));
+    assert_eq!(a.node.st.hearth_export_solo(&id, Some(&vs[2].id().to_hex())).await.unwrap().version_number, 3);
+    for p in &peers {
+        p.stop().await;
+    }
+}

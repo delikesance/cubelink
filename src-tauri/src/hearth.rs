@@ -23,7 +23,7 @@ use core_lib::hearth::server::{diagnose_failure, log_message, InstallRequest, Li
 use core_lib::instance::InstanceStore;
 use core_lib::types::{
     HearthBlocker, HearthBranch, HearthCard, HearthDetail, HearthInvite, HearthMember, HearthMemberLite, HearthOrphan, HearthProposal,
-    HearthCrash, HearthSettings, HearthStateKind, HearthUnclean, HearthVersion, LoaderSpec,
+    HearthCrash, HearthExport, HearthSettings, HearthStateKind, HearthUnclean, HearthVersion, LoaderSpec,
 };
 use iroh::{Endpoint, EndpointAddr};
 use p2p_lib::friends_db::FriendsDb;
@@ -2807,6 +2807,87 @@ impl HearthRuntime {
         Ok(())
     }
 
+    /// « Exporter en monde solo » (docs/hearth.md § 8) : écrit le monde d'une version du groupe dans `saves_dir`, sous le nom
+    /// « <groupe> (export du groupe) » (suivi de 2, 3… si ce nom est pris : un monde existant n'est jamais remplacé), puis
+    /// remet le joueur `player_uuid` dans `Data.Player` pour qu'il le retrouve en solo. On lit le magasin de versions, pas
+    /// `server/world` : l'export marche pendant qu'une partie tourne (il donne alors la dernière version publiée) et ne
+    /// touche ni au serveur ni à la version matérialisée.
+    ///
+    /// `version` : une version précise, qui doit être complète sur ce PC (comme `HearthVersion.available` : une version dont le
+    /// contenu a été libéré n'est plus protégée dans le magasin, même si ses blobs y traînent encore un moment). Sans elle : la version actuelle, ou, si son contenu
+    /// n'est pas ici, la dernière version complète (`fallback`). Une fourche demande de choisir.
+    pub async fn export_solo(
+        self: &Arc<Self>,
+        gid: GroupId,
+        version: Option<VersionId>,
+        saves_dir: &Path,
+        player_uuid: Option<String>,
+    ) -> Result<HearthExport, String> {
+        let st = self.require_state(&gid)?;
+        let (v, fallback) = match version {
+            Some(id) => {
+                let v = self.version(&gid, &id).ok_or("cette version n'existe plus")?;
+                if !self.world_complete(&v) {
+                    return Err(format!("Le contenu de la version {} n'est plus sur ce PC : elle ne peut pas être exportée.", v.header.number));
+                }
+                (v, false)
+            }
+            None => {
+                if self.is_fork(&gid) {
+                    return Err("Deux versions du monde existent : choisis laquelle exporter depuis l'historique, ou garde l'une d'elles.".into());
+                }
+                let head = self.head(&gid).ok_or("ce groupe n'a pas encore de monde à exporter")?;
+                if self.world_complete(&head) {
+                    (head, false)
+                } else {
+                    let prev = self.complete_head(&gid).ok_or("aucune version de ce monde n'est complète sur ce PC : il faut d'abord la recevoir")?;
+                    (prev, true)
+                }
+            }
+        };
+        let world = self.world()?;
+        std::fs::create_dir_all(saves_dir).map_err(|e| format!("le dossier des mondes est inaccessible : {e}"))?;
+        let base = export_folder_base(&st.name);
+        let mut world_name = base.clone();
+        for n in 2..1000 {
+            if saves_dir.join(&world_name).exists() {
+                world_name = format!("{base} {n}");
+            } else {
+                break;
+            }
+        }
+        let dest = saves_dir.join(&world_name);
+        if dest.exists() {
+            return Err("trop d'exports du même groupe : supprime les anciens depuis la liste des mondes du jeu".into());
+        }
+        // Le monde s'écrit dans un dossier caché voisin, puis prend son nom d'un coup : la liste des mondes du jeu ne voit
+        // jamais un export à moitié écrit, et un monde existant n'est jamais remplacé (le renommage échoue s'il existe).
+        let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or_default();
+        let tmp = saves_dir.join(format!(".cubelink-export-{nonce:x}"));
+        let done = async {
+            world.materialize(&v.header.collection, &tmp).await.map_err(|e| e.to_string())?;
+            let (t, name, uuid) = (tmp.clone(), world_name.clone(), player_uuid.as_deref().and_then(core_lib::hearth::nbt::dashed_uuid));
+            let prepared = tokio::task::spawn_blocking(move || {
+                // Le marqueur Hearth ferait refuser ce monde au partage solo (§ 6.4) : l'export est un monde ordinaire.
+                let _ = std::fs::remove_file(t.join("cubelink-hearth.json"));
+                core_lib::hearth::nbt::prepare_solo_world(&t, &name, uuid.as_deref())
+            })
+            .await
+            .map_err(|_| "l'export a été interrompu".to_string())?
+            .map_err(|e| format!("le monde exporté est illisible : {e:#}"))?;
+            std::fs::rename(&tmp, &dest).map_err(|e| format!("impossible de créer le monde exporté : {e}"))?;
+            Ok::<_, String>(prepared)
+        }
+        .await;
+        match done {
+            Ok(p) => Ok(HearthExport { world_name, version_number: v.header.number, fallback, has_player: p.has_player }),
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&tmp);
+                Err(e)
+            }
+        }
+    }
+
     /// Installe et démarre le serveur dédié du groupe. `base` : la version dont part la partie.
     pub async fn start_server(
         self: &Arc<Self>,
@@ -3911,6 +3992,14 @@ fn dir_size(root: &Path) -> u64 {
         }
     }
     total
+}
+
+/// Nom du dossier d'un export : le nom du groupe sans caractère interdit dans un nom de dossier, suivi de « (export du groupe) ».
+fn export_folder_base(group: &str) -> String {
+    let clean: String = group.chars().map(|c| if c.is_control() || "/\\:*?\"<>|".contains(c) { '-' } else { c }).collect();
+    let clean: String = clean.trim().trim_end_matches('.').chars().take(60).collect();
+    let clean = clean.trim();
+    if clean.is_empty() { "Monde du groupe (export du groupe)".to_string() } else { format!("{clean} (export du groupe)") }
 }
 
 #[cfg(test)]

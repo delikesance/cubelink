@@ -12,7 +12,7 @@ use core_lib::hearth::world;
 use core_lib::instance::InstanceKind;
 use core_lib::manifest::{build_manifest, manifest_hash, ManifestOptions};
 use core_lib::types::{
-    HearthCard, HearthDetail, HearthHostPrompt, HearthInvite, HearthRamWarning, HearthWorld, Instance,
+    HearthCard, HearthDetail, HearthExport, HearthHostPrompt, HearthInvite, HearthRamWarning, HearthWorld, Instance,
 };
 use p2p_lib::hearth::lease::Decision;
 use p2p_lib::hearth::model::{GroupOp, GroupId, PackPin};
@@ -402,15 +402,66 @@ impl AppState {
             return Err("Le monde de la dernière version est de nouveau disponible : clique sur Jouer.".into());
         }
         let prev = rt.complete_head(&g).ok_or("aucune version complète sur ce PC pour repartir : il faut attendre l'auteur")?;
+        self.hearth_play_from_base(g, &instance, prev.id()).await
+    }
+
+    /// « Jouer depuis cette version » : le serveur démarre ici depuis une version complète choisie dans l'historique, pas
+    /// depuis la dernière. Si ce n'est pas la dernière, la partie en devient une branche : le groupe a alors deux versions du
+    /// monde (fourche, docs/hearth.md § 7.5) et choisit laquelle garder depuis la page du serveur. Refuse une version dont le
+    /// contenu n'est pas sur ce PC, la version actuelle (c'est « Jouer »), une fourche déjà ouverte et un serveur déjà lancé.
+    pub async fn hearth_play_from_version(self: &Arc<Self>, id: &str, version_id: &str) -> Result<(), String> {
+        self.hearth.require_enabled()?;
+        let g = gid(id)?;
+        let rt = self.hearth.clone();
+        rt.require_state(&g)?;
+        let vid = VersionId::from_hex(version_id).ok_or("identifiant de version invalide")?;
+        if self.auth_status_refresh().await.is_none() {
+            return Err("connectez-vous avant de lancer le jeu".into());
+        }
+        let instance = rt.instance_of(&g).ok_or("Installe d'abord le modpack de ce groupe : rejoins la partie d'un ami du groupe pour le récupérer.")?;
+        if rt.active(&g).is_some() {
+            return Err("le serveur de ce groupe tourne déjà".into());
+        }
+        if rt.is_fork(&g) {
+            return Err("Deux versions du monde existent : choisis laquelle garder depuis la page du serveur.".into());
+        }
+        let v = rt.version(&g, &vid).ok_or("cette version n'existe plus")?;
+        if !rt.world_complete(&v) {
+            return Err(format!("Le contenu de la version {} n'est plus sur ce PC : elle ne peut pas servir de départ.", v.header.number));
+        }
+        if rt.head(&g).is_some_and(|h| h.id() == vid) {
+            return Err("C'est déjà la version actuelle : clique sur Jouer.".into());
+        }
+        self.hearth_play_from_base(g, &instance, vid).await
+    }
+
+    /// Le bail et le démarrage du serveur depuis `base` (commun à « Jouer depuis la n° N » et « Jouer depuis cette version »).
+    async fn hearth_play_from_base(self: &Arc<Self>, g: GroupId, instance: &str, base: VersionId) -> Result<(), String> {
+        let rt = self.hearth.clone();
         if !rt.try_begin_play(&g, HOST_STEPS) {
             return Err("un lancement de ce serveur est déjà en cours".into());
         }
-        let r = self.hearth_host(g, &instance, Some(prev.id())).await;
+        let r = self.hearth_host(g, instance, Some(base)).await;
         rt.settle_confirmation(&g, &r);
         if r.is_err() {
             rt.set_play(&g, None);
         }
         r
+    }
+
+    /// « Exporter en monde solo » (docs/hearth.md § 8) : copie une version complète du monde du groupe dans les mondes de
+    /// l'instance liée, sous « <groupe> (export du groupe) », avec ton joueur remis dedans. Sans `version_id` : la version
+    /// actuelle, ou la dernière complète sur ce PC.
+    pub async fn hearth_export_solo(self: &Arc<Self>, id: &str, version_id: Option<&str>) -> Result<HearthExport, String> {
+        self.hearth.require_enabled()?;
+        let g = gid(id)?;
+        let rt = self.hearth.clone();
+        rt.require_state(&g)?;
+        let version = version_id.map(|v| VersionId::from_hex(v).ok_or("identifiant de version invalide")).transpose()?;
+        let instance = rt.instance_of(&g).ok_or("Choisis d'abord l'instance de ce groupe : l'export s'écrit dans ses mondes.")?;
+        let saves = self.instances.game_dir(&instance).map_err(|e| user_msg(&e))?.join("saves");
+        let uuid = self.auth_status().map(|p| core_lib::auth::accounts::profile_uuid(&p).to_string());
+        rt.export_solo(g, version, &saves, uuid).await
     }
 
     /// Ferme le jeu en cours s'il s'agit de la même instance (par exemple après une passation, le client est resté au menu).
@@ -863,6 +914,20 @@ pub async fn hearth_stop(state: S<'_>, id: String) -> Result<(), String> {
 #[specta::specta(rename_all = "snake_case")]
 pub async fn hearth_play_from_previous(state: S<'_>, id: String) -> Result<(), String> {
     state.inner().hearth_play_from_previous(&id).await
+}
+
+/// Jouer depuis une version complète choisie dans l'historique (branche : fourche à résoudre).
+#[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
+pub async fn hearth_play_from_version(state: S<'_>, id: String, version_id: String) -> Result<(), String> {
+    state.inner().hearth_play_from_version(&id, &version_id).await
+}
+
+/// Exporter une version du monde du groupe en monde solo, dans les mondes de l'instance liée.
+#[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
+pub async fn hearth_export_solo(state: S<'_>, id: String, version_id: Option<String>) -> Result<HearthExport, String> {
+    state.inner().hearth_export_solo(&id, version_id.as_deref()).await
 }
 
 /// Choix du groupe après une partie mal terminée.

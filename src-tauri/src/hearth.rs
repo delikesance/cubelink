@@ -3007,10 +3007,11 @@ impl HearthRuntime {
         } else {
             None
         };
-        // `save-on` est toujours tenté, même si `save-off` n'a pas confirmé (la commande a pu partir sans réponse).
-        let resumed = host.server.flush_end().await;
         // La version est déjà enregistrée et en file d'envoi : elle devient le parent de la suivante quoi qu'il arrive
         // ensuite. Sinon la `Session` finale aurait le même parent et le groupe verrait une fourche après une partie normale.
+        // Cette avance doit rester AVANT tout `await` : `flush_end` attend `save-on` (jusqu'à 30 s) et `finish_hosting` peut
+        // annuler cette tâche pendant l'attente ; entre l'enregistrement de la version et l'avance du tip, il n'y a aucune
+        // suspension, donc aucune annulation possible.
         if let Some(Ok(v)) = &published {
             *lock(&host.tip) = Some((v.id(), v.header.number));
             // Si la partie se termine mal après ce point, la fin de partie repartira de lui.
@@ -3018,6 +3019,8 @@ impl HearthRuntime {
                 eprintln!("[cubelink] marqueur de session non mis à jour : {e}");
             }
         }
+        // `save-on` est toujours tenté, même si `save-off` n'a pas confirmé (la commande a pu partir sans réponse).
+        let resumed = host.server.flush_end().await;
         begun?;
         let v = published.ok_or("point de reprise non fait")??;
         resumed?;

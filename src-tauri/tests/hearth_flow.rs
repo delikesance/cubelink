@@ -35,6 +35,8 @@ struct FakeServer {
     dir: PathBuf,
     task: tokio::task::JoinHandle<()>,
     calls: Arc<Mutex<Vec<&'static str>>>,
+    /// `save-on` n'est jamais confirmé (serveur chargé) : `flush_end` reste en attente après avoir noté l'appel.
+    hang_end: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl RunningServer for FakeServer {
@@ -50,6 +52,9 @@ impl RunningServer for FakeServer {
     }
     fn flush_end(&self) -> BoxFut<'_, Result<(), String>> {
         self.calls.lock().unwrap().push("save-on");
+        if self.hang_end.load(std::sync::atomic::Ordering::SeqCst) {
+            return Box::pin(std::future::pending());
+        }
         Box::pin(async { Ok(()) })
     }
     fn stop(&self, _grace: Duration) -> BoxFut<'_, ()> {
@@ -68,11 +73,12 @@ impl RunningServer for FakeServer {
 struct FakeRunner {
     calls: Arc<Mutex<Vec<&'static str>>>,
     specs: Arc<Mutex<Vec<ServerSpec>>>,
+    hang_end: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ServerRunner for FakeRunner {
     fn start(&self, spec: ServerSpec) -> BoxFut<'static, Result<Arc<dyn RunningServer>, String>> {
-        let (calls, specs) = (self.calls.clone(), self.specs.clone());
+        let (calls, specs, hang_end) = (self.calls.clone(), self.specs.clone(), self.hang_end.clone());
         Box::pin(async move {
             let world = spec.dir.join("world");
             std::fs::create_dir_all(&world).unwrap();
@@ -97,7 +103,7 @@ impl ServerRunner for FakeRunner {
             calls.lock().unwrap().push("start");
             let dir = spec.dir.clone();
             specs.lock().unwrap().push(spec);
-            Ok(Arc::new(FakeServer { port, dir, task, calls }) as Arc<dyn RunningServer>)
+            Ok(Arc::new(FakeServer { port, dir, task, calls, hang_end }) as Arc<dyn RunningServer>)
         })
     }
 }
@@ -443,6 +449,43 @@ async fn on_peut_heberger_sans_personne_d_autre_en_ligne() {
     a.node.st.hearth_play(&card.id).await.unwrap();
     assert!(!a.launcher.launched.lock().unwrap().is_empty(), "le serveur et le jeu ont démarré");
     a.stop().await;
+}
+
+/// Point de reprise interrompu pendant l'attente de `save-on` (arrêt du serveur au même moment) : la version de reprise
+/// est déjà enregistrée, la `Session` finale doit en être l'enfant. Sinon V et S seraient deux enfants du même parent :
+/// deux têtes, donc une fausse fourche « Deux versions » après une partie normale.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn point_de_reprise_interrompu_pendant_save_on_ne_fourche_pas() {
+    let (peers, g, id) = group_of(&["Alice", "Bob"]).await;
+    let a = &peers[0];
+    a.node.st.hearth_play(&id).await.unwrap();
+    assert_eq!(a.state_of(&g), HearthStateKind::Hosting);
+    let host = a.rt().active(&g).expect("serveur d'Alice");
+    a.runner.hang_end.store(true, std::sync::atomic::Ordering::SeqCst);
+    let before = a.runner.calls.lock().unwrap().iter().filter(|c| **c == "save-on").count();
+    let rt = a.rt().clone();
+    let h = host.clone();
+    let task = tokio::spawn(async move { rt.checkpoint(&h).await });
+    // `save-on` est demandé : la version de reprise est déjà publiée, et la tâche attend la confirmation.
+    wait_for("point de reprise en attente de save-on", 30, || {
+        a.runner.calls.lock().unwrap().iter().filter(|c| **c == "save-on").count() > before
+    })
+    .await;
+    let v = a.rt().head(&g).expect("la version de reprise est la tête");
+    assert_eq!(v.header.kind, VersionKind::Checkpoint);
+    // L'arrêt annule la tâche comme le fait `finish_hosting` (`t.abort()`), puis publie la Session.
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    a.runner.hang_end.store(false, std::sync::atomic::Ordering::SeqCst);
+    let s = a.rt().finish_hosting(g).await.unwrap().expect("la session est publiée");
+    assert_eq!(s.header.kind, VersionKind::Session);
+    assert_eq!(s.header.parent, Some(v.id()), "la session prolonge le point de reprise");
+    assert_eq!(s.header.number, v.header.number + 1);
+    assert_eq!(a.rt().head(&g).expect("une seule tête").id(), s.id());
+    assert!(!a.rt().is_fork(&g), "aucune fourche");
+    for p in &peers {
+        p.stop().await;
+    }
 }
 
 /// Crée un groupe (Alice crée, les autres acceptent l'invitation et relient leur instance), sans monde de départ.

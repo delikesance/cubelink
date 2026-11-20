@@ -4,7 +4,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 use core_lib::guest;
-use core_lib::types::{Error, Manifest, TransferPhase, TransferProgress};
+use core_lib::types::{Error, Manifest, TransferPhase, TransferProgress, TrustLevel};
 use p2p_lib::transfer::plan::{compute_plan, to_join_summary, DiskCache, Plan};
 use serde::Serialize;
 use tauri::State;
@@ -33,6 +33,11 @@ pub struct JoinPlan {
     /// pas redemandés.
     #[serde(default)]
     pub unknown_trusted: Vec<String>,
+    /// Jars inconnus ou non vérifiés servis par un ami en qui tu as confiance (« Installer ses mods sans me demander ») :
+    /// installés sans accord. Les scripts KubeJS n'en font jamais partie, et ces jars ne sont pas mémorisés pour les
+    /// autres amis.
+    #[serde(default)]
+    pub unknown_friend_trusted: Vec<String>,
 }
 
 /// Ce que le dernier `join_plan` a montré pour un ami : `join_start` ne part que sur ce manifeste-là, et seulement avec
@@ -42,6 +47,9 @@ pub struct PendingConsent {
     pub manifest_hash: String,
     /// sha256 des fichiers qui demandent l'accord (mods inconnus ou non vérifiés, scripts), pas encore acceptés.
     pub needs_consent: Vec<String>,
+    /// sha256 des jars (inconnus ou non vérifiés) dispensés d'accord parce que l'ami a la confiance « toujours » ; la
+    /// confiance est relue au départ (`check_consent`) : si elle a été retirée entre-temps, l'accord est redemandé.
+    pub friend_jars: Vec<String>,
 }
 
 /// Script KubeJS, exécuté par le jeu.
@@ -137,6 +145,11 @@ impl AppState {
         }
     }
 
+    /// L'ami a le réglage « Installer ses mods sans me demander ». Une erreur de lecture vaut « demander ».
+    fn friend_trusts_mods(&self, key: &str) -> bool {
+        matches!(self.friends.get_friend(key), Ok(Some(f)) if f.trust == TrustLevel::Always)
+    }
+
     async fn host_plan(&self, key: &str) -> Result<(HostManifest, Plan), String> {
         let hm = self.backend().fetch_manifest(key.to_string()).await.map_err(|e| sanitize(&e))?;
         let plan = compute_plan(&hm.manifest, &DiskCache { index: &self.store, root: &self.paths.store }).map_err(|e| user_msg(&e))?;
@@ -154,17 +167,26 @@ impl AppState {
         // contourne pas la case de confiance). De même pour les scripts KubeJS.
         let files = &hm.manifest.files;
         let scripts: Vec<String> = files.iter().filter(|f| is_script(&f.path)).map(|f| f.path.clone()).collect();
-        let (unknown_mods, mut unknown_trusted) = self.trusted_mods.split(report.unknown, files);
-        let (unknown_unchecked, t2) = self.trusted_mods.split(report.unchecked, files);
+        let (mut unknown_mods, mut unknown_trusted) = self.trusted_mods.split(report.unknown, files);
+        let (mut unknown_unchecked, t2) = self.trusted_mods.split(report.unchecked, files);
         let (unknown_scripts, t3) = self.trusted_mods.split(scripts, files);
         unknown_trusted.extend(t2);
         unknown_trusted.extend(t3);
+        // Ami de confiance : ses jars inconnus ou non vérifiés ne demandent plus l'accord. Les scripts KubeJS (code exécuté
+        // par le jeu) le demandent toujours, et les exécutables sont déjà refusés par la validation du manifeste.
+        let mut unknown_friend_trusted = Vec::new();
+        let mut friend_jars = Vec::new();
+        if self.friend_trusts_mods(friend_public_key) {
+            unknown_friend_trusted.append(&mut unknown_mods);
+            unknown_friend_trusted.append(&mut unknown_unchecked);
+            friend_jars = files.iter().filter(|f| unknown_friend_trusted.contains(&f.path)).map(|f| f.sha256.clone()).collect();
+        }
         // Ce que l'utilisateur accepte en cochant la case : vérifié et enregistré au `join_start`.
         let needs: Vec<&String> = unknown_mods.iter().chain(&unknown_unchecked).chain(&unknown_scripts).collect();
         let needs_consent: Vec<String> = files.iter().filter(|f| needs.contains(&&f.path)).map(|f| f.sha256.clone()).collect();
         let manifest_hash = core_lib::manifest::manifest_hash(&hm.manifest);
         lock(&self.pending_trust)
-            .insert(friend_public_key.to_string(), PendingConsent { manifest_hash: manifest_hash.clone(), needs_consent });
+            .insert(friend_public_key.to_string(), PendingConsent { manifest_hash: manifest_hash.clone(), needs_consent, friend_jars });
         Ok(JoinPlan {
             manifest: hm.manifest,
             manifest_hash,
@@ -175,6 +197,7 @@ impl AppState {
             unknown_unchecked,
             unknown_scripts,
             unknown_trusted,
+            unknown_friend_trusted,
         })
     }
 
@@ -190,8 +213,15 @@ impl AppState {
         let Some(pending) = pending.filter(|p| p.manifest_hash == live) else {
             return Err(CHANGED.into());
         };
-        let needs: Vec<&str> =
-            pending.needs_consent.iter().map(String::as_str).filter(|h| !self.trusted_mods.contains(h)).collect();
+        // La confiance de l'ami est relue ici, pas reprise du plan : retirée entre le plan et le départ, elle redemande l'accord.
+        let friend_jars: &[String] = if self.friend_trusts_mods(key) { &[] } else { &pending.friend_jars };
+        let needs: Vec<&str> = pending
+            .needs_consent
+            .iter()
+            .chain(friend_jars)
+            .map(String::as_str)
+            .filter(|h| !self.trusted_mods.contains(h))
+            .collect();
         if needs.is_empty() {
             return Ok(());
         }
@@ -224,9 +254,15 @@ impl AppState {
         }
         let (hm, plan) = self.host_plan(friend_public_key).await?;
         // Fichiers déjà acceptés AVANT ce « Rejoindre » : ne sont plus signalés après l'installation.
-        let trusted_before: std::collections::HashSet<String> =
+        let mut trusted_before: std::collections::HashSet<String> =
             hm.manifest.files.iter().filter(|f| self.trusted_mods.contains(&f.sha256)).map(|f| f.sha256.clone()).collect();
         self.check_consent(friend_public_key, &hm, manifest_hash, accept_unknown)?;
+        // Jars dispensés d'accord par la confiance en cet ami : pas signalés non plus après l'installation.
+        if self.friend_trusts_mods(friend_public_key) {
+            if let Some(p) = lock(&self.pending_trust).get(friend_public_key) {
+                trusted_before.extend(p.friend_jars.iter().cloned());
+            }
+        }
         let control = Arc::new(TransferControl::default());
         let last = Arc::new(Mutex::new(None));
         {
@@ -471,7 +507,7 @@ pub async fn join_close_tunnel(state: State<'_, Arc<AppState>>) -> Result<(), St
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::{HostManifest, ProgressFn, TransferControl};
     use crate::state::test_support::test_state;
     use core_lib::types::{Friend, TrustLevel};
@@ -493,7 +529,7 @@ mod tests {
     }
 
     /// Hôte simulé pour S1 : un jar sans sha1 (donc non vérifié) et un script KubeJS ; le manifeste peut changer.
-    struct ConsentBackend(std::sync::Mutex<core_lib::types::Manifest>);
+    pub(crate) struct ConsentBackend(pub(crate) std::sync::Mutex<core_lib::types::Manifest>);
     impl crate::p2p_backend::P2pBackend for ConsentBackend {
         fn presence(&self, _k: &str) -> core_lib::types::Presence {
             core_lib::types::Presence::Online
@@ -529,7 +565,7 @@ mod tests {
         }
     }
 
-    fn consent_manifest() -> core_lib::types::Manifest {
+    pub(crate) fn consent_manifest() -> core_lib::types::Manifest {
         use core_lib::types::{Loader, LoaderSpec, ManifestFile};
         let f = |path: &str, c: &str| ManifestFile { path: path.into(), size: 3, sha256: c.repeat(64), sha1: None, cf_fingerprint: None };
         core_lib::types::Manifest {
@@ -586,6 +622,86 @@ mod tests {
         let again = st.join_plan(&key).await.unwrap();
         assert!(again.unknown_unchecked.is_empty() && again.unknown_scripts.is_empty());
         assert_eq!(again.unknown_trusted.len(), 2);
+    }
+
+    fn add_bob(st: &crate::state::AppState, key: &str, trust: TrustLevel) {
+        st.friends.add_friend(&Friend { public_key: key.into(), name: "Bob".into(), trust, added_at: 1 }).unwrap();
+    }
+
+    /// Même manifeste, sans le script KubeJS : il ne reste que le jar non vérifié.
+    fn jar_only_manifest() -> core_lib::types::Manifest {
+        let mut m = consent_manifest();
+        m.files.retain(|f| !f.path.starts_with("kubejs/"));
+        m
+    }
+
+    /// #208 : un ami « Installer ses mods sans me demander » dispense d'accord ses jars inconnus ou non vérifiés, sans
+    /// rien écrire dans `trusted_mods` (la confiance ne fuit pas vers les autres amis) ; un ami « demander » reste inchangé.
+    #[tokio::test]
+    async fn ami_de_confiance_dispense_les_jars_seulement() {
+        let dir = tempfile::tempdir().unwrap();
+        let (st, _) = test_state(dir.path());
+        let (bob, carl) = ("c".repeat(64), "e".repeat(64));
+        add_bob(&st, &bob, TrustLevel::Always);
+        add_bob(&st, &carl, TrustLevel::Ask);
+        let be = Arc::new(ConsentBackend(std::sync::Mutex::new(jar_only_manifest())));
+        st.set_backend(be.clone());
+
+        // Autre ami « demander », même fichier : l'accord reste exigé.
+        let plan = st.join_plan(&carl).await.unwrap();
+        assert_eq!(plan.unknown_unchecked, ["mods/sans-sha1.jar"]);
+        assert!(plan.unknown_friend_trusted.is_empty());
+        assert!(st.join_start(&carl, None, &plan.manifest_hash, false).await.unwrap_err().contains("accord"));
+
+        // Ami de confiance : plus rien à accepter, le départ passe sans la case.
+        let plan = st.join_plan(&bob).await.unwrap();
+        assert!(plan.unknown_mods.is_empty() && plan.unknown_unchecked.is_empty() && plan.unknown_scripts.is_empty());
+        assert_eq!(plan.unknown_friend_trusted, ["mods/sans-sha1.jar"]);
+        assert!(plan.unknown_trusted.is_empty());
+        st.join_start(&bob, None, &plan.manifest_hash, false).await.unwrap();
+        assert!(!st.trusted_mods.contains(&"a".repeat(64)), "la confiance ami n'est pas une acceptation par contenu");
+        // L'autre ami demande toujours.
+        let plan = st.join_plan(&carl).await.unwrap();
+        assert_eq!(plan.unknown_unchecked, ["mods/sans-sha1.jar"]);
+        assert!(st.join_start(&carl, None, &plan.manifest_hash, false).await.is_err());
+    }
+
+    /// Les scripts KubeJS demandent toujours l'accord, même d'un ami de confiance ; ses jars, non.
+    #[tokio::test]
+    async fn ami_de_confiance_les_scripts_demandent_toujours() {
+        let dir = tempfile::tempdir().unwrap();
+        let (st, _) = test_state(dir.path());
+        let bob = "c".repeat(64);
+        add_bob(&st, &bob, TrustLevel::Always);
+        st.set_backend(Arc::new(ConsentBackend(std::sync::Mutex::new(consent_manifest()))));
+        let plan = st.join_plan(&bob).await.unwrap();
+        assert_eq!(plan.unknown_scripts, ["kubejs/server_scripts/x.js"]);
+        assert_eq!(plan.unknown_friend_trusted, ["mods/sans-sha1.jar"]);
+        assert!(plan.unknown_unchecked.is_empty());
+        let e = st.join_start(&bob, None, &plan.manifest_hash, false).await.unwrap_err();
+        assert!(e.contains("accord"), "{e}");
+        // Avec la case : seul le script est mémorisé, pas le jar de l'ami.
+        st.join_start(&bob, None, &plan.manifest_hash, true).await.unwrap();
+        assert!(st.trusted_mods.contains(&"b".repeat(64)));
+        assert!(!st.trusted_mods.contains(&"a".repeat(64)));
+    }
+
+    /// Confiance retirée entre le plan et le départ : l'accord est redemandé (relu côté Rust, pas repris du plan).
+    #[tokio::test]
+    async fn confiance_retiree_entre_plan_et_depart() {
+        let dir = tempfile::tempdir().unwrap();
+        let (st, _) = test_state(dir.path());
+        let bob = "c".repeat(64);
+        add_bob(&st, &bob, TrustLevel::Always);
+        st.set_backend(Arc::new(ConsentBackend(std::sync::Mutex::new(jar_only_manifest()))));
+        let plan = st.join_plan(&bob).await.unwrap();
+        st.friends.set_trust(&bob, TrustLevel::Ask).unwrap();
+        let e = st.join_start(&bob, None, &plan.manifest_hash, false).await.unwrap_err();
+        assert!(e.contains("accord"), "{e}");
+        // Un nouveau plan montre la case.
+        let plan = st.join_plan(&bob).await.unwrap();
+        assert_eq!(plan.unknown_unchecked, ["mods/sans-sha1.jar"]);
+        assert!(plan.unknown_friend_trusted.is_empty());
     }
 
     struct TunnelBackend;

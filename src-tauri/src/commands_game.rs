@@ -349,7 +349,8 @@ impl AppState {
             Some(id) => id.to_string(),
             None => {
                 // Pas de case de confiance ici : des fichiers inconnus ou non vérifiés font échouer le départ, et
-                // l'utilisateur les accepte depuis l'écran « Rejoindre ».
+                // l'utilisateur les accepte depuis l'écran « Rejoindre ». Sauf les jars d'un ami « Installer ses mods
+                // sans me demander » (`join_plan` les dispense d'accord) ; ses scripts KubeJS font encore échouer le départ.
                 self.join_start(public_key, None, &plan.manifest_hash, false).await?;
                 let deadline = tokio::time::Instant::now() + JOIN_WAIT_TIMEOUT;
                 while lock(&self.join).is_some() {
@@ -775,6 +776,34 @@ mod tests {
         // Réseau indisponible : le plan échoue, le jeu en cours reste en place.
         assert!(st.game_join_friend(&key, None).await.is_err());
         assert_eq!(lock(&st.game).as_deref(), Some("ancien"));
+    }
+
+    /// #208 : `game_join_friend` honore « Installer ses mods sans me demander » pour les jars, pas pour les scripts.
+    #[tokio::test]
+    async fn game_join_friend_honore_la_confiance_pour_les_jars() {
+        use crate::commands_join::tests::{consent_manifest, ConsentBackend};
+        use core_lib::types::TrustLevel;
+        let dir = tempfile::tempdir().unwrap();
+        let (st, _) = test_state(dir.path());
+        login(&st);
+        let (ask, always) = ("d".repeat(64), "e".repeat(64));
+        for (key, trust) in [(&ask, TrustLevel::Ask), (&always, TrustLevel::Always)] {
+            st.friends.add_friend(&core_lib::types::Friend { public_key: key.clone(), name: "Bob".into(), trust, added_at: 1 }).unwrap();
+        }
+        let mut jar_only = consent_manifest();
+        jar_only.files.retain(|f| !f.path.starts_with("kubejs/"));
+        let backend = Arc::new(ConsentBackend(std::sync::Mutex::new(jar_only)));
+        st.set_backend(backend.clone());
+        // Ami « demander » : le jar non vérifié bloque le départ.
+        let e = st.game_join_friend(&ask, None).await.unwrap_err();
+        assert!(e.contains("accord"), "{e}");
+        // Ami de confiance : l'accord n'est plus en cause (l'hôte simulé n'envoie rien, la préparation échoue plus loin).
+        let e = st.game_join_friend(&always, None).await.unwrap_err();
+        assert!(!e.contains("accord") && e.contains("préparation"), "{e}");
+        // Avec un script KubeJS, même l'ami de confiance fait échouer le départ.
+        *backend.0.lock().unwrap() = consent_manifest();
+        let e = st.game_join_friend(&always, None).await.unwrap_err();
+        assert!(e.contains("accord"), "{e}");
     }
 
     #[test]

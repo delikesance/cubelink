@@ -46,7 +46,7 @@ export const commands = {
 	instancesKill: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("instances_kill", { id }, options),
 	/**  Supprime l'instance (refusé si elle est en lancement ou en jeu). */
 	instancesDelete: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("instances_delete", { id }, options),
-	/**  Modifie les champs donnés d'une instance (les autres restent). `wrapper` : commande d'enrobage placée devant Java, Linux seulement ; chaîne vide = aucune. */
+	/**  Modifie les champs donnés d'une instance (les autres restent). `wrapper` : commande d'enrobage placée devant Java, Linux seulement ; chaîne vide = aucune. `java_path` : `""` efface le chemin Java de l'instance, `null` le laisse inchangé ; un Java dont la version ne convient pas à Minecraft fait échouer le lancement (le Java global, lui, est alors ignoré). `jvm_args` et `wrapper` sont découpés façon shell (guillemets simples ou doubles pour une valeur avec espaces) ; un guillemet non fermé est refusé. */
 	instancesUpdate: (id: string, name: string | null, ramMb: number | null, javaPath: string | null, jvmArgs: string | null, wrapper: string | null, options?: InvokeOptions) => __TAURI_INVOKE<Instance_Serialize>("instances_update", { id, name, ram_mb: ramMb, java_path: javaPath, jvm_args: jvmArgs, wrapper }, options),
 	/**  Ouvre le dossier de l'instance dans le gestionnaire de fichiers. */
 	instancesOpenFolder: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("instances_open_folder", { id }, options),

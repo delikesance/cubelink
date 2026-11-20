@@ -253,8 +253,14 @@ impl InstanceStore {
             check_ram(mb)?;
         }
         let java_path = java_path.map(validate_java_path).transpose()?;
-        let jvm_args = jvm_args.map(validate_jvm_args).transpose()?;
-        let wrapper = wrapper.map(validate_wrapper).transpose()?;
+        // Une valeur déjà enregistrée et renvoyée telle quelle (le tiroir renvoie toujours tous les champs) n'est pas
+        // revalidée : un ancien guillemet mal fermé ne doit pas empêcher de changer le nom ou la mémoire.
+        let jvm_args = jvm_args
+            .map(|a| if a.trim() == stored.instance.jvm_args { Ok(stored.instance.jvm_args.clone()) } else { validate_jvm_args(a) })
+            .transpose()?;
+        let wrapper = wrapper
+            .map(|w| if w.trim() == stored.instance.wrapper { Ok(stored.instance.wrapper.clone()) } else { validate_wrapper(w) })
+            .transpose()?;
         if let Some(n) = name {
             stored.instance.name = n;
         }
@@ -816,6 +822,21 @@ b"), None).is_err());
         let i = s.create("A", "1.21.1", spec(), 2048).unwrap();
         let e = s.update(&i.id, None, None, None, Some("-Dk=\"a"), None).unwrap_err();
         assert!(e.to_string().contains("guillemet non fermé"), "{e}");
+    }
+
+    #[test]
+    fn ancienne_valeur_mal_fermee_renvoyee_telle_quelle_ne_bloque_pas_l_enregistrement() {
+        let (_t, s) = store();
+        let i = s.create("A", "1.21.1", spec(), 2048).unwrap();
+        let mut stored = s.read_meta(&i.id).unwrap();
+        stored.instance.jvm_args = "-Dname=O'Brien".into();
+        stored.instance.wrapper = "gamemoderun \"x".into();
+        s.write_meta(&i.id, &stored).unwrap();
+        // Même valeur renvoyée avec un autre champ : accepté, la valeur est conservée.
+        let u = s.update(&i.id, Some("B"), None, None, Some("-Dname=O'Brien"), Some("gamemoderun \"x")).unwrap();
+        assert_eq!((u.name.as_str(), u.jvm_args.as_str(), u.wrapper.as_str()), ("B", "-Dname=O'Brien", "gamemoderun \"x"));
+        // Une autre valeur mal fermée reste refusée.
+        assert!(s.update(&i.id, None, None, None, Some("-Dk=\"a"), None).is_err());
     }
 
     #[cfg(unix)]

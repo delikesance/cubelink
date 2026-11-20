@@ -453,7 +453,7 @@ pub fn instances_delete(state: State<'_, Arc<AppState>>, id: String) -> Result<(
     state.instances_delete(&id)
 }
 
-/// Modifie les champs donnés d'une instance (les autres restent). `wrapper` : commande d'enrobage placée devant Java, Linux seulement ; chaîne vide = aucune.
+/// Modifie les champs donnés d'une instance (les autres restent). `wrapper` : commande d'enrobage placée devant Java, Linux seulement ; chaîne vide = aucune. `java_path` : `""` efface le chemin Java de l'instance, `null` le laisse inchangé ; un Java dont la version ne convient pas à Minecraft fait échouer le lancement (le Java global, lui, est alors ignoré). `jvm_args` et `wrapper` sont découpés façon shell (guillemets simples ou doubles pour une valeur avec espaces) ; un guillemet non fermé est refusé.
 #[tauri::command(rename_all = "snake_case")]
 #[specta::specta(rename_all = "snake_case")]
 pub fn instances_update(

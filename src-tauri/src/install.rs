@@ -240,6 +240,12 @@ async fn resolve_setting(setting: &JavaSetting, required: u32, mc: &str) -> Resu
         .map_err(|_| Error::Other("vérification de Java interrompue".into()))?;
     match (verdict, own) {
         (ConfiguredJava::Fits | ConfiguredJava::Unprobeable, _) => Ok(Some(p)),
+        // Java d'instance plus récent que le minimum d'un vieux Minecraft (11 ou 17 pour un 1.16.5 : Java 8) : choix explicite
+        // du joueur, qui fonctionne en vanilla et avec Fabric. On le garde (comme avant) au lieu de faire échouer le lancement.
+        (ConfiguredJava::Mismatch { found }, true) if required < 16 && found > required => {
+            eprintln!("[java] Java {found} réglé pour l'instance, Minecraft {mc} demande Java {required} : gardé, choix explicite");
+            Ok(Some(p))
+        }
         (ConfiguredJava::Mismatch { found }, true) => Err(Error::Invalid(format!(
             "Java {found} configuré pour cette instance, Minecraft {mc} demande Java {required}. Change le chemin ou vide-le pour laisser Cubelink choisir."
         ))),
@@ -618,7 +624,11 @@ mod tests {
         assert_eq!(resolve_setting(&JavaSetting::Instance(j17.clone()), 17, "1.18.2").await.unwrap(), Some(PathBuf::from(&j17)));
         // Java 21 global pour un 1.12.2 (Java 8) : refusé.
         let j21 = fake_java(dir.path(), "j21", &says("21.0.2")).display().to_string();
-        assert_eq!(resolve_setting(&JavaSetting::Global(j21), 8, "1.12.2").await.unwrap(), None);
+        assert_eq!(resolve_setting(&JavaSetting::Global(j21.clone()), 8, "1.12.2").await.unwrap(), None);
+        // Java d'instance plus récent pour un vieux Minecraft : choix explicite, gardé ; plus ancien que requis : échec.
+        assert_eq!(resolve_setting(&JavaSetting::Instance(j17.clone()), 8, "1.16.5").await.unwrap(), Some(PathBuf::from(&j17)));
+        let j8 = fake_java(dir.path(), "j8", &says("1.8.0_392")).display().to_string();
+        assert!(matches!(resolve_setting(&JavaSetting::Instance(j8), 17, "1.18.2").await, Err(Error::Invalid(_))));
     }
 
     #[cfg(unix)]

@@ -1064,6 +1064,10 @@ impl P2pBackend for IrohBackend {
         self.tunnel.set_world_port(port);
     }
 
+    fn host_cancel_join_requests(&self) {
+        self.join_requests.cancel_all();
+    }
+
     fn join_open_tunnel(&self, key: String) -> BoxFuture<'_, std::result::Result<u16, String>> {
         Box::pin(async move { self.open_tunnel_impl(key, true).await })
     }

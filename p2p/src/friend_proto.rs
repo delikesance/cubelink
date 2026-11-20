@@ -34,8 +34,8 @@ use crate::friends_db::{Direction, FriendsDb};
 use crate::identity::Identity;
 use crate::presence::{observed_addr, AddrSink};
 
-/// Code ami sans aucune adresse IP : il vient d'une ancienne version (relais n0 seul).
-pub const OLD_CODE_MESSAGE: &str = "Ce code vient d'une ancienne version de Cubelink : demande à ton ami un nouveau code.";
+/// Code ami sans aucune adresse IP : ancienne version (relais n0 seul), ou code généré avant que le réseau soit prêt.
+pub const OLD_CODE_MESSAGE: &str = "Ce code ne contient aucune adresse : il vient d'une ancienne version de Cubelink, ou a été généré avant que le réseau soit prêt. Demande à ton ami un nouveau code.";
 use crate::verify_code::verify_code;
 
 /// ALPN du protocole d'ajout d'ami.

@@ -318,6 +318,11 @@ impl P2pBackend for PendingBackend {
             b.host_set_world_port(port);
         }
     }
+    fn host_cancel_join_requests(&self) {
+        if let Some(b) = self.current() {
+            b.host_cancel_join_requests();
+        }
+    }
     fn join_open_tunnel(&self, friend_public_key: String) -> BoxFuture<'_, Result<u16, String>> {
         Box::pin(async move { self.wait().await?.join_open_tunnel(friend_public_key).await })
     }

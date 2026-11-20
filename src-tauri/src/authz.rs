@@ -159,14 +159,15 @@ impl FriendsAuthz {
         &self.access
     }
 
-    /// Pourquoi ce pair ne peut pas rejoindre la partie : `NotFriend` s'il n'est pas ami d'un monde solo (la seule
-    /// raison qui ne révèle rien de la partie), sinon `NotInvited` : ami non invité ou invitation retirée (monde solo),
-    /// ou membre retiré (groupe : l'amitié n'y est pas exigée).
+    /// Pourquoi ce pair ne peut pas rejoindre la partie : `NotFriend` s'il n'est pas ami (la seule raison qui ne
+    /// révèle rien de la partie : un inconnu qui connaît la clé de l'hôte n'apprend ni qu'il sert un groupe ni son
+    /// état), sinon `NotInvited` : ami non invité ou invitation retirée, ou ami retiré du groupe servi. Un ancien
+    /// membre qui n'est pas ami n'est pas distinguable d'un inconnu : il reçoit `NotFriend`.
     pub fn join_denial(&self, key: &PeerKey) -> Reach {
-        match self.access.served_for(key).0 {
-            SessionTarget::Group(_) => Reach::NotInvited,
-            SessionTarget::Solo if self.is_friend_hex(&hex::encode(key)) => Reach::NotInvited,
-            SessionTarget::Solo => Reach::NotFriend,
+        if self.is_friend_hex(&hex::encode(key)) {
+            Reach::NotInvited
+        } else {
+            Reach::NotFriend
         }
     }
 
@@ -248,11 +249,14 @@ mod tests {
         assert!(access.allow_friend(&[0xab; 32]));
         access.revoke(&[0xab; 32]);
         assert_eq!(TunnelAuthorizer::denial(&a, &[0xab; 32]), Reach::NotInvited);
-        // Groupe servi : l'amitié n'est pas exigée, un membre retiré (même non-ami) n'est « pas invité ».
+        // Groupe servi : un inconnu ne doit rien apprendre (« pas ami »), même retiré du groupe ; un ami retiré est « pas invité ».
         let g = GroupId([7; 16]);
-        access.allow_members(g, [[0xcd; 32]]);
+        access.allow_members(g, [[0xcd; 32], [0xab; 32]]);
         access.revoke_member(&g, &[0xcd; 32]);
-        assert_eq!(TunnelAuthorizer::denial(&a, &[0xcd; 32]), Reach::NotInvited);
+        access.revoke_member(&g, &[0xab; 32]);
+        assert_eq!(TunnelAuthorizer::denial(&a, &[0xcd; 32]), Reach::NotFriend);
+        assert_eq!(TunnelAuthorizer::denial(&a, &[0xee; 32]), Reach::NotFriend);
+        assert_eq!(TunnelAuthorizer::denial(&a, &[0xab; 32]), Reach::NotInvited);
     }
 
     #[test]

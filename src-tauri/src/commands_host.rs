@@ -163,6 +163,8 @@ impl AppState {
         };
         if !self.access.serving_group() {
             self.backend().host_set_world_port(0);
+            // Les demandeurs en attente reçoivent « expirée » tout de suite, au lieu d'attendre une réponse qui ne viendra pas.
+            self.backend().host_cancel_join_requests();
             set_tunnel_port(0);
             self.access.clear_guests();
             self.join_requests_clear();
@@ -437,6 +439,9 @@ mod tests {
         fn host_stop_sharing(&self) {
             self.log("stop".into());
         }
+        fn host_cancel_join_requests(&self) {
+            self.log("cancel_requests".into());
+        }
         fn receive_files(&self, _k: String, _i: String, _p: Plan, _pr: ProgressFn, _c: Arc<TransferControl>) -> BoxFuture<'_, Result<(), Error>> {
             Box::pin(async { Ok(()) })
         }
@@ -544,21 +549,25 @@ mod tests {
     async fn monde_quitte_revoque_invitations_et_acces_sauf_groupe() {
         let dir = tempfile::tempdir().unwrap();
         let (st, _) = test_state(dir.path());
-        st.set_backend(Arc::new(Rec::default()));
+        let rec = Arc::new(Rec::default());
+        st.set_backend(rec.clone());
         let inst = st.instances.create("Hote", "1.21.1", LoaderSpec { loader: Loader::Vanilla, version: String::new() }, 2048).unwrap();
         let open = || *lock(&st.host) = Some(HostState { instance_id: inst.id.clone(), sharing: true, world_port: Some(54321) });
 
-        // Un invité (accès solo) perd l'accès avec le monde.
+        // Un invité (accès solo) perd l'accès avec le monde, et les demandes à rejoindre en attente sont annulées côté backend.
         open();
         st.access.allow_friend(&[1; 32]);
         st.host_world_closed(&inst.id);
         assert!(!st.access.contains(&[1; 32]));
+        assert!(rec.0.lock().unwrap().contains(&"cancel_requests".to_string()), "demandes en attente annulées");
+        rec.0.lock().unwrap().clear();
 
         // Serveur de groupe servi : le tunnel et l'accès des membres ne sont pas touchés.
         open();
         st.access.allow_members(p2p_lib::hearth::model::GroupId([7u8; 16]), [[2u8; 32]]);
         st.host_world_closed(&inst.id);
         assert!(st.access.contains(&[2; 32]), "accès du groupe conservé");
+        assert!(rec.0.lock().unwrap().is_empty(), "le tunnel du groupe n'est pas touché");
 
         // Une autre instance ne ferme pas ce monde.
         open();

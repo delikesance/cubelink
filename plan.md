@@ -25,7 +25,7 @@ Chantiers prévus (après go explicite) :
 2. **Démarrage non bloquant** : ne plus bloquer sur `iroh_backend::start_app` au démarrage (`src-tauri/src/lib.rs`).
 3. **Images** : miniatures au lieu de data URL base64 pour l'art d'instance.
 4. **Refonte des écrans** selon le design (accent cyan : adapter le test d'accessibilité `e2e/08-a11y.spec.ts`, qui exige encore un focus orange fixe).
-5. **Réseau** : persister les adresses des amis et les rafraîchir à chaque connexion ; test de bout en bout avec relais local (redémarrage, changement d'adresse) ; imposer la comparaison du code de vérification dans l'interface.
+5. **Réseau** : persister les adresses des amis et les rafraîchir à chaque connexion ; test de bout en bout en boucle locale (redémarrage, changement d'adresse) ; imposer la comparaison du code de vérification dans l'interface.
 6. **« Amis ayant joué au modpack »** : nouvelle donnée réseau, à cadrer d'abord (confidentialité, opt-in).
 
 Décisions en attente de l'utilisateur : validation du style, un seul cyan ou un accent par modpack, confidentialité de la liste des modpacks joués, découverte publique en option.
@@ -39,7 +39,7 @@ Chaque tâche a un livrable vérifiable (code, tests, rapport). Tests et lint pa
 
 ## Vérification
 - `npm test` : clippy `-D warnings`, `cargo test --workspace`, `tsc --noEmit`, vitest.
-- `npm run e2e` : scénarios Playwright `e2e/01` à `11` (ajout d'ami, join, installation, lancement, mod inconnu, échecs, réseau sans relais, accessibilité, tailles, parcourir, art).
+- `npm run e2e` : scénarios Playwright `e2e/01` à `20` (ajout d'ami, join, installation, lancement, mod inconnu, échecs, réseau sans relais, accessibilité, tailles, parcourir, art).
 - Test réel sur deux machines pour le P2P (ajout d'ami par code, join avec manifeste, hashes identiques, mod maison absent des catalogues).
 
 ## Points ouverts

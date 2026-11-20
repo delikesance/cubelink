@@ -4,7 +4,7 @@
 # et se relance sous `dbus-run-session` si aucun bus de session n'existe. Prerequis : xvfb, openbox, xdotool, wmctrl,
 # x11-utils (xwininfo), dbus-x11, un binaire `cargo build -p cubelink` et `npm ci`.
 # Variables : CUBELINK_BIN (binaire), CARGO_TARGET_DIR (sinon target/), E2E_DISPLAY (defaut :99), E2E_LOG_DIR (journaux
-# de l'app et de Xvfb/openbox/Vite ; defaut : dossier temporaire supprime a la fin si tout passe).
+# de l'app et de Xvfb/openbox/Vite ; defaut : dossier temporaire /tmp/cl-bg-logs.*, conserve).
 # Verifie : fenetre montree, entree de demarrage avec --background, fermer = masquer (processus vivant), avis unique,
 # instance unique (relancer remontre la fenetre), --background sans fenetre, start_with_os=false retire l entree.
 # Essai reel de la phase 1 sous Linux (Xvfb + openbox + D-Bus) : vraie app Tauri, vrai disque, HOME isole.

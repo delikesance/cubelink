@@ -15,9 +15,11 @@ function setup(over: Partial<Services> = {}, params: Record<string, string> = { 
   const navigate = vi.fn();
   const goBack = vi.fn();
   const value = { services, route: "join", params, navigate, goBack, canGoBack: false, setTitle: () => {} } as ShellContextValue;
-  render(<ShellContext.Provider value={value}><Join /></ShellContext.Provider>);
+  const ui = (v: ShellContextValue) => <ShellContext.Provider value={v}><Join /></ShellContext.Provider>;
+  const { unmount, rerender } = render(ui(value));
   const emit = (p: TransferProgress) => act(() => cb(p));
-  return { services, navigate, goBack, emit };
+  const setParams = (next: Record<string, string>) => rerender(ui({ ...value, params: next }));
+  return { services, navigate, goBack, emit, unmount, setParams };
 }
 
 const P = (o: Partial<TransferProgress> & { error?: string } = {}): TransferProgress => ({
@@ -109,6 +111,45 @@ describe("Join", () => {
     expect(play.mock.calls[0][0]).toBe("pk-alex");
     // Instance invitée : désignée par le backend (vide), jamais la première instance de la liste.
     expect(play.mock.calls[0][1]).toBe("");
+  });
+
+  it("écran quitté pendant le lancement : joinPlay se termine sans renvoyer à l'accueil", async () => {
+    let finish: () => void = () => {};
+    const play = vi.fn(() => new Promise<void>((r) => { finish = r; }));
+    const { navigate, emit, unmount } = setup({ joinPlay: play });
+    await startJoin();
+    emit(P({ phase: "done" }));
+    await waitFor(() => expect(play).toHaveBeenCalledTimes(1));
+    unmount();
+    await act(async () => { finish(); await Promise.resolve(); });
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it("écran quitté pendant le lancement : un échec de joinPlay est avalé sans erreur ni navigation", async () => {
+    let fail: (e: Error) => void = () => {};
+    const play = vi.fn(() => new Promise<void>((_, r) => { fail = r; }));
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { navigate, emit, unmount } = setup({ joinPlay: play });
+    await startJoin();
+    emit(P({ phase: "done" }));
+    await waitFor(() => expect(play).toHaveBeenCalledTimes(1));
+    unmount();
+    await act(async () => { fail(new Error("boum")); await Promise.resolve(); });
+    expect(navigate).not.toHaveBeenCalled();
+    expect(err).not.toHaveBeenCalled();
+    err.mockRestore();
+  });
+
+  it("autre ami ouvert pendant le lancement (écran non démonté) : pas de retour forcé à l'accueil", async () => {
+    let finish: () => void = () => {};
+    const play = vi.fn(() => new Promise<void>((r) => { finish = r; }));
+    const { navigate, emit, setParams } = setup({ joinPlay: play });
+    await startJoin();
+    emit(P({ phase: "done" }));
+    await waitFor(() => expect(play).toHaveBeenCalledTimes(1));
+    setParams({ friend: "pk-autre" });
+    await act(async () => { finish(); await Promise.resolve(); });
+    expect(navigate).not.toHaveBeenCalled();
   });
 
   it("échec de la connexion au jeu : message sur place puis Réessayer", async () => {

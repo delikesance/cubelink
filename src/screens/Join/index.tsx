@@ -125,18 +125,31 @@ export default function Join() {
   const name = peer?.name ?? "ton ami";
   peerName.current = peer?.name ?? "";
 
+  // Époque de l'écran : change au démontage et quand on passe à un autre ami sans démonter (le shell garde le même
+  // composant pour #/join?friend=A puis #/join?friend=B). Un lancement démarré dans une époque révolue ne doit plus
+  // ni renvoyer à l'accueil ni toucher à l'état.
+  const epoch = useRef(0);
+  useEffect(() => {
+    epoch.current += 1;
+    return () => { epoch.current += 1; };
+  }, [friend]);
+
   const joinAndPlay = useCallback(async () => {
     if (!friend) return;
+    const ep = epoch.current;
+    const stale = () => ep !== epoch.current;
     setPlaying(true);
     setPlayError(null);
     try {
       // Sans instance précisée : celle que le transfert vient de préparer (le backend la connaît ; les instances
       // reçues d'un ami ne figurent pas dans la liste des instances).
-      try { await services.joinPlay(friend, params.instance ?? ""); } catch (e) { setPlayError(friendlyJoinError(e, peerName.current)); return; }
+      try { await services.joinPlay(friend, params.instance ?? ""); } catch (e) { if (!stale()) setPlayError(friendlyJoinError(e, peerName.current)); return; }
+      // Écran quitté pendant le lancement : le jeu démarre quand même, mais on ne renvoie pas l'utilisateur à l'accueil.
+      if (stale()) return;
       navigate("main");
     } catch (e) {
-      setPlayError(friendlyJoinError(e, peerName.current));
-    } finally { setPlaying(false); }
+      if (!stale()) setPlayError(friendlyJoinError(e, peerName.current));
+    } finally { if (!stale()) setPlaying(false); }
   }, [services, friend, params.instance, navigate]);
 
   // Transfert terminé : le jeu se lance et rejoint l'ami (une seule fois).

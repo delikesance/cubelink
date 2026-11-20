@@ -118,7 +118,12 @@ cargo test --workspace
 npx vitest run
 ```
 
-Les scénarios Playwright (`npm run e2e`) et les tests Win32 de `host/tests/` ouvrent de vraies fenêtres : lance-les volontairement, un seul à la fois.
+Les tests Win32 de `host/tests/` et les scénarios Playwright ouvrent de vraies fenêtres : lance-les volontairement, un seul à la fois.
+
+- **Windows** : `npm run e2e` (scénarios Playwright simulés, WebView2 piloté par CDP) et `cargo test -p cubelink-host --test <nom>`.
+- **Linux** : `npm run e2e` ne fonctionne pas (WebKitGTK n'a pas de CDP) et s'arrête tout de suite avec un message, sans compiler. Les essais réels Linux sont dans `e2e/linux/`, leurs prérequis sont décrits en tête de chaque script :
+  - `xvfb-run -a node e2e/linux/bindings-real.mjs` : liaisons Rust appelées par WebDriver (`cargo build -p cubelink`, `cargo install tauri-driver --locked`, paquet `webkit2gtk-driver`, Xvfb, `npm ci`) ;
+  - `bash e2e/linux/background.sh` : tray, démarrage avec le système, instance unique, fermer = masquer (Xvfb, openbox, xdotool, wmctrl, x11-utils, dbus-x11, binaire debug, `npm ci`).
 
 ## Contribuer
 

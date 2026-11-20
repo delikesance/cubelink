@@ -1082,7 +1082,6 @@ mod tests {
 
     /// Changement de modpack dont le lancement suivant est REFUSE (chaque refus de `launch_with`) : le rideau, reste ferme a
     /// mi-barre apres la fin de l'ancien jeu, se rouvre sur le launcher, et l'erreur revient a l'interface.
-    #[cfg(windows)]
     #[tokio::test(flavor = "multi_thread")]
     async fn changement_de_modpack_lancement_refuse_rouvre_le_rideau() {
         use crate::stage::fake::{switch_pending, FakeHost};
@@ -1118,7 +1117,6 @@ mod tests {
 
     /// Lancement ACCEPTE apres un changement de modpack, mais qui echoue pendant la preparation (version introuvable) : la
     /// tache de jeu s'arrete avant `watch`, le rideau se rouvre sur le launcher et l'echec est annonce a l'interface.
-    #[cfg(windows)]
     #[tokio::test(flavor = "multi_thread")]
     async fn changement_de_modpack_echec_de_preparation_rouvre_le_rideau() {
         use crate::stage::fake::{switch_pending, FakeHost};
@@ -1146,7 +1144,6 @@ mod tests {
 
     /// Le jeu suivant s'ouvre HORS de la zone integree (reglage coupe entre la fermeture et le lancement) : plus personne ne
     /// rouvrirait le rideau du changement de modpack.
-    #[cfg(windows)]
     #[tokio::test(flavor = "multi_thread")]
     async fn changement_de_modpack_vers_un_jeu_hors_scene_rouvre_le_rideau() {
         use crate::stage::fake::{switch_pending, FakeHost};

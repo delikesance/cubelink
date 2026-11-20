@@ -25,7 +25,7 @@ export function useStage(services: Services): StageState {
 /** Phrase montrée au joueur après un repli : ce qu'il voit, sans jargon ni raison technique. */
 export function stageFallbackMessage(f: StageFallback): string {
   return f.session_off
-    ? "Le jeu s'est ouvert dans sa propre fenêtre, et ce sera le cas jusqu'à la fermeture de Cubelink. Pour retrouver le jeu dans Cubelink, ferme puis rouvre Cubelink."
+    ? "Le jeu s'est ouvert dans sa propre fenêtre, et ce sera le cas pour les prochains lancements. Pour retrouver le jeu dans Cubelink, clique sur « Réessayer dans Cubelink »."
     : "Le jeu s'est ouvert dans sa propre fenêtre.";
 }
 

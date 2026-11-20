@@ -114,7 +114,7 @@ export interface BrowseProgressEvent { done: number; total: number; label: strin
 export interface StageFallback {
   /** Identifiant technique de la raison (journal `stage.log`), jamais montré au joueur. */
   reason: string;
-  /** Trop d'échecs de suite : le jeu s'ouvrira dans sa propre fenêtre jusqu'au redémarrage de Cubelink (le message dit comment revenir). */
+  /** Trop d'échecs de suite : le jeu s'ouvrira dans sa propre fenêtre jusqu'à ce que le joueur clique « Réessayer dans Cubelink » (`stage_retry`) ou redémarre Cubelink. */
   session_off: boolean;
 }
 /** Rectangle de la zone de jeu et largeur du panneau, en pixels physiques (origine : coin haut-gauche de la zone cliente). */
@@ -378,6 +378,8 @@ export interface Services {
 
   /** Zone de jeu intégrée (Windows, Linux X11) : elle existe sur ce système. */
   stageSupported(): Promise<boolean>;
+  /** Redonne sa chance à la Scène après une coupure de session ; vrai si le prochain lancement ira dans la zone de jeu. */
+  stageRetry(): Promise<boolean>;
   stageState(): Promise<StageState>;
   /** Bascule entre le jeu (`true`) et le launcher (bouton de la barre de titre). */
   stageView(game: boolean): Promise<void>;

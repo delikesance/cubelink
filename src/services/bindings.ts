@@ -224,6 +224,11 @@ export const commands = {
 	stageLayout: (x: number, y: number, w: number, h: number, panelW: number, options?: InvokeOptions) => __TAURI_INVOKE<void>("stage_layout", { x, y, w, h, panel_w: panelW }, options),
 	/**  La zone de jeu integree existe sur cette plateforme (l'interface n'affiche le reglage « Jeu integre » que dans ce cas). */
 	stageSupported: (options?: InvokeOptions) => __TAURI_INVOKE<boolean>("stage_supported", undefined, options),
+	/**
+	 *  Le joueur redonne sa chance a la Scene apres une coupure de session (replis de suite) : le prochain lancement y retourne.
+	 *  Rend vrai si ce prochain lancement ira dans la Scene (hote present, reglage « Jeu integre » actif).
+	 */
+	stageRetry: (options?: InvokeOptions) => __TAURI_INVOKE<boolean>("stage_retry", undefined, options),
 	/**  État de la mise à jour automatique du launcher. */
 	updateState: (options?: InvokeOptions) => __TAURI_INVOKE<UpdateState_Serialize>("update_state", undefined, options),
 	/**  Vérifie s'il existe une mise à jour ; si oui, le téléchargement démarre en arrière-plan. */

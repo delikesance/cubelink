@@ -185,6 +185,7 @@ export function createTauriServices(): Services {
     onBrowseProgress: (cb) => on("browse://progress", cb),
     onModsFixProgress: (cb) => on("mods-fix://progress", cb),
     stageSupported: () => commands.stageSupported(),
+    stageRetry: () => commands.stageRetry(),
     stageState: () => commands.stageState(),
     stageView: (game) => done(commands.stageView(game)),
     stagePanel: (open) => done(commands.stagePanel(open)),

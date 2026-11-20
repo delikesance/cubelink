@@ -128,10 +128,18 @@ jobs:
           shared-key: ci-test-linux
           save-if: ${{ github.event_name == 'push' }}
       - name: Dépendances système (avec Xvfb)
-        run: bash scripts/ci-apt.sh xvfb
+        run: bash scripts/ci-apt.sh xvfb openbox
       - name: Agent LAN (JDK 17 préinstallé sur le runner)
         run: JAVA_HOME="$JAVA_HOME_17_X64" bash core/resources/lan-agent/build.sh
+      # CUBELINK_REQUIRE_WM : sans openbox, le test X11 du mode transitoire échoue au lieu de s'ignorer en silence
       - run: xvfb-run -a cargo test --workspace
+        env:
+          CUBELINK_REQUIRE_WM: "1"
+      # Scène X11 sur deux moniteurs : la racine doit faire 3840x1080 d'emblée (sous l'écran par défaut, le test s'ignore)
+      # CUBELINK_REQUIRE_MULTIHEAD : si le serveur refuse de décrire deux moniteurs, le test échoue au lieu de s'ignorer
+      - run: xvfb-run -a -s "-screen 0 3840x1080x24" cargo test -p cubelink-host --test x11_fullscreen_multihead
+        env:
+          CUBELINK_REQUIRE_MULTIHEAD: "1"
 
   # E2E Playwright en mode simulé : l'app Tauri réelle (deux profils) contre de faux serveurs locaux
   # (auth, Mojang, Modrinth) et un faux Java. Le harnais pilote WebView2 par CDP : Windows seulement.

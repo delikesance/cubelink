@@ -121,7 +121,7 @@ fn forget(s: &Shared, win: u32) {
     st.refused.remove(&win);
     st.adopted_at.remove(&win);
     st.known_before.remove(&win);
-    if st.game_rect.is_some_and(|(g, _, _)| g == win) {
+    if st.game_rect.is_some_and(|(g, ..)| g == win) {
         st.game_rect = None;
     }
 }

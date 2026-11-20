@@ -29,7 +29,7 @@ mod util;
 mod watch;
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -91,7 +91,8 @@ pub struct State {
     /// Rectangle ecran applique au rideau, a la scene (repere du launcher) et au jeu (largeur, hauteur dans la scene).
     curtain_rect: Option<(i32, i32, i32, i32)>,
     stage_rect: Option<(i32, i32, i32, i32)>,
-    game_rect: Option<(u32, i32, i32)>,
+    /// `(fenetre, x, y, largeur, hauteur)` deja appliques au jeu : en ecran pour le jeu transitoire, `(0, 0)` dans la scene.
+    game_rect: Option<(u32, i32, i32, i32, i32)>,
     /// Largeur de la bande rognee a droite du jeu transitoire (panneau ouvert), deja appliquee par XShape.
     game_clip: Option<(u32, i32)>,
     stage_mapped: bool,
@@ -131,7 +132,8 @@ pub struct Shared {
     depth: u8,
     /// Un gestionnaire de fenetres tourne (lu a l'installation) : le focus et le premier plan ont alors un sens.
     wm_present: bool,
-    scale: f32,
+    /// Echelle d'affichage du rideau (bits d'un `f32`) : `GDK_SCALE` au depart, puis celle du launcher (`set_scale`).
+    scale: AtomicU32,
     state: Mutex<State>,
     /// Observateur de l'appelant. Verrou distinct de l'etat : il n'est tenu que le temps de cloner le pointeur.
     observer: Mutex<Option<Observer>>,
@@ -152,7 +154,7 @@ impl Shared {
             return Err(format!("fenetre du launcher {parent:#x} introuvable"));
         }
         let made = embedded::create(&conn, &atoms, &screen, parent)?;
-        let scale = std::env::var("GDK_SCALE").ok().and_then(|v| v.parse::<f32>().ok()).filter(|v| *v >= 1.0).unwrap_or(1.0);
+        let scale = initial_scale(std::env::var("GDK_SCALE").ok().as_deref());
         let wm_present = util::has_wm(&conn, &atoms, screen.root);
         let s = Arc::new(Shared {
             conn,
@@ -164,7 +166,7 @@ impl Shared {
             gc: made.gc,
             depth: made.depth,
             wm_present,
-            scale,
+            scale: AtomicU32::new(scale.to_bits()),
             state: Mutex::new(State::default()),
             observer: Mutex::new(None),
             render: Mutex::new(curtain_window::Render::new()),
@@ -176,6 +178,11 @@ impl Shared {
         watch::start(&s)?;
         curtain_window::start_ticker(&s)?;
         Ok(s)
+    }
+
+    /// Echelle d'affichage courante du rideau.
+    fn scale(&self) -> f32 {
+        f32::from_bits(self.scale.load(Ordering::Relaxed))
     }
 
     /// Verrou d'etat, tolerant a l'empoisonnement (l'etat reste coherent : chaque operation le met a jour d'un bloc).
@@ -460,6 +467,20 @@ fn guard_tick(s: &Shared) {
 /// La Scene X11 : l'API commune (`crate::scene`) sur ce systeme.
 pub type GameHost = crate::scene::GameHost<Shared>;
 
+/// Echelle de depart du rideau, avant le premier `set_scale` : `GDK_SCALE` s'il est valide, sinon 1.
+fn initial_scale(env: Option<&str>) -> f32 {
+    env.and_then(|v| v.trim().parse::<f32>().ok()).map_or(1.0, sanitize_scale)
+}
+
+/// Echelle utilisable : finie et dans [1, 4] (une valeur aberrante donnerait un rideau vide ou enorme).
+fn sanitize_scale(v: f32) -> f32 {
+    if v.is_finite() && v >= 1.0 {
+        v.min(4.0)
+    } else {
+        1.0
+    }
+}
+
 impl Backend for Shared {
     type Win = u32;
     type State = State;
@@ -503,6 +524,15 @@ impl Backend for Shared {
         self.flush();
     }
 
+    fn set_scale(&self, scale: f32) {
+        let bits = sanitize_scale(scale).to_bits();
+        if self.scale.swap(bits, Ordering::Relaxed) != bits && self.curtain_mapped.load(Ordering::SeqCst) {
+            // `sync` ne redessine que si le rectangle bouge, et au repos (cadence arretee) aucun battement ne le ferait
+            curtain_window::present(self);
+            self.flush();
+        }
+    }
+
     fn reset_for_watch(st: &mut State) {
         st.origin.clear();
         st.refused.clear();
@@ -543,5 +573,31 @@ impl Backend for Shared {
         if let Some(t) = self.ticker.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
             t.unpark();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{initial_scale, sanitize_scale};
+
+    #[test]
+    fn echelle_de_depart_depuis_gdk_scale() {
+        assert_eq!(initial_scale(None), 1.0);
+        assert_eq!(initial_scale(Some("2")), 2.0);
+        assert_eq!(initial_scale(Some(" 1.5 ")), 1.5);
+        assert_eq!(initial_scale(Some("0.5")), 1.0);
+        assert_eq!(initial_scale(Some("abc")), 1.0);
+        assert_eq!(initial_scale(Some("nan")), 1.0);
+    }
+
+    #[test]
+    fn echelle_aberrante_ramenee_dans_les_bornes() {
+        assert_eq!(sanitize_scale(f32::NAN), 1.0);
+        assert_eq!(sanitize_scale(f32::INFINITY), 1.0);
+        assert_eq!(sanitize_scale(0.0), 1.0);
+        assert_eq!(sanitize_scale(-2.0), 1.0);
+        assert_eq!(sanitize_scale(1.5), 1.5);
+        assert_eq!(sanitize_scale(2.0), 2.0);
+        assert_eq!(sanitize_scale(9.0), 4.0);
     }
 }

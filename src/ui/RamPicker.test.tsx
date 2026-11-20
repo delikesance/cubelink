@@ -40,6 +40,18 @@ describe("RamPicker", () => {
     expect(changed).toHaveBeenLastCalledWith(4096);
   });
 
+  it("avertit (sans bloquer) quand la valeur manuelle dépasse 75 % de la RAM du PC", () => {
+    const { rerender } = render(<RamPicker value={24576} defaultMb={0} systemMb={16384} onChange={() => {}} />);
+    expect(screen.getByText(/Attention/).textContent).toMatch(/24 Go dépassent 75\s%\sde la mémoire de ce PC \(16 Go\)/);
+    expect(screen.getByRole("slider")).toBeTruthy();
+    rerender(<RamPicker value={8192} defaultMb={0} systemMb={16384} onChange={() => {}} />);
+    expect(screen.queryByText(/Attention/)).toBeNull();
+    rerender(<RamPicker value={RAM_DEFAULT} defaultMb={0} systemMb={16384} onChange={() => {}} />);
+    expect(screen.queryByText(/Attention/)).toBeNull();
+    rerender(<RamPicker value={24576} defaultMb={0} systemMb={null} onChange={() => {}} />);
+    expect(screen.queryByText(/Attention/)).toBeNull();
+  });
+
   it("libellés en Go", () => {
     expect(ramLabel(8192)).toBe("8 Go");
     expect(ramLabel(1536)).toBe("1,5 Go");

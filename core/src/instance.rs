@@ -58,6 +58,21 @@ pub fn effective_ram_mb(instance_mb: u32, global_mb: u32, mod_count: u32, physic
     }
 }
 
+/// Réserve laissée au système quand l'hôte Hearth fait tourner le serveur ET le client sur le même PC.
+const HOST_RESERVE_MB: u64 = 3072;
+
+/// Mémoire du serveur Hearth (Mo) : la valeur voulue bornée de 1 à 8 Go, puis réduite pour que serveur + client tiennent
+/// dans la RAM physique moins 3 Go (docs/hearth.md § 6.6). Le client garde sa part ; plancher 1 Go, arrondi à 256 Mo.
+/// RAM illisible : pas de réduction.
+pub fn hearth_server_ram_mb(wanted_mb: u32, client_mb: u32, physical_mb: Option<u64>) -> u32 {
+    let wanted = wanted_mb.clamp(1024, 8192);
+    let capped = match physical_mb {
+        Some(p) => u64::from(wanted).min(p.saturating_sub(u64::from(client_mb) + HOST_RESERVE_MB)) as u32,
+        None => wanted,
+    };
+    capped.max(1024) / 256 * 256
+}
+
 /// Avant de rejoindre un ami : désactive l'écran d'accueil « accessibilité » de Minecraft (1.19.4+).
 /// Sur un dossier de jeu neuf (sans `options.txt`), il s'affiche au premier lancement et bloque le
 /// `--quickPlayMultiplayer` : le jeu ne se connecte jamais. Ne touche à rien d'autre dans `options.txt`.
@@ -746,6 +761,18 @@ mod tests {
                 assert!(v.is_multiple_of(256) && (1024..=8192).contains(&v), "{m} mods, {p} Mo : {v}");
             }
         }
+    }
+
+    #[test]
+    fn serveur_hearth_cede_de_la_ram_au_client_de_l_hote() {
+        // 16 Go, client 8 Go : le serveur ne garde que 16 - 8 - 3 = 5 Go (jamais 8 + 8 sur 16).
+        assert_eq!(hearth_server_ram_mb(8192, 8192, Some(16384)), 5120);
+        // Gros PC : borné à 8 Go.
+        assert_eq!(hearth_server_ram_mb(12288, 8192, Some(65536)), 8192);
+        // Petit PC : plancher 1 Go ; RAM illisible : pas de réduction, mais borné 1 à 8 Go.
+        assert_eq!(hearth_server_ram_mb(4096, 4096, Some(8192)), 1024);
+        assert_eq!(hearth_server_ram_mb(16384, 16384, None), 8192);
+        assert_eq!(hearth_server_ram_mb(512, 512, None), 1024);
     }
 
     #[test]

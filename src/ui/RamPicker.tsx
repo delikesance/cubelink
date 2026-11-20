@@ -19,12 +19,28 @@ export function useDefaultRam(services: { settingsGet: () => Promise<{ default_r
   return mb;
 }
 
+/** RAM physique du PC en Mo, `null` tant qu'elle n'est pas lue ou si le système ne la donne pas. */
+export function useSystemRam(services: { systemRamMb: () => Promise<number | null> }): number | null {
+  const [mb, setMb] = useState<number | null>(null);
+  useEffect(() => {
+    let alive = true;
+    Promise.resolve(services.systemRamMb?.()).then((v) => { if (alive) setMb(v ?? null); }, () => {});
+    return () => { alive = false; };
+  }, [services]);
+  return mb;
+}
+
+/** Au-delà de cette part de la RAM du PC, une valeur manuelle fait ralentir Windows (avertissement non bloquant). */
+const WARN_SHARE = 0.75;
+
 export interface RamPickerProps {
   /** Mo, ou `RAM_DEFAULT` (0) pour suivre la valeur globale. */
   value: number;
   onChange: (mb: number) => void;
   /** Valeur globale des paramètres en Mo (`0` : « Automatique » ; `null` : pas encore connue). */
   defaultMb: number | null;
+  /** RAM physique du PC en Mo (`null` : inconnue) : sert l'avertissement quand la valeur manuelle la dépasse presque. */
+  systemMb?: number | null;
   label?: string;
   /** Conseil sous le réglage (ex. besoin d'un gros modpack). */
   hint?: string;
@@ -35,7 +51,7 @@ export interface RamPickerProps {
  * Mémoire allouée : « Valeur des paramètres » (cochée par défaut, l'instance suit le réglage global, même s'il change
  * plus tard) ou une valeur propre à l'instance, choisie au curseur.
  */
-export function RamPicker({ value, onChange, defaultMb, label = "Mémoire allouée", hint, disabled }: RamPickerProps) {
+export function RamPicker({ value, onChange, defaultMb, systemMb = null, label = "Mémoire allouée", hint, disabled }: RamPickerProps) {
   const uid = useId();
   const inherit = value === RAM_DEFAULT;
   const auto = defaultMb === 0;
@@ -43,6 +59,7 @@ export function RamPicker({ value, onChange, defaultMb, label = "Mémoire allou�
   const custom = inherit ? (defaultMb || 4 * GB) : value;
   const maxGb = Math.max(16, Math.ceil(custom / GB), Math.ceil((defaultMb ?? 0) / GB));
   const gb = Math.min(maxGb, Math.max(MIN_GB, Math.round(custom / GB)));
+  const tooHigh = systemMb !== null && !!shown && shown > systemMb * WARN_SHARE;
   const defLabel = auto ? "Automatique" : defaultMb ? ramLabel(defaultMb) : "…";
 
   return (
@@ -67,6 +84,11 @@ export function RamPicker({ value, onChange, defaultMb, label = "Mémoire allou�
           />
           <div className="cl-ram-scale" aria-hidden="true"><span>{MIN_GB}&nbsp;Go</span><span>{maxGb}&nbsp;Go</span></div>
         </>
+      )}
+      {tooHigh && (
+        <p className="cl-ram-hint cl-ram-warn" role="status">
+          Attention&nbsp;: {ramLabel(shown!)} dépassent 75&nbsp;% de la mémoire de ce PC ({ramLabel(systemMb!)}). Windows risque de ralentir, voire de fermer le jeu.
+        </p>
       )}
       {hint && <p className="cl-ram-hint">{hint}</p>}
     </div>

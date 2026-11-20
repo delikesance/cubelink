@@ -9,6 +9,8 @@ import {
 
 test.describe.configure({ mode: 'serial' });
 test.setTimeout(180_000);
+// Ecrit un settings.json de test (default_ram_mb: 4096, sans drapeau ram_auto_migrated) : la migration le passe en Automatique.
+test.use({ appOptions: { settings: {} } });
 
 const WITNESS = '.cubelink-fake-launch.json';
 const STOP = '.cubelink-fake-stop';

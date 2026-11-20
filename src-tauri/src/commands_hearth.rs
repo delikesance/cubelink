@@ -470,7 +470,11 @@ impl AppState {
             minecraft: inst.minecraft.clone(),
             loader: inst.loader.clone(),
             mods_src: game_dir.join("mods"),
-            ram_mb: self.launch_ram_mb(inst).clamp(1024, 8192),
+            // Le client de l'hôte se lance ensuite sur le même PC (`hearth_join`) : serveur + client tiennent dans la RAM.
+            ram_mb: {
+                let client = self.launch_ram_mb(inst);
+                core_lib::instance::hearth_server_ram_mb(client, client, core_lib::sysmem::physical_ram_mb())
+            },
             java_override: settings.java_path.as_deref().map(PathBuf::from),
             java_root: self.paths.java.clone(),
         };

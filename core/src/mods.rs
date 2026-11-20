@@ -3,6 +3,8 @@
 //! La provenance est écrite dans `<instance>/.cubelink-mods.json` (hors du dossier de jeu, donc jamais
 //! partagée en P2P) : `{ "<fichier>": { "source": "curseforge"|"modrinth"|"custom", "id": "..." } }`.
 //! La clé est le nom du fichier ACTIVÉ (sans `.disabled`) : activer / désactiver ne la modifie pas.
+//! Un fichier illisible n'est jamais écrasé : avant la prochaine écriture il est renommé en
+//! `.cubelink-mods.json.bad-<horodatage>` (la lecture seule ne touche pas au disque).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -96,8 +98,63 @@ fn prov_path(game_dir: &Path) -> PathBuf {
     game_dir.parent().unwrap_or(game_dir).join(PROVENANCE_FILE)
 }
 
+/// Lit la provenance : absente = table vide (cas normal) ; illisible = `Err`.
+fn read_provenance_checked(game_dir: &Path) -> Result<BTreeMap<String, Provenance>> {
+    match std::fs::read(prov_path(game_dir)) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| Error::Other(format!("JSON invalide : {e}"))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Lecture seule : un fichier illisible donne une table vide et un avertissement, sans rien modifier sur le disque.
 pub fn read_provenance(game_dir: &Path) -> BTreeMap<String, Provenance> {
-    std::fs::read(prov_path(game_dir)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+    read_provenance_checked(game_dir).unwrap_or_else(|e| {
+        tracing::warn!("provenance des mods illisible ({}) : {e}", prov_path(game_dir).display());
+        BTreeMap::new()
+    })
+}
+
+/// Chemin libre `<fichier>.bad-<secondes epoch>` (suffixe `-1`, `-2`... si déjà pris) : jamais d'écrasement.
+fn bad_path(path: &Path) -> PathBuf {
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| PROVENANCE_FILE.into());
+    let mut candidate = path.with_file_name(format!("{name}.bad-{secs}"));
+    let mut n = 1;
+    while candidate.exists() {
+        candidate = path.with_file_name(format!("{name}.bad-{secs}-{n}"));
+        n += 1;
+    }
+    candidate
+}
+
+/// Lecture avant réécriture (sous `guard()`) : un fichier illisible est mis de côté en `.bad-<horodatage>` avant
+/// de repartir d'une table vide, pour ne jamais effacer sans sauvegarde. Si la mise de côté échoue, on refuse d'écrire.
+fn load_for_write(game_dir: &Path) -> Result<BTreeMap<String, Provenance>> {
+    match read_provenance_checked(game_dir) {
+        Ok(map) => Ok(map),
+        Err(e) => {
+            let path = prov_path(game_dir);
+            let bad = bad_path(&path);
+            match std::fs::rename(&path, &bad) {
+                Ok(()) => {
+                    tracing::warn!(
+                        "provenance des mods illisible ({e}) : {} conservé dans {}, nouvelle table vide",
+                        path.display(),
+                        bad.display()
+                    );
+                    Ok(BTreeMap::new())
+                }
+                Err(re) => {
+                    tracing::warn!("provenance des mods illisible ({e}) et mise de côté impossible : {re}");
+                    Err(Error::Other(format!(
+                        "provenance des mods illisible ({}) et impossible à mettre de côté : {re}",
+                        path.display()
+                    )))
+                }
+            }
+        }
+    }
 }
 
 fn write_provenance(game_dir: &Path, map: &BTreeMap<String, Provenance>) -> Result<()> {
@@ -122,7 +179,7 @@ fn write_provenance(game_dir: &Path, map: &BTreeMap<String, Provenance>) -> Resu
 /// Enregistre la provenance de fichiers (clés : noms activés).
 pub fn record_provenance(game_dir: &Path, entries: &[(String, Provenance)]) -> Result<()> {
     let _g = guard();
-    let mut map = read_provenance(game_dir);
+    let mut map = load_for_write(game_dir)?;
     for (f, p) in entries {
         map.insert(f.clone(), p.clone());
     }
@@ -130,7 +187,7 @@ pub fn record_provenance(game_dir: &Path, entries: &[(String, Provenance)]) -> R
 }
 
 fn forget(game_dir: &Path, base: &str) -> Result<()> {
-    let mut map = read_provenance(game_dir);
+    let mut map = load_for_write(game_dir)?;
     if map.remove(base).is_some() {
         write_provenance(game_dir, &map)?;
     }
@@ -140,7 +197,7 @@ fn forget(game_dir: &Path, base: &str) -> Result<()> {
 /// Oublie la provenance de fichiers (noms activés ou désactivés), sans toucher aux fichiers.
 pub fn forget_provenance(game_dir: &Path, files: &[String]) -> Result<()> {
     let _g = guard();
-    let mut map = read_provenance(game_dir);
+    let mut map = load_for_write(game_dir)?;
     let mut changed = false;
     for f in files {
         let base = jar_base(f).unwrap_or_else(|| f.clone());
@@ -263,7 +320,7 @@ pub fn add(game_dir: &Path, src: &Path) -> Result<ModEntry> {
         let _ = std::fs::remove_file(&tmp);
         return Err(e.into());
     }
-    let mut map = read_provenance(game_dir);
+    let mut map = load_for_write(game_dir)?;
     map.insert(final_name.clone(), Provenance { source: "custom".into(), id: String::new() });
     write_provenance(game_dir, &map)?;
     Ok(ModEntry { file: final_name, enabled: true, size: meta.len(), custom: true })
@@ -311,7 +368,7 @@ pub fn remove_old_versions(game_dir: &Path, source: &str, id: &str, keep: &[Stri
 /// sont supprimés (un pack décompressé en dossier reste en place) ; `.disabled` n'existe que pour les mods.
 pub fn remove_old_versions_in(game_dir: &Path, dir: &str, source: &str, id: &str, keep: &[String]) -> Result<()> {
     let _g = guard();
-    let mut map = read_provenance(game_dir);
+    let mut map = load_for_write(game_dir)?;
     let base = game_dir.join(dir);
     let old: Vec<(String, String)> = map
         .iter()
@@ -417,6 +474,101 @@ mod tests {
         assert!(l.iter().all(|m| m.custom));
         assert_eq!(read_provenance(&g)["MyMod.jar"], Provenance { source: "custom".into(), id: String::new() });
         assert_eq!(std::fs::read_dir(g.join("mods")).unwrap().count(), 3, "aucun temporaire résiduel");
+    }
+
+    fn prov_file(g: &Path) -> PathBuf {
+        g.parent().unwrap().join(PROVENANCE_FILE)
+    }
+
+    fn bad_files(g: &Path) -> Vec<PathBuf> {
+        let mut v: Vec<PathBuf> = std::fs::read_dir(g.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.file_name().unwrap().to_string_lossy().starts_with(".cubelink-mods.json.bad-"))
+            .collect();
+        v.sort();
+        v
+    }
+
+    fn prov(id: &str) -> Provenance {
+        Provenance { source: "modrinth".into(), id: id.into() }
+    }
+
+    #[test]
+    fn corrupt_provenance_is_set_aside_before_write() {
+        let (_d, g) = setup();
+        std::fs::write(prov_file(&g), b"{\"a.jar\":").unwrap();
+        record_provenance(&g, &[("b.jar".into(), prov("p"))]).unwrap();
+        let map = read_provenance(&g);
+        assert_eq!(map.len(), 1);
+        assert_eq!(map["b.jar"], prov("p"));
+        let bad = bad_files(&g);
+        assert_eq!(bad.len(), 1);
+        assert_eq!(std::fs::read(&bad[0]).unwrap(), b"{\"a.jar\":");
+    }
+
+    #[test]
+    fn corrupt_provenance_read_only_changes_nothing() {
+        let (_d, g) = setup();
+        std::fs::write(prov_file(&g), b"pas du json").unwrap();
+        assert!(read_provenance(&g).is_empty());
+        assert!(list(&g).unwrap().is_empty());
+        assert!(bad_files(&g).is_empty());
+        assert_eq!(std::fs::read(prov_file(&g)).unwrap(), b"pas du json");
+    }
+
+    #[test]
+    fn empty_and_wrong_shape_files_count_as_unreadable() {
+        for body in [&b""[..], &b"[1,2]"[..]] {
+            let (_d, g) = setup();
+            std::fs::write(prov_file(&g), body).unwrap();
+            record_provenance(&g, &[("b.jar".into(), prov("p"))]).unwrap();
+            assert_eq!(std::fs::read(&bad_files(&g)[0]).unwrap(), body);
+            assert_eq!(read_provenance(&g).len(), 1);
+        }
+    }
+
+    #[test]
+    fn missing_or_valid_provenance_creates_no_bad_file() {
+        let (_d, g) = setup();
+        record_provenance(&g, &[("a.jar".into(), prov("p"))]).unwrap();
+        record_provenance(&g, &[("b.jar".into(), prov("q"))]).unwrap();
+        assert_eq!(read_provenance(&g).len(), 2);
+        std::fs::write(prov_file(&g), b"{}").unwrap();
+        record_provenance(&g, &[("c.jar".into(), prov("r"))]).unwrap();
+        assert!(bad_files(&g).is_empty());
+    }
+
+    #[test]
+    fn successive_corruptions_keep_distinct_backups() {
+        let (_d, g) = setup();
+        for i in 0..3 {
+            std::fs::write(prov_file(&g), format!("casse {i}")).unwrap();
+            record_provenance(&g, &[("a.jar".into(), prov("p"))]).unwrap();
+        }
+        let bad = bad_files(&g);
+        assert_eq!(bad.len(), 3);
+        let mut bodies: Vec<Vec<u8>> = bad.iter().map(|p| std::fs::read(p).unwrap()).collect();
+        bodies.sort();
+        assert_eq!(bodies, vec![b"casse 0".to_vec(), b"casse 1".to_vec(), b"casse 2".to_vec()]);
+    }
+
+    #[test]
+    fn add_and_forget_set_corrupt_provenance_aside() {
+        let (d, g) = setup();
+        std::fs::write(prov_file(&g), b"{").unwrap();
+        let src = d.path().join("My.jar");
+        std::fs::write(&src, b"abc").unwrap();
+        add(&g, &src).unwrap();
+        assert_eq!(bad_files(&g).len(), 1);
+        assert_eq!(read_provenance(&g)["My.jar"].source, "custom");
+        std::fs::write(prov_file(&g), b"{").unwrap();
+        forget_provenance(&g, &["My.jar".into()]).unwrap();
+        assert_eq!(bad_files(&g).len(), 2);
+        std::fs::write(prov_file(&g), b"{").unwrap();
+        remove_old_versions(&g, "modrinth", "p", &[]).unwrap();
+        assert_eq!(bad_files(&g).len(), 3, "même sans rien à retirer, le fichier illisible est conservé en .bad");
+        assert!(!prov_file(&g).exists());
     }
 
     #[test]

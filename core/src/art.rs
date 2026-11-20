@@ -36,6 +36,8 @@ const FETCH_BUDGET: Duration = Duration::from_secs(60);
 const SHOT_PARALLELISM: usize = 3;
 /// Âge au-delà duquel un dossier `art.tmp*` est un reste d'un arrêt brutal (bien plus que `FETCH_BUDGET`).
 const STALE_STAGE: Duration = Duration::from_secs(3600);
+/// Délai avant de relancer la recherche automatique d'une instance dont la recherche n'a trouvé aucun modpack.
+const AUTO_RETRY_SECS: i64 = 7 * 24 * 3600;
 
 fn invalid(m: impl Into<String>) -> Error {
     Error::Invalid(m.into())
@@ -443,13 +445,35 @@ pub async fn lookup_modpack(p: &Providers, name: &str, exact: bool) -> Result<(B
 
 /// Recherche par le nom de l'instance, puis récupération de l'art. `auto` (sans demande de l'utilisateur) : jamais
 /// pour une instance créée à la main, et seulement sur un nom identique (« Test » ne doit pas devenir « Testro's… »).
+/// Un échec définitif (aucun modpack de ce nom) est mémorisé : la recherche automatique ne repart pas, sans requête,
+/// avant [`AUTO_RETRY_SECS`]. Une erreur réseau n'est jamais mémorisée ; `auto = false` ignore la mémorisation.
 pub async fn lookup_and_apply(p: &Providers, store: &InstanceStore, instance_id: &str, auto: bool) -> Result<Instance> {
     let inst = store.get(instance_id)?;
     if auto && store.is_custom(instance_id) {
         return Err(Error::NotFound("instance créée à la main : pas d'illustration automatique".into()));
     }
-    let (source, id) = lookup_modpack(p, &inst.name, auto).await?;
+    if auto {
+        let now = now_secs();
+        // Une date dans le futur (horloge reculée) ne bloque pas : elle compte comme expirée.
+        if store.art_lookup_failed_at(instance_id).is_some_and(|at| (0..=now).contains(&at) && now - at < AUTO_RETRY_SECS) {
+            return Err(Error::NotFound("recherche automatique déjà tentée récemment sans résultat".into()));
+        }
+    }
+    let (source, id) = match lookup_modpack(p, &inst.name, auto).await {
+        Ok(found) => found,
+        Err(e) => {
+            if auto && matches!(e, Error::NotFound(_)) {
+                // Écriture « au mieux » : si elle échoue, on retombe sur l'ancien comportement (réessai au prochain démarrage).
+                let _ = store.set_art_lookup_failed(instance_id, Some(now_secs()));
+            }
+            return Err(e);
+        }
+    };
     apply_art(p, store, instance_id, source, &id).await
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
 }
 
 // ---------- Lecture et choix manuel ----------
@@ -1356,6 +1380,92 @@ mod tests {
         let u = lookup_and_apply(&providers(&mr, &cf, true), &s, &i.id, false).await.unwrap();
         let a = u.art.unwrap();
         assert_eq!((a.source.as_str(), a.project_id.as_str()), ("curseforge", "7"));
+    }
+
+    async fn empty_catalogs(mr: &MockServer, cf: &MockServer, expect: u64) {
+        Mock::given(method("GET"))
+            .and(path("/v2/search"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"hits": [], "total_hits": 0})))
+            .expect(expect)
+            .mount(mr)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/search"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": []})))
+            .expect(expect)
+            .mount(cf)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn auto_echec_memorise_et_pas_de_nouvelle_requete_avant_le_delai() {
+        let (mr, cf) = (MockServer::start().await, MockServer::start().await);
+        empty_catalogs(&mr, &cf, 1).await;
+        let (_t, s, i) = store();
+        let p = providers(&mr, &cf, true);
+        assert!(matches!(lookup_and_apply(&p, &s, &i.id, true).await, Err(Error::NotFound(_))));
+        assert!(s.art_lookup_failed_at(&i.id).is_some());
+        // Deuxième et troisième appels : aucune requête (`expect(1)` vérifié à la fin).
+        assert!(matches!(lookup_and_apply(&p, &s, &i.id, true).await, Err(Error::NotFound(_))));
+        assert!(matches!(lookup_and_apply(&p, &s, &i.id, true).await, Err(Error::NotFound(_))));
+        // La marque survit à une relecture du store (vrai disque) et à une modification de la RAM.
+        s.update_ram(&i.id, 4096).unwrap();
+        assert!(InstanceStore::new(s.root()).art_lookup_failed_at(&i.id).is_some());
+    }
+
+    #[tokio::test]
+    async fn auto_relance_apres_sept_jours_ou_si_la_date_est_dans_le_futur() {
+        let (mr, cf) = (MockServer::start().await, MockServer::start().await);
+        empty_catalogs(&mr, &cf, 2).await;
+        let (_t, s, i) = store();
+        let p = providers(&mr, &cf, true);
+        s.set_art_lookup_failed(&i.id, Some(now_secs() - AUTO_RETRY_SECS - 60)).unwrap();
+        assert!(lookup_and_apply(&p, &s, &i.id, true).await.is_err());
+        // L'échec est réécrit avec la date du jour.
+        assert!(now_secs() - s.art_lookup_failed_at(&i.id).unwrap() < 60);
+        s.set_art_lookup_failed(&i.id, Some(now_secs() + 3600)).unwrap();
+        assert!(lookup_and_apply(&p, &s, &i.id, true).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn manuel_ignore_le_delai_et_succes_efface_la_marque() {
+        let (mr, cf) = (MockServer::start().await, MockServer::start().await);
+        Mock::given(method("GET")).and(path("/v2/search")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"hits": [], "total_hits": 0}))).mount(&mr).await;
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/search"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [{"id": 7, "name": "Mon Pack"}]})))
+            .mount(&cf)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/7"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {"id": 7, "name": "Mon Pack", "summary": "s"}})))
+            .mount(&cf)
+            .await;
+        let (_t, s, i) = store();
+        let p = providers(&mr, &cf, true);
+        s.set_art_lookup_failed(&i.id, Some(now_secs())).unwrap();
+        assert!(lookup_and_apply(&p, &s, &i.id, true).await.is_err());
+        let u = lookup_and_apply(&p, &s, &i.id, false).await.unwrap();
+        assert_eq!(u.art.unwrap().project_id, "7");
+        assert_eq!(s.art_lookup_failed_at(&i.id), None);
+    }
+
+    #[tokio::test]
+    async fn auto_erreur_reseau_et_instance_custom_ne_memorisent_rien() {
+        let (mr, cf) = (MockServer::start().await, MockServer::start().await);
+        Mock::given(method("GET")).and(path("/v2/search")).respond_with(ResponseTemplate::new(500)).mount(&mr).await;
+        Mock::given(method("GET")).and(path("/v1/mods/search")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": []}))).mount(&cf).await;
+        let (_t, s, i) = store();
+        let p = providers(&mr, &cf, true);
+        assert!(lookup_and_apply(&p, &s, &i.id, true).await.is_err());
+        assert_eq!(s.art_lookup_failed_at(&i.id), None);
+        // Le réessai repart bien vers le réseau.
+        let before = mr.received_requests().await.unwrap().len();
+        assert!(lookup_and_apply(&p, &s, &i.id, true).await.is_err());
+        assert_eq!(mr.received_requests().await.unwrap().len(), before + 1);
+        s.mark_custom(&i.id).unwrap();
+        assert!(lookup_and_apply(&p, &s, &i.id, true).await.is_err());
+        assert_eq!(s.art_lookup_failed_at(&i.id), None);
     }
 
     #[test]

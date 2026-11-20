@@ -81,6 +81,10 @@ struct StoredInstance {
     /// Créée à la main dans Cubelink (pas importée d'un modpack) : jamais d'illustration automatique.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     custom: bool,
+    /// Secondes Unix du dernier échec définitif de la recherche automatique d'illustration (aucune correspondance
+    /// pour le nom). Sert à ne pas la relancer à chaque démarrage ; effacé par un renommage ou une illustration posée.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    art_lookup_failed_at: Option<i64>,
 }
 
 /// Dossier ignoré par `list_with_issues`.
@@ -145,7 +149,7 @@ impl InstanceStore {
             wrapper: String::new(),
             art: None,
         };
-        let stored = StoredInstance { instance: instance.clone(), created_at: now_secs(), kind, custom: false };
+        let stored = StoredInstance { instance: instance.clone(), created_at: now_secs(), kind, custom: false, art_lookup_failed_at: None };
         let res = fs::create_dir_all(self.root.join(&id).join(GAME_DIR))
             .map_err(Error::from)
             .and_then(|_| self.write_meta(&id, &stored));
@@ -207,6 +211,21 @@ impl InstanceStore {
         self.write_meta(id, &m)
     }
 
+    /// Date (secondes Unix) du dernier échec définitif de la recherche automatique d'illustration, s'il y en a un.
+    pub fn art_lookup_failed_at(&self, id: &str) -> Option<i64> {
+        self.read_meta(id).ok().and_then(|m| m.art_lookup_failed_at)
+    }
+
+    /// Mémorise (ou efface) l'échec de la recherche automatique d'illustration.
+    pub fn set_art_lookup_failed(&self, id: &str, at: Option<i64>) -> Result<()> {
+        let mut m = self.read_meta(id)?;
+        if m.art_lookup_failed_at == at {
+            return Ok(());
+        }
+        m.art_lookup_failed_at = at;
+        self.write_meta(id, &m)
+    }
+
     pub fn created_at(&self, id: &str) -> Result<i64> {
         Ok(self.read_meta(id)?.created_at)
     }
@@ -256,6 +275,10 @@ impl InstanceStore {
         let jvm_args = jvm_args.map(validate_jvm_args).transpose()?;
         let wrapper = wrapper.map(validate_wrapper).transpose()?;
         if let Some(n) = name {
+            // La recherche d'illustration se fait par le nom : un autre nom mérite un nouvel essai.
+            if stored.instance.name != n {
+                stored.art_lookup_failed_at = None;
+            }
             stored.instance.name = n;
         }
         if let Some(mb) = ram_mb {
@@ -290,6 +313,7 @@ impl InstanceStore {
     pub fn set_art(&self, id: &str, art: Option<InstanceArt>) -> Result<Instance> {
         let mut stored = self.read_meta(id)?;
         stored.instance.art = art;
+        stored.art_lookup_failed_at = None;
         self.write_meta(id, &stored)?;
         Ok(self.with_live_mod_count(id, stored.instance))
     }
@@ -576,6 +600,28 @@ mod tests {
         assert_eq!(s.mod_count(&i.id).unwrap(), 2);
         assert_eq!(s.get(&i.id).unwrap().mod_count, 2);
         assert_eq!(s.list()[0].mod_count, 2);
+    }
+
+    #[test]
+    fn echec_de_recherche_d_art_memorise_efface_par_renommage_ou_art() {
+        let (_t, s) = store();
+        let i = s.create("Pack", "1.21.1", spec(), 2048).unwrap();
+        assert_eq!(s.art_lookup_failed_at(&i.id), None);
+        s.set_art_lookup_failed(&i.id, Some(1234)).unwrap();
+        assert_eq!(s.art_lookup_failed_at(&i.id), Some(1234));
+        // Conservé par les autres modifications, y compris un « renommage » au même nom.
+        s.update_ram(&i.id, 4096).unwrap();
+        s.update(&i.id, Some("Pack"), None, None, None, None).unwrap();
+        assert_eq!(s.art_lookup_failed_at(&i.id), Some(1234));
+        s.update(&i.id, Some("Autre"), None, None, None, None).unwrap();
+        assert_eq!(s.art_lookup_failed_at(&i.id), None);
+        s.set_art_lookup_failed(&i.id, Some(5)).unwrap();
+        s.set_art(&i.id, None).unwrap();
+        assert_eq!(s.art_lookup_failed_at(&i.id), None);
+        // Le champ n'est pas écrit quand il est vide, et un ancien instance.json sans champ se relit.
+        let raw = fs::read_to_string(s.root().join(&i.id).join(META_FILE)).unwrap();
+        assert!(!raw.contains("art_lookup_failed_at"));
+        assert_eq!(s.get(&i.id).unwrap().name, "Autre");
     }
 
     #[test]

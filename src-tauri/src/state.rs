@@ -120,6 +120,8 @@ pub struct AppState {
     pub lan_agent: Mutex<Option<PathBuf>>,
     /// Vrai si l'agent LAN a fait planter la JVM : désactivé pour le reste de la session.
     pub lan_agent_off: std::sync::atomic::AtomicBool,
+    /// Vrai pendant un balayage du cache (`store_gc`) : jamais deux en même temps.
+    store_gc_running: AtomicBool,
     /// État du partage hôte (voir `commands_host`).
     pub host: Mutex<Option<crate::commands_host::HostState>>,
     /// Invitations reçues d'amis (mémoire seulement, voir `invites`).
@@ -377,6 +379,12 @@ pub fn default_settings() -> Settings {
     }
 }
 
+/// Âge minimal d'un objet du cache délié pour être supprimé au balayage du démarrage.
+pub const STORE_GC_STARTUP_MIN_AGE: std::time::Duration = std::time::Duration::from_secs(3 * 86_400);
+/// Idem après la suppression d'une instance. Jamais en dessous d'un jour : un objet déposé par une installation ou un
+/// transfert en cours (pas encore lié) est protégé par son âge.
+pub const STORE_GC_DELETE_MIN_AGE: std::time::Duration = std::time::Duration::from_secs(86_400);
+
 impl AppState {
     pub fn new(root: &Path, emit: EventSink, backend: Arc<dyn P2pBackend>) -> Result<Self, String> {
         let paths = Paths::new(root);
@@ -411,6 +419,7 @@ impl AppState {
             join: Mutex::new(None),
             lan_agent: Mutex::new(None),
             lan_agent_off: std::sync::atomic::AtomicBool::new(false),
+            store_gc_running: AtomicBool::new(false),
             host: Mutex::new(None),
             invites: Mutex::new(Vec::new()),
             invites_sent: Mutex::new(std::collections::HashMap::new()),
@@ -433,6 +442,54 @@ impl AppState {
 
     pub fn set_backend(&self, b: Arc<dyn P2pBackend>) {
         *self.backend.write().unwrap_or_else(|e| e.into_inner()) = b;
+    }
+
+    /// Balaie le cache du magasin : recalcule les références depuis les liens durs des instances puis supprime les
+    /// objets délies depuis plus de `min_age` (voir `core_lib::store::gc::sweep`). Bloquant : à appeler hors du fil
+    /// d'interface. `None` si le balayage est sauté (un autre est en cours, ou une instance se prépare ou tourne :
+    /// ses fichiers sont en cours de liaison). Les échecs sont journalisés, jamais remontés au joueur.
+    pub fn store_gc(&self, min_age: std::time::Duration) -> Option<core_lib::store::gc::GcReport> {
+        if lock(&self.game).is_some() {
+            return None;
+        }
+        if self.store_gc_running.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return None;
+        }
+        struct Reset<'a>(&'a AtomicBool);
+        impl Drop for Reset<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let _reset = Reset(&self.store_gc_running);
+        match core_lib::store::gc::sweep(&self.paths.store, &self.store, &self.paths.instances, min_age) {
+            Ok(r) => {
+                if r.removed.is_empty() && r.errors.is_empty() {
+                    return Some(r);
+                }
+                eprintln!(
+                    "[Cubelink] cache : {} objet(s) supprimé(s), {} Mo libérés, {} erreur(s){}",
+                    r.removed.len(),
+                    r.bytes_freed / (1024 * 1024),
+                    r.errors.len(),
+                    r.errors.first().map(|e| format!(" ({e})")).unwrap_or_default()
+                );
+                Some(r)
+            }
+            Err(e) => {
+                eprintln!("[Cubelink] nettoyage du cache impossible : {e}");
+                None
+            }
+        }
+    }
+
+    /// Lance `store_gc` en tâche de fond après `delay`.
+    pub fn store_gc_later(self: &Arc<Self>, delay: std::time::Duration, min_age: std::time::Duration) {
+        let st = self.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(delay).await;
+            let _ = tauri::async_runtime::spawn_blocking(move || st.store_gc(min_age)).await;
+        });
     }
 
     pub fn emit_event<T: Serialize>(&self, name: &str, payload: &T) {
@@ -468,6 +525,57 @@ mod quit_tests {
         assert!(g.quitting());
         drop(pass);
         assert!(!g.spawning(), "la fermeture peut se terminer");
+    }
+}
+
+#[cfg(test)]
+mod gc_tests {
+    use super::test_support::test_state;
+    use core_lib::store::index::object_rel_path;
+    use core_lib::store::link::link_into;
+    use core_lib::types::{Loader, LoaderSpec};
+    use std::time::Duration;
+
+    fn put(st: &super::AppState, seed: u8) -> (String, std::path::PathBuf) {
+        let content = vec![seed; 4096];
+        let sha = core_lib::store::hash::sha256_reader(&content[..]).unwrap();
+        let rel = object_rel_path(&sha).unwrap();
+        let p = st.paths.store.join(&rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, &content).unwrap();
+        st.store.insert(&sha, &rel, content.len() as u64).unwrap();
+        (sha, p)
+    }
+
+    #[test]
+    fn balayage_du_cache_apres_suppression_d_instance() {
+        let dir = tempfile::tempdir().unwrap();
+        let (st, _) = test_state(dir.path());
+        let vanilla = || LoaderSpec { loader: Loader::Vanilla, version: String::new() };
+        let (a, b) = (st.instances.create("A", "1.21.1", vanilla(), 2048).unwrap(), st.instances.create("B", "1.21.1", vanilla(), 2048).unwrap());
+        let (sha_own, p_own) = put(&st, 1);
+        let (sha_shared, p_shared) = put(&st, 2);
+        link_into(&st.instances.game_dir(&a.id).unwrap(), "mods/own.jar", &p_own).unwrap();
+        link_into(&st.instances.game_dir(&a.id).unwrap(), "mods/shared.jar", &p_shared).unwrap();
+        link_into(&st.instances.game_dir(&b.id).unwrap(), "mods/shared.jar", &p_shared).unwrap();
+        st.instances_delete(&a.id).unwrap();
+
+        // Une instance qui se prépare : balayage sauté.
+        *super::lock(&st.game) = Some(b.id.clone());
+        assert!(st.store_gc(Duration::ZERO).is_none());
+        *super::lock(&st.game) = None;
+        // Un balayage déjà en cours : sauté aussi.
+        st.store_gc_running.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(st.store_gc(Duration::ZERO).is_none());
+        st.store_gc_running.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(p_own.exists());
+
+        let r = st.store_gc(Duration::ZERO).expect("balayage exécuté");
+        assert_eq!(r.removed, vec![sha_own.clone()]);
+        assert!(!p_own.exists() && st.store.get(&sha_own).unwrap().is_none());
+        assert!(p_shared.exists());
+        assert_eq!(st.store.get(&sha_shared).unwrap().unwrap().refs, 1);
+        assert!(!st.store_gc_running.load(std::sync::atomic::Ordering::SeqCst), "verrou relâché");
     }
 }
 

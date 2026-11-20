@@ -363,6 +363,9 @@ pub fn run() {
                     }
                 });
             }
+            // Cache du magasin : on recalcule les références depuis les liens durs des instances, puis on supprime les
+            // objets délies depuis plus de 3 jours. Une fois par session, longtemps après le démarrage.
+            st.store_gc_later(std::time::Duration::from_secs(60), state::STORE_GC_STARTUP_MIN_AGE);
             let opts = iroh_options(hooks);
             tauri::async_runtime::spawn(async move {
                 match iroh_backend::IrohBackend::start(&st, opts).await {

@@ -1,10 +1,14 @@
 //! Tâche S4 : nettoyage du magasin (objets à 0 référence, orphelins, dossiers de préfixe vides).
+//!
+//! [`sweep`] est le point d'entrée de l'application : les références sont recalculées depuis les liens durs des
+//! instances avant chaque nettoyage, le compteur incrémental n'étant pas fiable (voir `live`).
 
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::store::index::{object_rel_path, StoreIndex};
+use crate::store::live::live_refs;
 use crate::types::{Error, Result};
 
 /// Options du nettoyage.
@@ -133,6 +137,22 @@ pub fn collect(store_root: &Path, index: &StoreIndex, opts: &GcOptions) -> Resul
         }
     }
     Ok(rep)
+}
+
+/// Marquer-balayer : recalcule les compteurs de l'index depuis les liens durs des instances ([`live_refs`]), puis
+/// supprime les objets sans lien plus anciens que `min_age` ([`collect`], orphelins du disque épargnés).
+///
+/// Si le parcours des instances est incomplet (lecture impossible), rien n'est modifié ni supprimé et la raison est
+/// dans `errors` : un ensemble vivant incomplet détruirait des objets encore utilisés.
+/// Les `add_ref` / `release_ref` des installations ne servent plus qu'à protéger un objet pendant une installation
+/// (entre son insertion et sa liaison) : `min_age` doit rester d'au moins un jour hors tests.
+pub fn sweep(store_root: &Path, index: &StoreIndex, instances_root: &Path, min_age: Duration) -> Result<GcReport> {
+    let scan = live_refs(store_root, index, instances_root)?;
+    if !scan.complete {
+        return Ok(GcReport { errors: scan.errors, ..GcReport::default() });
+    }
+    index.reconcile_refs(&scan.counts)?;
+    collect(store_root, index, &GcOptions { min_age, ..GcOptions::default() })
 }
 
 fn scan_leaf(dir: &Path, index: &StoreIndex, opts: &GcOptions, now: i64, min_age: i64, rep: &mut GcReport) {

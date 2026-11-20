@@ -438,7 +438,10 @@ pub async fn instances_kill(state: State<'_, Arc<AppState>>, id: String) -> Resu
 #[tauri::command(rename_all = "snake_case")]
 #[specta::specta(rename_all = "snake_case")]
 pub fn instances_delete(state: State<'_, Arc<AppState>>, id: String) -> Result<(), String> {
-    state.instances_delete(&id)
+    state.instances_delete(&id)?;
+    // Les jars de l'instance restent dans le cache tant qu'une autre instance les utilise : le balayage libère le reste.
+    state.inner().store_gc_later(std::time::Duration::from_secs(2), crate::state::STORE_GC_DELETE_MIN_AGE);
+    Ok(())
 }
 
 /// Modifie les champs donnés d'une instance (les autres restent). `wrapper` : commande d'enrobage placée devant Java, Linux seulement ; chaîne vide = aucune.

@@ -104,6 +104,9 @@ Chaque launcher contient : client Tauri, nœud P2P (Iroh), store de blobs adress
 - **Iroh** (ou libp2p) : QUIC, hole punching, relais, blobs adressés par hash.
 - **SQLite** : amis, index du cache.
 - Cache : stockage adressé par hash, hardlinks vers les instances.
+  - Le compteur `refs` de l'index n'est pas la source de vérité (les suppressions de mod, de sauvegarde ou d'instance ne le décrémentent pas, une réinstallation le compte deux fois). Il est **recalculé** avant chaque nettoyage : un objet est vivant tant qu'un fichier d'une instance (sauvegardes `.cubelink` comprises, hors `saves/`, `logs/`, `crash-reports/`, `screenshots/`, `art/`) en est un lien dur (`core/src/store/live.rs`). Une copie ne le retient pas.
+  - `store::gc::sweep` recalcule puis supprime les objets délies plus anciens que `min_age` (3 jours au démarrage, ~1 minute après le lancement ; 1 jour après la suppression d'une instance, jamais moins : un objet déposé par une installation ou un transfert, pas encore lié, est protégé par son âge). Sont aussi balayés les `.mrpack` de Parcourir, jamais liés. Le balayage est sauté si une instance se prépare ou tourne, ou si un autre est en cours (`AppState::store_gc`).
+  - Fail-safe : si un dossier d'instance ne peut pas être lu, l'ensemble vivant est incomplet et rien n'est supprimé. Magasin et instances sur deux volumes : pas de lien dur, donc tout le cache est balayé après `min_age` (les instances gardent leur copie).
 
 ## 6. Plan par phases
 1. **MVP** : lancer le jeu, auth Microsoft, installer des mods Modrinth, cache par hash.

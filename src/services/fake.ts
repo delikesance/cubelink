@@ -355,10 +355,10 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     const card: HearthCard = {
       minecraft: "1.21.1", loader: "NeoForge", state: "idle", host: null, players: 0, progress: null, step: null, step_index: null,
       step_count: 3, unclean: null, members_online: [], members_total: members.length, is_creator: true, can_host: true,
-      instance_id: "inst-aeronautics", version: 1, ...p,
+      instance_id: "inst-aeronautics", version: 1, orphans: d.orphans?.length ?? 0, ...p,
     };
     const g: HearthDetail = {
-      card, members, proposals: [], blocker: null, fork: [],
+      card, members, proposals: [], blocker: null, fork: [], orphans: [],
       versions: [{ id: `v-${p.id}-1`, number: 1, kind: "session", author: ME.public_key, author_name: ME.name, created_at: NOW - 86400, played_secs: 5400, total_size: 380_000_000, is_head: true, side_branch: false }],
       settings: { keep_background: false, disk_bytes: 380_000_000, outbox_pending: 0, instance_name: "Create: Aeronautics" },
       ...d,
@@ -727,6 +727,8 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
       if (g.members.length <= 1) throw new HearthLeaveError("last_member");
       // Comme Rust : une partie encore en file n'est pas jetée sans `force`.
       if (!force && g.settings.outbox_pending > 0) throw new HearthLeaveError("outbox_pending");
+      // Comme Rust : une fin de partie non publiée, gardée de côté, n'est pas supprimée sans `force`.
+      if (!force && g.orphans.length > 0) throw new HearthLeaveError("orphan_pending");
       hearthGroups.delete(id);
       hearthEmit();
     },
@@ -775,6 +777,23 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
       if (!g.fork.some((b) => b.version_id === versionId)) throw new Error("Version introuvable.");
       g.fork = [];
       hearthPatch(id, { state: "idle" });
+    },
+    hearthOrphanPublish: async (id, orphanId) => {
+      hearthCalls.push({ kind: "OrphanPublish", args: [id, orphanId] });
+      const g = hearthCard(id);
+      if (!g.orphans.some((o) => o.id === orphanId)) throw new Error("Cette partie n'existe plus sur ce PC.");
+      g.orphans = g.orphans.filter((o) => o.id !== orphanId);
+      g.card.orphans = g.orphans.length;
+      newVersion(g, "session");
+      hearthEmit();
+    },
+    hearthOrphanDiscard: async (id, orphanId) => {
+      hearthCalls.push({ kind: "OrphanDiscard", args: [id, orphanId] });
+      const g = hearthCard(id);
+      if (!g.orphans.some((o) => o.id === orphanId)) throw new Error("Cette partie n'existe plus sur ce PC.");
+      g.orphans = g.orphans.filter((o) => o.id !== orphanId);
+      g.card.orphans = g.orphans.length;
+      hearthEmit();
     },
     hearthSetBackground: async (id, on) => {
       hearthCalls.push({ kind: "SetBackground", args: [id, on] });

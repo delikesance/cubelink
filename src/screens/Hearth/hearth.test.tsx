@@ -520,6 +520,50 @@ describe("Page du serveur", () => {
     await waitFor(() => expect(screen.queryByRole("heading", { name: "Deux versions du monde existent" })).toBeNull());
   });
 
+  const orphan = { id: "1763600000", at: 1_763_600_000, played_secs: 480, base_number: 11, size_bytes: 52_000_000 };
+
+  it("fin de partie non publiée (#61) : bandeau, Publier appelle hearthOrphanPublish et le bandeau disparaît", async () => {
+    const { services } = page({ id: "g1" }, { id: "g1", name: "Les copains" }, { orphans: [orphan] });
+    await screen.findByRole("heading", { name: "Une fin de partie n'a pas été publiée" });
+    expect(screen.getByText(/partie de la version 11/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /^Publier la fin de partie/ }));
+    await waitFor(() => expect(services.hearthCalls).toEqual([{ kind: "OrphanPublish", args: ["g1", "1763600000"] }]));
+    await waitFor(() => expect(screen.queryByRole("heading", { name: "Une fin de partie n'a pas été publiée" })).toBeNull());
+  });
+
+  it("fin de partie non publiée : Supprimer demande confirmation avant d'appeler hearthOrphanDiscard", async () => {
+    const { services } = page({ id: "g1" }, { id: "g1", name: "Les copains" }, { orphans: [orphan] });
+    fireEvent.click(await screen.findByRole("button", { name: /^Supprimer la fin de partie/ }));
+    const dlg = await screen.findByRole("alertdialog");
+    expect(services.hearthCalls).toEqual([]);
+    fireEvent.click(within(dlg).getByRole("button", { name: "Annuler" }));
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+    expect(services.hearthCalls).toEqual([]);
+    fireEvent.click(screen.getByRole("button", { name: /^Supprimer la fin de partie/ }));
+    fireEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Supprimer" }));
+    await waitFor(() => expect(services.hearthCalls).toEqual([{ kind: "OrphanDiscard", args: ["g1", "1763600000"] }]));
+    await waitFor(() => expect(screen.queryByRole("heading", { name: "Une fin de partie n'a pas été publiée" })).toBeNull());
+  });
+
+  it("Quitter avec une fin de partie non publiée : boîte « Quitter quand même », rien n'est supprimé avant", async () => {
+    const { services, navigate } = page({ id: "g1" }, { id: "g1", name: "Les copains" }, { orphans: [orphan], members: [{ ...me }, { ...noor }] });
+    fireEvent.click(within(await clickQuitter()).getByRole("button", { name: "Quitter" }));
+    const dlg = await screen.findByText(/supprimée avec le monde/).then(() => screen.getByRole("alertdialog"));
+    expect(services.hearthCalls).toEqual([{ kind: "Leave", args: ["g1"] }]);
+    expect(navigate).not.toHaveBeenCalled();
+    fireEvent.click(within(dlg).getByRole("button", { name: "Quitter quand même" }));
+    await waitFor(() => expect(services.hearthCalls).toEqual([{ kind: "Leave", args: ["g1"] }, { kind: "Leave", args: ["g1", true] }]));
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith("main"));
+  });
+
+  it("accueil : la carte signale une fin de partie non publiée et ouvre la page du serveur", async () => {
+    const { navigate } = home({ id: "g1", name: "Les copains", orphans: 1 });
+    const card = await screen.findByRole("listitem", { name: "Serveur Les copains" });
+    expect(within(card).getByText(/Une fin de partie n'a pas été publiée/)).toBeTruthy();
+    fireEvent.click(within(card).getByRole("button", { name: /Voir la fin de partie non publiée/ }));
+    expect(navigate).toHaveBeenCalledWith("hearth", { id: "g1" });
+  });
+
   it("modpack absent : associer une instance locale", async () => {
     const { services } = page({ id: "g1" }, { id: "g1", name: "Les copains", state: "pack_missing", can_host: false, instance_id: null });
     fireEvent.click(await screen.findByRole("button", { name: /Utiliser Create: Aeronautics/ }));

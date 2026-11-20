@@ -241,6 +241,10 @@ impl AppState {
         if self.hearth.active(&g).is_some() {
             self.hearth_stop(id).await?;
         }
+        // #61 : une fin de partie non publiée, mise de côté, est supprimée avec le dossier du groupe.
+        if !force && self.hearth.orphan_count(&g) > 0 {
+            return Err(LeaveError::OrphanPending);
+        }
         // #56 : `forget_group` jette la file d'envoi du groupe. Ma dernière partie (publiée par l'arrêt ci-dessus) doit
         // d'abord être remise à un membre ; sinon rien n'est supprimé et l'écran propose « Quitter quand même ».
         if !force && !self.hearth.flush_group_outbox(&g, LEAVE_FLUSH_WAIT).await {
@@ -304,6 +308,19 @@ impl AppState {
         self.hearth.require_enabled()?;
         let v = VersionId::from_hex(version_id).ok_or("identifiant de version invalide")?;
         self.hearth.resolve_fork(gid(id)?, v).await
+    }
+
+    /// Publie une fin de partie non publiée (mise de côté après un plantage) : une nouvelle `Session`, enfant de la version
+    /// dont elle est partie.
+    pub async fn hearth_orphan_publish(&self, id: &str, orphan_id: &str) -> Result<(), String> {
+        self.hearth.require_enabled()?;
+        self.hearth.orphan_publish(gid(id)?, orphan_id).await.map(|_| ())
+    }
+
+    /// Supprime une fin de partie non publiée mise de côté.
+    pub async fn hearth_orphan_discard(&self, id: &str, orphan_id: &str) -> Result<(), String> {
+        self.hearth.require_enabled()?;
+        self.hearth.orphan_discard(gid(id)?, orphan_id).await
     }
 
     pub fn hearth_set_background(&self, id: &str, on: bool) -> Result<(), String> {
@@ -814,7 +831,7 @@ pub async fn hearth_remove_member(state: S<'_>, id: String, public_key: String) 
     state.hearth_remove_member(&id, &public_key).await
 }
 
-/// Quitte le groupe, après avoir attendu (jusqu'à 5 min) que ma dernière partie soit remise à un membre. Rejette `{ code: "last_member" | "unreachable" | "outbox_pending" | "other", message? }` : rien n'est supprimé dans ces cas. `force: true` saute l'attente de la file d'envoi (la dernière partie est perdue pour le groupe).
+/// Quitte le groupe, après avoir attendu (jusqu'à 5 min) que ma dernière partie soit remise à un membre. Rejette `{ code: "last_member" | "unreachable" | "outbox_pending" | "orphan_pending" | "other", message? }` : rien n'est supprimé dans ces cas. `force: true` saute l'attente de la file d'envoi (la dernière partie est perdue pour le groupe) et la garde d'une fin de partie non publiée (elle est supprimée avec le monde).
 #[tauri::command(rename_all = "snake_case")]
 #[specta::specta(rename_all = "snake_case")]
 pub async fn hearth_leave(state: S<'_>, id: String, force: Option<bool>) -> Result<(), LeaveError> {
@@ -861,6 +878,20 @@ pub async fn hearth_restore(state: S<'_>, id: String, version_id: String) -> Res
 #[specta::specta(rename_all = "snake_case")]
 pub async fn hearth_resolve_fork(state: S<'_>, id: String, version_id: String) -> Result<(), String> {
     state.hearth_resolve_fork(&id, &version_id).await
+}
+
+/// Publie une fin de partie non publiée mise de côté (`HearthDetail.orphans`) : une nouvelle `Session`, enfant de la version dont elle est partie (une fourche si le groupe a avancé).
+#[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
+pub async fn hearth_orphan_publish(state: S<'_>, id: String, orphan_id: String) -> Result<(), String> {
+    state.hearth_orphan_publish(&id, &orphan_id).await
+}
+
+/// Supprime une fin de partie non publiée mise de côté.
+#[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
+pub async fn hearth_orphan_discard(state: S<'_>, id: String, orphan_id: String) -> Result<(), String> {
+    state.hearth_orphan_discard(&id, &orphan_id).await
 }
 
 /// Garde le serveur ouvert quand le jeu de ce PC se ferme.

@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use core_lib::hearth::server::{log_message, InstallRequest, LineSink, ServerConfig, ServerInstaller};
 use core_lib::instance::InstanceStore;
 use core_lib::types::{
-    HearthBlocker, HearthBranch, HearthCard, HearthDetail, HearthInvite, HearthMember, HearthMemberLite, HearthProposal,
+    HearthBlocker, HearthBranch, HearthCard, HearthDetail, HearthInvite, HearthMember, HearthMemberLite, HearthOrphan, HearthProposal,
     HearthSettings, HearthStateKind, HearthUnclean, HearthVersion, LoaderSpec,
 };
 use iroh::{Endpoint, EndpointAddr};
@@ -293,6 +293,60 @@ struct GroupMeta {
     /// `PackUpdate` appliqué à la chaîne.
     #[serde(default)]
     pending_pack: Option<(String, String)>,
+    /// Fins de partie non publiées, mises de côté dans `server/orphans/<id>/world` (docs/hearth.md § 7.5).
+    #[serde(default)]
+    orphans: Vec<OrphanRecord>,
+}
+
+/// Une fin de partie non publiée, mise de côté. Purement locale : jamais signée, jamais annoncée, hors du graphe des versions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OrphanRecord {
+    /// Nom du dossier sous `server/orphans/` (jamais fourni par l'écran : il le retrouve ici).
+    id: String,
+    /// Dernière écriture du monde (secondes Unix).
+    at: i64,
+    played_secs: u64,
+    /// Version dont la partie était partie (point de reprise le plus récent) et son numéro.
+    #[serde(default)]
+    base: Option<String>,
+    #[serde(default)]
+    base_number: Option<u64>,
+}
+
+/// Marqueur de session (docs/hearth.md § 7.5) : écrit dans `server/.cubelink-session` quand le serveur démarre, retiré
+/// quand le monde a été publié. Présent au « Jouer » suivant, il dit que `server/world` contient du jeu qui n'a pas été
+/// publié. Hors de `world/` : jamais haché, jamais publié.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct SessionMarker {
+    #[serde(default)]
+    base: Option<String>,
+    #[serde(default)]
+    base_number: Option<u64>,
+    #[serde(default)]
+    started_at: i64,
+}
+
+const SESSION_MARKER: &str = ".cubelink-session";
+
+/// Dernière écriture (secondes Unix) et taille du contenu de `world` ; `None` s'il n'existe pas ou ne contient aucun fichier.
+fn world_stats(world: &Path) -> Option<(i64, u64)> {
+    let (mut newest, mut bytes, mut files) = (0i64, 0u64, 0u64);
+    let mut stack = vec![world.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else { continue };
+        for e in rd.flatten() {
+            let Ok(t) = e.file_type() else { continue };
+            if t.is_dir() {
+                stack.push(e.path());
+            } else if let Ok(m) = e.metadata() {
+                files += 1;
+                bytes += m.len();
+                let secs = m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs() as i64);
+                newest = newest.max(secs);
+            }
+        }
+    }
+    (files > 0).then_some((newest, bytes))
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -510,7 +564,7 @@ impl std::fmt::Display for ProposeErr {
 }
 
 /// Échec de `hearth_leave`, avec un code stable pour que l'écran choisisse quoi proposer. Seul `Unreachable` autorise le
-/// repli « supprimer quand même ce PC » (après une seconde confirmation), et seul `OutboxPending` autorise de rejouer avec
+/// repli « supprimer quand même ce PC » (après une seconde confirmation), et seuls `OutboxPending` et `OrphanPending` autorisent de rejouer avec
 /// `force` (« Quitter quand même », la dernière partie sera perdue pour le groupe) ; jamais une autre erreur.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, specta::Type)]
 #[serde(tag = "code", content = "message", rename_all = "snake_case")]
@@ -522,6 +576,9 @@ pub enum LeaveError {
     /// Ma dernière partie n'a été remise à aucun membre (file d'envoi non vidée) : la quitter maintenant la perdrait pour le
     /// groupe. Rien n'a été supprimé ; mon serveur est arrêté et la version reste en file. Rejouable, ou avec `force`.
     OutboxPending,
+    /// Une fin de partie non publiée est mise de côté sur ce PC : quitter la supprimerait. Rien n'a été supprimé ; rejouable
+    /// avec `force` (« Quitter quand même »), ou après l'avoir publiée ou supprimée depuis la page du serveur.
+    OrphanPending,
     /// Toute autre erreur (quota, disque, jeu en cours…) : message affichable, rien n'est supprimé par le front.
     Other(String),
 }
@@ -538,6 +595,7 @@ impl std::fmt::Display for LeaveError {
             LeaveError::LastMember => f.write_str("Tu es le dernier membre de ce groupe : le quitter effacerait la seule copie du monde."),
             LeaveError::Unreachable => f.write_str(&ProposeErr::Unreachable.to_string()),
             LeaveError::OutboxPending => f.write_str("Ta dernière partie n'a pas encore été envoyée aux autres membres."),
+            LeaveError::OrphanPending => f.write_str("Une partie non publiée est gardée de côté sur ce PC : la quitter la supprimerait."),
             LeaveError::Other(m) => f.write_str(m),
         }
     }
@@ -2307,9 +2365,163 @@ impl HearthRuntime {
         self.with_group(gid, |g| g.graph().get(&id).map(|x| x.header.point())).ok().flatten()
     }
 
+    fn session_marker_path(&self, gid: &GroupId) -> PathBuf {
+        self.server_dir(gid).join(SESSION_MARKER)
+    }
+
+    /// Écrit (ou met à jour) le marqueur de session. `base` : la version dont part la partie, puis chaque point de reprise.
+    /// L'heure de début de la partie est conservée d'une écriture à l'autre.
+    fn write_session_marker(&self, gid: &GroupId, base: Option<(VersionId, u64)>) -> std::io::Result<()> {
+        let path = self.session_marker_path(gid);
+        let started_at = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice::<SessionMarker>(&b).ok()).map_or_else(now_secs, |m| m.started_at);
+        let m = SessionMarker { base: base.map(|b| b.0.to_hex()), base_number: base.map(|b| b.1), started_at };
+        write_atomic(&path, &serde_json::to_vec(&m).unwrap_or_default())
+    }
+
+    /// Le monde de la partie est publié (ou n'a rien à publier) : le marqueur n'a plus lieu d'être.
+    fn clear_session_marker(&self, gid: &GroupId) {
+        let _ = std::fs::remove_file(self.session_marker_path(gid));
+    }
+
+    /// Le dernier serveur de ce groupe sur ce PC s'est-il arrêté sans que son monde soit publié ?
+    pub fn has_session_marker(&self, gid: &GroupId) -> bool {
+        self.session_marker_path(gid).exists()
+    }
+
+    /// Si le marqueur de session est là, `server/world` contient du jeu non publié (plantage du serveur ou du PC, Cubelink
+    /// tué, fermeture plus longue que le délai) : le dossier est **déplacé** dans `server/orphans/<id>/world` (un renommage,
+    /// donc instantané et sans copie), enregistré dans les métadonnées du groupe, et le marqueur est retiré. Rien n'est
+    /// publié ni annoncé : l'hôte choisit ensuite (`orphan_publish`, `orphan_discard`). Si le déplacement échoue, rien
+    /// n'est supprimé et l'erreur remonte. Rend `true` si un monde a été mis de côté.
+    pub async fn shelve_unpublished_world(self: &Arc<Self>, gid: GroupId) -> Result<bool, String> {
+        let dir = self.server_dir(&gid);
+        let marker_path = dir.join(SESSION_MARKER);
+        if !marker_path.exists() {
+            return Ok(false);
+        }
+        // Un marqueur illisible reste un marqueur : on ne sait pas de quelle version la partie est partie, c'est tout.
+        let marker: SessionMarker = std::fs::read(&marker_path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        let world = dir.join("world");
+        let w = world.clone();
+        let stats = tokio::task::spawn_blocking(move || world_stats(&w)).await.map_err(|e| e.to_string())?;
+        let Some((newest, _)) = stats else {
+            // Pas de monde, ou un dossier vide : rien à garder.
+            let _ = std::fs::remove_file(&marker_path);
+            return Ok(false);
+        };
+        let at = if newest > 0 { newest } else { now_secs() };
+        let played_secs = if marker.started_at > 0 { (at - marker.started_at).max(0) as u64 } else { 0 };
+        let orphans = dir.join("orphans");
+        let existing: HashSet<String> = self.meta_of(&gid).orphans.iter().map(|o| o.id.clone()).collect();
+        let mut id = now_secs().to_string();
+        let mut n = 1;
+        while existing.contains(&id) || orphans.join(&id).exists() {
+            n += 1;
+            id = format!("{}-{n}", now_secs());
+        }
+        let rec = OrphanRecord { id: id.clone(), at, played_secs, base: marker.base, base_number: marker.base_number };
+        // L'enregistrement d'abord : un plantage entre les deux laisse une entrée sans dossier (retirée à la lecture), jamais
+        // un dossier que personne ne sait retrouver.
+        self.update_meta(&gid, |m| m.orphans.push(rec));
+        let target = orphans.join(&id);
+        let moved = std::fs::create_dir_all(&target).and_then(|()| std::fs::rename(&world, target.join("world")));
+        if let Err(e) = moved {
+            self.update_meta(&gid, |m| m.orphans.retain(|o| o.id != id));
+            let _ = std::fs::remove_dir(&target);
+            return Err(format!(
+                "Ta dernière partie n'a pas été publiée et n'a pas pu être mise de côté ({e}). Ferme Minecraft s'il est encore ouvert, puis réessaie. Rien n'a été supprimé."
+            ));
+        }
+        let _ = std::fs::remove_file(&marker_path);
+        self.emit_state();
+        Ok(true)
+    }
+
+    /// Fins de partie mises de côté dont le dossier existe encore (les entrées sans dossier sont retirées).
+    fn live_orphans(&self, gid: &GroupId) -> Vec<OrphanRecord> {
+        let dir = self.server_dir(gid).join("orphans");
+        let all = self.meta_of(gid).orphans;
+        if all.iter().all(|o| dir.join(&o.id).join("world").is_dir()) {
+            return all;
+        }
+        self.update_meta(gid, |m| m.orphans.retain(|o| dir.join(&o.id).join("world").is_dir()));
+        self.meta_of(gid).orphans
+    }
+
+    /// Nombre de fins de partie non publiées mises de côté pour ce groupe.
+    pub fn orphan_count(&self, gid: &GroupId) -> usize {
+        self.meta_of(gid).orphans.len()
+    }
+
+    fn orphan_record(&self, gid: &GroupId, id: &str) -> Result<OrphanRecord, String> {
+        self.live_orphans(gid).into_iter().find(|o| o.id == id).ok_or_else(|| "cette partie n'existe plus sur ce PC".to_string())
+    }
+
+    /// Ce qu'il faut pour afficher les fins de partie de ce groupe (la plus récente d'abord). Lit le disque (taille).
+    fn orphans_view(&self, gid: &GroupId) -> Vec<HearthOrphan> {
+        let dir = self.server_dir(gid).join("orphans");
+        let mut v: Vec<HearthOrphan> = self
+            .live_orphans(gid)
+            .into_iter()
+            .map(|o| HearthOrphan {
+                size_bytes: dir_size(&dir.join(&o.id)),
+                id: o.id,
+                at: o.at,
+                played_secs: o.played_secs,
+                base_number: o.base_number,
+            })
+            .collect();
+        v.sort_by(|a, b| b.at.cmp(&a.at).then(b.id.cmp(&a.id)));
+        v
+    }
+
+    /// Publie une fin de partie mise de côté : une nouvelle `Session`, enfant de la version dont la partie était partie. Si
+    /// le groupe a avancé entre-temps, c'est une fourche explicite que le groupe tranche ensuite (docs/hearth.md § 7.5).
+    /// Hors du graphe jusqu'ici, elle y entre seulement maintenant et part alors en file d'envoi.
+    pub async fn orphan_publish(self: &Arc<Self>, gid: GroupId, id: &str) -> Result<SignedVersion, String> {
+        self.require_state(&gid)?;
+        if self.active(&gid).is_some() || self.play_of(&gid).is_some() {
+            return Err("arrête le serveur avant de publier cette partie".into());
+        }
+        let rec = self.orphan_record(&gid, id)?;
+        let parent = match rec.base.as_deref().and_then(VersionId::from_hex).and_then(|b| self.version(&gid, &b)) {
+            Some(b) => Some((b.id(), b.header.number)),
+            // Sa version de départ n'est plus connue : on repart de la tête.
+            None => match self.heads_of(&gid).unwrap_or_default().as_slice() {
+                [] => None,
+                [h] => Some((h.id(), h.header.number)),
+                _ => return Err("Deux versions du monde existent : choisis d'abord laquelle garder, puis publie cette partie.".into()),
+            },
+        };
+        let world = self.server_dir(&gid).join("orphans").join(&rec.id).join("world");
+        let v = self.publish_version(gid, &world, VersionKind::Session, parent, rec.played_secs).await?;
+        self.remove_orphan(&gid, &rec)?;
+        Ok(v)
+    }
+
+    /// Supprime une fin de partie mise de côté (choix explicite de l'hôte).
+    pub async fn orphan_discard(self: &Arc<Self>, gid: GroupId, id: &str) -> Result<(), String> {
+        self.require_state(&gid)?;
+        let rec = self.orphan_record(&gid, id)?;
+        self.remove_orphan(&gid, &rec)
+    }
+
+    fn remove_orphan(&self, gid: &GroupId, rec: &OrphanRecord) -> Result<(), String> {
+        let dir = self.server_dir(gid).join("orphans").join(&rec.id);
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir).map_err(|e| format!("la partie n'a pas pu être supprimée : {e}"))?;
+        }
+        self.update_meta(gid, |m| m.orphans.retain(|o| o.id != rec.id));
+        self.emit_state();
+        Ok(())
+    }
+
     /// Prépare le monde du groupe pour un serveur : la tête matérialisée dans `server/world`. Un nouveau groupe sans
     /// version n'a rien à écrire (le serveur crée le monde).
     pub async fn prepare_world(self: &Arc<Self>, gid: GroupId, head: Option<&SignedVersion>) -> Result<(), String> {
+        // Une partie qui ne s'est pas terminée proprement a laissé du jeu non publié dans `server/world` : on le met de côté
+        // avant tout, que la tête ait changé ou non. Rien n'est écrasé ni publié sans l'accord de l'hôte (§ 7.5).
+        self.shelve_unpublished_world(gid).await?;
         let Some(h) = head else { return Ok(()) };
         let dest = self.server_dir(&gid).join("world");
         if self.materialized(&gid) == Some(h.id()) && dest.join("level.dat").is_file() {
@@ -2378,6 +2590,12 @@ impl HearthRuntime {
             // Groupe supprimé pendant la préparation : pas de serveur orphelin.
             server.stop(Duration::from_secs(20)).await;
             return Err("Le groupe a été supprimé pendant le démarrage du serveur.".into());
+        }
+        // Dès ici le monde peut contenir du jeu non publié : le marqueur le dit jusqu'à la publication (§ 7.5).
+        if let Err(e) = self.write_session_marker(&gid, base) {
+            server.stop(Duration::from_secs(20)).await;
+            self.emit_state();
+            return Err(format!("Impossible de noter le début de la partie sur le disque : {e}"));
         }
         let lease = match starting {
             // Même partie (même `lease_id`, `seq` continue), signée de nouveau en phase `Ready`.
@@ -2780,6 +2998,10 @@ impl HearthRuntime {
         // ensuite. Sinon la `Session` finale aurait le même parent et le groupe verrait une fourche après une partie normale.
         if let Some(Ok(v)) = &published {
             *lock(&host.tip) = Some((v.id(), v.header.number));
+            // Si la partie se termine mal après ce point, la fin de partie repartira de lui.
+            if let Err(e) = self.write_session_marker(&host.group, Some((v.id(), v.header.number))) {
+                eprintln!("[cubelink] marqueur de session non mis à jour : {e}");
+            }
         }
         begun?;
         let v = published.ok_or("point de reprise non fait")??;
@@ -2795,6 +3017,8 @@ impl HearthRuntime {
             t.abort();
         }
         host.server.stop(Duration::from_secs(20)).await;
+        // Un autre membre a gardé la main avant que quiconque ne joue ici : il n'y a rien à publier.
+        self.clear_session_marker(&gid);
         let l = lock(&host.lease).clone();
         let visit: Visit =
             Arc::new(move |c| Box::pin(async move { c.release_lease(&gid, l.lease_id, l.seq, ReleaseReason::Handover, None).await }));
@@ -2825,8 +3049,15 @@ impl HearthRuntime {
         } else {
             Ok(None)
         };
-        if let Ok(Some(v)) = &published {
-            self.set_materialized(&gid, Some(v.id()));
+        match &published {
+            Ok(Some(v)) => {
+                self.set_materialized(&gid, Some(v.id()));
+                self.clear_session_marker(&gid);
+            }
+            // Pas de dossier de monde : rien à publier. Une publication en échec laisse le marqueur : le prochain « Jouer »
+            // mettra le monde de côté au lieu de l'écraser.
+            Ok(None) => self.clear_session_marker(&gid),
+            Err(_) => {}
         }
         let vid = published.as_ref().ok().and_then(|v| v.as_ref().map(SignedVersion::id));
         let l = lock(&host.lease).clone();
@@ -2887,6 +3118,7 @@ impl HearthRuntime {
             can_host: instance_id.is_some(),
             instance_id: instance_id.clone(),
             version: heads.first().map(|h| h.header.number),
+            orphans: self.orphan_count(gid) as u32,
         };
         let decision = self.decision(gid);
         let holder_of = |k: &PeerKey| Some(self.lite(&st, k));
@@ -3067,7 +3299,7 @@ impl HearthRuntime {
             outbox_pending: self.outbox.pending().iter().filter(|e| e.group_id() == *gid).count() as u32,
             instance_name: self.instance_of(gid).and_then(|i| self.instances.get(&i).ok()).map(|i| i.name),
         };
-        Ok(HearthDetail { card, members, versions, proposals, blocker, fork, settings })
+        Ok(HearthDetail { card, members, versions, proposals, blocker, fork, orphans: self.orphans_view(gid), settings })
     }
 
     /// Le membre qui bloque le groupe (bannière « Continuer sans X »), s'il y en a un.
@@ -3191,6 +3423,29 @@ fn dir_size(root: &Path) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn world_stats_compte_les_fichiers_et_ignore_un_dossier_vide() {
+        let d = tempfile::tempdir().unwrap();
+        assert_eq!(world_stats(&d.path().join("absent")), None);
+        std::fs::create_dir_all(d.path().join("w/region")).unwrap();
+        assert_eq!(world_stats(&d.path().join("w")), None, "des dossiers vides ne sont pas un monde");
+        std::fs::write(d.path().join("w/level.dat"), b"abc").unwrap();
+        std::fs::write(d.path().join("w/region/r.0.0.mca"), b"12345").unwrap();
+        let (newest, bytes) = world_stats(&d.path().join("w")).unwrap();
+        assert_eq!(bytes, 8);
+        assert!(newest > 1_600_000_000);
+    }
+
+    #[test]
+    fn un_marqueur_de_session_ancien_ou_incomplet_se_lit_quand_meme() {
+        let m: SessionMarker = serde_json::from_str("{}").unwrap();
+        assert_eq!((m.base, m.started_at), (None, 0));
+        let m: SessionMarker = serde_json::from_str(r#"{"base":"ab","base_number":3,"started_at":7}"#).unwrap();
+        assert_eq!((m.base.as_deref(), m.base_number, m.started_at), (Some("ab"), Some(3), 7));
+        let g: GroupMeta = serde_json::from_str("{}").unwrap();
+        assert!(g.orphans.is_empty(), "les métadonnées d'avant ce champ restent lisibles");
+    }
 
     #[test]
     fn joueur_qui_entre_ou_sort_seulement_depuis_un_message_de_journal() {

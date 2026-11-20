@@ -15,7 +15,7 @@ async function done(p: Promise<unknown>): Promise<void> {
 export function toLeaveError(e: unknown): Error {
   if (e && typeof e === "object" && "code" in e) {
     const { code, message } = e as { code: unknown; message?: unknown };
-    if (code === "last_member" || code === "unreachable" || code === "outbox_pending") return new HearthLeaveError(code);
+    if (code === "last_member" || code === "unreachable" || code === "outbox_pending" || code === "orphan_pending") return new HearthLeaveError(code);
     if (code === "other") return new HearthLeaveError("other", typeof message === "string" ? message : undefined);
   }
   return new HearthLeaveError("other", typeof e === "string" ? e : e instanceof Error ? e.message : undefined);
@@ -153,6 +153,8 @@ export function createTauriServices(): Services {
     hearthPackUpdate: (id, instanceId) => done(commands.hearthPackUpdate(id, instanceId)),
     hearthRestore: (id, versionId) => done(commands.hearthRestore(id, versionId)),
     hearthResolveFork: (id, versionId) => done(commands.hearthResolveFork(id, versionId)),
+    hearthOrphanPublish: (id, orphanId) => done(commands.hearthOrphanPublish(id, orphanId)),
+    hearthOrphanDiscard: (id, orphanId) => done(commands.hearthOrphanDiscard(id, orphanId)),
     hearthSetBackground: (id, on) => done(commands.hearthSetBackground(id, on)),
     hearthEula: () => commands.hearthEula(),
     hearthEulaAccept: () => commands.hearthEulaAccept(),

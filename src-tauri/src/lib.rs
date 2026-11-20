@@ -123,6 +123,8 @@ macro_rules! commands {
             commands_hearth::hearth_pack_update,
             commands_hearth::hearth_restore,
             commands_hearth::hearth_resolve_fork,
+            commands_hearth::hearth_orphan_publish,
+            commands_hearth::hearth_orphan_discard,
             commands_hearth::hearth_set_background,
             commands_hearth::hearth_eula,
             commands_hearth::hearth_eula_accept,

@@ -14,7 +14,9 @@ export class HearthLeaveError extends Error {
         ? "Personne du groupe n'a pu être joint : ton départ n'a pas pu leur être annoncé."
         : code === "outbox_pending"
           ? "Ta dernière partie n'a pas encore été envoyée aux autres membres."
-          : "Une erreur est survenue."));
+          : code === "orphan_pending"
+            ? "Une partie non publiée est gardée de côté sur ce PC : la quitter la supprimerait."
+            : "Une erreur est survenue."));
     this.name = "HearthLeaveError";
   }
 }
@@ -323,6 +325,10 @@ export interface Services {
   hearthPackUpdate(id: string, instanceId: string): Promise<void>;
   hearthRestore(id: string, versionId: string): Promise<void>;
   hearthResolveFork(id: string, versionId: string): Promise<void>;
+  /** Publie une fin de partie non publiée, mise de côté après un plantage : une nouvelle version, enfant de celle dont elle est partie. */
+  hearthOrphanPublish(id: string, orphanId: string): Promise<void>;
+  /** Supprime une fin de partie non publiée mise de côté. */
+  hearthOrphanDiscard(id: string, orphanId: string): Promise<void>;
   hearthSetBackground(id: string, on: boolean): Promise<void>;
   hearthEula(): Promise<HearthEula>;
   hearthEulaAccept(): Promise<void>;

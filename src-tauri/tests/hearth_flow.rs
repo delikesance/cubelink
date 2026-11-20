@@ -915,3 +915,149 @@ async fn en_tete_sans_contenu_jouer_propose_la_version_precedente() {
         p.stop().await;
     }
 }
+
+// ---------------------------------------------------------------------------------------------------------
+// #61 : partie mal terminée, le jeu non publié n'est jamais écrasé ni publié tout seul
+// ---------------------------------------------------------------------------------------------------------
+
+const SENTINELLE: &[u8] = b"8 minutes de jeu que personne n'a publiees";
+
+/// Alice part de la n° 1, joue (la sentinelle est écrite dans `world/`), puis son Cubelink s'arrête sans publier (plantage).
+/// Rend les pairs, le groupe, l'identifiant et la n° 1.
+async fn alice_plante() -> (Vec<Peer>, GroupId, String, p2p_lib::hearth::version::SignedVersion) {
+    let (mut peers, g, id) = group_of(&["Alice", "Bob"]).await;
+    let d1 = peers[0].dir.path().join("monde-1");
+    small_world(&d1, "monde n° 1");
+    let v1 = peers[0].rt().publish_version(g, &d1, VersionKind::Session, None, 60).await.unwrap();
+    peers[1].stop().await; // Bob est hors ligne : un seul clic sur Jouer suffit à héberger.
+    let a = &peers[0];
+    a.node.st.hearth_play(&id).await.unwrap();
+    assert_eq!(a.state_of(&g), HearthStateKind::Hosting);
+    assert!(a.rt().has_session_marker(&g), "le marqueur de session est écrit au démarrage du serveur");
+    std::fs::write(a.rt().server_dir(&g).join("world/region-jouee.mca"), SENTINELLE).unwrap();
+    // Plantage : le nœud disparaît sans `finish_hosting`. Ce qui retient le runtime est lâché pour que le magasin de blobs
+    // libère son verrou : la surveillance du jeu (le serveur reste ouvert quand le jeu se ferme) et les spécifications
+    // gardées par le faux lanceur (le rappel des lignes de log).
+    a.rt().set_keep_background(&g, true);
+    a.close_game();
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    a.runner.specs.lock().unwrap().clear();
+    peers[0].restart().await;
+    let a = &peers[0];
+    a.rt().set_keep_background(&g, false);
+    assert!(a.rt().active(&g).is_none());
+    assert!(a.rt().has_session_marker(&g), "le marqueur survit au plantage");
+    (peers, g, id, v1)
+}
+
+fn orphan_files(a: &Peer, g: &GroupId) -> Vec<Vec<(String, Vec<u8>)>> {
+    let dir = a.rt().server_dir(g).join("orphans");
+    let mut v: Vec<_> = std::fs::read_dir(&dir).map(|d| d.flatten().map(|e| read_tree(&e.path().join("world"))).collect()).unwrap_or_default();
+    v.sort();
+    v
+}
+
+/// Le monde non publié est mis de côté, pas écrasé, quand la tête a avancé pendant ce temps (le cas du ticket : n° 12 chez
+/// Bob, `materialized` en retard). Rien n'est publié ni mis en file d'envoi. L'hôte publie ensuite la partie : une
+/// `Session` enfant de la version dont elle est partie, donc une fourche explicite.
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn partie_mal_terminee_le_monde_est_mis_de_cote_puis_publie() {
+    let (peers, g, id, v1) = alice_plante().await;
+    let a = &peers[0];
+    a.node.st.hearth_eula_accept();
+    // La tête avance pendant que le PC d'Alice est éteint (version d'un autre membre, simulée ici).
+    let d2 = a.dir.path().join("monde-2");
+    small_world(&d2, "monde n° 2");
+    let v2 = a.rt().publish_version(g, &d2, VersionKind::Session, Some((v1.id(), 1)), 30).await.unwrap();
+    let (heads_before, outbox_before) = (a.rt().heads_of(&g).unwrap().len(), a.rt().pending_outbox());
+    assert_eq!(a.rt().head(&g).unwrap().id(), v2.id());
+
+    a.node.st.hearth_play(&id).await.unwrap();
+    assert_eq!(a.state_of(&g), HearthStateKind::Hosting);
+    let world = a.rt().server_dir(&g).join("world");
+    let served = read_tree(&world);
+    assert!(served.iter().any(|(n, c)| n == "level.dat" && c == "monde n° 2".as_bytes()), "la tête est matérialisée");
+    assert!(!served.iter().any(|(n, _)| n == "region-jouee.mca"), "le jeu non publié n'est plus dans world/");
+
+    let kept = orphan_files(a, &g);
+    assert_eq!(kept.len(), 1, "une fin de partie est gardée de côté");
+    assert!(kept[0].iter().any(|(n, c)| n == "region-jouee.mca" && c == SENTINELLE), "la sentinelle est intacte");
+    let d = a.node.st.hearth.detail(&g).unwrap();
+    assert_eq!((a.rt().card(&g).unwrap().orphans, d.orphans.len()), (1, 1));
+    assert!(d.orphans[0].size_bytes >= SENTINELLE.len() as u64);
+    assert_eq!(d.orphans[0].base_number, Some(1), "la partie était partie de la n° 1");
+    assert_eq!((a.rt().heads_of(&g).unwrap().len(), a.rt().pending_outbox()), (heads_before, outbox_before), "rien n'est publié ni annoncé");
+
+    // Fin propre de la nouvelle partie : le marqueur disparaît, la fin de partie reste gardée.
+    a.close_game();
+    wait_for("serveur arrêté", 30, || a.state_of(&g) != HearthStateKind::Hosting).await;
+    assert!(!a.rt().has_session_marker(&g), "la fin propre retire le marqueur");
+    assert_eq!(orphan_files(a, &g).len(), 1);
+    let head_after = a.rt().head(&g).unwrap();
+    assert_eq!((head_after.header.kind, head_after.header.parent), (VersionKind::Session, Some(v2.id())));
+
+    // « Quitter » ne supprime pas la fin de partie sans qu'on le décide.
+    assert_eq!(a.node.st.hearth_leave(&id, false).await.unwrap_err(), LeaveError::OrphanPending);
+    assert!(a.rt().state(&g).is_some() && !orphan_files(a, &g).is_empty());
+
+    // Publier : une Session enfant de la n° 1, donc une fourche avec la chaîne de la n° 2.
+    let oid = a.node.st.hearth.detail(&g).unwrap().orphans[0].id.clone();
+    a.node.st.hearth_orphan_publish(&id, &oid).await.unwrap();
+    assert!(orphan_files(a, &g).is_empty() && a.rt().card(&g).unwrap().orphans == 0);
+    let heads = a.rt().heads_of(&g).unwrap();
+    assert_eq!(heads.len(), 2, "fourche explicite");
+    let mine = heads.iter().find(|h| h.header.parent == Some(v1.id())).expect("enfant de la n° 1");
+    assert_eq!(mine.header.kind, VersionKind::Session);
+    assert!(a.rt().world_complete(mine));
+    assert!(a.rt().pending_outbox() > outbox_before, "la version publiée part en file d'envoi");
+    assert!(a.node.st.hearth_orphan_publish(&id, &oid).await.is_err(), "déjà publiée");
+    for p in &peers {
+        p.stop().await;
+    }
+}
+
+/// Même cas quand la tête n'a PAS avancé (`materialized == tête`) : avant, le monde non publié était repris tel quel puis
+/// publié automatiquement. Maintenant il est mis de côté et la tête est rematérialisée ; « Supprimer » le retire.
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn partie_mal_terminee_tete_inchangee_n_est_pas_republiee_toute_seule() {
+    let (peers, g, id, v1) = alice_plante().await;
+    let a = &peers[0];
+    a.node.st.hearth_eula_accept();
+    assert_eq!(a.rt().materialized(&g), Some(v1.id()), "le cas du ticket : materialized == tête");
+    let (versions_before, outbox_before) = (a.rt().heads_of(&g).unwrap().len(), a.rt().pending_outbox());
+
+    a.node.st.hearth_play(&id).await.unwrap();
+    let served = read_tree(&a.rt().server_dir(&g).join("world"));
+    assert!(!served.iter().any(|(n, _)| n == "region-jouee.mca"), "la tête est remise à neuf");
+    assert!(served.iter().any(|(n, c)| n == "level.dat" && c == "monde n° 1".as_bytes()));
+    assert!(orphan_files(a, &g)[0].iter().any(|(n, c)| n == "region-jouee.mca" && c == SENTINELLE));
+    assert_eq!(a.rt().head(&g).unwrap().id(), v1.id(), "aucune Session n'a été publiée");
+    assert_eq!((a.rt().heads_of(&g).unwrap().len(), a.rt().pending_outbox()), (versions_before, outbox_before));
+
+    let oid = a.node.st.hearth.detail(&g).unwrap().orphans[0].id.clone();
+    assert!(a.node.st.hearth_orphan_discard(&id, "../../etc").await.is_err(), "l'identifiant ne sort jamais du dossier");
+    a.node.st.hearth_orphan_discard(&id, &oid).await.unwrap();
+    assert!(orphan_files(a, &g).is_empty());
+    assert_eq!(a.node.st.hearth.detail(&g).unwrap().orphans.len(), 0);
+    for p in &peers {
+        p.stop().await;
+    }
+}
+
+/// Si la mise de côté échoue, `prepare_world` rejette sans rien supprimer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn mise_de_cote_impossible_ne_supprime_rien() {
+    let (peers, g, id, _v1) = alice_plante().await;
+    let a = &peers[0];
+    a.node.st.hearth_eula_accept();
+    // `orphans` est un fichier : le dossier de la fin de partie ne peut pas être créé.
+    std::fs::write(a.rt().server_dir(&g).join("orphans"), b"x").unwrap();
+    let e = a.node.st.hearth_play(&id).await.unwrap_err();
+    assert!(e.contains("mise de côté") || e.contains("de côté"), "{e}");
+    assert_eq!(std::fs::read(a.rt().server_dir(&g).join("world/region-jouee.mca")).unwrap(), SENTINELLE, "le monde est intact");
+    assert!(a.rt().has_session_marker(&g));
+    assert_eq!(a.node.st.hearth.detail(&g).unwrap().orphans.len(), 0);
+    for p in &peers {
+        p.stop().await;
+    }
+}

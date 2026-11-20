@@ -279,6 +279,14 @@ export default function ServerPage({ id }: { id: string }) {
     busyText: "Quitter le groupe…",
     run: () => leaveNow(true),
   });
+  // Une fin de partie non publiée, gardée de côté, part avec le monde : on le dit avant (#61). Le serveur est déjà arrêté.
+  const unpublished = (): Confirm => wrap({
+    title: "Une partie n'a pas été publiée",
+    text: "Tu as une fin de partie gardée de côté sur ce PC, que personne d'autre n'a reçue. Si tu quittes maintenant, elle est supprimée avec le monde. Tu peux d'abord la publier ou la supprimer depuis cette page.",
+    action: "Quitter quand même", danger: true,
+    busyText: "Quitter le groupe…",
+    run: () => leaveNow(true),
+  });
   const leaveNow = async (force: boolean): Promise<void | Confirm> => {
     try { await services.hearthLeave(c.id, force); } catch (e) {
       // Seuls ces codes mènent à autre chose qu'une erreur affichée, et la suppression n'arrive qu'après une nouvelle
@@ -286,6 +294,7 @@ export default function ServerPage({ id }: { id: string }) {
       if (e instanceof HearthLeaveError && e.code === "last_member") return lastMember();
       if (e instanceof HearthLeaveError && e.code === "unreachable") return unreachable();
       if (e instanceof HearthLeaveError && e.code === "outbox_pending" && !force) return notSent();
+      if (e instanceof HearthLeaveError && e.code === "orphan_pending" && !force) return unpublished();
       throw e;
     }
     navigate("main");
@@ -331,6 +340,40 @@ export default function ServerPage({ id }: { id: string }) {
           <Button loading={busy} onClick={() => { const r = resumeLabel(c); void run(() => services.hearthUncleanChoice(c.id, r.choice), c.id); }}>{resumeLabel(c).label}</Button>
           <Button variant="secondary" onClick={() => { void run(() => services.hearthUncleanChoice(c.id, "wait")); }}>Attendre</Button>
         </div>
+      )}
+
+      {detail.orphans.length > 0 && (
+        <section className="hearth-block hearth-fork hearth-orphans" aria-label="Fin de partie non publiée">
+          <h2>Une fin de partie n'a pas été publiée</h2>
+          <p className="hearth-meta">
+            Une de tes parties ne s'est pas terminée proprement (plantage, arrêt du PC ou fermeture trop longue). Elle est gardée de côté sur ce PC : personne d'autre ne l'a reçue, et rien n'est publié sans ton accord.
+            Si le groupe a joué depuis, la publier crée deux versions du monde et tu choisiras laquelle garder.
+          </p>
+          <ul className="hearth-rows">
+            {detail.orphans.map((o) => (
+              <li key={o.id} className="hearth-row">
+                <span className="hearth-row-txt">
+                  <strong>Partie du {fmtDate(o.at)}</strong>
+                  <span className="hearth-meta">
+                    {o.played_secs > 0 ? `${fmtPlayed(o.played_secs)} de jeu · ` : ""}{fmtSize(o.size_bytes)}
+                    {o.base_number != null ? ` · partie de la version ${o.base_number}` : ""}
+                  </span>
+                </span>
+                <Button aria-label={`Publier la fin de partie du ${fmtDate(o.at)}`} onClick={() => { services.hearthOrphanPublish(c.id, o.id).then(reload, (e: unknown) => setError(errText(e))); }}>Publier la fin de partie</Button>
+                <Button
+                  variant="secondary"
+                  aria-label={`Supprimer la fin de partie du ${fmtDate(o.at)}`}
+                  onClick={() => ask({
+                    title: "Supprimer cette fin de partie ?", action: "Supprimer", danger: true,
+                    text: "Ces minutes de jeu ne sont plus nulle part ailleurs : une fois supprimées, il n'y a pas de retour possible.",
+                    run: () => services.hearthOrphanDiscard(c.id, o.id),
+                  })}
+                >Supprimer</Button>
+              </li>
+            ))}
+          </ul>
+          <p className="hearth-meta">« La mettre de côté » ne demande rien : laisse-la là, elle reste gardée tant que tu ne choisis pas.</p>
+        </section>
       )}
 
       {c.state === "pack_missing" && (

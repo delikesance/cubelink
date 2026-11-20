@@ -34,6 +34,12 @@ function GroupCard({ card, services, navigate }: { card: HearthCard; services: S
         </div>
       )}
       {hint && <p className="hearth-hint">{hint}</p>}
+      {card.orphans > 0 && (
+        <p className="hearth-hint" role="status">
+          Une fin de partie n'a pas été publiée : elle est gardée de côté sur ce PC.{" "}
+          <button type="button" className="hearth-link" onClick={open} aria-label={`Voir la fin de partie non publiée de ${card.name}`}>La voir</button>
+        </p>
+      )}
 
       <div className="hearth-foot">
         <ul className="hearth-avatars" aria-label={online.length ? `En ligne : ${online.map((m) => m.name).join(", ")}` : "Aucun membre en ligne"}>

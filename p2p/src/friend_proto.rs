@@ -88,13 +88,15 @@ pub type EventSink = Arc<dyn Fn(FriendEvent) + Send + Sync>;
 #[derive(Debug, Clone)]
 pub struct FriendConfig {
     /// Demandes entrantes simultanées (en cours ou en attente de décision), tous pairs confondus.
+    /// Borne les demandes en attente de la décision de l'utilisateur (jusqu'à `decision_ttl`).
     pub max_pending_total: usize,
     /// Demandes acceptées par pair et par fenêtre.
     pub max_requests_per_peer: usize,
     pub rate_window: Duration,
     /// Plafond de demandes stockées dans la base (au-delà : rejet silencieux).
     pub max_stored_requests: usize,
-    /// Poignées de main simultanées (CPU).
+    /// Poignées de main simultanées (CPU). Le créneau n'est tenu que pendant l'échange des messages
+    /// (jusqu'au REVEAL), jamais pendant l'attente de la décision : sinon il borne les demandes en attente.
     pub max_concurrent_handshakes: usize,
     /// Délai par message.
     pub io_timeout: Duration,
@@ -436,7 +438,16 @@ impl Shared {
     }
 
     /// Côté B : une connexion entrante complète.
-    async fn respond(self: &Arc<Self>, conn: &Connection, send: &mut SendStream, recv: &mut RecvStream) -> Result<()> {
+    ///
+    /// `permit` est le créneau de poignée de main : il est rendu dès que notre REVEAL est écrit, avant
+    /// l'attente de la décision (600 s), pour que la demande en attente ne bloque pas les suivantes.
+    async fn respond(
+        self: &Arc<Self>,
+        conn: &Connection,
+        send: &mut SendStream,
+        recv: &mut RecvStream,
+        permit: OwnedSemaphorePermit,
+    ) -> Result<()> {
         let t = self.cfg.io_timeout;
         let m1 = decode(&read_frame(recv, t).await?)?;
         let (name, commit_a, token) = match &m1.body {
@@ -478,6 +489,8 @@ impl Shared {
             return Err(Error::Integrity { expected: hex::encode(commit_a), actual: hex::encode(commitment(&m1.from, &nonce_a)) });
         }
         write_frame(send, &self.sign(m1.from, Body::Reveal { session, nonce: nonce_b })).await?;
+        // Poignée de main terminée : la suite (SQLite, attente de décision) ne coûte plus de CPU de handshake.
+        drop(permit);
 
         let code = verify_code(&self.me, &m1.from, &nonce_b, &nonce_a);
         let req = FriendRequest { public_key: peer.clone(), name: name.clone(), verify_code: code, received_at: now_secs() as i64 };
@@ -563,12 +576,11 @@ impl ProtocolHandler for FriendHandler {
             conn.close(0u32.into(), b"");
             return Ok(());
         };
-        let _permit = permit;
         let io = self.shared.cfg.io_timeout;
         let Ok(Ok((mut send, mut recv))) = tokio::time::timeout(io, conn.accept_bi()).await else {
             return Ok(());
         };
-        if let Err(e) = self.shared.respond(&conn, &mut send, &mut recv).await {
+        if let Err(e) = self.shared.respond(&conn, &mut send, &mut recv, permit).await {
             // Rejet silencieux : aucune réponse, simple fermeture.
             tracing::debug!("demande d'ami rejetée : {e}");
             conn.close(0u32.into(), b"");
@@ -1256,6 +1268,43 @@ mod tests {
         send_raw(&mut s, &late.msg(&b.pk(), now_secs(), Body::Request { name: "L".into(), commit: random32(), token: b.svc.code_token() })).await;
         assert!(try_read(&mut r).await.is_none());
         nothing_happened(&b);
+    }
+
+    /// Fait l'échange REQUEST/COMMIT/REVEAL/REVEAL complet avec une identité neuve et garde la connexion ouverte
+    /// (demande en attente de décision côté `b`). `None` si `b` ferme ou ignore avant la fin.
+    async fn pending_request(b: &Node, name: &str) -> Option<(Node, Connection, SendStream, RecvStream)> {
+        let p = Node::new(name).await;
+        let nonce = random32();
+        let (c, mut s, mut r) = p.raw(b).await;
+        send_raw(&mut s, &p.msg(&b.pk(), now_secs(), Body::Request { name: name.into(), commit: commitment(&p.pk(), &nonce), token: b.svc.code_token() })).await;
+        let m = decode(&try_read(&mut r).await?).ok()?;
+        let Body::Commit { commit_a, commit_b } = m.body else { return None };
+        let session = session_id(&commit_a, &commit_b);
+        send_raw(&mut s, &p.msg(&b.pk(), now_secs(), Body::Reveal { session, nonce })).await;
+        try_read(&mut r).await?;
+        Some((p, c, s, r))
+    }
+
+    /// Les demandes en attente de décision ne tiennent pas le créneau de poignée de main (2 ici) : une
+    /// 3e poignée de main aboutit, et c'est `max_pending_total` (3) qui borne les demandes en attente.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pending_requests_do_not_hold_handshake_slots() {
+        let cfg = FriendConfig { max_concurrent_handshakes: 2, max_pending_total: 3, io_timeout: Duration::from_secs(5), ..FriendConfig::default() };
+        let b = Node::with_config("Bob", cfg).await;
+        let mut held = Vec::new();
+        for i in 0..3 {
+            let h = pending_request(&b, &format!("P{i}")).await;
+            assert!(h.is_some(), "demande {i} aboutie malgré les précédentes en attente");
+            held.push(h);
+            b.wait_event(|e| matches!(e, FriendEvent::IncomingRequest(_))).await;
+        }
+        assert_eq!(b.db.request_count().unwrap(), 3);
+        // 4e : refusée par `max_pending_total`, pas par le créneau de poignée de main.
+        assert!(pending_request(&b, "P3").await.is_none(), "max_pending_total atteint");
+        assert_eq!(b.db.request_count().unwrap(), 3);
+        // Le créneau est libre : une demande en attente se décide normalement.
+        let first = held[0].as_ref().unwrap().0.hex();
+        b.svc.refuse(&first).await.unwrap();
     }
 
     /// Cinq demandes périmées puis une valide : une demande refusée sur le jeton ne consomme pas le quota

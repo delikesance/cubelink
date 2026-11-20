@@ -474,9 +474,11 @@ async fn serveur_de_groupe_de_la_creation_a_la_fourche() {
     }
 }
 
-/// Personne d'autre en ligne : on peut quand même lancer le serveur (les amis le rejoindront), sans second clic.
+/// Personne d'autre en ligne (#93) : le clic sur Jouer ne démarre rien et demande une confirmation explicite
+/// (`confirm_host|alone|…`) ; après `hearth_confirm_host`, le serveur démarre une seule fois, sans seconde demande ni relance
+/// automatique, et la confirmation est consommée.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn on_peut_heberger_sans_personne_d_autre_en_ligne() {
+async fn heberger_seul_demande_une_confirmation_explicite() {
     let (a, b) = (Peer::start("Alice").await, Peer::start("Bob").await);
     befriend(&a.node, &b.node).await;
     wait_for("ami chez Bob", 20, || b.node.st.friends.is_friend(&a.node.key()).unwrap()).await;
@@ -484,12 +486,84 @@ async fn on_peut_heberger_sans_personne_d_autre_en_ligne() {
     let g = GroupId::from_hex(&card.id).unwrap();
     a.node.st.hearth_eula_accept();
     b.stop().await;
-    // Bob est hors ligne : la carte le dit (bloquée), mais un seul clic sur Jouer démarre quand même le serveur et le jeu.
     assert_eq!(a.state_of(&g), HearthStateKind::Blocked);
-    assert!(a.launcher.launched.lock().unwrap().is_empty());
+
+    // Premier clic : la question, rien d'annoncé ni de démarré. Un second clic ne vaut pas confirmation.
+    for _ in 0..2 {
+        let e = a.node.st.hearth_play(&card.id).await.unwrap_err();
+        assert_eq!(e, "confirm_host|alone|Bob", "{e}");
+        assert!(a.launcher.launched.lock().unwrap().is_empty(), "rien ne démarre sans confirmation");
+        assert!(a.runner.calls.lock().unwrap().is_empty(), "aucun serveur démarré");
+        assert!(a.rt().active(&g).is_none());
+        assert!(!a.rt().confirmation_pending(&g), "poser la question ne confirme rien");
+        assert_eq!(a.state_of(&g), HearthStateKind::Blocked);
+    }
+
+    // Confirmé : un seul démarrage, la confirmation est consommée.
+    a.node.st.hearth_confirm_host(&card.id).unwrap();
+    assert!(a.rt().confirmation_pending(&g));
     a.node.st.hearth_play(&card.id).await.unwrap();
     assert!(!a.launcher.launched.lock().unwrap().is_empty(), "le serveur et le jeu ont démarré");
+    let starts = a.runner.calls.lock().unwrap().iter().filter(|c| **c == "start").count();
+    assert_eq!(starts, 1, "un seul démarrage, pas de relance automatique");
+    assert!(!a.rt().confirmation_pending(&g), "la confirmation est consommée");
     a.stop().await;
+}
+
+/// L'EULA manquant n'efface pas la confirmation (l'écran relance juste après « J'accepte »), un échec ou une autre décision
+/// l'efface : une confirmation périmée ne sert jamais à un clic ultérieur.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn la_confirmation_survit_a_l_eula_et_ne_survit_pas_a_un_echec() {
+    let (a, b) = (Peer::start("Alice").await, Peer::start("Bob").await);
+    befriend(&a.node, &b.node).await;
+    wait_for("ami chez Bob", 20, || b.node.st.friends.is_friend(&a.node.key()).unwrap()).await;
+    let card = a.node.st.hearth_create("Duo", &a.instance, None, vec![b.node.key()]).await.unwrap();
+    let g = GroupId::from_hex(&card.id).unwrap();
+    b.stop().await;
+
+    a.node.st.hearth_confirm_host(&card.id).unwrap();
+    assert_eq!(a.node.st.hearth_play(&card.id).await.unwrap_err(), EULA_REQUIRED);
+    assert!(a.rt().confirmation_pending(&g), "l'EULA ne perd pas la confirmation");
+    a.node.st.hearth_eula_accept();
+    a.node.st.hearth_play(&card.id).await.unwrap();
+    assert_eq!(a.runner.calls.lock().unwrap().iter().filter(|c| **c == "start").count(), 1);
+    assert!(!a.rt().confirmation_pending(&g));
+
+    // Un échec autre que l'EULA, ou une fin réussie (Join, Sync…), efface la confirmation ; seul l'EULA la garde.
+    for (r, kept) in [(Err("boum".to_string()), false), (Ok(()), false), (Err(EULA_REQUIRED.to_string()), true)] {
+        a.node.st.hearth_confirm_host(&card.id).unwrap();
+        a.rt().settle_confirmation(&g, &r);
+        assert_eq!(a.rt().confirmation_pending(&g), kept, "{r:?}");
+        a.rt().settle_confirmation(&g, &Err("fin".into()));
+    }
+    a.stop().await;
+}
+
+/// Bail « au mieux » avec des membres joignables mais sans majorité (§ 3.4) : le même contrat, `confirm_host|best_effort|…`,
+/// sans rien annoncer ; confirmé, un seul démarrage.
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn bail_au_mieux_demande_la_meme_confirmation() {
+    let (peers, g, id) = group_of(&["Alice", "Bob", "Chloe", "Dan"]).await;
+    let a = &peers[0];
+    peers[2].stop().await;
+    peers[3].stop().await;
+    let e = a.node.st.hearth_play(&id).await.unwrap_err();
+    assert_eq!(e, "confirm_host|best_effort|2|4|3", "{e}");
+    assert!(a.runner.calls.lock().unwrap().is_empty(), "aucun serveur démarré");
+    assert!(a.rt().active(&g).is_none());
+    assert!(!a.rt().confirmation_pending(&g));
+    // Un second clic ne vaut pas confirmation.
+    assert!(a.node.st.hearth_play(&id).await.unwrap_err().starts_with("confirm_host|best_effort|"));
+    assert!(a.launcher.launched.lock().unwrap().is_empty());
+
+    a.node.st.hearth_confirm_host(&id).unwrap();
+    a.node.st.hearth_play(&id).await.unwrap();
+    assert_eq!(a.runner.calls.lock().unwrap().iter().filter(|c| **c == "start").count(), 1, "un seul démarrage");
+    assert_eq!(a.state_of(&g), HearthStateKind::Hosting);
+    assert!(!a.rt().confirmation_pending(&g));
+    for p in &peers[..2] {
+        p.stop().await;
+    }
 }
 
 /// Simple Voice Chat dans les mods de l'instance (§ 6.7) : la carte porte `voice_unsupported`, qui suit l'ajout et le
@@ -595,7 +669,7 @@ async fn deux_candidats_simultanes_un_seul_heberge() {
     for r in [&ra, &rb] {
         if let Err(e) = r {
             assert!(
-                e.contains("démarre déjà") || e.contains("pas assez joignable") || e.contains("réessaie"),
+                e.contains("démarre déjà") || e.contains("confirm_host|best_effort|") || e.contains("réessaie"),
                 "refus inattendu d'un candidat : {e}"
             );
         }
@@ -1128,8 +1202,9 @@ async fn alice_plante() -> (Vec<Peer>, GroupId, String, p2p_lib::hearth::version
     let d1 = peers[0].dir.path().join("monde-1");
     small_world(&d1, "monde n° 1");
     let v1 = peers[0].rt().publish_version(g, &d1, VersionKind::Session, None, 60).await.unwrap();
-    peers[1].stop().await; // Bob est hors ligne : un seul clic sur Jouer suffit à héberger.
+    peers[1].stop().await; // Bob est hors ligne : héberger seul demande une confirmation explicite (#93).
     let a = &peers[0];
+    a.node.st.hearth_confirm_host(&id).unwrap();
     a.node.st.hearth_play(&id).await.unwrap();
     assert_eq!(a.state_of(&g), HearthStateKind::Hosting);
     assert!(a.rt().has_session_marker(&g), "le marqueur de session est écrit au démarrage du serveur");
@@ -1171,6 +1246,8 @@ async fn partie_mal_terminee_le_monde_est_mis_de_cote_puis_publie() {
     let (heads_before, outbox_before) = (a.rt().heads_of(&g).unwrap().len(), a.rt().pending_outbox());
     assert_eq!(a.rt().head(&g).unwrap().id(), v2.id());
 
+    // Bob est toujours hors ligne : héberger seul est confirmé explicitement (#93).
+    a.node.st.hearth_confirm_host(&id).unwrap();
     a.node.st.hearth_play(&id).await.unwrap();
     assert_eq!(a.state_of(&g), HearthStateKind::Hosting);
     let world = a.rt().server_dir(&g).join("world");
@@ -1227,6 +1304,8 @@ async fn partie_mal_terminee_tete_inchangee_n_est_pas_republiee_toute_seule() {
     assert_eq!(a.rt().materialized(&g), Some(v1.id()), "le cas du ticket : materialized == tête");
     let (versions_before, outbox_before) = (a.rt().heads_of(&g).unwrap().len(), a.rt().pending_outbox());
 
+    // Bob est toujours hors ligne : héberger seul est confirmé explicitement (#93).
+    a.node.st.hearth_confirm_host(&id).unwrap();
     a.node.st.hearth_play(&id).await.unwrap();
     let served = read_tree(&a.rt().server_dir(&g).join("world"));
     assert!(!served.iter().any(|(n, _)| n == "region-jouee.mca"), "la tête est remise à neuf");
@@ -1253,6 +1332,8 @@ async fn mise_de_cote_impossible_ne_supprime_rien() {
     a.node.st.hearth_eula_accept();
     // `orphans` est un fichier : le dossier de la fin de partie ne peut pas être créé.
     std::fs::write(a.rt().server_dir(&g).join("orphans"), b"x").unwrap();
+    // Bob est toujours hors ligne : héberger seul est confirmé explicitement (#93).
+    a.node.st.hearth_confirm_host(&id).unwrap();
     let e = a.node.st.hearth_play(&id).await.unwrap_err();
     assert!(e.contains("mise de côté") || e.contains("de côté"), "{e}");
     assert_eq!(std::fs::read(a.rt().server_dir(&g).join("world/region-jouee.mca")).unwrap(), SENTINELLE, "le monde est intact");

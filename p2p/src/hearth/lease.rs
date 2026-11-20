@@ -1055,7 +1055,8 @@ pub enum Decision {
     Sync(PeerKey),
     /// Démarrer le serveur sur ce PC (annoncer le bail, attendre `CONFLICT_WAIT`, voir [`arbitrate`]).
     Host,
-    /// Aucun membre ni source joignable : jeu hors ligne interdit.
+    /// Aucun membre ni source joignable : le bouton Jouer demande une confirmation explicite avant d'héberger seul
+    /// (docs/hearth.md § 1) ; l'hébergement ne part jamais sur le seul clic.
     Blocked,
     /// La partie de `holder` ne s'est pas terminée proprement : le groupe choisit (jouer depuis son dernier
     /// point de reprise, attendre, ou reprendre depuis la dernière version connue).
@@ -1067,7 +1068,7 @@ pub enum Decision {
 ///    gagnant du départage) ;
 /// 2. un membre joignable a une version plus récente que la mienne : **Synchroniser** (le plus avancé, puis la
 ///    plus petite clé) ;
-/// 3. aucun membre ni source joignable (et groupe non solo) : **Bloqué** ;
+/// 3. aucun membre ni source joignable (et groupe non solo) : **Bloqué** (héberger seul demande une confirmation) ;
 /// 4. une partie mal terminée : **Unclean** (le plus petit titulaire s'il y en a plusieurs) ;
 /// 5. sinon **Héberger**.
 pub fn decide(input: &DecideInput) -> Decision {

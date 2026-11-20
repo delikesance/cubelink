@@ -6,7 +6,7 @@ import { HearthLeaveError } from "../../services/types";
 import { HearthSection } from "./HearthSection";
 import { HearthMoments } from "./Moments";
 import Hearth from "./index";
-import { parseHeadUnavailable } from "./format";
+import { parseConfirmHost, parseHeadUnavailable } from "./format";
 
 afterEach(cleanup);
 
@@ -17,9 +17,9 @@ function shell(services: ReturnType<typeof createFakeServices>, params: Record<s
   return { navigate, goBack, value };
 }
 
-function home(g?: Parameters<ReturnType<typeof createFakeServices>["seedHearth"]>[0]) {
+function home(g?: Parameters<ReturnType<typeof createFakeServices>["seedHearth"]>[0], detail?: Parameters<ReturnType<typeof createFakeServices>["seedHearth"]>[1]) {
   const services = createFakeServices({ tickMs: 0 });
-  if (g) services.seedHearth(g);
+  if (g) services.seedHearth(g, detail);
   const navigate = vi.fn();
   render(<HearthSection services={services} navigate={navigate} />);
   return { services, navigate };
@@ -79,7 +79,7 @@ describe("Accueil : serveurs de groupe", () => {
     expect(screen.getByRole("progressbar", { name: /Sync/ }).getAttribute("aria-valuenow")).toBe("42");
     const blocked = screen.getByRole("listitem", { name: "Serveur Hors ligne" });
     expect(within(blocked).getByText("Aucun membre en ligne")).toBeTruthy();
-    expect(within(blocked).getByText(/Tu peux lancer le serveur : ils le rejoindront à leur arrivée/)).toBeTruthy();
+    expect(within(blocked).getByText(/Tu peux lancer le serveur après une confirmation : ils le rejoindront à leur arrivée/)).toBeTruthy();
     expect(within(blocked).getByRole("button", { name: "Jouer sur Hors ligne" })).toBeTruthy();
     const fork = screen.getByRole("listitem", { name: "Serveur Fourche" });
     expect(within(fork).getByText("Deux versions existent")).toBeTruthy();
@@ -134,6 +134,72 @@ describe("Accueil : serveurs de groupe", () => {
     const dlg = await screen.findByRole("dialog");
     expect(within(dlg).getByRole("button", { name: "Attendre Alice" })).toBeTruthy();
     expect(within(dlg).queryByRole("button", { name: /Jouer depuis/ })).toBeNull();
+  });
+
+  const duo = {
+    members: [
+      { public_key: "me", name: "Moi", online: true, is_me: true, is_creator: true, sync: "ok" as const, version: 1, unseen_days: null },
+      { public_key: "b", name: "Bob", online: false, is_me: false, is_creator: false, sync: "ok" as const, version: 1, unseen_days: 2 },
+    ],
+  };
+
+  it("aucun membre joignable (#93) : Jouer ouvre la confirmation, Annuler n'héberge rien", async () => {
+    const { services } = home({ id: "g1", name: "Les copains", state: "blocked" }, duo);
+    services.setHearthEula(true);
+    fireEvent.click(await screen.findByRole("button", { name: "Jouer sur Les copains" }));
+    const dlg = await screen.findByRole("dialog", { name: "Héberger sans les autres ?" });
+    expect(within(dlg).getByText(/Aucun autre membre n'est joignable pour l'instant \(Bob\)/)).toBeTruthy();
+    expect(within(dlg).getByText(/deux versions du monde et le groupe choisira laquelle garder/)).toBeTruthy();
+    expect(document.activeElement).toBe(within(dlg).getByRole("button", { name: "Annuler" }));
+    fireEvent.click(within(dlg).getByRole("button", { name: "Annuler" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    await act(async () => { await Promise.resolve(); });
+    expect(services.hearthCalls).toEqual([{ kind: "Play", args: ["g1"] }]);
+    expect(screen.queryByText("Tu héberges · 1 joueur")).toBeNull();
+    // Un nouveau clic redemande : le clic ne vaut jamais confirmation.
+    fireEvent.click(screen.getByRole("button", { name: "Jouer sur Les copains" }));
+    await screen.findByRole("dialog", { name: "Héberger sans les autres ?" });
+    expect(services.hearthCalls.map((c) => c.kind)).toEqual(["Play", "Play"]);
+  });
+
+  it("aucun membre joignable (#93) : Héberger quand même confirme puis relance Jouer, une seule fois", async () => {
+    const { services } = home({ id: "g1", name: "Les copains", state: "blocked" }, duo);
+    services.setHearthEula(true);
+    fireEvent.click(await screen.findByRole("button", { name: "Jouer sur Les copains" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Héberger quand même" }));
+    await screen.findByText("Tu héberges · 1 joueur");
+    expect(services.hearthCalls.map((c) => c.kind)).toEqual(["Play", "ConfirmHost", "Play"]);
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("confirmation puis contrat Minecraft : J'accepte relance Jouer sans redemander la confirmation", async () => {
+    const { services } = home({ id: "g1", name: "Les copains", state: "blocked" }, duo);
+    fireEvent.click(await screen.findByRole("button", { name: "Jouer sur Les copains" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Héberger quand même" }));
+    fireEvent.click(await screen.findByRole("button", { name: "J'accepte" }));
+    await screen.findByText("Tu héberges · 1 joueur");
+    expect(services.hearthCalls.map((c) => c.kind)).toEqual(["Play", "ConfirmHost", "Play", "EulaAccept", "Play"]);
+  });
+
+  it("bail au mieux (#93) : la boîte dit combien de membres sont joignables", async () => {
+    const { services } = home({ id: "g1", name: "Les copains" });
+    services.setHearthEula(true);
+    services.setHearthBestEffort({ acks: 2, members: 4, needed: 3 });
+    fireEvent.click(await screen.findByRole("button", { name: "Jouer sur Les copains" }));
+    const dlg = await screen.findByRole("dialog", { name: "Héberger sans les autres ?" });
+    expect(within(dlg).getByText(/Seulement 2 membres sont joignables sur 4 \(toi compris\) : il en faut 3/)).toBeTruthy();
+    fireEvent.click(within(dlg).getByRole("button", { name: "Héberger quand même" }));
+    await screen.findByText("Tu héberges · 1 joueur");
+    expect(services.hearthCalls.map((c) => c.kind)).toEqual(["Play", "ConfirmHost", "Play"]);
+  });
+
+  it("parseConfirmHost : lit les deux formats, ignore les autres erreurs", () => {
+    expect(parseConfirmHost("confirm_host|alone|Bob;Chloé")).toEqual({ kind: "alone", offline: ["Bob", "Chloé"] });
+    expect(parseConfirmHost(new Error("confirm_host|alone|"))).toEqual({ kind: "alone", offline: [] });
+    expect(parseConfirmHost("confirm_host|best_effort|2|4|3")).toEqual({ kind: "best_effort", acks: 2, members: 4, needed: 3 });
+    expect(parseConfirmHost("confirm_host|best_effort|x|4|3")).toBeNull();
+    expect(parseConfirmHost("head_unavailable|3||Alice")).toBeNull();
+    expect(parseConfirmHost("Java introuvable.")).toBeNull();
   });
 
   it("parseHeadUnavailable : lit le format stable, ignore les autres erreurs", () => {

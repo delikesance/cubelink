@@ -22,7 +22,7 @@ use serde::Serialize;
 use tauri::State;
 
 use crate::error::{sanitize, user_msg};
-use crate::hearth::{key_hex, parse_key, Begin, HearthRuntime, HostParams, LeaveError, Play, EULA_REQUIRED, HOST_STEPS, JOIN_STEPS, LEAVE_FLUSH_WAIT};
+use crate::hearth::{key_hex, parse_key, Begin, HearthRuntime, HostParams, LeaveError, Play, CONFIRM_HOST, EULA_REQUIRED, HOST_STEPS, JOIN_STEPS, LEAVE_FLUSH_WAIT};
 use crate::state::AppState;
 
 /// Longueur maximale du nom d'un groupe (caractères).
@@ -357,10 +357,21 @@ impl AppState {
             return Err("un lancement de ce serveur est déjà en cours".into());
         }
         let r = self.hearth_play_inner(g, &instance).await;
+        rt.settle_confirmation(&g, &r);
         if r.is_err() {
             rt.set_play(&g, None);
         }
         r
+    }
+
+    /// « Héberger quand même » : la personne a lu l'avertissement d'une erreur `confirm_host|…` (docs/hearth.md § 1). La
+    /// confirmation vaut 2 minutes pour **une** prise du bail ; l'écran relance ensuite la commande qui avait été refusée.
+    pub fn hearth_confirm_host(&self, id: &str) -> Result<(), String> {
+        self.hearth.require_enabled()?;
+        let g = gid(id)?;
+        self.hearth.require_state(&g)?;
+        self.hearth.grant_confirmation(&g);
+        Ok(())
     }
 
     /// « Jouer depuis la version précédente » : la dernière version est connue mais personne de joignable n'en a le
@@ -391,6 +402,7 @@ impl AppState {
             return Err("un lancement de ce serveur est déjà en cours".into());
         }
         let r = self.hearth_host(g, &instance, Some(prev.id())).await;
+        rt.settle_confirmation(&g, &r);
         if r.is_err() {
             rt.set_play(&g, None);
         }
@@ -419,15 +431,16 @@ impl AppState {
                 return Err("Deux versions du monde existent : choisis laquelle garder depuis la page du serveur.".into());
             }
             match rt.decision_for(&g, &round).ok_or("ce groupe n'existe plus")? {
-                // Personne d'autre n'est joignable : on héberge quand même (docs/hearth.md § 1). Les amis rejoignent mon nœud à leur
-                // arrivée ; le monde leur parvient par la file d'envoi. Le bail « au mieux » demande une seconde confirmation
-                // (`best_effort_pending`) : le clic sur Jouer vaut pour les deux, on ne fait pas cliquer deux fois.
+                // Personne d'autre n'est joignable : héberger seul est possible (docs/hearth.md § 1) mais demande une confirmation
+                // explicite, jamais le simple clic sur Jouer : sans `hearth_confirm_host`, rien n'est annoncé ni démarré et l'erreur
+                // `confirm_host|alone|…` fait poser la question. Confirmé, la prise du bail (`begin_starting`) consomme la
+                // confirmation : pas de seconde demande. Aucune relance automatique ici.
                 Decision::Blocked => {
-                    let r = self.hearth_host(g, instance, None).await;
-                    if r.is_err() && rt.best_effort_pending(&g) {
-                        return self.hearth_host(g, instance, None).await;
+                    if !rt.confirmation_pending(&g) {
+                        let names: Vec<String> = round.unreachable.iter().map(|k| rt.name_of(k).replace(['|', ';'], " ")).collect();
+                        return Err(format!("{CONFIRM_HOST}|alone|{}", names.join(";")));
                     }
-                    return r;
+                    return self.hearth_host(g, instance, None).await;
                 }
                 Decision::Unclean { holder, .. } => {
                     let name = rt.name_of(&holder);
@@ -710,6 +723,7 @@ impl AppState {
             self.hearth_host(g, &instance, base).await
         }
         .await;
+        rt.settle_confirmation(&g, &r);
         if r.is_err() {
             rt.set_play(&g, None);
         }
@@ -799,6 +813,13 @@ pub fn hearth_invite_dismiss(state: S<'_>, id: String) -> Result<(), String> {
 #[specta::specta(rename_all = "snake_case")]
 pub async fn hearth_play(state: S<'_>, id: String) -> Result<(), String> {
     state.inner().hearth_play(&id).await
+}
+
+/// Confirme l'hébergement sans la majorité du groupe, après une erreur `confirm_host|…` de la commande qui démarre le serveur.
+#[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
+pub fn hearth_confirm_host(state: S<'_>, id: String) -> Result<(), String> {
+    state.hearth_confirm_host(&id)
 }
 
 /// Arrête le serveur du groupe hébergé sur ce PC (monde publié, bail relâché).

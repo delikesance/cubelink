@@ -51,6 +51,12 @@ pub const EULA_REQUIRED: &str = "eula_required";
 /// a le contenu. Format : `head_unavailable|<n° de la tête>|<n° de la dernière version complète, ou vide>|<nom de l'auteur>`.
 /// L'écran propose « Attendre » et, s'il y a une version complète, « Jouer depuis la n° N ».
 pub const HEAD_UNAVAILABLE: &str = "head_unavailable";
+/// Préfixe de l'erreur des commandes qui démarrent le serveur (`hearth_play`, `hearth_unclean_choice`,
+/// `hearth_play_from_previous`) quand héberger sans la majorité du groupe demande une confirmation explicite (docs/hearth.md
+/// § 1). Formats : `confirm_host|alone|<noms hors ligne séparés par ;>` (aucun autre membre joignable) et
+/// `confirm_host|best_effort|<accusés>|<membres>|<nécessaires>` (des membres joignables, mais sans majorité). L'écran pose la
+/// question ; « Héberger quand même » appelle `hearth_confirm_host` puis relance la commande.
+pub const CONFIRM_HOST: &str = "confirm_host";
 /// Message de `fetch_version` quand aucun membre n'est en ligne pour fournir le monde.
 const NO_MEMBER_ONLINE: &str = "aucun membre du groupe n'est joignable pour récupérer le monde";
 /// Délai entre deux sondes des membres.
@@ -61,8 +67,8 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(8);
 pub const ROUND_HELLO_TIMEOUT: Duration = Duration::from_secs(4);
 /// Attente du bail d'un concurrent après un `ClaimConflict` sur un claim (il annonce son bail `Starting`).
 const CLAIM_YIELD_WAIT: Duration = Duration::from_secs(12);
-/// Durée pendant laquelle un premier « Jouer » sur un bail « au mieux » attend la confirmation (le second clic).
-const BEST_EFFORT_CONFIRM: Duration = Duration::from_secs(120);
+/// Durée de validité d'une confirmation explicite d'héberger sans la majorité du groupe (`hearth_confirm_host`).
+const HOST_CONFIRM_WINDOW: Duration = Duration::from_secs(120);
 /// Période des points de reprise pendant une partie.
 pub const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(10 * 60);
 /// Un serveur sans joueur pendant ce temps s'arrête, même avec « Garder le serveur ouvert » (docs/hearth.md § 7.3).
@@ -611,8 +617,8 @@ pub struct HearthRuntime {
     stop_all: tokio::sync::Mutex<()>,
     /// Horloges (injectables : les tests font « dormir » la machine sans attendre).
     clock: Mutex<Arc<dyn Clock>>,
-    /// Groupes dont un premier « Jouer » a reçu un bail « au mieux » : le second clic vaut confirmation.
-    best_effort: Mutex<HashMap<GroupId, Instant>>,
+    /// Confirmations explicites d'héberger sans la majorité du groupe (`hearth_confirm_host`), valables [`HOST_CONFIRM_WINDOW`].
+    confirmations: Mutex<HashMap<GroupId, Instant>>,
     /// Dernier plantage de serveur connu par groupe (hôte, mod probable) : annoncé par `LeaseRelease { Crashed }`, ou vu
     /// chez moi. Effacé dès qu'un nouveau bail est accepté ou que je lance un serveur.
     crashes: Mutex<HashMap<GroupId, (PeerKey, Option<String>)>>,
@@ -700,9 +706,6 @@ pub enum RenewTick {
     /// publiée comme branche sans bail.
     Fenced,
 }
-
-/// Début du message d'un bail « au mieux » (voir [`HearthRuntime::begin_starting`]).
-pub const BEST_EFFORT_NOTE: &str = "Le groupe n'est pas assez joignable pour une prise du serveur sûre : si un autre membre joue de son côté, il y aura deux versions à départager.";
 
 /// Réaction de l'application à la fin d'une partie hébergée (voir `HearthRuntime::set_end_hook`).
 pub type EndHook = Arc<dyn Fn(GroupId) -> BoxFut<'static, ()> + Send + Sync>;
@@ -792,7 +795,7 @@ impl HearthRuntime {
             timings: Mutex::new(Timings::default()),
             stop_all: tokio::sync::Mutex::new(()),
             clock: Mutex::new(Arc::new(SystemClock)),
-            best_effort: Mutex::new(HashMap::new()),
+            confirmations: Mutex::new(HashMap::new()),
             crashes: Mutex::new(HashMap::new()),
             voice_cache: Mutex::new(HashMap::new()),
             me_weak: w.clone(),
@@ -2292,7 +2295,7 @@ impl HearthRuntime {
         lock(&self.leases).forget_group(gid);
         lock(&self.status).retain(|(g, _), _| g != gid);
         lock(&self.play).remove(gid);
-        lock(&self.best_effort).remove(gid);
+        lock(&self.confirmations).remove(gid);
         lock(&self.crashes).remove(gid);
         for e in self.outbox.pending().into_iter().filter(|e| e.group_id() == *gid) {
             let _ = self.outbox.remove(&e.id());
@@ -2905,15 +2908,29 @@ impl HearthRuntime {
         (acks, conflicts, silent)
     }
 
-    /// Un premier « Jouer » a-t-il reçu un bail « au mieux » il y a moins de [`BEST_EFFORT_CONFIRM`] ? (Le second clic vaut
-    /// confirmation ; la confirmation est consommée.)
-    fn take_best_effort_confirmation(&self, gid: &GroupId) -> bool {
-        lock(&self.best_effort).remove(gid).is_some_and(|t| t.elapsed() < BEST_EFFORT_CONFIRM)
+    /// Une confirmation explicite (`hearth_confirm_host`) vaut-elle encore pour ce groupe ? Elle est consommée.
+    fn take_confirmation(&self, gid: &GroupId) -> bool {
+        lock(&self.confirmations).remove(gid).is_some_and(|t| t.elapsed() < HOST_CONFIRM_WINDOW)
     }
 
-    /// Un bail « au mieux » attend la confirmation de la personne (un second « Jouer »).
-    pub fn best_effort_pending(&self, gid: &GroupId) -> bool {
-        lock(&self.best_effort).get(gid).is_some_and(|t| t.elapsed() < BEST_EFFORT_CONFIRM)
+    /// La personne a confirmé « Héberger quand même » : valable [`HOST_CONFIRM_WINDOW`], pour une seule prise du bail.
+    pub fn grant_confirmation(&self, gid: &GroupId) {
+        lock(&self.confirmations).insert(*gid, Instant::now());
+    }
+
+    /// Une confirmation valable existe-t-elle pour ce groupe ? (Sans la consommer.)
+    pub fn confirmation_pending(&self, gid: &GroupId) -> bool {
+        lock(&self.confirmations).get(gid).is_some_and(|t| t.elapsed() < HOST_CONFIRM_WINDOW)
+    }
+
+    /// Fin d'une commande qui démarre le serveur : la confirmation ne survit pas, sauf si on attend seulement l'EULA (l'écran
+    /// relance la commande juste après). Sans cela, un échec ou un Join laisserait une confirmation périmée servir à un clic
+    /// ultérieur, sans nouvelle question.
+    pub fn settle_confirmation(&self, gid: &GroupId, r: &Result<(), String>) {
+        if r.as_ref().err().is_some_and(|e| e == EULA_REQUIRED) {
+            return;
+        }
+        lock(&self.confirmations).remove(gid);
     }
 
     /// Un concurrent a la main : on cède. Le verrou du claim tombe ici et chez les témoins.
@@ -2927,14 +2944,14 @@ impl HearthRuntime {
     /// Premier temps de la prise du bail, en deux phases :
     ///
     /// 1. **Claim** : `LeaseClaim` à tous les membres joignables ; majorité stricte des membres (moi compris) = bail
-    ///    **sûr**, sinon **au mieux** : la première fois, une erreur dédiée ([`HearthRuntime::best_effort_pending`]) demande
-    ///    la confirmation (un second « Jouer » vaut confirmation). Un `ClaimConflict` fait céder : on rejoint le bail
+    ///    **sûr**, sinon **au mieux** : sans confirmation explicite ([`HearthRuntime::grant_confirmation`]), l'erreur
+    ///    [`CONFIRM_HOST`] demande la confirmation à la personne (le clic sur « Jouer » n'en tient pas lieu). Un `ClaimConflict` fait céder : on rejoint le bail
     ///    existant, ou on attend l'annonce du concurrent.
     /// 2. **Annonce** d'un bail `Starting` aux membres en ligne dès qu'on a choisi d'héberger (l'installation et le démarrage
     ///    d'un gros pack prennent des minutes), attente d'une contre-annonce, puis renouvellement tant que le serveur n'est
     ///    pas prêt.
     pub async fn begin_starting(self: &Arc<Self>, gid: GroupId, base: Option<(VersionId, u64)>) -> Result<Begin, String> {
-        let confirmed = self.take_best_effort_confirmation(&gid);
+        let confirmed = self.take_confirmation(&gid);
         let lease = self.new_signed_lease(gid, LeasePhase::Starting, base, new_lease_id());
         let claim = Claim::of(&lease);
         let members = self.state(&gid).map_or(1, |s| s.members.len());
@@ -2954,11 +2971,7 @@ impl HearthRuntime {
             }
             ClaimOutcome::BestEffort { acks, needed, members } if !confirmed => {
                 self.cede_claim(gid, claim.lease_id).await;
-                lock(&self.best_effort).insert(gid, Instant::now());
-                self.emit_state();
-                return Err(format!(
-                    "{BEST_EFFORT_NOTE} ({acks} membre(s) sur {members} joignable(s), {needed} nécessaires pour une prise sûre.) Clique encore sur Jouer pour héberger quand même."
-                ));
+                return Err(format!("{CONFIRM_HOST}|best_effort|{acks}|{members}|{needed}"));
             }
             ClaimOutcome::BestEffort { .. } | ClaimOutcome::Safe { .. } => {}
         }

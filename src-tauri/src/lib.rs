@@ -110,6 +110,7 @@ macro_rules! commands {
             commands_hearth::hearth_invite_accept,
             commands_hearth::hearth_invite_dismiss,
             commands_hearth::hearth_play,
+            commands_hearth::hearth_confirm_host,
             commands_hearth::hearth_stop,
             commands_hearth::hearth_unclean_choice,
             commands_hearth::hearth_play_from_previous,

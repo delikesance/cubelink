@@ -172,6 +172,13 @@ export const HEARTH_EULA_REQUIRED = "eula_required";
  */
 export const HEARTH_HEAD_UNAVAILABLE = "head_unavailable";
 
+/**
+ * Préfixe de l'erreur de `hearthPlay` (et de `hearthUncleanChoice` / `hearthPlayFromPrevious`) quand héberger sans la majorité du
+ * groupe demande une confirmation explicite. Formats : `confirm_host|alone|<noms hors ligne séparés par ;>` et
+ * `confirm_host|best_effort|<accusés>|<membres>|<nécessaires>`. « Héberger quand même » appelle `hearthConfirmHost`, puis relance l'action.
+ */
+export const HEARTH_CONFIRM_HOST = "confirm_host";
+
 export interface Services {
   authStatus(): Promise<Profile | null>;
   authBeginLogin(): Promise<DeviceCode>;
@@ -308,6 +315,8 @@ export interface Services {
   hearthInviteDismiss(groupId: string): Promise<void>;
   /** Le bouton unique de la carte : jouer ou rejoindre selon l'état. Rejette avec `eula_required` au premier hébergement. */
   hearthPlay(id: string): Promise<void>;
+  /** Confirme « Héberger quand même » après une erreur `confirm_host|…` : valable 2 minutes pour une seule prise du serveur ; relancer ensuite l'action refusée. */
+  hearthConfirmHost(id: string): Promise<void>;
   /** Repart de la dernière version complète quand `hearthPlay` a rejeté avec `head_unavailable` : crée une fourche quand l'auteur revient. */
   hearthPlayFromPrevious(id: string): Promise<void>;
   hearthStop(id: string): Promise<void>;

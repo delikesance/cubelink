@@ -158,6 +158,8 @@ export const commands = {
 	hearthInviteDismiss: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_invite_dismiss", { id }, options),
 	/**  Joue sur le serveur du groupe : le rejoint s'il est hébergé, sinon l'héberge sur ce PC. */
 	hearthPlay: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_play", { id }, options),
+	/**  Confirme l'hébergement sans la majorité du groupe, après une erreur `confirm_host|…` de la commande qui démarre le serveur. */
+	hearthConfirmHost: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_confirm_host", { id }, options),
 	/**  Arrête le serveur du groupe hébergé sur ce PC (monde publié, bail relâché). */
 	hearthStop: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_stop", { id }, options),
 	/**  Choix du groupe après une partie mal terminée. */

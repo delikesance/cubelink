@@ -1,4 +1,4 @@
-import { HEARTH_EULA_REQUIRED, HEARTH_HEAD_UNAVAILABLE, type HearthCard } from "../../services/types";
+import { HEARTH_CONFIRM_HOST, HEARTH_EULA_REQUIRED, HEARTH_HEAD_UNAVAILABLE, type HearthCard } from "../../services/types";
 
 export const errText = (e: unknown): string => (e instanceof Error ? e.message : typeof e === "string" ? e : "Une erreur est survenue.");
 
@@ -23,6 +23,25 @@ export function parseHeadUnavailable(e: unknown): HeadUnavailable | null {
   if (!Number.isInteger(h)) return null;
   const p = previous ? Number(previous) : null;
   return { author: name.join("|").trim() || "un ami", head: h, previous: p !== null && Number.isInteger(p) ? p : null };
+}
+
+/** Héberger sans la majorité du groupe demande une confirmation : personne d'autre n'est joignable, ou seulement une partie. */
+export type ConfirmHost =
+  | { kind: "alone"; offline: string[] }
+  | { kind: "best_effort"; acks: number; members: number; needed: number };
+
+/** Lit l'erreur `confirm_host|alone|<noms ;>` ou `confirm_host|best_effort|<accusés>|<membres>|<nécessaires>` ; `null` pour toute autre erreur. */
+export function parseConfirmHost(e: unknown): ConfirmHost | null {
+  const text = errText(e);
+  const at = text.indexOf(`${HEARTH_CONFIRM_HOST}|`);
+  if (at < 0) return null;
+  const [kind, ...rest] = text.slice(at + HEARTH_CONFIRM_HOST.length + 1).split("|");
+  if (kind === "alone") return { kind, offline: (rest.join("|") || "").split(";").map((n) => n.trim()).filter(Boolean) };
+  if (kind === "best_effort") {
+    const [acks, members, needed] = rest.map(Number);
+    if ([acks, members, needed].every(Number.isInteger)) return { kind, acks, members, needed };
+  }
+  return null;
 }
 
 export function fmtSize(bytes: number): string {
@@ -64,7 +83,7 @@ export function stateHint(c: HearthCard, offline: string[] = []): string | null 
   switch (c.state) {
     case "blocked": {
       const who = offline.length > 0 ? ` (${offline.join(", ")} ${offline.length > 1 ? "sont hors ligne" : "est hors ligne"})` : "";
-      return `Aucun autre membre n'est en ligne${who}. Tu peux lancer le serveur : ils le rejoindront à leur arrivée. Si l'un d'eux joue seul de son côté en même temps, le groupe choisira la version du monde à garder.`;
+      return `Aucun autre membre n'est en ligne${who}. Tu peux lancer le serveur après une confirmation : ils le rejoindront à leur arrivée. Si l'un d'eux joue seul de son côté en même temps, le groupe choisira la version du monde à garder.`;
     }
     case "unclean": return c.unclean ? `La partie de ${c.unclean.holder.name} ne s'est pas terminée proprement.` : null;
     case "fork": return "Deux membres ont joué en même temps : le groupe choisit la version à garder.";

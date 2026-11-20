@@ -219,6 +219,16 @@ pub struct HearthUnclean {
     pub checkpoint_at: Option<i64>,
 }
 
+/// Dernier plantage du serveur d'un groupe : qui l'hébergeait et le mod probablement en cause.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+pub struct HearthCrash {
+    pub host: HearthMemberLite,
+    /// Le serveur qui a planté était le mien (sur ce PC).
+    pub mine: bool,
+    /// Mod probable d'après la fin de la sortie du serveur ; `None` : cause inconnue.
+    pub mod_hint: Option<String>,
+}
+
 /// Carte d'un serveur de groupe sur l'accueil (événement `hearth://state`, commande `hearth_list`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct HearthCard {
@@ -251,6 +261,8 @@ pub struct HearthCard {
     pub version: Option<u64>,
     /// Fins de partie non publiées, mises de côté sur ce PC (`HearthDetail::orphans`) : l'hôte n'a pas encore choisi.
     pub orphans: u32,
+    /// Le serveur a planté à la fin de la dernière partie (`None` tant qu'un nouveau serveur n'a pas été lancé).
+    pub crash: Option<HearthCrash>,
 }
 
 /// Invitation à un groupe reçue d'un ami (événement `hearth://invites`).

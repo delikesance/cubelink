@@ -564,6 +564,27 @@ describe("Page du serveur", () => {
     expect(navigate).toHaveBeenCalledWith("hearth", { id: "g1" });
   });
 
+  const alexCrash = { public_key: "k", name: "Alex", online: false };
+
+  it("plantage du serveur d'un ami (#98) : la carte et la page disent le mod probable", async () => {
+    home({ id: "g1", name: "Les copains", crash: { host: alexCrash, mine: false, mod_hint: "Sodium (sodium)" } });
+    const card = await screen.findByRole("listitem", { name: "Serveur Les copains" });
+    expect(within(card).getByText("Le serveur de Alex a planté (mod probable : Sodium (sodium)).")).toBeTruthy();
+  });
+
+  it("plantage sans mod connu : cause inconnue ; chez l'hôte, le monde est gardé de côté", async () => {
+    page({ id: "g1" }, { id: "g1", name: "Les copains", crash: { host: { ...alexCrash, name: "Toi" }, mine: true, mod_hint: null }, orphans: 1 }, { orphans: [orphan] });
+    await screen.findByText("Ton serveur a planté (cause inconnue).");
+    expect(screen.getByText(/gardé de côté sur ce PC/)).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Une fin de partie n'a pas été publiée" })).toBeTruthy();
+  });
+
+  it("sans plantage connu, aucun message", async () => {
+    home({ id: "g1", name: "Les copains" });
+    await screen.findByRole("listitem", { name: "Serveur Les copains" });
+    expect(screen.queryByText(/a planté/)).toBeNull();
+  });
+
   it("modpack absent : associer une instance locale", async () => {
     const { services } = page({ id: "g1" }, { id: "g1", name: "Les copains", state: "pack_missing", can_host: false, instance_id: null });
     fireEvent.click(await screen.findByRole("button", { name: /Utiliser Create: Aeronautics/ }));

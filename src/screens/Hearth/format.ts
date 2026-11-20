@@ -73,6 +73,14 @@ export function stateHint(c: HearthCard, offline: string[] = []): string | null 
   }
 }
 
+/** Le serveur a planté à la fin de la dernière partie : qui, et le mod probable (une phrase), `null` sans plantage connu. */
+export function crashText(c: HearthCard): string | null {
+  if (!c.crash) return null;
+  const who = c.crash.mine ? "Ton serveur" : `Le serveur de ${c.crash.host.name}`;
+  const cause = c.crash.mod_hint ? `mod probable : ${c.crash.mod_hint}` : "cause inconnue";
+  return `${who} a planté (${cause}).`;
+}
+
 export type MainAction =
   | { kind: "play"; label: string }
   | { kind: "stop"; label: string }

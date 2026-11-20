@@ -37,6 +37,10 @@ struct FakeServer {
     calls: Arc<Mutex<Vec<&'static str>>>,
     /// `save-on` n'est jamais confirmé (serveur chargé) : `flush_end` reste en attente après avoir noté l'appel.
     hang_end: Arc<std::sync::atomic::AtomicBool>,
+    /// Code de sortie : `wait_exit` rend dès qu'il est posé (le test fait « mourir » le serveur sans passer par `stop`).
+    exit: tokio::sync::watch::Receiver<Option<i32>>,
+    /// Sortie du serveur, telle que la lit `recent_lines`.
+    log: Arc<Mutex<Vec<String>>>,
 }
 
 impl RunningServer for FakeServer {
@@ -64,8 +68,20 @@ impl RunningServer for FakeServer {
         self.task.abort();
         Box::pin(async {})
     }
-    fn wait_exit(&self) -> BoxFut<'_, ()> {
-        Box::pin(std::future::pending())
+    fn wait_exit(&self) -> BoxFut<'_, i32> {
+        let mut rx = self.exit.clone();
+        Box::pin(async move {
+            let code = rx.wait_for(Option::is_some).await.ok().and_then(|c| *c);
+            match code {
+                Some(c) => c,
+                // L'émetteur est gardé par le lanceur : sans code posé, le serveur tourne.
+                None => std::future::pending().await,
+            }
+        })
+    }
+    fn recent_lines(&self, n: usize) -> Vec<String> {
+        let l = self.log.lock().unwrap();
+        l[l.len().saturating_sub(n)..].to_vec()
     }
 }
 
@@ -74,11 +90,23 @@ struct FakeRunner {
     calls: Arc<Mutex<Vec<&'static str>>>,
     specs: Arc<Mutex<Vec<ServerSpec>>>,
     hang_end: Arc<std::sync::atomic::AtomicBool>,
+    /// Lignes de log que le prochain serveur « a écrites ».
+    log: Arc<Mutex<Vec<String>>>,
+    /// Pour faire mourir le serveur en cours avec un code de sortie.
+    exit_tx: Arc<Mutex<Option<tokio::sync::watch::Sender<Option<i32>>>>>,
+}
+
+impl FakeRunner {
+    /// Le serveur en cours meurt seul avec ce code de sortie (sans `stop` demandé).
+    fn die(&self, code: i32) {
+        self.exit_tx.lock().unwrap().as_ref().expect("aucun serveur lancé").send(Some(code)).unwrap();
+    }
 }
 
 impl ServerRunner for FakeRunner {
     fn start(&self, spec: ServerSpec) -> BoxFut<'static, Result<Arc<dyn RunningServer>, String>> {
         let (calls, specs, hang_end) = (self.calls.clone(), self.specs.clone(), self.hang_end.clone());
+        let (log, exit_slot) = (self.log.clone(), self.exit_tx.clone());
         Box::pin(async move {
             let world = spec.dir.join("world");
             std::fs::create_dir_all(&world).unwrap();
@@ -103,7 +131,9 @@ impl ServerRunner for FakeRunner {
             calls.lock().unwrap().push("start");
             let dir = spec.dir.clone();
             specs.lock().unwrap().push(spec);
-            Ok(Arc::new(FakeServer { port, dir, task, calls, hang_end }) as Arc<dyn RunningServer>)
+            let (tx, exit) = tokio::sync::watch::channel(None);
+            *exit_slot.lock().unwrap() = Some(tx);
+            Ok(Arc::new(FakeServer { port, dir, task, calls, hang_end, exit, log }) as Arc<dyn RunningServer>)
         })
     }
 }
@@ -1125,6 +1155,8 @@ async fn partie_mal_terminee_le_monde_est_mis_de_cote_puis_publie() {
     // Fin propre de la nouvelle partie : le marqueur disparaît, la fin de partie reste gardée.
     a.close_game();
     wait_for("serveur arrêté", 30, || a.state_of(&g) != HearthStateKind::Hosting).await;
+    // L'état quitte `Hosting` dès le début de la fin de partie : on attend la publication, qui retire le marqueur.
+    wait_for("marqueur retiré", 30, || !a.rt().has_session_marker(&g)).await;
     assert!(!a.rt().has_session_marker(&g), "la fin propre retire le marqueur");
     assert_eq!(orphan_files(a, &g).len(), 1);
     let head_after = a.rt().head(&g).unwrap();
@@ -1319,6 +1351,121 @@ async fn serveur_jamais_rejoint_s_arrete_sans_version() {
     assert!(!a.rt().has_session_marker(&g));
     assert_ne!(a.state_of(&g), HearthStateKind::Hosting);
     wait_for("bail relâché chez Bob", 20, || b.rt().lease_of_holder(&g, &a.key()).is_none()).await;
+    for p in &peers {
+        p.stop().await;
+    }
+}
+
+/// Alice et Bob, la n° 1 complète chez les deux, Alice héberge (Bob en ligne). `log` : ce que le serveur d'Alice écrit.
+async fn alice_heberge_avec_bob(log: &[&str]) -> (Vec<Peer>, GroupId, String, p2p_lib::hearth::version::SignedVersion) {
+    let (peers, g, id) = group_of(&["Alice", "Bob"]).await;
+    let (a, b) = (&peers[0], &peers[1]);
+    let d1 = a.dir.path().join("monde-1");
+    small_world(&d1, "monde n° 1");
+    let v1 = a.rt().publish_version(g, &d1, VersionKind::Session, None, 60).await.unwrap();
+    wait_for("n° 1 complète chez Bob", 40, || b.rt().head(&g).is_some_and(|h| h.id() == v1.id() && b.rt().world_complete(&h))).await;
+    *a.runner.log.lock().unwrap() = log.iter().map(|l| (*l).to_string()).collect();
+    a.rt().probe_all().await;
+    a.node.st.hearth_play(&id).await.unwrap();
+    assert_eq!(a.state_of(&g), HearthStateKind::Hosting);
+    wait_for("Bob voit la partie d'Alice", 20, || b.state_of(&g) == HearthStateKind::Hosted).await;
+    (peers, g, id, v1)
+}
+
+/// Le serveur meurt seul avec un code d'erreur : rien n'est publié (la tête et la file d'envoi ne bougent pas), le monde est
+/// mis de côté chez l'hôte, le bail est relâché avec `Crashed` et Bob voit le mod probable (ticket n° 98). L'hôte peut
+/// ensuite publier cette partie comme une branche, qui ne devient pas la tête toute seule.
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn plantage_du_serveur_ne_publie_rien_et_previent_les_autres() {
+    let (peers, g, id, v1) = alice_heberge_avec_bob(&[
+        "[12:00:00] [main/INFO]: Loading Minecraft 1.21.1 with Fabric Loader 0.16.0",
+        "[12:03:10] [Server thread/ERROR]: Mod 'Sodium' (sodium) 0.5.8 a planté pendant le tick",
+    ])
+    .await;
+    let (a, b) = (&peers[0], &peers[1]);
+    std::fs::write(a.rt().server_dir(&g).join("world/region-jouee.mca"), SENTINELLE).unwrap();
+    let (heads_before, outbox_before) = (a.rt().heads_of(&g).unwrap().len(), a.rt().pending_outbox());
+
+    a.runner.die(1);
+    // L'état quitte `Hosting` dès le début de la fin de partie : on attend que le monde planté soit mis de côté.
+    wait_for("monde planté mis de côté", 30, || a.rt().card(&g).unwrap().orphans == 1).await;
+    wait_for("plantage retenu", 30, || a.rt().card(&g).unwrap().crash.is_some()).await;
+    assert_eq!(a.rt().head(&g).unwrap().id(), v1.id(), "la tête n'a pas bougé");
+    assert_eq!((a.rt().heads_of(&g).unwrap().len(), a.rt().pending_outbox()), (heads_before, outbox_before), "rien n'est publié");
+    assert!(a.rt().active(&g).is_none());
+
+    // Le monde planté est gardé de côté chez l'hôte, intact.
+    assert!(!a.rt().has_session_marker(&g));
+    assert_eq!(orphan_files(a, &g).len(), 1);
+    assert!(orphan_files(a, &g)[0].iter().any(|(n, c)| n == "region-jouee.mca" && c == SENTINELLE));
+    let ca = a.rt().card(&g).unwrap();
+    assert_eq!((ca.state, ca.orphans), (HearthStateKind::Idle, 1));
+    assert_eq!(ca.crash.as_ref().unwrap().mod_hint.as_deref(), Some("Sodium (sodium)"));
+
+    // Bob : le bail est libéré, le plantage est annoncé avec le mod probable.
+    wait_for("plantage chez Bob", 20, || b.rt().card(&g).unwrap().crash.is_some()).await;
+    let cb = b.rt().card(&g).unwrap();
+    let crash = cb.crash.unwrap();
+    assert_eq!(cb.state, HearthStateKind::Idle);
+    assert_eq!((crash.host.public_key, crash.mod_hint.as_deref()), (a.node.key(), Some("Sodium (sodium)")));
+    assert_eq!(b.rt().head(&g).unwrap().id(), v1.id());
+
+    // Le monde mis de côté ne se publie que sur le choix de l'hôte : une Session enfant de la n° 1 (la tête n'a pas avancé
+    // entre-temps, donc elle la prolonge ; si le groupe avait avancé, ce serait une fourche, voir `partie_mal_terminee_*`).
+    let oid = a.node.st.hearth.detail(&g).unwrap().orphans[0].id.clone();
+    a.node.st.hearth_orphan_publish(&id, &oid).await.unwrap();
+    assert_eq!(orphan_files(a, &g).len(), 0);
+    let head = a.rt().head(&g).unwrap();
+    assert_eq!((head.header.kind, head.header.parent, head.header.number), (VersionKind::Session, Some(v1.id()), 2));
+    for p in &peers {
+        p.stop().await;
+    }
+}
+
+/// Un plantage sans mod identifiable dit « cause inconnue » ; le prochain serveur efface l'annonce, et une fin propre
+/// ensuite publie comme avant.
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn plantage_sans_mod_connu_puis_nouvelle_partie_publiee() {
+    let (peers, g, id, v1) = alice_heberge_avec_bob(&["[12:00:00] [Server thread/ERROR]: Exception in server tick loop"]).await;
+    let (a, b) = (&peers[0], &peers[1]);
+    a.runner.die(-1);
+    wait_for("serveur d'Alice arrêté", 30, || a.state_of(&g) != HearthStateKind::Hosting).await;
+    wait_for("plantage chez Bob", 20, || b.rt().card(&g).unwrap().crash.is_some()).await;
+    assert_eq!(b.rt().card(&g).unwrap().crash.unwrap().mod_hint, None);
+    assert_eq!(a.rt().head(&g).unwrap().id(), v1.id());
+
+    // Nouvelle partie chez Alice : l'annonce disparaît, la fin propre publie une Session.
+    a.rt().probe_all().await;
+    a.node.st.hearth_play(&id).await.unwrap();
+    assert_eq!(a.state_of(&g), HearthStateKind::Hosting);
+    assert!(a.rt().card(&g).unwrap().crash.is_none());
+    wait_for("Bob voit la partie", 20, || b.state_of(&g) == HearthStateKind::Hosted).await;
+    assert!(b.rt().card(&g).unwrap().crash.is_none());
+    a.close_game();
+    wait_for("serveur d'Alice arrêté", 30, || a.state_of(&g) != HearthStateKind::Hosting).await;
+    wait_for("monde publié", 30, || !a.rt().has_session_marker(&g)).await;
+    assert!(a.rt().card(&g).unwrap().crash.is_none());
+    let head = a.rt().head(&g).unwrap();
+    assert_eq!((head.header.kind, head.header.parent), (VersionKind::Session, Some(v1.id())));
+    for p in &peers {
+        p.stop().await;
+    }
+}
+
+/// Code 0 sans arrêt demandé (un `/stop` tapé dans la console du serveur) : fin propre, le monde est publié et le bail
+/// relâché avec `Stopped`, comme avant.
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn serveur_arrete_proprement_de_lui_meme_publie_la_session() {
+    let (peers, g, _id, v1) = alice_heberge_avec_bob(&[]).await;
+    let (a, b) = (&peers[0], &peers[1]);
+    a.runner.die(0);
+    wait_for("serveur d'Alice arrêté", 30, || a.state_of(&g) != HearthStateKind::Hosting).await;
+    wait_for("monde publié", 30, || !a.rt().has_session_marker(&g)).await;
+    let head = a.rt().head(&g).unwrap();
+    assert_eq!((head.header.kind, head.header.parent), (VersionKind::Session, Some(v1.id())));
+    assert_eq!(a.rt().card(&g).unwrap().orphans, 0);
+    wait_for("version 2 chez Bob", 40, || b.rt().head(&g).is_some_and(|h| h.header.number == 2 && b.rt().world_complete(&h))).await;
+    assert!(b.rt().card(&g).unwrap().crash.is_none());
     for p in &peers {
         p.stop().await;
     }

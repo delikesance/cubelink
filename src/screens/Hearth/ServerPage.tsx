@@ -8,7 +8,7 @@ import type { FriendWithPresence, HearthDetail, HearthProposal, Instance, Servic
 import { Select, BackButton, Badge, Button, Card, Icon, ICONS, StatusDot } from "../../ui";
 import { Avatar } from "../Friends/Avatar";
 import { Modal } from "../Main/Modal";
-import { errText, fmtDate, fmtPlayed, fmtSize, mainAction, plural, resumeLabel, stateHint, stateText } from "./format";
+import { crashText, errText, fmtDate, fmtPlayed, fmtSize, mainAction, plural, resumeLabel, stateHint, stateText } from "./format";
 import { useHearthRun } from "./usePlay";
 
 const TABS = [["membres", "Membres"], ["historique", "Historique"], ["reglages", "Réglages"]] as const;
@@ -340,6 +340,20 @@ export default function ServerPage({ id }: { id: string }) {
           </span>
           <Button loading={busy} onClick={() => { const r = resumeLabel(c); void run(() => services.hearthUncleanChoice(c.id, r.choice), c.id); }}>{resumeLabel(c).label}</Button>
           <Button variant="secondary" onClick={() => { void run(() => services.hearthUncleanChoice(c.id, "wait")); }}>Attendre</Button>
+        </div>
+      )}
+
+      {c.crash && (
+        <div className="hearth-banner" role="status">
+          <Icon d={ICONS.alert} size={20} />
+          <span className="hearth-row-txt">
+            <strong>{crashText(c)}</strong>
+            <span className="hearth-meta">
+              {c.crash.mine
+                ? "Le monde de cette partie n'a pas été publié : il est gardé de côté sur ce PC, à toi de choisir ce que tu en fais."
+                : "Son monde n'a pas été publié : le groupe repart du dernier point de reprise."}
+            </span>
+          </span>
         </div>
       )}
 

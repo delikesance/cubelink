@@ -565,6 +565,8 @@ export type HearthCard_Deserialize = {
 	version?: number | null,
 	/**  Fins de partie non publiées, mises de côté sur ce PC (`HearthDetail::orphans`) : l'hôte n'a pas encore choisi. */
 	orphans: number,
+	/**  Le serveur a planté à la fin de la dernière partie (`None` tant qu'un nouveau serveur n'a pas été lancé). */
+	crash?: HearthCrash_Deserialize | null,
 };
 
 /**  Carte d'un serveur de groupe sur l'accueil (événement `hearth://state`, commande `hearth_list`). */
@@ -598,6 +600,29 @@ export type HearthCard_Serialize = {
 	version: number | null,
 	/**  Fins de partie non publiées, mises de côté sur ce PC (`HearthDetail::orphans`) : l'hôte n'a pas encore choisi. */
 	orphans: number,
+	/**  Le serveur a planté à la fin de la dernière partie (`None` tant qu'un nouveau serveur n'a pas été lancé). */
+	crash: HearthCrash_Serialize | null,
+};
+
+/**  Dernier plantage du serveur d'un groupe : qui l'hébergeait et le mod probablement en cause. */
+export type HearthCrash = HearthCrash_Serialize | HearthCrash_Deserialize;
+
+/**  Dernier plantage du serveur d'un groupe : qui l'hébergeait et le mod probablement en cause. */
+export type HearthCrash_Deserialize = {
+	host: HearthMemberLite,
+	/**  Le serveur qui a planté était le mien (sur ce PC). */
+	mine: boolean,
+	/**  Mod probable d'après la fin de la sortie du serveur ; `None` : cause inconnue. */
+	mod_hint?: string | null,
+};
+
+/**  Dernier plantage du serveur d'un groupe : qui l'hébergeait et le mod probablement en cause. */
+export type HearthCrash_Serialize = {
+	host: HearthMemberLite,
+	/**  Le serveur qui a planté était le mien (sur ce PC). */
+	mine: boolean,
+	/**  Mod probable d'après la fin de la sortie du serveur ; `None` : cause inconnue. */
+	mod_hint: string | null,
 };
 
 /**  Page du serveur (commande `hearth_detail`). */

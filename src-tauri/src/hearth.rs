@@ -19,11 +19,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
-use core_lib::hearth::server::{log_message, InstallRequest, LineSink, ServerConfig, ServerInstaller};
+use core_lib::hearth::server::{diagnose_failure, log_message, InstallRequest, LineSink, ServerConfig, ServerInstaller};
 use core_lib::instance::InstanceStore;
 use core_lib::types::{
     HearthBlocker, HearthBranch, HearthCard, HearthDetail, HearthInvite, HearthMember, HearthMemberLite, HearthOrphan, HearthProposal,
-    HearthSettings, HearthStateKind, HearthUnclean, HearthVersion, LoaderSpec,
+    HearthCrash, HearthSettings, HearthStateKind, HearthUnclean, HearthVersion, LoaderSpec,
 };
 use iroh::{Endpoint, EndpointAddr};
 use p2p_lib::friends_db::FriendsDb;
@@ -181,8 +181,10 @@ pub trait RunningServer: Send + Sync {
     fn flush_end(&self) -> BoxFut<'_, Result<(), String>>;
     /// `stop`, puis arrêt forcé après `grace`.
     fn stop(&self, grace: Duration) -> BoxFut<'_, ()>;
-    /// Le serveur s'est arrêté (plantage ou `stop`).
-    fn wait_exit(&self) -> BoxFut<'_, ()>;
+    /// Le serveur s'est arrêté (plantage ou `stop`) : rend son code de sortie (`-1` s'il est inconnu).
+    fn wait_exit(&self) -> BoxFut<'_, i32>;
+    /// Les `n` dernières lignes de la sortie du serveur (pour chercher le mod en cause après un plantage).
+    fn recent_lines(&self, n: usize) -> Vec<String>;
 }
 
 pub trait ServerRunner: Send + Sync {
@@ -229,10 +231,11 @@ impl RunningServer for RealServer {
             self.0.stop(grace).await;
         })
     }
-    fn wait_exit(&self) -> BoxFut<'_, ()> {
-        Box::pin(async move {
-            self.0.wait_exit().await;
-        })
+    fn wait_exit(&self) -> BoxFut<'_, i32> {
+        Box::pin(async move { self.0.wait_exit().await })
+    }
+    fn recent_lines(&self, n: usize) -> Vec<String> {
+        self.0.recent_lines(n)
     }
 }
 
@@ -442,7 +445,22 @@ pub struct ActiveHost {
     played_since_checkpoint: Arc<AtomicBool>,
     tasks: Mutex<Vec<JoinHandle<()>>>,
     stopping: AtomicBool,
+    /// Le serveur est mort seul avec un code d'erreur (sans arrêt demandé) : le monde n'est pas publié (§ 7.5).
+    crashed: Mutex<Option<CrashInfo>>,
 }
+
+/// Plantage du serveur d'une partie hébergée.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CrashInfo {
+    pub code: i32,
+    /// Mod probablement en cause, d'après la fin de la sortie du serveur.
+    pub mod_hint: Option<String>,
+}
+
+/// Nombre de lignes de la sortie du serveur lues pour trouver le mod en cause d'un plantage.
+const CRASH_TAIL_LINES: usize = 1000;
+/// Longueur maximale du mod probable gardé ou affiché (il vient aussi d'un autre membre).
+const MOD_HINT_MAX: usize = 120;
 
 impl ActiveHost {
     pub fn players(&self) -> u32 {
@@ -564,6 +582,9 @@ pub struct HearthRuntime {
     clock: Mutex<Arc<dyn Clock>>,
     /// Groupes dont un premier « Jouer » a reçu un bail « au mieux » : le second clic vaut confirmation.
     best_effort: Mutex<HashMap<GroupId, Instant>>,
+    /// Dernier plantage de serveur connu par groupe (hôte, mod probable) : annoncé par `LeaseRelease { Crashed }`, ou vu
+    /// chez moi. Effacé dès qu'un nouveau bail est accepté ou que je lance un serveur.
+    crashes: Mutex<HashMap<GroupId, (PeerKey, Option<String>)>>,
     me_weak: Weak<HearthRuntime>,
 }
 
@@ -737,6 +758,7 @@ impl HearthRuntime {
             stop_all: tokio::sync::Mutex::new(()),
             clock: Mutex::new(Arc::new(SystemClock)),
             best_effort: Mutex::new(HashMap::new()),
+            crashes: Mutex::new(HashMap::new()),
             me_weak: w.clone(),
         }))
     }
@@ -1799,6 +1821,7 @@ impl HearthDelegate for HearthRuntime {
             });
         }
         if matches!(r, Ok(Observed::Accepted)) {
+            lock(&self.crashes).remove(&gid);
             // Je suis moi-même en train d'héberger : si ce bail gagne et que personne ne joue sur mon serveur, je cède.
             // Le bail adverse est renouvelé toutes les quelques secondes : `fenced` garantit une seule fin de partie.
             if let Some(host) = self.active(&gid).filter(|a| a.players() == 0) {
@@ -1834,11 +1857,16 @@ impl HearthDelegate for HearthRuntime {
         group: &GroupId,
         lease_id: LeaseId,
         last_seq: u64,
-        _reason: ReleaseReason,
+        reason: ReleaseReason,
         version: Option<VersionId>,
     ) {
         lock(&self.leases).release_lease(group, &from, &lease_id, last_seq, Instant::now());
         let gid = *group;
+        if let ReleaseReason::Crashed { mod_hint } = reason {
+            if last_seq > 0 {
+                self.note_crash(gid, from, mod_hint);
+            }
+        }
         // `last_seq == 0` : un candidat qui renonce à son claim, aucune partie n'avait été annoncée.
         if let (Some(Play::Joined { holder }), Some(st)) = (self.play_of(&gid), self.state(&gid)) {
             if last_seq > 0 && holder == from && self.active(&gid).is_none() {
@@ -2117,6 +2145,7 @@ impl HearthRuntime {
         lock(&self.status).retain(|(g, _), _| g != gid);
         lock(&self.play).remove(gid);
         lock(&self.best_effort).remove(gid);
+        lock(&self.crashes).remove(gid);
         for e in self.outbox.pending().into_iter().filter(|e| e.group_id() == *gid) {
             let _ = self.outbox.remove(&e.id());
         }
@@ -2652,6 +2681,7 @@ impl HearthRuntime {
             Some(e) => self.resign(lock(&e.lease).ready()),
             None => self.new_signed_lease(gid, LeasePhase::Ready, base, new_lease_id()),
         };
+        lock(&self.crashes).remove(&gid);
         let host = Arc::new(ActiveHost {
             group: gid,
             instance_id: p.instance_id,
@@ -2666,6 +2696,7 @@ impl HearthRuntime {
             played_since_checkpoint: played,
             tasks: Mutex::new(Vec::new()),
             stopping: AtomicBool::new(false),
+            crashed: Mutex::new(None),
         });
         lock(&self.active).insert(gid, host.clone());
         Ok(host)
@@ -3029,9 +3060,17 @@ impl HearthRuntime {
         });
         let (rt, h) = (self.clone(), host.clone());
         let watch = spawn(async move {
-            h.server.wait_exit().await;
+            let code = h.server.wait_exit().await;
             if !h.stopping.load(Ordering::SeqCst) {
-                eprintln!("[cubelink] le serveur du groupe {} s'est arrêté seul", h.group);
+                // Un code non nul sans arrêt demandé est un plantage (ou un processus tué : `-1`). Code 0 : le serveur a
+                // fini proprement (un `/stop` tapé dans sa console), son monde est complet et se publie comme une fin normale.
+                if code != 0 {
+                    let mod_hint = diagnose_failure(&h.server.recent_lines(CRASH_TAIL_LINES));
+                    eprintln!("[cubelink] le serveur du groupe {} a planté (code {code}, mod probable : {mod_hint:?})", h.group);
+                    *lock(&h.crashed) = Some(CrashInfo { code, mod_hint });
+                } else {
+                    eprintln!("[cubelink] le serveur du groupe {} s'est arrêté seul", h.group);
+                }
                 // Tâche détachée : la fin de partie abandonne les tâches de l'hôte, dont celle-ci. Lancée d'ici, elle serait
                 // annulée à son premier point d'attente (la publication) et le plantage ne serait jamais traité jusqu'au bout.
                 let gid = h.group;
@@ -3175,8 +3214,18 @@ impl HearthRuntime {
         self.emit_state();
     }
 
+    /// Retient le plantage d'un serveur du groupe pour l'afficher (carte et page du serveur).
+    fn note_crash(&self, gid: GroupId, host: PeerKey, mod_hint: Option<String>) {
+        let hint = mod_hint.map(|h| h.chars().take(MOD_HINT_MAX).collect::<String>()).filter(|h| !h.trim().is_empty());
+        lock(&self.crashes).insert(gid, (host, hint));
+    }
+
     /// Fin de la partie : le serveur s'arrête, le monde est publié (version `Session`), le bail est relâché.
     /// Rend la version publiée.
+    ///
+    /// Si le serveur a planté (mort seul avec un code d'erreur), rien n'est publié : cela propagerait peut-être le chunk
+    /// qui fait planter le serveur (§ 7.5). Le monde est mis de côté comme une fin de partie non publiée (l'hôte le publie
+    /// ou le jette), la tête reste le dernier point de reprise et le bail est relâché avec `Crashed`.
     pub async fn finish_hosting(self: &Arc<Self>, gid: GroupId) -> Result<Option<SignedVersion>, String> {
         let host = lock(&self.active).remove(&gid).ok_or("aucun serveur n'est lancé pour ce groupe")?;
         host.stopping.store(true, Ordering::SeqCst);
@@ -3186,24 +3235,44 @@ impl HearthRuntime {
         host.server.stop(SERVER_STOP_GRACE).await;
         let dir = host.server.world_dir();
         let tip = *lock(&host.tip);
-        let published = if dir.is_dir() {
+        let crash = lock(&host.crashed).take();
+        let published = if crash.is_some() {
+            Ok(None)
+        } else if dir.is_dir() {
             self.publish_version(gid, &dir, VersionKind::Session, tip, host.started.elapsed().as_secs()).await.map(Some)
         } else {
             Ok(None)
         };
-        match &published {
-            Ok(Some(v)) => {
+        match (&published, &crash) {
+            // Plantage : le marqueur reste jusqu'à la mise de côté ; si elle échoue, le prochain « Jouer » la refait.
+            (_, Some(c)) => {
+                self.note_crash(gid, self.me, c.mod_hint.clone());
+                if let Err(e) = self.shelve_unpublished_world(gid).await {
+                    eprintln!("[cubelink] groupe {gid} : le monde du serveur planté n'a pas pu être mis de côté : {e}");
+                }
+            }
+            (Ok(Some(v)), None) => {
                 self.set_materialized(&gid, Some(v.id()));
                 self.clear_session_marker(&gid);
             }
             // Pas de dossier de monde : rien à publier. Une publication en échec laisse le marqueur : le prochain « Jouer »
             // mettra le monde de côté au lieu de l'écraser.
-            Ok(None) => self.clear_session_marker(&gid),
-            Err(_) => {}
+            (Ok(None), None) => self.clear_session_marker(&gid),
+            (Err(_), None) => {}
         }
-        let vid = published.as_ref().ok().and_then(|v| v.as_ref().map(SignedVersion::id));
+        // Après un plantage, la tête annoncée est le dernier point de reprise publié (la base de la partie sinon).
+        let vid = match &crash {
+            Some(_) => tip.map(|t| t.0),
+            None => published.as_ref().ok().and_then(|v| v.as_ref().map(SignedVersion::id)),
+        };
         let l = lock(&host.lease).clone();
-        let reason = if host.fenced.load(Ordering::SeqCst) { ReleaseReason::Suspend } else { ReleaseReason::Stopped };
+        let reason = if host.fenced.load(Ordering::SeqCst) {
+            ReleaseReason::Suspend
+        } else if let Some(c) = &crash {
+            ReleaseReason::Crashed { mod_hint: c.mod_hint.clone() }
+        } else {
+            ReleaseReason::Stopped
+        };
         let visit: Visit = Arc::new(move |c| {
             let reason = reason.clone();
             Box::pin(async move { c.release_lease(&gid, l.lease_id, l.seq, reason, vid).await })
@@ -3261,6 +3330,7 @@ impl HearthRuntime {
             instance_id: instance_id.clone(),
             version: heads.first().map(|h| h.header.number),
             orphans: self.orphan_count(gid) as u32,
+            crash: None,
         };
         let decision = self.decision(gid);
         let holder_of = |k: &PeerKey| Some(self.lite(&st, k));
@@ -3312,6 +3382,11 @@ impl HearthRuntime {
         }
         if let (HearthStateKind::PackMissing, Some(Decision::Join(h))) = (card.state, decision) {
             card.host = holder_of(&h);
+        }
+        if matches!(card.state, HearthStateKind::Idle | HearthStateKind::PackMissing) {
+            card.crash = lock(&self.crashes)
+                .get(gid)
+                .map(|(k, hint)| HearthCrash { host: self.lite(&st, k), mine: *k == self.me, mod_hint: hint.clone() });
         }
         Some(card)
     }

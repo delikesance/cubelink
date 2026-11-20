@@ -28,6 +28,8 @@ export const commands = {
 	authBeginLogin: (options?: InvokeOptions) => __TAURI_INVOKE<DeviceCodeInfo>("auth_begin_login", undefined, options),
 	/**  Attend la validation du code d'appareil et renvoie le profil connecté. */
 	authPollLogin: (options?: InvokeOptions) => __TAURI_INVOKE<Profile>("auth_poll_login", undefined, options),
+	/**  Abandonne la connexion Microsoft en cours (le code n'est plus attendu ; une validation tardive n'ajoute aucun compte). */
+	authCancelLogin: (options?: InvokeOptions) => __TAURI_INVOKE<void>("auth_cancel_login", undefined, options),
 	/**  Déconnecte le compte actif. */
 	authLogout: (options?: InvokeOptions) => __TAURI_INVOKE<null>("auth_logout", undefined, options),
 	/**  Crée ou reprend un compte hors ligne au pseudo donné. */
@@ -52,16 +54,16 @@ export const commands = {
 	instancesOpenFolder: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("instances_open_folder", { id }, options),
 	/**  Fin de `latest.log` (ou `latest.log.old`) de l'instance. */
 	instancesLogs: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<string>("instances_logs", { id }, options),
-	/**  Data URL d'un fichier d'illustration (`icon` ou une capture), réduit à `max_px` de côté (512 par défaut). */
+	/**  Data URL d'un fichier d'illustration (`icon` ou une capture), réduit à `max_px` de côté (512 par défaut). Décodage hors du thread principal. */
 	instancesArtImage: (instanceId: string, file: string, maxPx: number | null, options?: InvokeOptions) => __TAURI_INVOKE<string>("instances_art_image", { instance_id: instanceId, file, max_px: maxPx }, options),
-	/**  Remplace l'icône ou la bannière (`role` : "icon" ou "banner") par une image choisie par le joueur. */
+	/**  Remplace l'icône ou la bannière (`role` : "icon" ou "banner") par une image choisie par le joueur. Lecture et écriture hors du thread principal ; autorisé pendant le jeu (`art/` n'est pas le dossier de jeu). */
 	instancesArtSet: (instanceId: string, path: string, role: string, options?: InvokeOptions) => __TAURI_INVOKE<Instance_Serialize>("instances_art_set", { instance_id: instanceId, path, role }, options),
 	/**  Cherche l'illustration du modpack et l'applique. `auto` : recherche silencieuse de l'accueil (nom identique seulement). */
 	instancesArtLookup: (instanceId: string, auto: boolean | null, options?: InvokeOptions) => __TAURI_INVOKE<Instance_Serialize>("instances_art_lookup", { instance_id: instanceId, auto }, options),
 	/**  Description longue du modpack, en HTML déjà nettoyé ; `None` sans projet d'origine. */
 	instancesDescription: (instanceId: string, options?: InvokeOptions) => __TAURI_INVOKE<string | null>("instances_description", { instance_id: instanceId }, options),
 	/**  Test de connexion réseau (Paramètres → « Tester ma connexion »). */
-	netTest: (options?: InvokeOptions) => __TAURI_INVOKE<NetTest_Serialize>("net_test", undefined, options),
+	netTest: (options?: InvokeOptions) => __TAURI_INVOKE<NetTest>("net_test", undefined, options),
 	/**  Mon code ami (`mcl1-…`). */
 	friendMyCode: (options?: InvokeOptions) => __TAURI_INVOKE<FriendCode>("friend_my_code", undefined, options),
 	/**  Génère un nouveau code ami (l'ancien ne marche plus). */
@@ -103,11 +105,17 @@ export const commands = {
 	systemRamMb: (options?: InvokeOptions) => __TAURI_INVOKE<number | null>("system_ram_mb", undefined, options),
 	/**  Le front envoie les réglages dans `{ settings }`. */
 	settingsSet: (settings: SettingsInput_Deserialize, options?: InvokeOptions) => __TAURI_INVOKE<Settings_Serialize>("settings_set", { settings }, options),
+	/**  Sauvegarde l'identité et la liste d'amis dans un fichier `.cubelink-id` chiffré. Renvoie la clé publique. */
+	identityExport: (path: string, passphrase: string, options?: InvokeOptions) => __TAURI_INVOKE<string>("identity_export", { path, passphrase }, options),
+	/**  Valide une sauvegarde et la prépare ; elle s'applique au redémarrage (`identity_restart`). Renvoie la clé publique. */
+	identityImport: (path: string, passphrase: string, options?: InvokeOptions) => __TAURI_INVOKE<string>("identity_import", { path, passphrase }, options),
+	/**  Redémarre Cubelink pour appliquer la restauration préparée par `identity_import`. */
+	identityRestart: (options?: InvokeOptions) => __TAURI_INVOKE<null>("identity_restart", undefined, options),
 	/**  Recherche dans le catalogue (Modrinth ou CurseForge). */
 	browseSearch: (query: BrowseQuery_Deserialize, options?: InvokeOptions) => __TAURI_INVOKE<BrowsePage_Serialize>("browse_search", { query }, options),
 	/**  Versions d'un projet du catalogue, filtrées par version de Minecraft et loader. */
 	browseVersions: (source: string, id: string, kind: string, minecraft: string | null, loader: string | null, options?: InvokeOptions) => __TAURI_INVOKE<BrowseVersion[]>("browse_versions", { source, id, kind, minecraft, loader }, options),
-	/**  Installe un projet du catalogue (nouvelle instance pour un modpack). Progression par `browse://progress`. */
+	/**  Installe un projet du catalogue (nouvelle instance pour un modpack). Un mod remplace les jars du même mod déjà présents sous un autre nom (modpack, ajout manuel) : ils vont dans `mods/.cubelink-backup/<id>/` (restaurables avec `mods_fix_undo` sur cet id ; le résultat de `browse_install` ne le renvoie pas encore, donc l'interface n'offre pas d'annulation). Une dépendance déjà fournie par un jar activé sous un autre nom est ignorée. Progression par `browse://progress`. */
 	browseInstall: (input: BrowseInstallInput_Deserialize, options?: InvokeOptions) => __TAURI_INVOKE<BrowseInstallResult_Serialize>("browse_install", { input }, options),
 	/**  Mods d'une instance (activés ou non). */
 	modsList: (instanceId: string, options?: InvokeOptions) => __TAURI_INVOKE<ModEntry[]>("mods_list", { instance_id: instanceId }, options),
@@ -167,15 +175,17 @@ export const commands = {
 	hearthStop: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_stop", { id }, options),
 	/**  Choix du groupe après une partie mal terminée. */
 	hearthUncleanChoice: (id: string, choice: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_unclean_choice", { id, choice }, options),
+	/**  Jouer depuis la dernière version complète quand le contenu de la dernière version n'est chez personne de joignable. */
+	hearthPlayFromPrevious: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_play_from_previous", { id }, options),
 	/**  Associe l'instance locale du modpack au groupe. */
 	hearthSetInstance: (id: string, instanceId: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_set_instance", { id, instance_id: instanceId }, options),
 	/**  Propose d'ajouter un ami au groupe. */
 	hearthAddMember: (id: string, publicKey: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_add_member", { id, public_key: publicKey }, options),
 	/**  Propose de retirer un membre du groupe. */
 	hearthRemoveMember: (id: string, publicKey: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_remove_member", { id, public_key: publicKey }, options),
-	/**  Quitte le groupe. */
-	hearthLeave: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_leave", { id }, options),
-	/**  Supprime le serveur de ce PC seulement, sans prévenir le groupe : arrête mon serveur, libère les blobs et efface le dossier (repli quand quitter est impossible). */
+	/**  Quitte le groupe, après avoir attendu (jusqu'à 5 min) que ma dernière partie soit remise à un membre. Rejette `{ code: "last_member" | "unreachable" | "outbox_pending" | "orphan_pending" | "other", message? }` : rien n'est supprimé dans ces cas. `force: true` saute l'attente de la file d'envoi (la dernière partie est perdue pour le groupe) et la garde d'une fin de partie non publiée (elle est supprimée avec le monde). */
+	hearthLeave: (id: string, force: boolean | null, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_leave", { id, force }, options),
+	/**  Supprime le serveur de ce PC seulement, sans prévenir le groupe : arrête mon serveur, libère les blobs et efface le dossier (choix explicite de l'utilisateur quand personne n'est joignable, jamais un repli automatique). */
 	hearthForget: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_forget", { id }, options),
 	/**  Approuve une décision du groupe en attente. */
 	hearthVote: (id: string, proposalId: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_vote", { id, proposal_id: proposalId }, options),
@@ -187,6 +197,10 @@ export const commands = {
 	hearthRestore: (id: string, versionId: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_restore", { id, version_id: versionId }, options),
 	/**  Choisit la version gardée quand le monde a deux versions. */
 	hearthResolveFork: (id: string, versionId: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_resolve_fork", { id, version_id: versionId }, options),
+	/**  Publie une fin de partie non publiée mise de côté (`HearthDetail.orphans`) : une nouvelle `Session`, enfant de la version dont elle est partie (une fourche si le groupe a avancé). */
+	hearthOrphanPublish: (id: string, orphanId: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_orphan_publish", { id, orphan_id: orphanId }, options),
+	/**  Supprime une fin de partie non publiée mise de côté. */
+	hearthOrphanDiscard: (id: string, orphanId: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_orphan_discard", { id, orphan_id: orphanId }, options),
 	/**  Garde le serveur ouvert quand le jeu de ce PC se ferme. */
 	hearthSetBackground: (id: string, on: boolean, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_set_background", { id, on }, options),
 	/**  État de l'acceptation du CLUF Minecraft (serveur dédié) et son adresse. */
@@ -215,6 +229,11 @@ export const commands = {
 	stageLayout: (x: number, y: number, w: number, h: number, panelW: number, options?: InvokeOptions) => __TAURI_INVOKE<void>("stage_layout", { x, y, w, h, panel_w: panelW }, options),
 	/**  La zone de jeu integree existe sur cette plateforme (l'interface n'affiche le reglage « Jeu integre » que dans ce cas). */
 	stageSupported: (options?: InvokeOptions) => __TAURI_INVOKE<boolean>("stage_supported", undefined, options),
+	/**
+	 *  Le joueur redonne sa chance a la Scene apres une coupure de session (replis de suite) : le prochain lancement y retourne.
+	 *  Rend vrai si ce prochain lancement ira dans la Scene (hote present, reglage « Jeu integre » actif).
+	 */
+	stageRetry: (options?: InvokeOptions) => __TAURI_INVOKE<boolean>("stage_retry", undefined, options),
 	/**  État de la mise à jour automatique du launcher. */
 	updateState: (options?: InvokeOptions) => __TAURI_INVOKE<UpdateState_Serialize>("update_state", undefined, options),
 	/**  Vérifie s'il existe une mise à jour ; si oui, le téléchargement démarre en arrière-plan. */
@@ -562,6 +581,8 @@ export type HearthCard_Deserialize = {
 	instance_id?: string | null,
 	/**  Numéro de la version du monde la plus récente connue. */
 	version?: number | null,
+	/**  Fins de partie non publiées, mises de côté sur ce PC (`HearthDetail::orphans`) : l'hôte n'a pas encore choisi. */
+	orphans: number,
 };
 
 /**  Carte d'un serveur de groupe sur l'accueil (événement `hearth://state`, commande `hearth_list`). */
@@ -593,6 +614,8 @@ export type HearthCard_Serialize = {
 	instance_id: string | null,
 	/**  Numéro de la version du monde la plus récente connue. */
 	version: number | null,
+	/**  Fins de partie non publiées, mises de côté sur ce PC (`HearthDetail::orphans`) : l'hôte n'a pas encore choisi. */
+	orphans: number,
 };
 
 /**  Page du serveur (commande `hearth_detail`). */
@@ -606,6 +629,8 @@ export type HearthDetail_Deserialize = {
 	proposals: HearthProposal_Deserialize[],
 	blocker?: HearthBlocker | null,
 	fork: HearthBranch[],
+	/**  Fins de partie non publiées, de la plus récente à la plus ancienne. */
+	orphans: HearthOrphan_Deserialize[],
 	settings: HearthSettings_Deserialize,
 };
 
@@ -617,6 +642,8 @@ export type HearthDetail_Serialize = {
 	proposals: HearthProposal_Serialize[],
 	blocker: HearthBlocker | null,
 	fork: HearthBranch[],
+	/**  Fins de partie non publiées, de la plus récente à la plus ancienne. */
+	orphans: HearthOrphan_Serialize[],
 	settings: HearthSettings_Serialize,
 };
 
@@ -675,6 +702,42 @@ export type HearthMember_Serialize = {
 	version: number | null,
 	/**  Jours depuis qu'on l'a vu en ligne (`None` : jamais vu, ou en ligne). */
 	unseen_days: number | null,
+};
+
+/**
+ *  Fin de partie non publiée (plantage, arrêt de Cubelink, fermeture trop longue), mise de côté sur ce PC. Jamais annoncée
+ *  aux autres membres : l'hôte la publie ou la supprime.
+ */
+export type HearthOrphan = HearthOrphan_Serialize | HearthOrphan_Deserialize;
+
+/**
+ *  Fin de partie non publiée (plantage, arrêt de Cubelink, fermeture trop longue), mise de côté sur ce PC. Jamais annoncée
+ *  aux autres membres : l'hôte la publie ou la supprime.
+ */
+export type HearthOrphan_Deserialize = {
+	id: string,
+	/**  Dernière écriture du monde (secondes Unix). */
+	at: number,
+	/**  Temps de jeu approximatif de cette partie. */
+	played_secs: number,
+	/**  Numéro de la version dont la partie était partie (point de reprise le plus récent), si connue. */
+	base_number?: number | null,
+	size_bytes: number,
+};
+
+/**
+ *  Fin de partie non publiée (plantage, arrêt de Cubelink, fermeture trop longue), mise de côté sur ce PC. Jamais annoncée
+ *  aux autres membres : l'hôte la publie ou la supprime.
+ */
+export type HearthOrphan_Serialize = {
+	id: string,
+	/**  Dernière écriture du monde (secondes Unix). */
+	at: number,
+	/**  Temps de jeu approximatif de cette partie. */
+	played_secs: number,
+	/**  Numéro de la version dont la partie était partie (point de reprise le plus récent), si connue. */
+	base_number: number | null,
+	size_bytes: number,
 };
 
 /**  Décision du groupe en attente de votes. */
@@ -1004,6 +1067,29 @@ export type LaunchStateEvent_Serialize = {
 	message?: string,
 };
 
+/**
+ *  Échec de `hearth_leave`, avec un code stable pour que l'écran choisisse quoi proposer. Seul `Unreachable` autorise le
+ *  repli « supprimer quand même ce PC » (après une seconde confirmation), et seuls `OutboxPending` et `OrphanPending` autorisent de rejouer avec
+ *  `force` (« Quitter quand même », la dernière partie sera perdue pour le groupe) ; jamais une autre erreur.
+ */
+export type LeaveError = 
+/**  Je suis le dernier membre : quitter effacerait la seule copie du monde. Rien n'a été touché. */
+{ code: "last_member" } | 
+/**  Aucun autre membre n'a reçu mon départ. Rien n'a été supprimé. */
+{ code: "unreachable" } | 
+/**
+ *  Ma dernière partie n'a été remise à aucun membre (file d'envoi non vidée) : la quitter maintenant la perdrait pour le
+ *  groupe. Rien n'a été supprimé ; mon serveur est arrêté et la version reste en file. Rejouable, ou avec `force`.
+ */
+{ code: "outbox_pending" } | 
+/**
+ *  Une fin de partie non publiée est mise de côté sur ce PC : quitter la supprimerait. Rien n'a été supprimé ; rejouable
+ *  avec `force` (« Quitter quand même »), ou après l'avoir publiée ou supprimée depuis la page du serveur.
+ */
+{ code: "orphan_pending" } | 
+/**  Toute autre erreur (quota, disque, jeu en cours…) : message affichable, rien n'est supprimé par le front. */
+{ code: "other"; message: string };
+
 export type Loader = "vanilla" | "neoforge" | "fabric" | "quilt" | "forge";
 
 export type LoaderSpec = {
@@ -1118,45 +1204,20 @@ export type ModIssue_Serialize = {
 	related?: string,
 };
 
-/**  Résultat du test « Ta connexion avec tes amis » (Paramètres). */
-export type NetTest = NetTest_Serialize | NetTest_Deserialize;
-
-/**  Résultat du test « Ta connexion avec tes amis » (Paramètres). */
-export type NetTest_Deserialize = {
-	/**  Connecté à un relais (secours quand la connexion directe échoue). */
-	relay_connected: boolean,
-	/**  Nom d'hôte du relais (« euc1-1.relay.n0.iroh.link »). */
-	relay?: string | null,
-	/**  Latence vers ce relais, en millisecondes. */
-	relay_ms?: number | null,
-	/**  L'UDP passe (indispensable à la connexion directe). */
-	udp: boolean,
+/**
+ *  Résultat du test « Ta connexion avec tes amis » (Paramètres). Aucun relais ni serveur tiers : ce test dit seulement
+ *  si cet appareil est joignable directement par un ami (IPv6 publique ou port ouvert sur la box).
+ */
+export type NetTest = {
+	/**
+	 *  Une adresse IPv6 globale est disponible : un ami peut s'y connecter sans que la box ouvre quoi que ce soit (si
+	 *  aucun pare-feu ne la filtre).
+	 */
 	ipv6: boolean,
-	/**  Connexion directe : `Some(true)` facile, `Some(false)` routeur strict (adresse publique changeante), `None` inconnu. */
-	direct?: boolean | null,
-	/**  Réglage « Passer toujours par le relais ». */
-	relay_only: boolean,
-	/**  Le rapport réseau n'est pas arrivé à temps : `udp` et `direct` ne sont pas fiables. */
-	partial: boolean,
-};
-
-/**  Résultat du test « Ta connexion avec tes amis » (Paramètres). */
-export type NetTest_Serialize = {
-	/**  Connecté à un relais (secours quand la connexion directe échoue). */
-	relay_connected: boolean,
-	/**  Nom d'hôte du relais (« euc1-1.relay.n0.iroh.link »). */
-	relay: string | null,
-	/**  Latence vers ce relais, en millisecondes. */
-	relay_ms: number | null,
-	/**  L'UDP passe (indispensable à la connexion directe). */
-	udp: boolean,
-	ipv6: boolean,
-	/**  Connexion directe : `Some(true)` facile, `Some(false)` routeur strict (adresse publique changeante), `None` inconnu. */
-	direct: boolean | null,
-	/**  Réglage « Passer toujours par le relais ». */
-	relay_only: boolean,
-	/**  Le rapport réseau n'est pas arrivé à temps : `udp` et `direct` ne sont pas fiables. */
-	partial: boolean,
+	/**  Une adresse IPv4 publique est portée directement par l'appareil (sans NAT). */
+	ipv4_public: boolean,
+	/**  La box a ouvert le port UDP de Cubelink (UPnP, NAT-PMP ou PCP). */
+	port_mapped: boolean,
 };
 
 export type Presence = "online" | "offline";
@@ -1169,7 +1230,13 @@ export type RequestsPage = {
 	total: number,
 };
 
-/**  Paramètres de l'application (écran Paramètres). Forme alignée sur `src/services/types.ts`. */
+/**
+ *  Paramètres de l'application (écran Paramètres). Forme alignée sur `src/services/types.ts`.
+ * 
+ *  #55 : les anciens champs `allow_relay`, `relay_only` (relais publics n0) et `discovery` (découverte n0) n'existent
+ *  plus. Un ancien `settings.json` qui les contient se charge sans erreur (champs inconnus ignorés) et ils
+ *  disparaissent à la réécriture.
+ */
 export type Settings = Settings_Serialize | Settings_Deserialize;
 
 /**  Entrée de `settings_set` : les champs de `Settings` ; les plus récents sont facultatifs (absents : valeur actuelle gardée). */
@@ -1181,11 +1248,8 @@ export type SettingsInput_Deserialize = {
 	default_ram_mb: number,
 	java_path?: string | null,
 	trust_default: TrustLevel,
-	allow_relay: boolean,
 	close_on_launch: boolean,
-	relay_only?: boolean | null,
 	share_mods?: boolean | null,
-	discovery?: boolean | null,
 	lan_auto?: boolean | null,
 	overlay_enabled?: boolean | null,
 	overlay_hotkey?: string | null,
@@ -1200,11 +1264,8 @@ export type SettingsInput_Serialize = {
 	default_ram_mb: number,
 	java_path: string | null,
 	trust_default: TrustLevel,
-	allow_relay: boolean,
 	close_on_launch: boolean,
-	relay_only: boolean | null,
 	share_mods: boolean | null,
-	discovery: boolean | null,
 	lan_auto: boolean | null,
 	overlay_enabled: boolean | null,
 	overlay_hotkey: string | null,
@@ -1213,7 +1274,13 @@ export type SettingsInput_Serialize = {
 	open_to_all_friends: boolean | null,
 };
 
-/**  Paramètres de l'application (écran Paramètres). Forme alignée sur `src/services/types.ts`. */
+/**
+ *  Paramètres de l'application (écran Paramètres). Forme alignée sur `src/services/types.ts`.
+ * 
+ *  #55 : les anciens champs `allow_relay`, `relay_only` (relais publics n0) et `discovery` (découverte n0) n'existent
+ *  plus. Un ancien `settings.json` qui les contient se charge sans erreur (champs inconnus ignorés) et ils
+ *  disparaissent à la réécriture.
+ */
 export type Settings_Deserialize = {
 	language: string,
 	/**
@@ -1223,18 +1290,9 @@ export type Settings_Deserialize = {
 	default_ram_mb: number,
 	java_path?: string | null,
 	trust_default: TrustLevel,
-	allow_relay: boolean,
 	close_on_launch: boolean,
-	/**  Réglage du design : toujours passer par le relais. */
-	relay_only: boolean,
 	/**  Réglage du design : envoyer des mods à mes amis. */
 	share_mods: boolean,
-	/**
-	 *  Découverte d'adresses publique (pkarr + DNS n0) : retrouver un ami dont l'adresse a changé.
-	 *  Publie la clé publique, le relais et les IP auprès de n0. Lu à la création de l'endpoint
-	 *  (redémarrage requis). `true` par défaut (fichiers de réglages anciens : `true`).
-	 */
-	discovery?: boolean,
 	/**
 	 *  Ouvrir automatiquement mon monde solo au réseau local (agent Java Cubelink, instances `Own`) pour que mes
 	 *  amis puissent le rejoindre sans manipulation. `true` par défaut (fichiers de réglages anciens : `true`).
@@ -1266,7 +1324,13 @@ export type Settings_Deserialize = {
 	ram_auto_migrated?: boolean,
 };
 
-/**  Paramètres de l'application (écran Paramètres). Forme alignée sur `src/services/types.ts`. */
+/**
+ *  Paramètres de l'application (écran Paramètres). Forme alignée sur `src/services/types.ts`.
+ * 
+ *  #55 : les anciens champs `allow_relay`, `relay_only` (relais publics n0) et `discovery` (découverte n0) n'existent
+ *  plus. Un ancien `settings.json` qui les contient se charge sans erreur (champs inconnus ignorés) et ils
+ *  disparaissent à la réécriture.
+ */
 export type Settings_Serialize = {
 	language: string,
 	/**
@@ -1276,18 +1340,9 @@ export type Settings_Serialize = {
 	default_ram_mb: number,
 	java_path: string | null,
 	trust_default: TrustLevel,
-	allow_relay: boolean,
 	close_on_launch: boolean,
-	/**  Réglage du design : toujours passer par le relais. */
-	relay_only: boolean,
 	/**  Réglage du design : envoyer des mods à mes amis. */
 	share_mods: boolean,
-	/**
-	 *  Découverte d'adresses publique (pkarr + DNS n0) : retrouver un ami dont l'adresse a changé.
-	 *  Publie la clé publique, le relais et les IP auprès de n0. Lu à la création de l'endpoint
-	 *  (redémarrage requis). `true` par défaut (fichiers de réglages anciens : `true`).
-	 */
-	discovery: boolean,
 	/**
 	 *  Ouvrir automatiquement mon monde solo au réseau local (agent Java Cubelink, instances `Own`) pour que mes
 	 *  amis puissent le rejoindre sans manipulation. `true` par défaut (fichiers de réglages anciens : `true`).
@@ -1341,8 +1396,6 @@ export type TransferProgress_Deserialize = {
 	bytes_total: number,
 	/**  Octets par seconde, 0 si inconnu. */
 	speed_bps: number,
-	/**  Vrai si le transfert passe par un relais. */
-	via_relay: boolean,
 	/**  Message d'échec (phase `failed`), en français. */
 	error?: string | null,
 };
@@ -1355,8 +1408,6 @@ export type TransferProgress_Serialize = {
 	bytes_total: number,
 	/**  Octets par seconde, 0 si inconnu. */
 	speed_bps: number,
-	/**  Vrai si le transfert passe par un relais. */
-	via_relay: boolean,
 	/**  Message d'échec (phase `failed`), en français. */
 	error?: string,
 };

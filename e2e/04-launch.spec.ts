@@ -29,7 +29,7 @@ async function installed(world: any, env: Record<string, string> = {}) {
   await appB.page.evaluate(() => { window.location.hash = '#/friends'; });
   await sleep(300);
   await appB.page.evaluate(() => { window.location.hash = '#/main'; });
-  await appB.page.waitForSelector('main[data-route="main"]');
+  await appB.page.waitForSelector('main[data-route="main"]', { timeout: 15_000 });
   return { ...ctx, guest: g! };
 }
 

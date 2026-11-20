@@ -611,7 +611,6 @@ mod tests {
 
     /// Fermeture du launcher et changement de modpack selon que le jeu a deja ete montre au joueur : faux hote (vraie machine du
     /// rideau) et un processus temoin inoffensif a la place de java.
-    #[cfg(windows)]
     mod quit {
         use super::*;
         use crate::stage::fake::{play, FakeHost};
@@ -619,12 +618,22 @@ mod tests {
         use core_lib::launch_run::{self, RunningGame};
         use std::path::Path;
 
+        /// Commande du processus temoin : dort 30 s sans rien faire.
+        #[cfg(windows)]
+        fn witness(cwd: std::path::PathBuf) -> LaunchCommand {
+            LaunchCommand::new("cmd".into(), vec!["/C".into(), "ping -n 30 127.0.0.1 >nul".into()], cwd)
+        }
+        #[cfg(not(windows))]
+        fn witness(cwd: std::path::PathBuf) -> LaunchCommand {
+            LaunchCommand::new("sleep".into(), vec!["30".into()], cwd)
+        }
+
         /// Processus temoin (30 s) tenu comme le jeu en cours ; une tache joue le role de la tache de jeu (fin du processus :
         /// fin annoncee a la Scene, verrou libere).
         async fn fake_game(st: &Arc<AppState>, dir: &Path) -> Arc<RunningGame> {
             let cwd = dir.join("jeu");
             std::fs::create_dir_all(&cwd).unwrap();
-            let cmd = LaunchCommand::new("cmd".into(), vec!["/C".into(), "ping -n 30 127.0.0.1 >nul".into()], cwd);
+            let cmd = witness(cwd);
             let game = Arc::new(launch_run::spawn(&cmd, &dir.join("journal-jeu")).await.unwrap());
             *lock(&st.game) = Some("jeu".into());
             *lock(&st.game_handle) = Some(("jeu".into(), game.clone()));

@@ -34,6 +34,12 @@ function GroupCard({ card, services, navigate }: { card: HearthCard; services: S
         </div>
       )}
       {hint && <p className="hearth-hint">{hint}</p>}
+      {card.orphans > 0 && (
+        <p className="hearth-hint" role="status">
+          Une fin de partie n'a pas été publiée : elle est gardée de côté sur ce PC.{" "}
+          <button type="button" className="hearth-link" onClick={open} aria-label={`Voir la fin de partie non publiée de ${card.name}`}>La voir</button>
+        </p>
+      )}
 
       <div className="hearth-foot">
         <ul className="hearth-avatars" aria-label={online.length ? `En ligne : ${online.map((m) => m.name).join(", ")}` : "Aucun membre en ligne"}>
@@ -45,7 +51,7 @@ function GroupCard({ card, services, navigate }: { card: HearthCard; services: S
         </ul>
         <div className="hearth-acts">
           {act.kind === "play" && (
-            <Button loading={busy} aria-label={`${act.label} sur ${card.name}`} icon={<Icon d={ICONS.play} fill />} onClick={() => { void run(() => services.hearthPlay(card.id)); }}>{act.label}</Button>
+            <Button loading={busy} aria-label={`${act.label} sur ${card.name}`} icon={<Icon d={ICONS.play} fill />} onClick={() => { void run(() => services.hearthPlay(card.id), card.id); }}>{act.label}</Button>
           )}
           {act.kind === "stop" && (
             <Button variant="secondary" loading={busy} aria-label={`Arrêter le serveur ${card.name}`} icon={<Icon d={ICONS.stop} fill />} onClick={() => { void run(() => services.hearthStop(card.id)); }}>{act.label}</Button>
@@ -54,7 +60,7 @@ function GroupCard({ card, services, navigate }: { card: HearthCard; services: S
             const r = resumeLabel(card);
             return (
               <>
-                <Button loading={busy} aria-label={`${r.label} sur ${card.name}`} onClick={() => { void run(() => services.hearthUncleanChoice(card.id, r.choice)); }}>{r.label}</Button>
+                <Button loading={busy} aria-label={`${r.label} sur ${card.name}`} onClick={() => { void run(() => services.hearthUncleanChoice(card.id, r.choice), card.id); }}>{r.label}</Button>
                 <Button variant="secondary" onClick={() => { void run(() => services.hearthUncleanChoice(card.id, "wait")); }}>Attendre</Button>
               </>
             );

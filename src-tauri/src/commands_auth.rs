@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use core_lib::auth::device::DeviceCodeClient;
+use core_lib::auth::device::{DeviceCode, DeviceCodeClient};
 use core_lib::auth::minecraft::MinecraftClient;
 use core_lib::auth::offline;
 use core_lib::auth::refresh::refresh_tokens;
@@ -275,8 +275,11 @@ impl AppState {
     pub async fn auth_poll_login(&self) -> Result<Profile, String> {
         let code = lock(&self.pending_login).clone().ok_or("aucune connexion en cours : demandez d'abord un code")?;
         let ms = ms_client(ms_client_id()?).poll(&code).await.map_err(|e| user_msg(&e))?;
+        // Annulée (ou remplacée par un nouveau code) pendant l'attente : on n'ajoute pas le compte dans le dos de l'utilisateur.
+        self.ensure_login_pending(&code)?;
         let xsts = xbox_client().authenticate(&ms.access_token).await.map_err(|e| user_msg(&e))?;
         let session = mc_client().login(&xsts.uhs, &xsts.token).await.map_err(|e| user_msg(&e))?;
+        self.ensure_login_pending(&code)?;
         let now = now_secs();
         let entry = AccountEntry::from_stored(StoredTokens {
             ms_refresh_token: ms.refresh_token,
@@ -294,6 +297,17 @@ impl AppState {
         *lock(&self.pending_login) = None;
         self.publish(&file, true);
         Ok(session.profile)
+    }
+
+    /// Vrai tant que `code` est le code d'appareil attendu (ni annulé, ni remplacé par un nouveau).
+    fn ensure_login_pending(&self, code: &DeviceCode) -> Result<(), String> {
+        let pending = lock(&self.pending_login).as_ref().is_some_and(|c| c.device_code == code.device_code);
+        if pending { Ok(()) } else { Err("connexion annulée".into()) }
+    }
+
+    /// Abandonne la connexion Microsoft en cours : une interrogation encore en vol n'ajoutera aucun compte.
+    pub fn auth_cancel_login(&self) {
+        *lock(&self.pending_login) = None;
     }
 
     /// Retire le compte actif (le premier restant devient actif).
@@ -429,6 +443,13 @@ pub async fn auth_begin_login(state: State<'_, Arc<AppState>>) -> Result<DeviceC
 #[specta::specta(rename_all = "snake_case")]
 pub async fn auth_poll_login(state: State<'_, Arc<AppState>>) -> Result<Profile, String> {
     state.auth_poll_login().await
+}
+
+/// Abandonne la connexion Microsoft en cours (le code n'est plus attendu ; une validation tardive n'ajoute aucun compte).
+#[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
+pub fn auth_cancel_login(state: State<'_, Arc<AppState>>) {
+    state.auth_cancel_login();
 }
 
 /// Déconnecte le compte actif.
@@ -615,6 +636,21 @@ mod tests {
         assert!(st.auth_accounts().accounts.is_empty());
         assert!(st.paths.tokens_file.exists());
         assert!(!st.paths.accounts_file.exists());
+    }
+
+    #[test]
+    fn annuler_la_connexion_invalide_le_code_attendu() {
+        let dir = tempfile::tempdir().unwrap();
+        let (st, _) = test_state(dir.path());
+        let code = |d: &str| DeviceCode { user_code: "AB".into(), verification_uri: "u".into(), device_code: d.into(), expires_in: 900, interval: 5 };
+        *lock(&st.pending_login) = Some(code("a"));
+        assert!(st.ensure_login_pending(&code("a")).is_ok());
+        // Un nouveau code remplace l'ancien : l'ancienne interrogation n'a plus le droit d'enregistrer.
+        *lock(&st.pending_login) = Some(code("b"));
+        assert!(st.ensure_login_pending(&code("a")).unwrap_err().contains("annulée"));
+        assert!(st.ensure_login_pending(&code("b")).is_ok());
+        st.auth_cancel_login();
+        assert!(st.ensure_login_pending(&code("b")).unwrap_err().contains("annulée"));
     }
 
     #[tokio::test]

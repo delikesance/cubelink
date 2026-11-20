@@ -21,7 +21,7 @@ use serde::Serialize;
 use tauri::State;
 
 use crate::error::{sanitize, user_msg};
-use crate::hearth::{key_hex, parse_key, Begin, HearthRuntime, HostParams, Play, EULA_REQUIRED, HOST_STEPS, JOIN_STEPS};
+use crate::hearth::{key_hex, parse_key, Begin, HearthRuntime, HostParams, LeaveError, Play, EULA_REQUIRED, HOST_STEPS, JOIN_STEPS, LEAVE_FLUSH_WAIT};
 use crate::state::AppState;
 
 /// Longueur maximale du nom d'un groupe (caractères).
@@ -230,13 +230,27 @@ impl AppState {
         self.hearth.propose(g, GroupOp::RemoveMember { key: k }).await
     }
 
-    pub async fn hearth_leave(self: &Arc<Self>, id: &str) -> Result<(), String> {
+    /// `force` saute l'attente de la file d'envoi : ma dernière partie, si elle n'est pas encore partie, est perdue pour le groupe.
+    pub async fn hearth_leave(self: &Arc<Self>, id: &str, force: bool) -> Result<(), LeaveError> {
         self.hearth.require_enabled()?;
         let g = gid(id)?;
+        // Dernier membre : refus AVANT d'arrêter mon serveur, il ne doit rien arriver au monde.
+        if self.hearth.state(&g).is_some_and(|s| s.members.len() <= 1) {
+            return Err(LeaveError::LastMember);
+        }
         if self.hearth.active(&g).is_some() {
             self.hearth_stop(id).await?;
         }
-        self.hearth.propose(g, GroupOp::Leave).await?;
+        // #61 : une fin de partie non publiée, mise de côté, est supprimée avec le dossier du groupe.
+        if !force && self.hearth.orphan_count(&g) > 0 {
+            return Err(LeaveError::OrphanPending);
+        }
+        // #56 : `forget_group` jette la file d'envoi du groupe. Ma dernière partie (publiée par l'arrêt ci-dessus) doit
+        // d'abord être remise à un membre ; sinon rien n'est supprimé et l'écran propose « Quitter quand même ».
+        if !force && !self.hearth.flush_group_outbox(&g, LEAVE_FLUSH_WAIT).await {
+            return Err(LeaveError::OutboxPending);
+        }
+        self.hearth.propose_leave(g).await?;
         // Le groupe a été quitté si la chaîne l'a appliqué ; `forget_group` est aussi appelé par le runtime.
         if self.hearth.state(&g).is_some() {
             self.hearth.forget_group_wait(&g).await?;
@@ -296,6 +310,19 @@ impl AppState {
         self.hearth.resolve_fork(gid(id)?, v).await
     }
 
+    /// Publie une fin de partie non publiée (mise de côté après un plantage) : une nouvelle `Session`, enfant de la version
+    /// dont elle est partie.
+    pub async fn hearth_orphan_publish(&self, id: &str, orphan_id: &str) -> Result<(), String> {
+        self.hearth.require_enabled()?;
+        self.hearth.orphan_publish(gid(id)?, orphan_id).await.map(|_| ())
+    }
+
+    /// Supprime une fin de partie non publiée mise de côté.
+    pub async fn hearth_orphan_discard(&self, id: &str, orphan_id: &str) -> Result<(), String> {
+        self.hearth.require_enabled()?;
+        self.hearth.orphan_discard(gid(id)?, orphan_id).await
+    }
+
     pub fn hearth_set_background(&self, id: &str, on: bool) -> Result<(), String> {
         self.hearth.require_enabled()?;
         let g = gid(id)?;
@@ -329,6 +356,40 @@ impl AppState {
             return Err("un lancement de ce serveur est déjà en cours".into());
         }
         let r = self.hearth_play_inner(g, &instance).await;
+        if r.is_err() {
+            rt.set_play(&g, None);
+        }
+        r
+    }
+
+    /// « Jouer depuis la version précédente » : la dernière version est connue mais personne de joignable n'en a le
+    /// contenu (`head_unavailable`). Le serveur démarre depuis la dernière version complète ici ; quand l'auteur revient avec
+    /// la sienne, les deux branches forment une fourche que le groupe résout depuis la page du serveur (docs/hearth-et-si.md).
+    pub async fn hearth_play_from_previous(self: &Arc<Self>, id: &str) -> Result<(), String> {
+        self.hearth.require_enabled()?;
+        let g = gid(id)?;
+        let rt = self.hearth.clone();
+        rt.require_state(&g)?;
+        if self.auth_status_refresh().await.is_none() {
+            return Err("connectez-vous avant de lancer le jeu".into());
+        }
+        let instance = rt.instance_of(&g).ok_or("Installe d'abord le modpack de ce groupe : rejoins la partie d'un ami du groupe pour le récupérer.")?;
+        if rt.active(&g).is_some() {
+            return Err("le serveur de ce groupe tourne déjà".into());
+        }
+        if rt.is_fork(&g) {
+            return Err("Deux versions du monde existent : choisis laquelle garder depuis la page du serveur.".into());
+        }
+        let head = rt.head(&g).ok_or("aucune version connue pour repartir")?;
+        // Le contenu de la tête est revenu entre-temps (l'auteur, ou un membre qui l'a reçu) : un simple « Jouer » suffit.
+        if rt.world_complete(&head) || rt.online_member_has_world(&g, &head).await {
+            return Err("Le monde de la dernière version est de nouveau disponible : clique sur Jouer.".into());
+        }
+        let prev = rt.complete_head(&g).ok_or("aucune version complète sur ce PC pour repartir : il faut attendre l'auteur")?;
+        if !rt.try_begin_play(&g, HOST_STEPS) {
+            return Err("un lancement de ce serveur est déjà en cours".into());
+        }
+        let r = self.hearth_host(g, &instance, Some(prev.id())).await;
         if r.is_err() {
             rt.set_play(&g, None);
         }
@@ -373,8 +434,12 @@ impl AppState {
                 }
                 Decision::Sync(peer) => {
                     rt.pull_from(g, peer).await?;
-                    for h in rt.heads_of(&g).unwrap_or_default() {
-                        rt.fetch_version_user(g, &h, Some(peer)).await?;
+                    // On récupère ce que ce membre annonce en entier : sa dernière tête n'a pas forcément son contenu
+                    // (un en-tête circule avant son monde), et la demander lui échouerait.
+                    let versions: Vec<_> = rt.announced_by(&g, &peer).iter().filter_map(|id| rt.version(&g, id)).collect();
+                    let versions = if versions.is_empty() { rt.heads_of(&g).unwrap_or_default() } else { versions };
+                    for v in versions {
+                        rt.fetch_version_user(g, &v, Some(peer)).await?;
                     }
                 }
                 Decision::Join(holder) => return self.hearth_join(g, instance, holder).await,
@@ -428,6 +493,17 @@ impl AppState {
             Some(id) => Some(rt.version(&g, &id).ok_or("la version de départ est introuvable")?),
             None => rt.head(&g),
         };
+        // La tête est connue (en-tête) mais personne de joignable n'en a le contenu : on le dit avant de prendre le bail, au
+        // lieu d'annoncer « le serveur démarre » puis d'échouer. L'écran propose d'attendre l'auteur ou de repartir de la
+        // dernière version complète (`hearth_play_from_previous`).
+        if base.is_none() {
+            // `world_complete` est l'ensemble en mémoire, rempli en tâche de fond au démarrage : on regarde aussi le disque.
+            if let Some(h) = head.as_ref().filter(|h| !rt.world_complete(h)) {
+                if !rt.world_on_disk_complete(h).await && !rt.online_member_has_world(&g, h).await {
+                    return Err(rt.head_unavailable_error(&g, h));
+                }
+            }
+        }
         let tip = head.as_ref().map(|h| (h.id(), h.header.number));
         // Premier temps du bail : les autres membres voient « le serveur démarre » dès maintenant, et non seulement à la
         // fin de l'installation (de 2 à 6 minutes pour un gros pack). Un membre déjà en train de démarrer, ou dont le
@@ -725,6 +801,13 @@ pub async fn hearth_stop(state: S<'_>, id: String) -> Result<(), String> {
     state.inner().hearth_stop(&id).await
 }
 
+/// Jouer depuis la dernière version complète quand le contenu de la dernière version n'est chez personne de joignable.
+#[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
+pub async fn hearth_play_from_previous(state: S<'_>, id: String) -> Result<(), String> {
+    state.inner().hearth_play_from_previous(&id).await
+}
+
 /// Choix du groupe après une partie mal terminée.
 #[tauri::command(rename_all = "snake_case")]
 #[specta::specta(rename_all = "snake_case")]
@@ -753,14 +836,14 @@ pub async fn hearth_remove_member(state: S<'_>, id: String, public_key: String) 
     state.hearth_remove_member(&id, &public_key).await
 }
 
-/// Quitte le groupe.
+/// Quitte le groupe, après avoir attendu (jusqu'à 5 min) que ma dernière partie soit remise à un membre. Rejette `{ code: "last_member" | "unreachable" | "outbox_pending" | "orphan_pending" | "other", message? }` : rien n'est supprimé dans ces cas. `force: true` saute l'attente de la file d'envoi (la dernière partie est perdue pour le groupe) et la garde d'une fin de partie non publiée (elle est supprimée avec le monde).
 #[tauri::command(rename_all = "snake_case")]
 #[specta::specta(rename_all = "snake_case")]
-pub async fn hearth_leave(state: S<'_>, id: String) -> Result<(), String> {
-    state.inner().hearth_leave(&id).await
+pub async fn hearth_leave(state: S<'_>, id: String, force: Option<bool>) -> Result<(), LeaveError> {
+    state.inner().hearth_leave(&id, force.unwrap_or(false)).await
 }
 
-/// Supprime le serveur de ce PC seulement, sans prévenir le groupe : arrête mon serveur, libère les blobs et efface le dossier (repli quand quitter est impossible).
+/// Supprime le serveur de ce PC seulement, sans prévenir le groupe : arrête mon serveur, libère les blobs et efface le dossier (choix explicite de l'utilisateur quand personne n'est joignable, jamais un repli automatique).
 #[tauri::command(rename_all = "snake_case")]
 #[specta::specta(rename_all = "snake_case")]
 pub async fn hearth_forget(state: S<'_>, id: String) -> Result<(), String> {
@@ -800,6 +883,20 @@ pub async fn hearth_restore(state: S<'_>, id: String, version_id: String) -> Res
 #[specta::specta(rename_all = "snake_case")]
 pub async fn hearth_resolve_fork(state: S<'_>, id: String, version_id: String) -> Result<(), String> {
     state.hearth_resolve_fork(&id, &version_id).await
+}
+
+/// Publie une fin de partie non publiée mise de côté (`HearthDetail.orphans`) : une nouvelle `Session`, enfant de la version dont elle est partie (une fourche si le groupe a avancé).
+#[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
+pub async fn hearth_orphan_publish(state: S<'_>, id: String, orphan_id: String) -> Result<(), String> {
+    state.hearth_orphan_publish(&id, &orphan_id).await
+}
+
+/// Supprime une fin de partie non publiée mise de côté.
+#[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
+pub async fn hearth_orphan_discard(state: S<'_>, id: String, orphan_id: String) -> Result<(), String> {
+    state.hearth_orphan_discard(&id, &orphan_id).await
 }
 
 /// Garde le serveur ouvert quand le jeu de ce PC se ferme.

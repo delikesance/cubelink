@@ -45,6 +45,14 @@ export default function MyCode() {
 
   useEffect(() => { void load(); }, [load]);
 
+  // Mes adresses changent après le montage (réseau, IPv6, port ouvert sur la box quelques secondes après le
+  // démarrage) : le code contient mes adresses, on le redemande sans clignotement ni message d'erreur.
+  useEffect(() => services.onFriendCodeChanged(() => {
+    void services.friendMyCode().then((code) => {
+      if (alive.current) setState((s) => (s.step === "ready" && s.code === code ? s : { step: "ready", code }));
+    }, () => {});
+  }), [services]);
+
   const say = (msg: string) => {
     setNotice(msg);
     if (timer.current) clearTimeout(timer.current);

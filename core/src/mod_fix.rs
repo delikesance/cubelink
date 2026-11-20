@@ -1252,15 +1252,11 @@ pub async fn check_content(
         };
         let Some(meta) = jar_meta(&store_root.join(&obj.rel_path)) else { continue };
         // Le même mod déjà présent (activé ou non) : il serait remplacé, donc on le retire de la simulation.
-        let ids: HashSet<String> = mod_check::selected(&meta, ctx.loader_s).iter().map(|m| m.id.clone()).collect();
         let mut same: Vec<String> = Vec::new();
-        for e in &entries {
-            let m = if e.enabled { det.jars.iter().find(|(f, _)| *f == e.file).map(|(_, m)| m.clone()) } else { jar_meta(&dir.join(&e.file)) };
-            if m.is_some_and(|m| main_mod(&m, ctx.loader_s).is_some_and(|(id, _, _)| ids.contains(&id))) {
-                let b = base_name(&e.file).to_string();
-                if !same.contains(&b) {
-                    same.push(b);
-                }
+        for e in same_mod_files(&entries, &dir, &det.jars, &meta, ctx.loader_s) {
+            let b = base_name(&e).to_string();
+            if !same.contains(&b) {
+                same.push(b);
             }
         }
         for f in &same {
@@ -1336,6 +1332,95 @@ fn backup_root(game_dir: &Path) -> PathBuf {
 
 fn valid_backup_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
+/// Fichiers de `mods/` (activés ou non, noms réels avec `.disabled` s'il y a lieu) qui sont le même mod que `new_meta` :
+/// le mod principal du fichier existant a un id fourni par le nouveau jar. Source unique du critère : la simulation
+/// ([`check_content`]) et l'installation ([`same_mod_in_instance`]) ne peuvent pas diverger. `cached` : métadonnées déjà
+/// lues des jars activés (sinon relues sur le disque). Un jar illisible n'est jamais compté : dans le doute, on garde.
+fn same_mod_files(entries: &[mods::ModEntry], mods_dir: &Path, cached: &[(String, Arc<JarMeta>)], new_meta: &JarMeta, loader: &str) -> Vec<String> {
+    let ids: HashSet<String> = mod_check::selected(new_meta, loader).iter().map(|m| m.id.clone()).collect();
+    if ids.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for e in entries {
+        let hit = if e.enabled { cached.iter().find(|(f, _)| *f == e.file).map(|(_, m)| m.clone()) } else { None };
+        let m = hit.or_else(|| jar_meta(&mods_dir.join(&e.file)));
+        if m.is_some_and(|m| main_mod(&m, loader).is_some_and(|(id, _, _)| ids.contains(&id))) {
+            out.push(e.file.clone());
+        }
+    }
+    out
+}
+
+/// Jars déjà dans `mods/` qui sont le même mod que `new_jar` (quel que soit leur nom ou leur provenance), hors `exclude`
+/// (noms réels). Vide si `new_jar` est illisible.
+pub(crate) fn same_mod_in_instance(game_dir: &Path, loader: Loader, new_jar: &Path, exclude: &[&str]) -> Result<Vec<String>> {
+    let Some(meta) = jar_meta(new_jar) else { return Ok(Vec::new()) };
+    let entries = mods::list(game_dir)?;
+    let mut v = same_mod_files(&entries, &game_dir.join("mods"), &[], &meta, loader_str(loader));
+    v.retain(|f| !exclude.contains(&f.as_str()));
+    Ok(v)
+}
+
+/// Sauvegarde ouverte par [`backup_replaced`] : les jars remplacés par une installation depuis le catalogue.
+pub(crate) struct ReplacedBackup {
+    bdir: PathBuf,
+    mf: Manifest,
+}
+
+impl ReplacedBackup {
+    /// L'installation a échoué : remet les jars à leur place (avec leur provenance) et supprime la sauvegarde.
+    pub(crate) fn rollback(self, game_dir: &Path) {
+        for m in self.mf.moved.iter().rev() {
+            let _ = restore_moved(game_dir, &self.bdir, m);
+        }
+        let _ = std::fs::remove_dir_all(&self.bdir);
+    }
+
+    /// L'installation a réussi : consigne le fichier ajouté (pour l'annulation) et garde la sauvegarde.
+    pub(crate) fn commit(mut self, game_dir: &Path, added_file: &str, sha256: &str) {
+        self.mf.added.push(Added { file: added_file.to_string(), sha256: sha256.to_string() });
+        if let Err(e) = write_manifest(&self.bdir, &self.mf) {
+            tracing::warn!("manifeste de sauvegarde non mis à jour : {e}");
+        }
+        prune_backups(game_dir);
+    }
+
+    /// Noms (réels) des jars sauvegardés.
+    pub(crate) fn files(&self) -> Vec<String> {
+        self.mf.moved.iter().map(|m| m.file.clone()).collect()
+    }
+}
+
+/// Déplace `files` (noms réels dans `mods/`) dans `mods/.cubelink-backup/<id>/` et oublie leur provenance, comme
+/// [`apply`] : la sauvegarde reste annulable avec [`undo`]. Tout ou rien : en cas d'échec, ce qui a été déplacé revient.
+/// `Ok(None)` si rien n'a été déplacé.
+pub(crate) fn backup_replaced(game_dir: &Path, files: &[String]) -> Result<Option<ReplacedBackup>> {
+    let id = new_backup_id();
+    let bdir = backup_root(game_dir).join(&id);
+    let mut mf = Manifest { id, ..Default::default() };
+    for f in files {
+        match move_to_backup(game_dir, &bdir, f) {
+            Ok(Some(m)) => mf.moved.push(m),
+            Ok(None) => {}
+            Err(e) => {
+                ReplacedBackup { bdir, mf }.rollback(game_dir);
+                return Err(e);
+            }
+        }
+    }
+    if mf.is_empty() {
+        let _ = std::fs::remove_dir_all(&bdir);
+        return Ok(None);
+    }
+    // Manifeste écrit tout de suite : même si le processus s'arrête avant la fin, la sauvegarde est restaurable.
+    if let Err(e) = write_manifest(&bdir, &mf) {
+        ReplacedBackup { bdir, mf }.rollback(game_dir);
+        return Err(e);
+    }
+    Ok(Some(ReplacedBackup { bdir, mf }))
 }
 
 fn new_backup_id() -> String {
@@ -2025,6 +2110,181 @@ mod tests {
         for i in &r.check.issues {
             println!("   [{}] {} : {}", i.kind, i.mod_name, i.message);
         }
+    }
+
+    // ---------- Installation depuis le catalogue : même mod sous un autre nom (#50) ----------
+
+    fn inst_fabric() -> crate::types::Instance {
+        crate::types::Instance {
+            id: "i1".into(),
+            name: "t".into(),
+            minecraft: "1.21.1".into(),
+            loader: crate::types::LoaderSpec { loader: Loader::Fabric, version: "1".into() },
+            ram_mb: 2048,
+            mod_count: 0,
+            java_path: None,
+            jvm_args: String::new(),
+            wrapper: String::new(),
+            art: None,
+        }
+    }
+
+    fn browse_input(id: &str) -> browse::BrowseInstallInput {
+        browse::BrowseInstallInput { source: BrowseSource::Modrinth, id: id.into(), kind: BrowseKind::Mod, version_id: None, instance_id: Some("i1".into()), ram_mb: None }
+    }
+
+    async fn mount_project(mr: &MockServer, project: &str, number: &str, file: &str, body: &[u8], deps: serde_json::Value) {
+        let v = mr_version(mr, &format!("v-{number}"), project, number, file, body, deps);
+        Mock::given(method("GET")).and(path(format!("/v2/project/{project}/version"))).respond_with(ResponseTemplate::new(200).set_body_json(json!([v]))).mount(mr).await;
+        Mock::given(method("GET")).and(path(format!("/cdn/{file}"))).respond_with(ResponseTemplate::new(200).set_body_bytes(body.to_vec())).mount(mr).await;
+    }
+
+    async fn install(mr: &MockServer, cf: &MockServer, e: &Env, project: &str) -> crate::types::Result<browse::InstallReport> {
+        browse::install_content(&providers(mr, cf), &browse_input(project), &inst_fabric(), &e.game, &e.store, &e.index, &dlo(), &|_, _, _| {}).await
+    }
+
+    fn mod_files(e: &Env) -> Vec<String> {
+        mods::list(&e.game).unwrap().into_iter().map(|m| m.file).collect()
+    }
+
+    fn backups(e: &Env) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(backup_root(&e.game)).map(|rd| rd.flatten().map(|x| x.file_name().to_string_lossy().into_owned()).collect()).unwrap_or_default();
+        v.sort();
+        v
+    }
+
+    /// Le cas du ticket : un jar du même mod sans provenance (modpack, ajout manuel) ne doit pas rester à côté du nouveau.
+    #[tokio::test]
+    async fn install_replaces_same_mod_without_provenance() {
+        let (mr, cf) = (MockServer::start().await, MockServer::start().await);
+        let new_jar = fabjar("sodium", "0.5.11", "");
+        mount_project(&mr, "SOD", "0.5.11", "sodium-fabric-0.5.11.jar", &new_jar, json!([])).await;
+        let e = env();
+        let old = fabjar("sodium", "0.5.8", "");
+        let other = fabjar("lithium", "0.12.0", "");
+        put(&e, "sodium-fabric-0.5.8.jar", &old);
+        put(&e, "lithium.jar", &other);
+        // Sans le correctif, la vérification annonçait déjà ce remplacement.
+        let c = check_content(&providers(&mr, &cf), "1.21.1", Loader::Fabric, &e.game, &e.store, &e.index, &dlo(), BrowseSource::Modrinth, "SOD", None).await.unwrap();
+        assert_eq!(c.installed, vec!["sodium-fabric-0.5.8.jar".to_string()]);
+
+        let r = install(&mr, &cf, &e, "SOD").await.unwrap();
+        assert_eq!(r.installed, vec!["sodium-fabric-0.5.11.jar".to_string()]);
+        assert_eq!(r.replaced, vec!["sodium-fabric-0.5.8.jar".to_string()]);
+        assert_eq!(mod_files(&e), vec!["lithium.jar".to_string(), "sodium-fabric-0.5.11.jar".to_string()]);
+        assert_eq!(mods::read_provenance(&e.game)["sodium-fabric-0.5.11.jar"].id, "SOD");
+        assert!(mod_check::check(&e.game, "1.21.1", "fabric").unwrap().issues.iter().all(|i| i.kind != "duplicate"));
+
+        // L'ancien jar est dans une sauvegarde annulable.
+        let b = backups(&e);
+        assert_eq!(b.len(), 1);
+        assert_eq!(std::fs::read(backup_root(&e.game).join(&b[0]).join("sodium-fabric-0.5.8.jar")).unwrap(), old);
+        assert_eq!(std::fs::read(e.game.join("mods/lithium.jar")).unwrap(), other);
+        undo(&e.game, &b[0], &e.index, "1.21.1", Loader::Fabric).unwrap();
+        assert_eq!(mod_files(&e), vec!["lithium.jar".to_string(), "sodium-fabric-0.5.8.jar".to_string()]);
+        assert!(backups(&e).is_empty());
+    }
+
+    /// Le doublon désactivé (`.jar.disabled`) est aussi mis de côté, et sa provenance éventuelle d'un autre projet suit.
+    #[tokio::test]
+    async fn install_backs_up_disabled_and_foreign_provenance_duplicates() {
+        let (mr, cf) = (MockServer::start().await, MockServer::start().await);
+        mount_project(&mr, "SOD", "0.5.11", "sodium-fabric-0.5.11.jar", &fabjar("sodium", "0.5.11", ""), json!([])).await;
+        let e = env();
+        put(&e, "sodium-old.jar.disabled", &fabjar("sodium", "0.5.0", ""));
+        put(&e, "sodium-cf.jar", &fabjar("sodium", "0.5.8", ""));
+        mods::record_provenance(&e.game, &[("sodium-cf.jar".into(), Provenance { source: "curseforge".into(), id: "394468".into() })]).unwrap();
+        let r = install(&mr, &cf, &e, "SOD").await.unwrap();
+        assert_eq!(r.replaced.len(), 2);
+        assert_eq!(mod_files(&e), vec!["sodium-fabric-0.5.11.jar".to_string()]);
+        assert!(!mods::read_provenance(&e.game).contains_key("sodium-cf.jar"));
+        // Annuler remet les deux fichiers, avec la provenance.
+        undo(&e.game, &backups(&e)[0], &e.index, "1.21.1", Loader::Fabric).unwrap();
+        assert_eq!(mod_files(&e), vec!["sodium-cf.jar".to_string(), "sodium-old.jar.disabled".to_string()]);
+        assert_eq!(mods::read_provenance(&e.game)["sodium-cf.jar"].id, "394468");
+    }
+
+    /// Mise à jour ordinaire (même projet, même provenance) : comportement inchangé, pas de sauvegarde.
+    #[tokio::test]
+    async fn install_update_same_project_keeps_old_behaviour() {
+        let (mr, cf) = (MockServer::start().await, MockServer::start().await);
+        mount_project(&mr, "SOD", "0.5.11", "sodium-fabric-0.5.11.jar", &fabjar("sodium", "0.5.11", ""), json!([])).await;
+        let e = env();
+        put(&e, "sodium-fabric-0.5.8.jar", &fabjar("sodium", "0.5.8", ""));
+        mods::record_provenance(&e.game, &[("sodium-fabric-0.5.8.jar".into(), Provenance { source: "modrinth".into(), id: "SOD".into() })]).unwrap();
+        let r = install(&mr, &cf, &e, "SOD").await.unwrap();
+        assert!(r.replaced.is_empty());
+        assert_eq!(mod_files(&e), vec!["sodium-fabric-0.5.11.jar".to_string()]);
+        assert!(backups(&e).is_empty());
+    }
+
+    /// Un jar d'un autre mod, ou illisible, n'est jamais touché ; le garde-fou « même nom qu'un ajout manuel » reste.
+    #[tokio::test]
+    async fn install_never_touches_other_or_unreadable_jars() {
+        let (mr, cf) = (MockServer::start().await, MockServer::start().await);
+        mount_project(&mr, "SOD", "0.5.11", "sodium-fabric-0.5.11.jar", &fabjar("sodium", "0.5.11", ""), json!([])).await;
+        let e = env();
+        put(&e, "lithium.jar", &fabjar("lithium", "1", ""));
+        put(&e, "cassé.jar", b"pas un zip");
+        let r = install(&mr, &cf, &e, "SOD").await.unwrap();
+        assert!(r.replaced.is_empty() && backups(&e).is_empty());
+        assert_eq!(mod_files(&e).len(), 3);
+
+        let e2 = env();
+        put(&e2, "sodium-fabric-0.5.11.jar", &fabjar("sodium", "0.5.8", ""));
+        mods::record_provenance(&e2.game, &[("sodium-fabric-0.5.11.jar".into(), Provenance { source: "custom".into(), id: String::new() })]).unwrap();
+        assert!(install(&mr, &cf, &e2, "SOD").await.is_err());
+        assert_eq!(mod_files(&e2), vec!["sodium-fabric-0.5.11.jar".to_string()]);
+    }
+
+    /// Une dépendance obligatoire déjà fournie sous un autre nom n'est ni téléchargée dans `mods/` ni dupliquée.
+    #[tokio::test]
+    async fn install_skips_dependency_already_present_under_another_name() {
+        let (mr, cf) = (MockServer::start().await, MockServer::start().await);
+        let deps = json!([{"project_id": "API", "version_id": null, "dependency_type": "required"}]);
+        mount_project(&mr, "IRIS", "1.7", "iris-1.7.jar", &fabjar("iris", "1.7", ""), deps).await;
+        mount_project(&mr, "API", "0.100", "fabric-api-0.100.jar", &fabjar("fabric-api", "0.100", ""), json!([])).await;
+        let e = env();
+        let api = fabjar("fabric-api", "0.99", "");
+        put(&e, "fabric-api-pack.jar", &api);
+        let r = install(&mr, &cf, &e, "IRIS").await.unwrap();
+        assert_eq!(r.installed, vec!["iris-1.7.jar".to_string()]);
+        assert!(r.replaced.is_empty());
+        assert_eq!(mod_files(&e), vec!["fabric-api-pack.jar".to_string(), "iris-1.7.jar".to_string()]);
+        assert_eq!(std::fs::read(e.game.join("mods/fabric-api-pack.jar")).unwrap(), api);
+    }
+
+    /// Une dépendance seulement présente sous un autre nom *désactivé* n'est pas fournie : elle est installée.
+    #[tokio::test]
+    async fn install_adds_dependency_when_other_name_is_disabled() {
+        let (mr, cf) = (MockServer::start().await, MockServer::start().await);
+        let deps = json!([{"project_id": "API", "version_id": null, "dependency_type": "required"}]);
+        mount_project(&mr, "IRIS", "1.7", "iris-1.7.jar", &fabjar("iris", "1.7", ""), deps).await;
+        mount_project(&mr, "API", "0.100", "fabric-api-0.100.jar", &fabjar("fabric-api", "0.100", ""), json!([])).await;
+        let e = env();
+        put(&e, "fabric-api-old.jar.disabled", &fabjar("fabric-api", "0.99", ""));
+        let r = install(&mr, &cf, &e, "IRIS").await.unwrap();
+        assert!(r.installed.contains(&"fabric-api-0.100.jar".to_string()), "{r:?}");
+        // L'ancien jar désactivé est mis de côté (réversible), pas laissé à côté du nouveau.
+        assert_eq!(r.replaced, vec!["fabric-api-old.jar.disabled".to_string()]);
+        assert_eq!(backups(&e).len(), 1);
+    }
+
+    /// Si la pose du nouveau jar échoue, l'ancien revient à sa place avec sa provenance et aucune sauvegarde ne reste.
+    #[tokio::test]
+    async fn install_failure_restores_replaced_jars() {
+        let (mr, cf) = (MockServer::start().await, MockServer::start().await);
+        mount_project(&mr, "SOD", "0.5.11", "sodium-fabric-0.5.11.jar", &fabjar("sodium", "0.5.11", ""), json!([])).await;
+        let e = env();
+        put(&e, "sodium-fabric-0.5.8.jar", &fabjar("sodium", "0.5.8", ""));
+        mods::record_provenance(&e.game, &[("sodium-fabric-0.5.8.jar".into(), Provenance { source: "curseforge".into(), id: "9".into() })]).unwrap();
+        // La destination est un dossier non vide : la pose échoue.
+        std::fs::create_dir_all(e.game.join("mods/sodium-fabric-0.5.11.jar")).unwrap();
+        std::fs::write(e.game.join("mods/sodium-fabric-0.5.11.jar/x"), b"x").unwrap();
+        assert!(install(&mr, &cf, &e, "SOD").await.is_err());
+        assert!(e.game.join("mods/sodium-fabric-0.5.8.jar").is_file());
+        assert_eq!(mods::read_provenance(&e.game)["sodium-fabric-0.5.8.jar"].id, "9");
+        assert!(backups(&e).is_empty());
     }
 
     /// Réseau réel : compatibilité du projet Modrinth `CUBELINK_CHECK_PROJECT` avec l'instance `CUBELINK_FIX_INSTANCE`

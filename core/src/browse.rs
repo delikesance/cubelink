@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::mod_fix;
 use crate::mods::{self, Provenance};
 use crate::providers::curseforge::MAX_FILE_BYTES;
 use crate::providers::curseforge_api::{self as cfapi, CfApi, CfFile};
@@ -168,6 +169,8 @@ pub struct BrowseInstallInput {
 pub struct InstallReport {
     pub installed: Vec<String>,
     pub missing: Vec<String>,
+    /// Jars du même mod (sans provenance commune : modpack, ajout manuel…) mis de côté dans `mods/.cubelink-backup`.
+    pub replaced: Vec<String>,
 }
 
 /// Clients des deux sources. `allow_loopback` (tests) autorise `http(s)://127.0.0.1|localhost` pour les téléchargements.
@@ -640,15 +643,48 @@ pub async fn install_content(
         if *is_dep && exists {
             continue; // dépendance déjà présente (ex. issue d'un modpack) : on n'y touche pas
         }
+        let mut backup = None;
         if input.kind == BrowseKind::Mod {
-            mods::remove_old_versions(game_dir, pl.source.as_str(), &pl.project_id, std::slice::from_ref(&pl.name))?;
+            // Le même mod sous un autre nom (modpack, ajout manuel, autre lanceur) : `remove_old_versions` ne le voit pas,
+            // il serait resté à côté du nouveau jar (« Duplicate mod »). Même critère que `check_content`.
+            let new_jar = store_root.join(&obj.rel_path);
+            let disabled = format!("{}.disabled", pl.name);
+            let prov = mods::read_provenance(game_dir);
+            let mut same = mod_fix::same_mod_in_instance(game_dir, inst.loader.loader, &new_jar, &[pl.name.as_str(), disabled.as_str()])?;
+            // Même projet (même provenance) : déjà géré, sans sauvegarde, par `remove_old_versions`.
+            same.retain(|f| !prov.get(f.strip_suffix(".disabled").unwrap_or(f)).is_some_and(|p| p.source == pl.source.as_str() && p.id == pl.project_id));
+            // Une dépendance désactivée (`.jar.disabled`) ne la fournit pas : on ne saute que si un jar activé la porte.
+            if *is_dep && same.iter().any(|f| !f.ends_with(".disabled")) {
+                continue; // dépendance déjà fournie sous un autre nom : pas de doublon
+            }
+            backup = mod_fix::backup_replaced(game_dir, &same)?;
+            let r = mods::remove_old_versions(game_dir, pl.source.as_str(), &pl.project_id, std::slice::from_ref(&pl.name));
+            if let Err(e) = r {
+                if let Some(b) = backup.take() {
+                    b.rollback(game_dir);
+                }
+                return Err(e);
+            }
             let _ = std::fs::remove_file(mods_dir.join(format!("{}.disabled", pl.name)));
         }
-        link_into(game_dir, &format!("{dir}/{}", pl.name), &store_root.join(&obj.rel_path))?;
-        index.add_ref(&obj.sha256)?;
-        if input.kind == BrowseKind::Mod {
-            mods::record_provenance(game_dir, &[(pl.name.clone(), Provenance { source: pl.source.as_str().into(), id: pl.project_id.clone() })])?;
+        if let Err(e) = link_into(game_dir, &format!("{dir}/{}", pl.name), &store_root.join(&obj.rel_path)) {
+            if let Some(b) = backup.take() {
+                b.rollback(game_dir);
+            }
+            return Err(e);
         }
+        index.add_ref(&obj.sha256)?;
+        let recorded = if input.kind == BrowseKind::Mod {
+            mods::record_provenance(game_dir, &[(pl.name.clone(), Provenance { source: pl.source.as_str().into(), id: pl.project_id.clone() })])
+        } else {
+            Ok(())
+        };
+        // Le jar est posé : on consigne la sauvegarde même si la provenance n'a pas pu être écrite (`undo` retire le jar posé).
+        if let Some(b) = backup {
+            report.replaced.extend(b.files());
+            b.commit(game_dir, &pl.name, &obj.sha256);
+        }
+        recorded?;
         report.installed.push(pl.name.clone());
     }
     Ok(report)

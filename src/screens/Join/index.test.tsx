@@ -32,7 +32,7 @@ function setup(over: Partial<Services> = {}, params: Record<string, string> = { 
 
 const P = (o: Partial<TransferProgress> & { error?: string } = {}): TransferProgress => ({
   phase: "receiving", files_done: 12, files_total: 40, bytes_done: 340_000_000, bytes_total: 1_200_000_000,
-  speed_bps: 8_000_000, via_relay: false, ...o,
+  speed_bps: 8_000_000, ...o,
 });
 
 async function startJoin() {

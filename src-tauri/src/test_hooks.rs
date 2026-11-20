@@ -16,13 +16,6 @@ use crate::state::AppState;
 
 pub const TEST_MODE_VAR: &str = "CUBELINK_TEST_MODE";
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, specta::Type)]
-pub enum RelayMode {
-    Disabled,
-    Default,
-    Custom(String),
-}
-
 #[derive(Debug, Clone, Default)]
 pub struct Hooks {
     pub test_mode: bool,
@@ -43,7 +36,6 @@ pub struct Hooks {
     pub cf_api: Option<String>,
     pub java_path: Option<PathBuf>,
     pub data_dir: Option<PathBuf>,
-    pub relay: Option<RelayMode>,
     pub skip_java_probe: bool,
     /// `CUBELINK_TRANSFER_IDLE_SECS` : délai d'inactivité d'un transfert (secondes) avant l'échec.
     pub transfer_idle_secs: Option<u64>,
@@ -123,15 +115,6 @@ impl Hooks {
             }
             None => None,
         };
-        let relay = match get("CUBELINK_RELAY_MODE").filter(|v| !v.trim().is_empty()).as_deref() {
-            None => None,
-            Some("disabled") => Some(RelayMode::Disabled),
-            Some("default") => Some(RelayMode::Default),
-            Some(s) => match s.strip_prefix("custom:") {
-                Some(u) => Some(RelayMode::Custom(parse_loopback_url(u).map_err(|e| format!("CUBELINK_RELAY_MODE : {e}"))?)),
-                None => return Err("CUBELINK_RELAY_MODE : disabled, default ou custom:<url>".into()),
-            },
-        };
         Ok(Self {
             test_mode: true,
             auth_ms: url("CUBELINK_AUTH_MS_URL")?,
@@ -154,7 +137,6 @@ impl Hooks {
             cf_api: url("CUBELINK_TEST_CF_API")?,
             java_path,
             data_dir,
-            relay,
             skip_java_probe: get("CUBELINK_SKIP_JAVA_PROBE").as_deref() == Some("1"),
             transfer_idle_secs: match get("CUBELINK_TRANSFER_IDLE_SECS").filter(|v| !v.trim().is_empty()) {
                 Some(v) => Some(
@@ -269,7 +251,6 @@ pub struct TestStateInfo {
     pub paths: BTreeMap<&'static str, String>,
     pub url_overrides: BTreeMap<&'static str, String>,
     pub java_path: Option<String>,
-    pub relay_mode: Option<RelayMode>,
     pub skip_java_probe: bool,
     /// Port du monde LAN de l'hôte (côté hôte, 0 sinon). Ne pas confondre avec `guest_tunnel_port`.
     pub tunnel_port: u16,
@@ -299,7 +280,6 @@ impl AppState {
             paths,
             url_overrides: h.active_urls(),
             java_path: h.java_path.as_ref().map(|j| s(j)),
-            relay_mode: h.relay.clone(),
             skip_java_probe: h.skip_java_probe,
             tunnel_port: TUNNEL_PORT.load(Ordering::SeqCst),
             guest_tunnel_port: guest_tunnel_port(),
@@ -371,8 +351,6 @@ mod tests {
             let pairs = [("CUBELINK_TEST_MODE", "1"), ("CUBELINK_MOJANG_META_URL", bad)];
             assert!(Hooks::from_lookup(env(&pairs)).is_err(), "{bad}");
         }
-        let relay: &[(&str, &str)] = &[("CUBELINK_TEST_MODE", "1"), ("CUBELINK_RELAY_MODE", "custom:https://relay.n0.example")];
-        assert!(Hooks::from_lookup(env(relay)).is_err());
     }
 
     #[test]
@@ -386,7 +364,6 @@ mod tests {
             ("CUBELINK_NEOFORGE_MAVEN_URL", "http://127.0.0.1:7002"),
             ("CUBELINK_FORGE_MAVEN_URL", "http://127.0.0.1:7003"),
             ("CUBELINK_JAVA_PATH", if cfg!(windows) { "C:\\fx\\fake-java.cmd" } else { "/fx/fake-java.cmd" }),
-            ("CUBELINK_RELAY_MODE", "custom:http://127.0.0.1:8000"),
             ("CUBELINK_SKIP_JAVA_PROBE", "1"),
         ];
         let h = Hooks::from_lookup(env(p)).unwrap();
@@ -394,7 +371,6 @@ mod tests {
         assert_eq!(h.manifest_url().unwrap(), "http://localhost:6000/mc/game/version_manifest_v2.json");
         assert_eq!(h.resources_url().unwrap(), "http://localhost:6000/resources");
         assert_eq!(h.modrinth_base().unwrap(), "http://127.0.0.1:7000/v2");
-        assert_eq!(h.relay, Some(RelayMode::Custom("http://127.0.0.1:8000".into())));
         assert!(h.skip_java_probe && h.java_path.is_some());
         assert_eq!(h.quilt_meta.as_deref(), Some("http://127.0.0.1:7001"));
         assert_eq!(h.active_urls().len(), 6);
@@ -421,10 +397,8 @@ mod tests {
     }
 
     #[test]
-    fn java_et_relais_invalides() {
+    fn java_invalide() {
         let p: &[(&str, &str)] = &[("CUBELINK_TEST_MODE", "1"), ("CUBELINK_JAVA_PATH", "C:\\Windows\\notepad.exe")];
-        assert!(Hooks::from_lookup(env(p)).is_err());
-        let p: &[(&str, &str)] = &[("CUBELINK_TEST_MODE", "1"), ("CUBELINK_RELAY_MODE", "bizarre")];
         assert!(Hooks::from_lookup(env(p)).is_err());
         assert!(java_name_ok("fake-java.cmd", true) && !java_name_ok("fake-java.cmd", false) && java_name_ok("java.exe", false));
     }

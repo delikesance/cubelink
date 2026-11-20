@@ -8,7 +8,7 @@ import type { NetTest } from "../../services/types";
 beforeEach(() => { window.location.hash = "#/settings"; });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
-const relay = () => screen.getByLabelText(/Passer toujours par le relais/) as HTMLInputElement;
+const lan = () => screen.getByLabelText(/Ouvrir mon monde au réseau local automatiquement/) as HTMLInputElement;
 const goTab = (name: string) => fireEvent.click(screen.getByRole("tab", { name }));
 
 describe("validation", () => {
@@ -23,36 +23,30 @@ describe("validation", () => {
 });
 
 describe("test de connexion", () => {
-  const base: NetTest = { relay_connected: true, relay: "euc1-1.relay.n0.iroh.link", relay_ms: 28, udp: true, ipv6: false, direct: true, relay_only: false, partial: false };
-  it("verdicts", () => {
+  const base: NetTest = { ipv6: false, ipv4_public: false, port_mapped: true };
+  it("verdicts : port ouvert = joignable ; adresse publique = probablement ; sinon peu joignable (aucun relais)", () => {
     const v = netVerdict(base);
-    expect([v.tone, v.label]).toEqual(["ok", "Excellente"]);
-    expect(v.checks).toEqual([
-      { label: "Connexion directe", ok: true, detail: "possible" },
-      { label: "Relais de secours", ok: true, detail: "joignable · Europe · 28 ms" },
-    ]);
+    expect([v.tone, v.label]).toEqual(["ok", "Joignable"]);
+    expect(v.checks.map((c) => [c.label, c.ok])).toEqual([["Adresse IPv6", false], ["Adresse IPv4 publique", false], ["Port ouvert sur la box", true]]);
     const lbl = (t: Partial<NetTest>) => { const r = netVerdict({ ...base, ...t }); return `${r.tone}:${r.label}`; };
-    expect(lbl({ direct: false })).toBe("warn:Correcte");
-    expect(lbl({ udp: false, direct: false })).toBe("warn:Limitée");
-    expect(lbl({ relay_connected: false, udp: false })).toBe("danger:Hors ligne");
-    expect(lbl({ relay_connected: false })).toBe("warn:Bonne");
-    expect(lbl({ relay_connected: false, direct: false })).toBe("danger:Fragile");
-    expect(lbl({ relay_only: true })).toBe("ok:Relais uniquement");
-    expect(lbl({ relay_only: true, relay_connected: false })).toBe("danger:Hors ligne");
-    expect(lbl({ partial: true })).toBe("neutral:Test incomplet");
+    expect(lbl({ ipv6: true, port_mapped: false })).toBe("ok:Probablement joignable");
+    expect(lbl({ ipv4_public: true, port_mapped: false })).toBe("ok:Probablement joignable");
+    expect(lbl({ ipv6: true })).toBe("ok:Joignable");
+    expect(lbl({ port_mapped: false })).toBe("warn:Peu joignable");
+    const w = netVerdict({ ipv6: false, ipv4_public: false, port_mapped: false });
+    expect(w.summary).toMatch(/même réseau local/);
+    expect(JSON.stringify(w)).not.toMatch(/relais de secours|n0/i);
   });
 
   it("le bouton lance le vrai test et affiche le verdict", async () => {
     const services = createFakeServices({ tickMs: 0 });
-    const spy = vi.spyOn(services, "netTest").mockResolvedValue({ ...base, direct: false });
+    const spy = vi.spyOn(services, "netTest").mockResolvedValue({ ipv6: false, ipv4_public: false, port_mapped: false });
     window.location.hash = "#/settings";
     render(<Shell services={services} />);
     goTab("Réseau");
     fireEvent.click(await screen.findByRole("button", { name: "Tester ma connexion" }));
-    expect(await screen.findByText("Correcte")).toBeTruthy();
-    expect(screen.getByText(/certaines parties passeront par le relais/)).toBeTruthy();
-    expect(screen.getByText("gênée par ton routeur")).toBeTruthy();
-    expect(screen.getByText("joignable · Europe · 28 ms")).toBeTruthy();
+    expect(await screen.findByText("Peu joignable")).toBeTruthy();
+    expect(screen.getByText(/non ouvert/)).toBeTruthy();
     expect(spy).toHaveBeenCalledTimes(1);
   });
 
@@ -176,22 +170,22 @@ describe("écran Paramètres", () => {
     const svc = createFakeServices({ tickMs: 0 });
     const first = render(<Shell services={svc} />);
     goTab("Réseau");
-    await waitFor(() => expect(relay().disabled).toBe(false));
-    expect(relay().checked).toBe(false);
-    fireEvent.click(relay());
+    await waitFor(() => expect(lan().disabled).toBe(false));
+    expect(lan().checked).toBe(true);
+    fireEvent.click(lan());
     await waitFor(() => expect(screen.getAllByRole("status").some((s) => s.textContent === "Enregistré")).toBe(true));
     first.unmount();
     render(<Shell services={svc} />);
     goTab("Réseau");
-    await waitFor(() => expect(relay().checked).toBe(true));
+    await waitFor(() => expect(lan().checked).toBe(false));
   });
 
   it("échec d'enregistrement : message d'erreur", async () => {
     const base = createFakeServices({ tickMs: 0 });
     render(<Shell services={{ ...base, settingsSet: () => Promise.reject(new Error("Disque plein.")) }} />);
     goTab("Réseau");
-    await waitFor(() => expect(relay().disabled).toBe(false));
-    fireEvent.click(relay());
+    await waitFor(() => expect(lan().disabled).toBe(false));
+    fireEvent.click(lan());
     expect((await screen.findByRole("alert")).textContent).toBe("Disque plein.");
   });
 
@@ -225,20 +219,24 @@ describe("Échap", () => {
 });
 });
 
-describe("découverte des amis", () => {
-  it("case cochée par défaut, décochable, aide mentionnant le redémarrage", async () => {
-    render(<Shell services={createFakeServices({ tickMs: 0 })} />);
+describe("n0 retiré", () => {
+  it("plus de réglage de relais ni de découverte publique, et l'envoi ne transmet aucun ancien champ", async () => {
+    const set = vi.fn(async (x) => x);
+    const services = { ...createFakeServices({ tickMs: 0 }), settingsSet: set };
+    render(<Shell services={services} />);
     goTab("Réseau");
-    const box = (await screen.findByLabelText(/Retrouver mes amis même si leur adresse change/)) as HTMLInputElement;
-    expect(box.checked).toBe(true);
-    expect(screen.getByText(/Appliqué au prochain démarrage/)).toBeTruthy();
-    fireEvent.click(box);
-    await waitFor(() => expect(box.checked).toBe(false));
+    await screen.findByLabelText(/Ouvrir mon monde au réseau local automatiquement/);
+    expect(screen.queryByLabelText(/Retrouver mes amis même si leur adresse change/)).toBeNull();
+    expect(screen.queryByText(/serveurs n0/)).toBeNull();
+    expect(screen.queryByLabelText(/Passer toujours par le relais/)).toBeNull();
+    fireEvent.click(screen.getByLabelText(/Ouvrir mon monde au réseau local automatiquement/));
+    await waitFor(() => expect(set).toHaveBeenCalled());
+    for (const k of ["discovery", "allow_relay", "relay_only"]) expect(set.mock.calls[0][0]).not.toHaveProperty(k);
   });
 });
 
 describe("ouverture automatique au réseau local", () => {
-  it("case cochée par défaut, envoie tous les champs sans écraser discovery", async () => {
+  it("case cochée par défaut, envoie tous les champs", async () => {
     const set = vi.fn(async (x) => x);
     const services = { ...createFakeServices({ tickMs: 0 }), settingsSet: set };
     render(<Shell services={services} />);
@@ -247,6 +245,6 @@ describe("ouverture automatique au réseau local", () => {
     expect(box.checked).toBe(true);
     fireEvent.click(box);
     await waitFor(() => expect(set).toHaveBeenCalled());
-    expect(set.mock.calls[0][0]).toMatchObject({ lan_auto: false, discovery: true, share_mods: true });
+    expect(set.mock.calls[0][0]).toMatchObject({ lan_auto: false, share_mods: true });
   });
 });

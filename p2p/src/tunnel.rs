@@ -59,8 +59,11 @@ impl TunnelAuthorizer for AllowKeys {
 /// Réglages du tunnel.
 #[derive(Debug, Clone, Copy)]
 pub struct TunnelConfig {
-    /// Connexions de jeu simultanées maximales.
+    /// Connexions de jeu simultanées maximales, tous pairs confondus (un groupe Hearth peut dépasser 8 membres).
     pub max_connections: usize,
+    /// Connexions simultanées maximales d'un même pair : une partie, un ping de la liste des serveurs et une
+    /// reconnexion tiennent dedans, mais un client bogué ou malveillant ne peut pas bloquer les autres.
+    pub max_per_peer: usize,
     /// Délai pour établir une connexion (QUIC ou TCP local).
     pub connect_timeout: Duration,
     /// Inactivité maximale d'une connexion relayée (dans un sens).
@@ -72,7 +75,8 @@ pub struct TunnelConfig {
 impl Default for TunnelConfig {
     fn default() -> Self {
         Self {
-            max_connections: 8,
+            max_connections: 32,
+            max_per_peer: 4,
             connect_timeout: Duration::from_secs(10),
             idle_timeout: Duration::from_secs(120),
             reconnect_budget: Duration::from_secs(10),
@@ -94,6 +98,9 @@ pub struct TunnelStats {
     pub active_connections: usize,
     pub total_connections: u64,
     pub rejected_connections: u64,
+    /// Côté invité : flux refusés par l'hôte parce qu'il est plein ou que ce pair a trop de connexions ouvertes
+    /// (code [`crate::reach::CLOSE_FULL`]). Toujours 0 côté hôte.
+    pub refused_full: u64,
     /// Octets TCP -> QUIC (côté local vers le pair).
     pub bytes_to_peer: u64,
     /// Octets QUIC -> TCP.
@@ -104,6 +111,7 @@ pub struct TunnelStats {
 struct Counters {
     total: AtomicU64,
     rejected: AtomicU64,
+    full: AtomicU64,
     up: AtomicU64,
     down: AtomicU64,
 }
@@ -114,6 +122,7 @@ impl Counters {
             active_connections: max.saturating_sub(sem.available_permits()),
             total_connections: self.total.load(Ordering::Relaxed),
             rejected_connections: self.rejected.load(Ordering::Relaxed),
+            refused_full: self.full.load(Ordering::Relaxed),
             bytes_to_peer: self.up.load(Ordering::Relaxed),
             bytes_from_peer: self.down.load(Ordering::Relaxed),
         }
@@ -172,8 +181,52 @@ async fn relay(
         tokio::try_join!(up, down)
     };
     if res.is_err() {
+        // L'hôte plein (ou trop de connexions de ce pair) réinitialise le flux avec CLOSE_FULL : on le compte
+        // pour que l'interface puisse l'expliquer. La lecture est déjà en erreur : la réponse est immédiate.
+        if let Ok(Ok(Some(code))) = timeout(Duration::from_millis(50), recv.received_reset()).await {
+            if code.into_inner() == u64::from(crate::reach::CLOSE_FULL) {
+                c.full.fetch_add(1, Ordering::Relaxed);
+            }
+        }
         let _ = send.reset(0u32.into());
         let _ = recv.stop(0u32.into());
+    }
+}
+
+/// Connexions ouvertes par pair (clé publique) : le compteur monte à l'acceptation d'un flux et redescend quand
+/// le [`PeerPermit`] est abandonné (fin du relais, ou tâche annulée à la fermeture de la connexion).
+type PerPeer = Arc<std::sync::Mutex<std::collections::HashMap<[u8; 32], usize>>>;
+
+/// Place d'un pair parmi ses `max_per_peer` connexions.
+struct PeerPermit {
+    map: PerPeer,
+    peer: [u8; 32],
+}
+
+impl PeerPermit {
+    fn acquire(map: &PerPeer, peer: [u8; 32], max: usize) -> Option<PeerPermit> {
+        let mut m = crate::util::lock(map);
+        let n = m.entry(peer).or_insert(0);
+        if *n >= max {
+            if *n == 0 {
+                m.remove(&peer);
+            }
+            return None;
+        }
+        *n += 1;
+        Some(PeerPermit { map: map.clone(), peer })
+    }
+}
+
+impl Drop for PeerPermit {
+    fn drop(&mut self) {
+        let mut m = crate::util::lock(&self.map);
+        if let Some(n) = m.get_mut(&self.peer) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                m.remove(&self.peer);
+            }
+        }
     }
 }
 
@@ -186,6 +239,7 @@ struct HostCore {
     authorizer: Arc<dyn TunnelAuthorizer>,
     cfg: TunnelConfig,
     sem: Arc<Semaphore>,
+    per_peer: PerPeer,
     counters: Arc<Counters>,
     /// Passe à `true` à l'arrêt : les connexions servies par un `Router` sont alors fermées.
     stop: watch::Sender<bool>,
@@ -246,6 +300,7 @@ impl HostTunnel {
             authorizer,
             cfg,
             sem: Arc::new(Semaphore::new(cfg.max_connections)),
+            per_peer: Arc::default(),
             counters: Arc::new(Counters::default()),
             stop,
         });
@@ -370,16 +425,26 @@ async fn serve_conn(core: Arc<HostCore>, conn: Connection) {
                     core.counters.rejected.fetch_add(1, Ordering::Relaxed);
                     break;
                 }
-                let Ok(permit) = sem.clone().try_acquire_owned() else {
+                // Limite du pair d'abord (il ne consomme alors aucun permis global), puis limite globale. Un refus ne
+                // touche que ce flux : la connexion et les autres flux du pair continuent. Le code CLOSE_FULL
+                // permet à l'invité de dire « serveur plein » plutôt que d'afficher une déconnexion muette.
+                let full = |send: &mut iroh::endpoint::SendStream, recv: &mut iroh::endpoint::RecvStream| {
                     counters.rejected.fetch_add(1, Ordering::Relaxed);
-                    let _ = send.reset(2u32.into());
-                    let _ = recv.stop(2u32.into());
+                    let _ = send.reset(crate::reach::CLOSE_FULL.into());
+                    let _ = recv.stop(crate::reach::CLOSE_FULL.into());
+                };
+                let Some(peer_permit) = PeerPermit::acquire(&core.per_peer, peer, cfg.max_per_peer) else {
+                    full(&mut send, &mut recv);
+                    continue;
+                };
+                let Ok(permit) = sem.clone().try_acquire_owned() else {
+                    full(&mut send, &mut recv);
                     continue;
                 };
                 counters.total.fetch_add(1, Ordering::Relaxed);
                 let counters = counters.clone();
                 streams.spawn(async move {
-                    let _permit = permit;
+                    let (_permit, _peer_permit) = (permit, peer_permit);
                     match timeout(cfg.connect_timeout, TcpStream::connect(world)).await {
                         Ok(Ok(tcp)) => relay(tcp, send, recv, cfg, &counters).await,
                         _ => {
@@ -774,7 +839,9 @@ mod tests {
 
     #[tokio::test]
     async fn tunnel_multiple_simultaneous() {
-        let (host, guest, _h, _g) = setup(true, TunnelConfig::default()).await;
+        // 5 flux en même temps d'un seul pair : au-dessus de la limite par pair par défaut, d'où la config.
+        let cfg = TunnelConfig { max_per_peer: 8, ..TunnelConfig::default() };
+        let (host, guest, _h, _g) = setup(true, cfg).await;
         let mut js = Vec::new();
         for i in 0..5u8 {
             let p = guest.local_port;
@@ -870,6 +937,120 @@ mod tests {
         assert_eq!(host.stats().active_connections, 2);
         drop(held);
         guest.stop().await;
+        host.stop().await;
+    }
+
+    /// Un hôte et `n` invités autorisés ; chaque invité a `guest_cfg` (sa propre limite locale).
+    async fn setup_many(n: usize, host_cfg: TunnelConfig, guest_cfg: TunnelConfig) -> (HostTunnel, Vec<GuestTunnel>, Endpoint, Vec<Endpoint>) {
+        let port = world().await;
+        let h = ep(true).await;
+        let mut eps = Vec::new();
+        for _ in 0..n {
+            eps.push(ep(false).await);
+        }
+        let auth = Arc::new(AllowKeys(eps.iter().map(key).collect()));
+        let host = HostTunnel::start_with_config(h.clone(), port, auth, host_cfg).unwrap();
+        let mut guests = Vec::new();
+        for e in &eps {
+            guests.push(GuestTunnel::connect_with_config(e.clone(), h.addr(), guest_cfg).await.unwrap());
+        }
+        (host, guests, h, eps)
+    }
+
+    /// Ouvre une session et dit si l'hôte l'a servie (`false` : flux refusé, connexion TCP fermée).
+    async fn try_session(port: u16) -> Option<TcpStream> {
+        let mut s = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let _ = s.write_all(b"MCHS\x00\x00\x00\x00").await;
+        let mut ok = [0u8; 3];
+        match timeout(Duration::from_secs(5), s.read_exact(&mut ok)).await.expect("réponse ou fermeture rapide") {
+            Ok(_) => Some(s),
+            Err(_) => None,
+        }
+    }
+
+    #[test]
+    fn default_limits_fit_a_group() {
+        let c = TunnelConfig::default();
+        assert!(c.max_connections >= 32);
+        assert!(c.max_per_peer >= 2 && c.max_per_peer <= c.max_connections);
+    }
+
+    #[tokio::test]
+    async fn tunnel_per_peer_limit_spares_other_peers() {
+        let host_cfg = TunnelConfig { max_per_peer: 2, ..TunnelConfig::default() };
+        let (host, guests, _h, _eps) = setup_many(2, host_cfg, TunnelConfig::default()).await;
+        let (a, b) = (&guests[0], &guests[1]);
+        let mut held = vec![try_session(a.local_port).await.unwrap(), try_session(a.local_port).await.unwrap()];
+        // La 3e connexion du pair A est refusée, avec le code explicite « plein » vu côté invité.
+        assert!(try_session(a.local_port).await.is_none());
+        assert_eq!(host.stats().rejected_connections, 1);
+        assert_eq!(a.stats().refused_full, 1);
+        assert_eq!(host.stats().active_connections, 2);
+        // Les flux déjà ouverts de A et le pair B ne sont pas touchés.
+        held[0].write_all(b"x").await.unwrap();
+        let mut one = [0u8; 1];
+        timeout(Duration::from_secs(5), held[0].read_exact(&mut one)).await.unwrap().unwrap();
+        assert_eq!(&one, b"x");
+        assert!(try_session(b.local_port).await.is_some());
+        assert_eq!(b.stats().refused_full, 0);
+        // Libérer une place la rend aussitôt : le compteur par pair redescend, puis la table se vide.
+        drop(held.pop());
+        let mut again = None;
+        for _ in 0..50 {
+            again = try_session(a.local_port).await;
+            if again.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(again.is_some(), "la place libérée doit être réutilisable");
+        drop((held, again));
+        for _ in 0..50 {
+            if crate::util::lock(&host.core.per_peer).is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(crate::util::lock(&host.core.per_peer).is_empty(), "pas de fuite du compteur par pair");
+        for g in guests {
+            g.stop().await;
+        }
+        host.stop().await;
+    }
+
+    #[tokio::test]
+    async fn tunnel_global_limit_refuses_with_full_code() {
+        let host_cfg = TunnelConfig { max_connections: 2, max_per_peer: 2, ..TunnelConfig::default() };
+        let (host, guests, _h, _eps) = setup_many(2, host_cfg, TunnelConfig::default()).await;
+        let (a, b) = (&guests[0], &guests[1]);
+        let _held = [try_session(a.local_port).await.unwrap(), try_session(b.local_port).await.unwrap()];
+        // Hôte plein : la 2e connexion de A (sous sa limite par pair) est refusée par la limite globale.
+        assert!(try_session(a.local_port).await.is_none());
+        assert_eq!(a.stats().refused_full, 1);
+        assert_eq!(host.stats().rejected_connections, 1);
+        assert_eq!(host.stats().active_connections, 2);
+        for g in guests {
+            g.stop().await;
+        }
+        host.stop().await;
+    }
+
+    #[tokio::test]
+    async fn tunnel_serves_ten_group_members_with_default_config() {
+        // Scénario du ticket : un groupe de 10 membres, une partie chacun. Avec l'ancienne limite (8 au total),
+        // le 9e était refusé sans explication.
+        let (host, guests, _h, _eps) = setup_many(10, TunnelConfig::default(), TunnelConfig::default()).await;
+        let mut held = Vec::new();
+        for g in &guests {
+            held.push(try_session(g.local_port).await.expect("chaque membre est servi"));
+        }
+        let st = host.stats();
+        assert_eq!(st.active_connections, 10);
+        assert_eq!(st.rejected_connections, 0);
+        drop(held);
+        for g in guests {
+            g.stop().await;
+        }
         host.stop().await;
     }
 

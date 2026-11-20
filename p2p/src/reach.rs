@@ -15,6 +15,9 @@ pub const CLOSE_SHARING_OFF: u32 = 3;
 pub const CLOSE_NOT_SHARED: u32 = 4;
 /// L'hôte refuse un ami qui n'est pas (ou plus) invité à cette partie : il peut demander à la rejoindre.
 pub const CLOSE_NOT_INVITED: u32 = 5;
+/// L'hôte est plein (limite globale de connexions) ou ce pair a déjà trop de connexions ouvertes. Utilisé comme
+/// code de réinitialisation d'un seul flux : la connexion reste ouverte et les autres flux continuent.
+pub const CLOSE_FULL: u32 = 6;
 
 /// Pourquoi on ne peut pas rejoindre l'ami.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,6 +32,8 @@ pub enum Reach {
     SharingOff,
     /// En ligne, mais aucun monde n'est ouvert.
     NothingShared,
+    /// L'hôte est plein, ou tu as déjà trop de connexions ouvertes chez lui.
+    Full,
 }
 
 impl Reach {
@@ -39,6 +44,7 @@ impl Reach {
             Reach::NotInvited => "Ton ami ne t'a pas invité à cette partie. Demande-lui de t'inviter, ou demande à la rejoindre.",
             Reach::SharingOff => "Ton ami a désactivé le partage de mods. Il doit l'activer dans les Réglages de Cubelink.",
             Reach::NothingShared => "Ton ami n'a pas encore ouvert son monde : il doit lancer le jeu puis l'ouvrir au réseau local.",
+            Reach::Full => "Le serveur de ton ami est plein, ou tu as trop de connexions ouvertes. Réessaie dans un instant.",
         }
     }
 
@@ -50,6 +56,7 @@ impl Reach {
             Reach::NotInvited => Some(CLOSE_NOT_INVITED),
             Reach::SharingOff => Some(CLOSE_SHARING_OFF),
             Reach::NothingShared => Some(CLOSE_NOT_SHARED),
+            Reach::Full => Some(CLOSE_FULL),
         }
     }
 
@@ -59,6 +66,7 @@ impl Reach {
             c if c == u64::from(CLOSE_NOT_INVITED) => Some(Reach::NotInvited),
             c if c == u64::from(CLOSE_SHARING_OFF) => Some(Reach::SharingOff),
             c if c == u64::from(CLOSE_NOT_SHARED) => Some(Reach::NothingShared),
+            c if c == u64::from(CLOSE_FULL) => Some(Reach::Full),
             _ => None,
         }
     }
@@ -96,7 +104,7 @@ mod tests {
 
     #[test]
     fn codes_roundtrip_and_messages_are_distinct() {
-        let all = [Reach::Offline, Reach::NotFriend, Reach::NotInvited, Reach::SharingOff, Reach::NothingShared];
+        let all = [Reach::Offline, Reach::NotFriend, Reach::NotInvited, Reach::SharingOff, Reach::NothingShared, Reach::Full];
         for r in all {
             if let Some(c) = r.close_code() {
                 assert_eq!(Reach::from_code(u64::from(c)), Some(r));
@@ -107,6 +115,7 @@ mod tests {
         assert_eq!(Reach::from_code(u64::from(CLOSE_BAD_REQUEST)), None);
         assert_eq!(Reach::from_code(0), None);
         assert_eq!(Reach::from_code(5), Some(Reach::NotInvited));
-        assert_eq!(Reach::from_code(6), None);
+        assert_eq!(Reach::from_code(6), Some(Reach::Full));
+        assert_eq!(Reach::from_code(7), None);
     }
 }

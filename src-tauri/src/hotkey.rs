@@ -63,6 +63,29 @@ pub fn invite_notification(payload: &Value, hotkey: Option<&str>) -> Option<(Str
     Some((format!("{name} t'invite à rejoindre son monde"), body))
 }
 
+/// Pur : titre et corps de la notification d'une demande à rejoindre reçue (`None` si la charge utile est inutilisable).
+/// `hotkey` : comme pour l'invitation. Avec la Scene, le jeu recouvre le bandeau du launcher tant que le panneau est fermé :
+/// le texte indique alors le raccourci qui l'ouvre.
+pub fn join_request_notification(payload: &Value, hotkey: Option<&str>) -> Option<(String, String)> {
+    let name: String = payload.get("name")?.as_str()?.chars().filter(|c| !c.is_control()).take(48).collect();
+    if name.trim().is_empty() {
+        return None;
+    }
+    let reply = match hotkey {
+        Some(hotkey) => format!("Appuie sur {hotkey} en jeu pour répondre."),
+        None => "Ouvre Cubelink pour répondre.".to_string(),
+    };
+    Some(("Demande à rejoindre".into(), format!("{name} veut rejoindre ta partie. {reply}")))
+}
+
+/// Raccourci du panneau « en jeu » à citer dans une notification, `None` s'il n'existera pas. Linux : il n'existe que si
+/// le prochain jeu ira dans la Scene (X11) ; sinon la notification n'en parle pas.
+fn hotkey_hint(app: &AppHandle) -> Option<String> {
+    let (_, hotkey) = settings_of(app);
+    let scene = app.try_state::<Arc<AppState>>().is_some_and(|s| s.stage.available());
+    (!cfg!(target_os = "linux") || scene).then_some(hotkey)
+}
+
 fn settings_of(app: &AppHandle) -> (bool, String) {
     match app.try_state::<Arc<AppState>>() {
         Some(st) => {
@@ -141,13 +164,22 @@ pub fn setup(app: &AppHandle, test_mode: bool) {
             return;
         }
         let Ok(v) = serde_json::from_str::<Value>(ev.payload()) else { return };
-        let (_, hotkey) = settings_of(&h);
-        // Linux : le raccourci n'existe que si le prochain jeu ira dans la Scene (X11) ; sinon la notification n'en parle pas.
-        let scene = h.try_state::<Arc<AppState>>().is_some_and(|s| s.stage.available());
-        let hotkey = (!cfg!(target_os = "linux") || scene).then_some(hotkey.as_str());
-        if let Some((title, body)) = invite_notification(&v, hotkey) {
+        if let Some((title, body)) = invite_notification(&v, hotkey_hint(&h).as_deref()) {
             if let Err(e) = h.notification().builder().title(title).body(body).show() {
                 eprintln!("[Cubelink] notification d'invitation : {e}");
+            }
+        }
+    });
+    // Demande à rejoindre reçue (hôte) : sans cela, un hôte dont la fenêtre n'est pas à l'écran ne la voit jamais.
+    let h = app.clone();
+    app.listen("friend://join_request", move |ev| {
+        if test_mode {
+            return;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(ev.payload()) else { return };
+        if let Some((title, body)) = join_request_notification(&v, hotkey_hint(&h).as_deref()) {
+            if let Err(e) = h.notification().builder().title(title).body(body).show() {
+                eprintln!("[Cubelink] notification de demande à rejoindre : {e}");
             }
         }
     });
@@ -174,6 +206,20 @@ mod tests {
             let e = validate_hotkey(bad).unwrap_err();
             assert!(e.contains("raccourci"), "{bad}: {e}");
         }
+    }
+
+    #[test]
+    fn notification_de_demande_a_rejoindre() {
+        let v = serde_json::json!({"public_key": "ab", "name": "Alex", "received_at": 1, "expires_at": 121});
+        let (t, b) = join_request_notification(&v, None).unwrap();
+        assert_eq!(t, "Demande à rejoindre");
+        assert_eq!(b, "Alex veut rejoindre ta partie. Ouvre Cubelink pour répondre.");
+        let (_, b) = join_request_notification(&v, Some("Ctrl+Shift+C")).unwrap();
+        assert_eq!(b, "Alex veut rejoindre ta partie. Appuie sur Ctrl+Shift+C en jeu pour répondre.");
+        assert!(join_request_notification(&serde_json::json!({"public_key": "ab"}), None).is_none());
+        assert!(join_request_notification(&serde_json::json!({"name": " \n "}), None).is_none());
+        let long = serde_json::json!({"name": "a".repeat(500)});
+        assert!(join_request_notification(&long, Some("F9")).unwrap().1.len() < 160);
     }
 
     #[test]

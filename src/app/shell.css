@@ -43,6 +43,11 @@
 .stage-notice .cl-btn{flex:none}
 @media (prefers-reduced-motion:reduce){.stage-notice{animation:none}}
 
+/* Demandes à rejoindre (hôte) hors du panneau « en jeu » : carte flottante en haut à droite, sous la barre de titre. */
+.join-banner{position:fixed;right:20px;top:calc(var(--titlebar-h) + 12px);z-index:40;width:min(420px,calc(100vw - 2 * var(--page-pad)));display:flex;flex-direction:column;gap:8px;padding:10px;background:var(--surface);border:1px solid var(--line-strong);border-radius:var(--r-lg);box-shadow:var(--shadow-soft);animation:update-in var(--dur-enter) var(--ease)}
+.join-banner-err{margin:0;padding:0 4px;color:var(--danger);font-size:12px}
+@media (prefers-reduced-motion:reduce){.join-banner{animation:none}}
+
 /* Démarrage : contrôle de la session avant d'afficher l'écran Connexion */
 .boot{height:100%;display:grid;place-items:center;color:var(--muted);font-size:14px}
 

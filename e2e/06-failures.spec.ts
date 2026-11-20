@@ -216,6 +216,23 @@ for (const c of AUTH_CASES) {
   });
 }
 
+test('T6 ecran du code : Annuler et Echap ramenent a l\'accueil, « Jouer hors ligne » reste accessible', async ({ appA, servers }) => {
+  const page = appA.page;
+  await page.waitForSelector('main[data-route="login"]');
+  // Le faux serveur fait attendre quelques secondes avant de valider : le temps d'annuler.
+  await control(servers.auth.base, { scenario: 'authorization_pending_then_ok' });
+  await page.getByRole('button', { name: 'Se connecter avec Microsoft' }).click();
+  await expect(page.getByRole('heading', { name: 'Entre ce code sur Microsoft' })).toBeVisible({ timeout: 30_000 });
+  await page.getByRole('button', { name: 'Annuler' }).click();
+  await expect(page.getByRole('button', { name: 'Jouer hors ligne' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Entre ce code sur Microsoft' })).toHaveCount(0);
+  // Meme chose au clavier (touche Echap dans la fenetre de l'app, pas sur le bureau).
+  await page.getByRole('button', { name: 'Se connecter avec Microsoft' }).click();
+  await expect(page.getByRole('heading', { name: 'Entre ce code sur Microsoft' })).toBeVisible({ timeout: 30_000 });
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('button', { name: 'Jouer hors ligne' })).toBeVisible();
+});
+
 test('T6 echec de connexion Microsoft : l\'ecran Erreur (cancelled / no-license / offline) est affiche', async ({ appA, servers }) => {
   const page = appA.page;
   await page.waitForSelector('main[data-route="login"]');

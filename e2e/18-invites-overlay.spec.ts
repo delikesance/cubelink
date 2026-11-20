@@ -120,8 +120,13 @@ test('regle de jonction : un ami non invite est refuse ; sa demande refusee est 
   expect(ev.expires_at - ev.received_at).toBe(120);
   expect(await invoke<unknown[]>(appA.page, 'friend_join_requests')).toHaveLength(1);
   expect(await invokeErr(appB.page, 'friend_join_request', { public_key: keyA }), 'une seule demande en attente').toMatch(/déjà/);
-  await invoke(appA.page, 'friend_join_request_answer', { public_key: keyB, accept: false });
+  // Sans Scene (mode test), le panneau « en jeu » n'existe pas : le bandeau de la coque est la seule interface de l'hote (#63).
+  const banner = appA.page.getByRole('region', { name: 'Demandes à rejoindre' });
+  await expect(banner).toBeVisible();
+  await expect(banner).toContainText(ev.name);
+  await banner.getByRole('button', { name: /^Refuser la demande de / }).click();
   expect(await asked).toBe('refused');
+  await expect(banner).toHaveCount(0);
   await until('file des demandes videe chez A', async () => (await invoke<unknown[]>(appA.page, 'friend_join_requests')).length === 0);
   expect(await invokeErr(appB.page, 'join_plan', { friend_public_key: keyA }), 'toujours refuse apres un refus').not.toBeNull();
   // Redemande avant 10 min : refus immediat, A n'est pas derange.

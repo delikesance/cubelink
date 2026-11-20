@@ -28,6 +28,8 @@ export const commands = {
 	authBeginLogin: (options?: InvokeOptions) => __TAURI_INVOKE<DeviceCodeInfo>("auth_begin_login", undefined, options),
 	/**  Attend la validation du code d'appareil et renvoie le profil connecté. */
 	authPollLogin: (options?: InvokeOptions) => __TAURI_INVOKE<Profile>("auth_poll_login", undefined, options),
+	/**  Abandonne la connexion Microsoft en cours (le code n'est plus attendu ; une validation tardive n'ajoute aucun compte). */
+	authCancelLogin: (options?: InvokeOptions) => __TAURI_INVOKE<void>("auth_cancel_login", undefined, options),
 	/**  Déconnecte le compte actif. */
 	authLogout: (options?: InvokeOptions) => __TAURI_INVOKE<null>("auth_logout", undefined, options),
 	/**  Crée ou reprend un compte hors ligne au pseudo donné. */

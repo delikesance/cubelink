@@ -17,6 +17,7 @@ Arguments : clés JSON envoyées à Tauri (snake_case) et leur type TypeScript. 
 | `auth_remove` | `id: string` | — | Retire un compte enregistré. |
 | `auth_begin_login` | — | `DeviceCodeInfo` | Démarre la connexion Microsoft (code d'appareil à saisir sur la page de vérification). |
 | `auth_poll_login` | — | `Profile` | Attend la validation du code d'appareil et renvoie le profil connecté. |
+| `auth_cancel_login` | — | — | Abandonne la connexion Microsoft en cours (le code n'est plus attendu ; une validation tardive n'ajoute aucun compte). |
 | `auth_logout` | — | — | Déconnecte le compte actif. |
 | `auth_offline_login` | `name: string` | `Profile` | Crée ou reprend un compte hors ligne au pseudo donné. |
 | `instances_list` | — | `Instance_Serialize[]` | Instances installées. |
@@ -134,8 +135,8 @@ Les types nommés (`Profile`, `TransferProgress`, `HostState`, `StageState`…) 
 | `friend://request` | `FriendRequest` |
 | `friend://code_changed` | `{}` : les adresses de l'appareil ont changé (réseau, IPv6, port ouvert sur la box quelques secondes après le démarrage) ; l'écran du code ami le redemande (`friend_my_code`) |
 | `friend://invite` / `friend://invites` | `Invite` (une invitation reçue) / `Invite[]` (file complète à chaque changement) |
-| `friend://join_request` | `JoinRequest` `{ public_key, name, received_at, expires_at }` : un ami demande à rejoindre ma partie (hôte) |
-| `friend://join_requests` | `JoinRequest[]` : demandes en attente, à chaque changement (décidée, expirée, retirée, partage arrêté) |
+| `friend://join_request` | `JoinRequest` `{ public_key, name, received_at, expires_at }` : un ami demande à rejoindre ma partie (hôte). Rust en fait une notification système (« Demande à rejoindre », hors mode test) |
+| `friend://join_requests` | `JoinRequest[]` : demandes en attente, à chaque changement (décidée, expirée, retirée, partage arrêté). Affichées par le bandeau de la coque (masqué tant que le panneau « en jeu » est ouvert) et par le panneau « en jeu » |
 | `launch://log` | lignes de log du jeu en cours |
 | `browse://progress` | progression d'une installation depuis le catalogue (`done`, `total`, libellé) |
 | `import://warning` | avertissement pendant l'import d'un modpack |

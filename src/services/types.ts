@@ -153,6 +153,8 @@ export interface Services {
   authStatus(): Promise<Profile | null>;
   authBeginLogin(): Promise<DeviceCode>;
   authPollLogin(): Promise<Profile>;
+  /** Abandonne la connexion Microsoft en cours côté Rust (sans effet si aucune). */
+  authCancelLogin(): Promise<void>;
   authLogout(): Promise<void>;
   authOfflineLogin(name: string): Promise<Profile>;
   /** Les comptes hors ligne sont libres : toujours vrai (méthode conservée pour compatibilité). */

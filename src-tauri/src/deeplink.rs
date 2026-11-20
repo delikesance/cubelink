@@ -9,7 +9,7 @@
 use std::sync::Arc;
 
 use p2p_lib::friend_code::LINK_SCHEME;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter};
 use tauri_plugin_deep_link::DeepLinkExt;
 
 use crate::state::{lock, AppState};
@@ -78,7 +78,7 @@ fn is_msix_path(exe: &str) -> bool {
 /// un réenregistrement à chaque démarrage, sur un fil à part car il lance `xdg-mime`) et un MSI posé avant ce correctif.
 fn register(app: &AppHandle) {
     let handle = app.clone();
-    if cfg!(target_os = "linux") && app.env().appimage.is_some() {
+    if cfg!(target_os = "linux") && std::env::var_os("APPIMAGE").is_some() {
         std::thread::spawn(move || {
             if let Err(e) = handle.deep_link().register(LINK_SCHEME) {
                 eprintln!("[Cubelink] enregistrement du lien cubelink:// impossible : {e}");

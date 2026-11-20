@@ -91,7 +91,8 @@ pub struct State {
     /// Rectangle ecran applique au rideau, a la scene (repere du launcher) et au jeu (largeur, hauteur dans la scene).
     curtain_rect: Option<(i32, i32, i32, i32)>,
     stage_rect: Option<(i32, i32, i32, i32)>,
-    game_rect: Option<(u32, i32, i32)>,
+    /// `(fenetre, x, y, largeur, hauteur)` deja appliques au jeu : en ecran pour le jeu transitoire, `(0, 0)` dans la scene.
+    game_rect: Option<(u32, i32, i32, i32, i32)>,
     /// Largeur de la bande rognee a droite du jeu transitoire (panneau ouvert), deja appliquee par XShape.
     game_clip: Option<(u32, i32)>,
     stage_mapped: bool,

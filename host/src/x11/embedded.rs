@@ -5,8 +5,10 @@
 //! et peut recevoir le focus clavier (`XSetInputFocus`). Le panneau « en jeu » reduit la scene : le jeu garde sa taille, rognee.
 //! Le rideau est une fenetre ARGB `override-redirect` au-dessus de tout, calee sur la zone, traversee par la souris.
 //!
-//! Repli si le reparentage est refuse : `WM_TRANSIENT_FOR` = launcher, `_MOTIF_WM_HINTS` sans decoration, `SKIP_TASKBAR`, calage
-//! en coordonnees ecran (non verifie sans gestionnaire de fenetres reel).
+//! Repli si le reparentage est refuse (et d'office des qu'un gestionnaire de fenetres tourne) : `WM_TRANSIENT_FOR` = launcher,
+//! `_MOTIF_WM_HINTS` sans decoration, `SKIP_TASKBAR`, calage en coordonnees ecran, garage hors ecran, panneau decoupe par XShape.
+//! Verifie par `tests/x11_transient_adopt.rs` (gestionnaire simule par `_NET_SUPPORTING_WM_CHECK`) et `tests/x11_transient_openbox.rs`
+//! (vrai gestionnaire, `openbox`) ; pas sous Mutter, KWin ni XWayland.
 
 use std::time::Instant;
 
@@ -126,7 +128,8 @@ pub(super) fn sync(s: &Shared) {
     let inner = (w - pw).max(1);
     if transient {
         // le jeu garde la taille de la zone entiere (son contenu ne bouge pas) ; la bande du panneau est rognee par XShape
-        let want = Some((g, w, h));
+        // la position (ecran) compte : le launcher deplace, le jeu, enfant de la racine, ne suit pas tout seul
+        let want = Some((g, x, y, w, h));
         if std::mem::replace(&mut s.lock().game_rect, want) != want {
             place(s, g, (x, y, w, h));
             let _ = s.conn.map_window(g);
@@ -140,8 +143,8 @@ pub(super) fn sync(s: &Shared) {
         let restage = st.stage_rect != Some(want);
         st.stage_rect = Some(want);
         let remap = !std::mem::replace(&mut st.stage_mapped, true);
-        let regame = st.game_rect != Some((g, w, h));
-        st.game_rect = Some((g, w, h));
+        let regame = st.game_rect != Some((g, 0, 0, w, h));
+        st.game_rect = Some((g, 0, 0, w, h));
         (restage, remap, regame)
     };
     if restage {
@@ -769,7 +772,11 @@ fn give_back(s: &Shared, r: &Returned, front: bool) {
     }
     let (ox, oy, ow, oh) = r.origin.rect;
     let (x, y, w, h) = if show || ox <= -30000 || oy <= -30000 { guard::returned_rect(util::work_area(c, a, s.root, s.parent), (ow, oh)) } else { (ox, oy, ow, oh) };
-    let _ = c.reparent_window(g, s.root, clamp16(x), clamp16(y));
+    if !r.origin.transient {
+        let _ = c.reparent_window(g, s.root, clamp16(x), clamp16(y));
+    }
+    // transitoire : la fenetre n'a jamais quitte le gestionnaire de fenetres (elle est dans SON cadre) ; la reparenter vers la
+    // racine la ferait demonter et la laisserait cachee. Le gestionnaire la replace lui-meme a la demande de `place`.
     place(s, g, (x, y, w, h));
     if show {
         raise(s, g);

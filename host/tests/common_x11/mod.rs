@@ -7,13 +7,21 @@
 //! Ces tests visent un serveur X11 NU (`xvfb-run`), sans gestionnaire de fenetres : sans lui, aucune decoration, aucun placement
 //! ni reordonnancement ne vient fausser les lectures. Ils se mettent donc en retrait (le test passe, avec un message) quand
 //! `DISPLAY` est absent OU quand un gestionnaire de fenetres tourne (`_NET_SUPPORTING_WM_CHECK`) : jamais de fenetre de test sur le
-//! bureau de l'utilisateur, sauf `CUBELINK_X11_TESTS=1`. Ce que ces tests NE peuvent PAS verifier : le cadre du gestionnaire de
-//! fenetres, la barre des taches, `_NET_ACTIVE_WINDOW`, la transparence du rideau (pas de compositeur), le comportement de Mutter ou
-//! de XWayland, ni celui d'un vrai GLFW / SDL.
+//! bureau de l'utilisateur, sauf `CUBELINK_X11_TESTS=1`.
+//!
+//! Le chemin TRANSITOIRE de l'hote (celui de tout bureau : `wm_present`) est exerce de deux facons, toutes deux lancees APRES
+//! `available()` (l'hote lit `wm_present` une seule fois, a `GameHost::embed` : le gestionnaire doit donc exister avant) :
+//!   - `FakeWmMark` : la seule propriete `_NET_SUPPORTING_WM_CHECK` de la racine. Deterministe, sans dependance : le serveur
+//!     execute telles quelles les requetes de placement, les lectures sont exactes (`x11_transient_adopt`) ;
+//!   - `RealWm` : un vrai gestionnaire leger (`openbox`), pour ce que la marque ne peut pas dire : cadre, contraintes de position,
+//!     reprise du focus (`x11_transient_openbox`). Absent, le test se retire ; `CUBELINK_REQUIRE_WM=1` (CI) en fait un echec.
+//!
+//! Ce que ces tests NE peuvent PAS verifier : la barre des taches, la transparence du rideau (pas de compositeur), le comportement
+//! de Mutter, de KDE ou de XWayland (openbox n'est pas Mutter), ni celui d'un vrai GLFW / SDL.
 
 #![allow(dead_code)] // chaque scenario n'utilise qu'une partie des outils
 
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -49,6 +57,84 @@ pub fn x() -> &'static (RustConnection, u32) {
 
 fn atom(name: &str) -> u32 {
     x().0.intern_atom(false, name.as_bytes()).unwrap().reply().unwrap().atom
+}
+
+/// Pose `_NET_SUPPORTING_WM_CHECK` sur la racine (un gestionnaire de fenetres SIMULE : `GameHost::embed` prend alors le chemin
+/// transitoire) et la retire a la fin, meme en cas d'echec. A creer APRES `available()` et AVANT `GameHost::embed`.
+pub struct FakeWmMark;
+
+impl FakeWmMark {
+    pub fn set(check_window: u32) -> FakeWmMark {
+        let (c, root) = x();
+        c.change_property32(PropMode::REPLACE, *root, atom("_NET_SUPPORTING_WM_CHECK"), AtomEnum::WINDOW, &[check_window]).unwrap();
+        c.flush().unwrap();
+        FakeWmMark
+    }
+}
+
+impl Drop for FakeWmMark {
+    fn drop(&mut self) {
+        let (c, root) = x();
+        let _ = c.delete_property(*root, atom("_NET_SUPPORTING_WM_CHECK"));
+        let _ = c.flush();
+    }
+}
+
+fn root_has_wm() -> bool {
+    let (c, root) = x();
+    c.get_property(false, *root, atom("_NET_SUPPORTING_WM_CHECK"), AtomEnum::WINDOW, 0, 1).unwrap().reply().is_ok_and(|r| r.value_len > 0)
+}
+
+/// Un vrai gestionnaire de fenetres leger (`openbox`) lance sur le serveur de test. TUE a la fin du test (meme en cas d'echec) et
+/// la marque `_NET_SUPPORTING_WM_CHECK` retiree : sinon les tests suivants du meme serveur s'ignoreraient en silence.
+pub struct RealWm {
+    child: Child,
+}
+
+impl RealWm {
+    /// `None` (avec un message) si `openbox` est introuvable : le test se retire. Avec `CUBELINK_REQUIRE_WM=1` (CI), c'est un echec.
+    /// A appeler apres `available()` (jamais de gestionnaire lance sur un bureau reel, ni a la place d'un autre).
+    pub fn start() -> Option<RealWm> {
+        let child = match Command::new("openbox").arg("--sm-disable").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                assert!(std::env::var_os("CUBELINK_REQUIRE_WM").is_none(), "openbox introuvable alors que CUBELINK_REQUIRE_WM est pose : {e}");
+                eprintln!("test X11 openbox ignore : openbox introuvable ({e})");
+                return None;
+            }
+        };
+        let wm = RealWm { child };
+        // Pret = il traite les `MapRequest` : sa propriete `_NET_SUPPORTING_WM_CHECK` est posee des le demarrage, mais une demande
+        // d'affichage faite avant la fin de son initialisation est PERDUE (la fenetre ne serait jamais affichee). On le sonde donc avec
+        // une fenetre jetable, affichee jusqu'a ce qu'elle le soit vraiment.
+        wait_until("openbox annonce _NET_SUPPORTING_WM_CHECK", Duration::from_secs(10), root_has_wm);
+        let (c, root) = x();
+        let probe = c.generate_id().unwrap();
+        c.create_window(0, probe, *root, 0, 0, 10, 10, 0, WindowClass::INPUT_OUTPUT, 0, &CreateWindowAux::new()).unwrap();
+        wait_until("openbox gere les fenetres", Duration::from_secs(10), || {
+            c.map_window(probe).unwrap();
+            c.flush().unwrap();
+            std::thread::sleep(Duration::from_millis(150));
+            let ok = visible(probe);
+            if !ok {
+                c.unmap_window(probe).unwrap();
+            }
+            ok
+        });
+        let _ = c.destroy_window(probe);
+        let _ = c.flush();
+        Some(wm)
+    }
+}
+
+impl Drop for RealWm {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let (c, root) = x();
+        let _ = c.delete_property(*root, atom("_NET_SUPPORTING_WM_CHECK")); // openbox tue brutalement ne la retire pas toujours
+        let _ = c.flush();
+    }
 }
 
 /// Le test peut tourner ici : un serveur X11 nu est joignable. Sinon, affiche pourquoi et rend faux (le test doit alors rendre la main).
@@ -212,6 +298,14 @@ pub fn stage() -> u32 {
 
 pub fn curtain() -> u32 {
     *windows_of(std::process::id(), "CubelinkCurtain").first().expect("fenetre du rideau introuvable")
+}
+
+/// Donne le focus clavier a `w` (avec un gestionnaire de fenetres, le focus a un sens : le rideau ne se ferme que si le launcher
+/// est la fenetre active).
+pub fn give_focus(w: u32) {
+    let (c, _) = x();
+    c.set_input_focus(InputFocus::PARENT, w, x11rb::CURRENT_TIME).unwrap();
+    c.flush().unwrap();
 }
 
 /// Fenetre qui a le focus clavier (0 : aucune, 1 : `PointerRoot`).
@@ -417,6 +511,32 @@ impl Sampler {
 pub fn card_prop(win: u32, name: &str) -> Vec<u32> {
     let r = x().0.get_property(false, win, atom(name), AtomEnum::CARDINAL, 0, 16).unwrap().reply().unwrap();
     r.value32().map(|v| v.collect()).unwrap_or_default()
+}
+
+/// Valeurs 32 bits d'une propriete de n'importe quel type (`ATOM`, `WINDOW`, `CARDINAL`...) ; vide : absente.
+pub fn prop32_any(win: u32, name: &str) -> Vec<u32> {
+    let r = x().0.get_property(false, win, atom(name), AtomEnum::ANY, 0, 64).unwrap().reply().unwrap();
+    r.value32().map(|v| v.collect()).unwrap_or_default()
+}
+
+/// Atome nomme (`_NET_WM_STATE_SKIP_TASKBAR`...).
+pub fn atom_named(name: &str) -> u32 {
+    atom(name)
+}
+
+/// Rectangles de la region de DECOUPE (`SHAPE` bounding) d'une fenetre.
+pub fn bounding_shape(win: u32) -> Vec<Rectangle> {
+    use x11rb::protocol::shape;
+    shape::get_rectangles(&x().0, win, shape::SK::BOUNDING).unwrap().reply().unwrap().rectangles
+}
+
+/// La fenetre a une forme `SHAPE` de decoupe (`bounding`) / de zone d'entree (`input`) : faux apres `shape::mask(None)`.
+pub fn bounding_shaped(win: u32) -> bool {
+    x11rb::protocol::shape::query_extents(&x().0, win).unwrap().reply().unwrap().bounding_shaped
+}
+
+pub fn input_shaped(win: u32) -> bool {
+    x11rb::protocol::shape::query_extents(&x().0, win).unwrap().reply().unwrap().clip_shaped
 }
 
 /// Premiere valeur d'une propriete `CARDINAL` (0 : absente).

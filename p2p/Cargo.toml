@@ -27,7 +27,7 @@ futures-util.workspace = true
 blake3.workspace = true
 tracing.workspace = true
 specta.workspace = true
-iroh = "=1.4.1"
+iroh = "=1.5.0"
 iroh-blobs = "=0.105.0"
 # Même version que celle d'iroh (déjà dans Cargo.lock) : mappage de port quand le relais est coupé.
 portmapper = "=0.19.3"

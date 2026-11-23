@@ -30,7 +30,7 @@ specta.workspace = true
 iroh = "=1.4.1"
 iroh-blobs = "=0.105.0"
 # Même version que celle d'iroh (déjà dans Cargo.lock) : mappage de port quand le relais est coupé.
-portmapper = "=0.19.3"
+portmapper = "=0.20.2"
 n0-future = "0.3"
 argon2.workspace = true
 chacha20poly1305.workspace = true

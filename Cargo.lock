@@ -1315,7 +1315,7 @@ dependencies = [
  "iroh",
  "iroh-blobs",
  "n0-future",
- "portmapper",
+ "portmapper 0.20.2",
  "proptest",
  "rand",
  "rusqlite",
@@ -2934,6 +2934,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "igd-next"
+version = "0.18.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c71312255fdc5364bff7eec0adf68146bc4e72aba85075261af40d234c11be99"
+dependencies = [
+ "bytes",
+ "futures",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "log",
+ "rand",
+ "thiserror 2.0.21",
+ "tokio",
+ "url",
+ "xml-rs",
+ "xmltree",
+]
+
+[[package]]
 name = "image"
 version = "0.25.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3062,14 +3083,14 @@ dependencies = [
  "n0-error",
  "n0-future",
  "n0-watcher",
- "netwatch",
+ "netwatch 0.19.3",
  "noq",
  "noq-proto",
  "noq-udp",
  "papaya",
  "pin-project",
  "portable-atomic",
- "portmapper",
+ "portmapper 0.19.3",
  "rand",
  "reqwest 0.13.5",
  "rustc-hash",
@@ -4017,6 +4038,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "netdev"
+version = "0.47.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "98a4d13f8061600697d721c5fd45262aba533a7d4a7670e7c64fd02d68e4a9fb"
+dependencies = [
+ "block2",
+ "dispatch2",
+ "dlopen2",
+ "ipnet",
+ "jni 0.21.1",
+ "libc",
+ "mac-addr",
+ "ndk-context",
+ "netlink-packet-core 0.9.0",
+ "netlink-packet-route 0.33.0",
+ "netlink-sys 0.9.0",
+ "objc2-core-foundation",
+ "objc2-system-configuration",
+ "once_cell",
+ "plist",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "netlink-packet-core"
 version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4072,6 +4117,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "netlink-proto"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "97e03ae6247c6cdb499e8f14e98c72b83954d85822b687056e3a21150b438f2b"
+dependencies = [
+ "bytes",
+ "futures-channel",
+ "futures-util",
+ "log",
+ "netlink-packet-core 0.9.0",
+ "netlink-sys 0.9.0",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "netlink-sys"
 version = "0.8.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4091,8 +4151,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c99d38e00b420df49e940fe0826e667c3dad82ac68eb4c2bbf754c1c14a83a10"
 dependencies = [
  "bytes",
+ "futures-util",
  "libc",
  "log",
+ "tokio",
 ]
 
 [[package]]
@@ -4115,7 +4177,7 @@ dependencies = [
  "netdev 0.46.3",
  "netlink-packet-core 0.8.2",
  "netlink-packet-route 0.31.0",
- "netlink-proto",
+ "netlink-proto 0.12.2",
  "netlink-sys 0.8.8",
  "noq-udp",
  "objc2-core-foundation",
@@ -4124,6 +4186,43 @@ dependencies = [
  "serde",
  "socket2",
  "time",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "web-sys",
+ "windows",
+ "windows-result 0.4.1",
+ "wmi",
+]
+
+[[package]]
+name = "netwatch"
+version = "0.20.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2acf7a1ca9205d7c1fc9a1595193a8cbaa7537b4a07dca93c6ae3de7c8d0e597"
+dependencies = [
+ "atomic-waker",
+ "bytes",
+ "cfg_aliases",
+ "chrono",
+ "derive_more",
+ "ipnet",
+ "js-sys",
+ "libc",
+ "n0-error",
+ "n0-future",
+ "n0-watcher",
+ "netdev 0.47.0",
+ "netlink-packet-core 0.9.0",
+ "netlink-packet-route 0.33.0",
+ "netlink-proto 0.13.0",
+ "netlink-sys 0.9.0",
+ "noq-udp",
+ "objc2-core-foundation",
+ "objc2-system-configuration",
+ "pin-project-lite",
+ "serde",
+ "socket2",
  "tokio",
  "tokio-util",
  "tracing",
@@ -5069,12 +5168,12 @@ dependencies = [
  "bytes",
  "derive_more",
  "hyper-util",
- "igd-next",
+ "igd-next 0.17.1",
  "iroh-metrics",
  "libc",
  "n0-error",
  "n0-future",
- "netwatch",
+ "netwatch 0.19.3",
  "num_enum",
  "rand",
  "serde",
@@ -5084,6 +5183,32 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tower-layer",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "portmapper"
+version = "0.20.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d36ce759df600731dd2511cd2d640bd551086b2f7b68bceb9bbcfd8c7ff86053"
+dependencies = [
+ "bytes",
+ "derive_more",
+ "hyper-util",
+ "igd-next 0.18.0",
+ "iroh-metrics",
+ "libc",
+ "n0-error",
+ "n0-future",
+ "netwatch 0.20.2",
+ "num_enum",
+ "rand",
+ "serde",
+ "smallvec",
+ "socket2",
+ "tokio",
+ "tokio-util",
  "tracing",
  "url",
 ]

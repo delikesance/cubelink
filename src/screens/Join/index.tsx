@@ -92,6 +92,7 @@ export default function Join() {
   const unchecked = state.kind === "ready" ? (state.plan.unknown_unchecked ?? []) : [];
   const scripts = state.kind === "ready" ? (state.plan.unknown_scripts ?? []) : [];
   const alreadyTrusted = state.kind === "ready" ? (state.plan.unknown_trusted ?? []) : [];
+  const friendTrusted = state.kind === "ready" ? (state.plan.unknown_friend_trusted ?? []) : [];
   // Tout ce qui s'exécutera sans avoir été reconnu : mods inconnus, jars non vérifiés, scripts KubeJS. La case de
   // confiance est obligatoire (le backend la revérifie, avec le hash du manifeste montré).
   const toAccept = unknown.length + unchecked.length + scripts.length;
@@ -384,6 +385,13 @@ export default function Join() {
             {alreadyTrusted.length > 1
               ? `${alreadyTrusted.length} mods hors catalogue ont déjà été acceptés lors d'une partie précédente : pas besoin de les revalider.`
               : "Un mod hors catalogue a déjà été accepté lors d'une partie précédente : pas besoin de le revalider."}
+          </p>
+        )}
+        {ready && friendTrusted.length > 0 && (
+          <p className="join-note enter" data-testid="friend-trusted" style={stagger(2)}>
+            {friendTrusted.length > 1
+              ? `${friendTrusted.length} mods hors catalogue de ${name} seront installés sans te demander (réglage de confiance actif ; les scripts demandent toujours ton accord).`
+              : `Un mod hors catalogue de ${name} sera installé sans te demander (réglage de confiance actif ; les scripts demandent toujours ton accord).`}
           </p>
         )}
         {ready && (

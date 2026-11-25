@@ -14,6 +14,7 @@ export default function FriendsList({ refreshKey = 0 }: { refreshKey?: number } 
   const [friends, setFriends] = useState<FriendWithPresence[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [toRemove, setToRemove] = useState<FriendWithPresence | null>(null);
+  const [busyTrust, setBusyTrust] = useState<string | null>(null);
   const [notice, setNotice] = useState("");
 
   useEffect(() => {
@@ -33,6 +34,25 @@ export default function FriendsList({ refreshKey = 0 }: { refreshKey?: number } 
     return () => { alive = false; off(); offAccepted(); };
   }, [services, refreshKey]);
 
+  const toggleTrust = async (item: FriendWithPresence, checked: boolean) => {
+    const next = checked ? "always" : "ask";
+    setBusyTrust(item.friend.public_key);
+    setError(null);
+    try {
+      await services.friendSetTrust(item.friend.public_key, next);
+      setFriends((l) => l && l.map((f) => (
+        f.friend.public_key === item.friend.public_key ? { ...f, friend: { ...f.friend, trust: next } } : f
+      )));
+      setNotice(checked
+        ? `Les mods de ${item.friend.name} seront installés sans te demander (les scripts demandent toujours ton accord).`
+        : `Cubelink te demandera à nouveau ton accord pour les mods de ${item.friend.name}.`);
+    } catch (e) {
+      setError(errMsg(e));
+    } finally {
+      setBusyTrust((cur) => (cur === item.friend.public_key ? null : cur));
+    }
+  };
+
   const nowSec = Math.floor(Date.now() / 1000);
   return (
     <section className="fl" aria-labelledby="fl-title">
@@ -50,6 +70,16 @@ export default function FriendsList({ refreshKey = 0 }: { refreshKey?: number } 
                   <span className="fl-name">{f.friend.name}</span>
                   <span className="fl-sub">{on ? "En ligne" : (lastSeenText(f.last_seen, nowSec) ?? "Hors ligne")}</span>
                 </span>
+                <label className="fl-trust">
+                  <input
+                    type="checkbox"
+                    checked={f.friend.trust === "always"}
+                    disabled={busyTrust === f.friend.public_key}
+                    aria-label={`Installer les mods de ${f.friend.name} sans me demander`}
+                    onChange={(e) => { void toggleTrust(f, e.target.checked); }}
+                  />
+                  <span>Installer ses mods sans me demander</span>
+                </label>
                 <Button variant="secondary" aria-label={`Retirer ${f.friend.name} de mes amis`} onClick={() => setToRemove(f)}>Retirer</Button>
               </li>
             );

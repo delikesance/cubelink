@@ -21,7 +21,7 @@ use iroh::protocol::Router;
 use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey};
 use p2p_lib::hearth::lease::{Claim, ClaimReply, ConflictKind, Lease, LeaseId, LeaseTable, ReleaseReason};
 use p2p_lib::hearth::model::{GroupId, GroupOp, GroupState, HearthSigner, OpHash, PackPin, Proposal, Sig, SignedOp};
-use p2p_lib::hearth::outbox::{MemberReplica, Outbox, Replica};
+use p2p_lib::hearth::outbox::{MemberReplica, Outbox, OutboxEntry, Replica};
 use p2p_lib::hearth::proto::{HearthConn, HearthDelegate, HearthHandler, NetError, HEARTH_ALPN, HEARTH_BLOBS_ALPN};
 use p2p_lib::hearth::store::{Group, GroupKey, GroupStore};
 use p2p_lib::hearth::sync::{FetchOptions, GroupMembers, SyncError, WorldStore};
@@ -42,6 +42,8 @@ struct Delegate {
     complete: Arc<Mutex<HashSet<VersionId>>>,
     addrs: Mutex<HashMap<PeerKey, EndpointAddr>>,
     refuse_offers: AtomicBool,
+    /// Versions refusées pour de bon (`refused_version`).
+    refused: Mutex<HashSet<VersionId>>,
     world: OnceLock<WorldStore>,
     endpoint: OnceLock<Endpoint>,
 }
@@ -83,6 +85,9 @@ impl HearthDelegate for Delegate {
     }
     fn have_version(&self, _group: &GroupId, version: &VersionId) -> bool {
         self.complete.lock().unwrap().contains(version)
+    }
+    fn refused_version(&self, _group: &GroupId, version: &VersionId) -> Option<String> {
+        self.refused.lock().unwrap().contains(version).then(|| "oversize".to_string())
     }
     fn on_lease(&self, from: PeerKey, lease: Lease) {
         let groups = self.groups.lock().unwrap();
@@ -208,6 +213,7 @@ async fn node(serve_blobs: bool) -> Node {
         complete: Arc::default(),
         addrs: Mutex::default(),
         refuse_offers: AtomicBool::new(false),
+        refused: Mutex::default(),
         world: OnceLock::new(),
         endpoint: OnceLock::new(),
     });
@@ -772,4 +778,76 @@ async fn lower_branch() {
     // Une fois la tête connue, plus rien à rattraper : pas de second téléchargement complet.
     let again = conn.fetch_versions_reaching(&g, 49, &st.heads, known, true).await.unwrap();
     assert!(again.iter().all(|v| v.header.number > 49));
+}
+
+/// La place d'un groupe, c'est ses blobs : un fichier inchangé d'une version à l'autre est compté une fois, et une
+/// version libérée n'est plus comptée (#96).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn group_bytes_compte_les_blobs_une_fois_et_baisse_a_la_liberation() {
+    let a = node(false).await;
+    let g = GroupId::random();
+    let other = GroupId::random();
+    assert_eq!(a.world.group_bytes(&g).await, 0);
+    let w = tempfile::tempdir().unwrap();
+    std::fs::write(w.path().join("gros.bin"), noise(1, 100_000)).unwrap();
+    std::fs::write(w.path().join("level.dat"), noise(2, 1_000)).unwrap();
+    let p1 = a.world.publish_dir(&g, w.path()).await.unwrap();
+    let one = a.world.group_bytes(&g).await;
+    assert!(one >= p1.total_size && one < p1.total_size + 2_000, "blobs + liste : {one} pour {}", p1.total_size);
+    // Seul le petit fichier change : le gros blob n'est pas recompté.
+    std::fs::write(w.path().join("level.dat"), noise(3, 1_000)).unwrap();
+    let p2 = a.world.publish_dir(&g, w.path()).await.unwrap();
+    assert_ne!(p1.collection, p2.collection);
+    let two = a.world.group_bytes(&g).await;
+    assert!(two > one && two < one + 3_000, "le gros fichier compte une fois : {one} puis {two}");
+    // Un autre groupe qui ne garde rien ne pèse rien ; libérer la n° 1 retire ses blobs propres.
+    assert_eq!(a.world.group_bytes(&other).await, 0);
+    a.world.release(&g, &p1.collection).await.unwrap();
+    let after = a.world.group_bytes(&g).await;
+    assert!(after < two && after >= p2.total_size, "{after}");
+}
+
+/// #99 : un membre qui a refusé une version (trop grosse d'un coup) le dit à la sonde `HaveVersion` par un rejet
+/// `refused:<code>` ; la cible réseau en fait un refus définitif (sans attendre le délai de confirmation), et la file
+/// n'y revient plus. Sans refus, la sonde répond `Have { complete: false }` comme avant.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn refused_version_is_reported_to_the_sender_and_not_retried() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let (a, b) = (node(true).await, node(true).await);
+        a.befriend(&b);
+        b.befriend(&a);
+        let g = GroupId::random();
+        let key = GroupKey::random();
+        let create = SignedOp::create(&*a.ident, g, "Les copains", pack(), &BTreeSet::from([b.key])).unwrap();
+        let group = a.delegate.store.create(&create, key.clone()).unwrap();
+        a.delegate.groups.lock().unwrap().insert(g, group);
+        let conn = HearthConn::connect(&a.ep, b.addr()).await.unwrap();
+        conn.send_invite(&a.with_group(&g, |gr| gr.ops().to_vec()), &key).await.unwrap();
+
+        let v1 = version(&a.ident, g, 1, None, [1; 32], 5_000_000_000, VersionKind::Session);
+        let conn = HearthConn::connect(&a.ep, b.addr()).await.unwrap();
+        // Pas encore refusée : réponse ordinaire.
+        assert!(!conn.have_version(&g, &v1.id()).await.unwrap());
+        b.delegate.refused.lock().unwrap().insert(v1.id());
+        assert_eq!(conn.have_version(&g, &v1.id()).await.unwrap_err(), NetError::Rejected("refused:oversize".into()));
+
+        // Côté file : refus définitif tout de suite (le délai de confirmation est de 60 s), l'entrée est « failed ».
+        let tmp = tempfile::tempdir().unwrap();
+        let outbox = Outbox::open(tmp.path()).unwrap();
+        outbox.set_others(Arc::new(|_| 1));
+        outbox.enqueue(v1.clone()).unwrap();
+        b.delegate.refuse_offers.store(false, Ordering::SeqCst);
+        let replica: Arc<dyn Replica> = Arc::new(MemberReplica::new(a.ep.clone(), b.addr(), BTreeSet::from([g])).with_confirm_timeout(Duration::from_secs(60)));
+        let started = Instant::now();
+        // L'offre est ignorée par le délégué de test (pas de monde publié) : seul le refus compte ici.
+        let r = outbox.drain(std::slice::from_ref(&replica)).await;
+        assert!(started.elapsed() < Duration::from_secs(20), "refus immédiat, pas d'attente de 60 s ({:?})", started.elapsed());
+        assert_eq!((r.delivered.len(), r.failures.len()), (0, 1), "{r:?}");
+        let e: OutboxEntry = outbox.pending().remove(0);
+        assert_eq!(e.failed.as_deref(), Some("oversize"));
+        let r = outbox.drain(std::slice::from_ref(&replica)).await;
+        assert!(r.failures.is_empty() && outbox.len() == 1, "plus aucune tentative");
+    })
+    .await
+    .expect("le test ne doit pas dépasser 1 minute");
 }

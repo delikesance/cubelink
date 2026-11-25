@@ -47,6 +47,10 @@ tauri-plugin-deep-link = "2"
 [target.'cfg(any(windows, target_os = "linux"))'.dependencies]
 cubelink-host = { path = "../host" }
 
+# Windows : la fenetre cachee qui recoit la fin de session (`shutdown_win.rs`).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_LibraryLoader", "Win32_System_Shutdown", "Win32_UI_WindowsAndMessaging"] }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 raw-window-handle = "0.6"
 # Sonde D-Bus du StatusNotifierWatcher (background.rs) : sans hôte de zone de notification, fermer quitte.
@@ -57,3 +61,4 @@ tempfile.workspace = true
 wiremock.workspace = true
 zip.workspace = true
 image = { version = "0.25", default-features = false, features = ["png"] }
+rusqlite.workspace = true

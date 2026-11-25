@@ -198,6 +198,16 @@ impl AppState {
         Ok(())
     }
 
+    /// Règle le niveau de confiance d'un ami : `Always` = « Installer ses mods sans me demander » (jars inconnus ou non
+    /// vérifiés de CET ami, voir `join_plan`). Idempotent ; ami inconnu : refusé.
+    pub fn friend_set_trust(&self, public_key: &str, trust: core_lib::types::TrustLevel) -> Result<(), String> {
+        valid_key(public_key)?;
+        self.friends.set_trust(public_key, trust).map_err(|e| match e {
+            core_lib::types::Error::NotFound(_) => "cet ami est inconnu".to_string(),
+            e => user_msg(&e),
+        })
+    }
+
     /// Retire un ami : il disparaît de la base (adresses comprises), perd l'accès d'invité en cours, et tout ce qui
     /// venait de lui est oublié (invitations, demandes à rejoindre, demande d'ami en file, dernière présence).
     /// Sans l'amitié, la sonde de présence est refusée et la revérification du tunnel (500 ms) coupe sa connexion.
@@ -319,6 +329,13 @@ pub async fn friend_refuse(state: State<'_, Arc<AppState>>, public_key: String) 
 #[specta::specta(rename_all = "snake_case")]
 pub async fn friend_refuse_all(state: State<'_, Arc<AppState>>) -> Result<usize, String> {
     state.friend_refuse_all().await
+}
+
+/// Règle la confiance envers un ami : `always` = « Installer ses mods sans me demander » (ses jars inconnus ne demandent plus l'accord ; les scripts KubeJS et les exécutables restent bloqués ou demandés). Idempotent ; ami inconnu refusé.
+#[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
+pub fn friend_set_trust(state: State<'_, Arc<AppState>>, public_key: String, trust: core_lib::types::TrustLevel) -> Result<(), String> {
+    state.friend_set_trust(&public_key, trust)
 }
 
 /// Retire un ami : accès d'invité en cours révoqué (le tunnel se coupe, la sonde de présence est refusée), invitations, demandes à rejoindre et demande en file de cet ami oubliées. Réussit aussi s'il n'est déjà plus ami ; les groupes Hearth ne sont pas touchés.
@@ -596,6 +613,27 @@ mod tests {
         st.friend_remove(&"c".repeat(64)).unwrap();
         assert!(st.friend_remove("pas-une-cle").unwrap_err().contains("invalide"));
         assert!(st.friend_remove(&"A".repeat(64)).is_err(), "majuscules refusées comme ailleurs");
+    }
+
+    #[test]
+    fn confiance_ami_reglable_idempotente_et_validee() {
+        use core_lib::types::TrustLevel::{Always, Ask};
+        let dir = tempfile::tempdir().unwrap();
+        let (st, _) = test_state(dir.path());
+        let a = add_friend(&st, 'a');
+        assert_eq!(st.friend_list().unwrap()[0].friend.trust, Ask, "refus par défaut");
+        st.friend_set_trust(&a, Always).unwrap();
+        st.friend_set_trust(&a, Always).unwrap();
+        assert_eq!(st.friend_list().unwrap()[0].friend.trust, Always);
+        st.friend_set_trust(&a, Ask).unwrap();
+        assert_eq!(st.friend_list().unwrap()[0].friend.trust, Ask);
+        assert!(st.friend_set_trust(&"c".repeat(64), Always).unwrap_err().contains("inconnu"));
+        assert!(st.friend_set_trust("pas-une-cle", Always).unwrap_err().contains("invalide"));
+        // Retirer puis ré-ajouter l'ami : la confiance ne survit pas.
+        st.friend_set_trust(&a, Always).unwrap();
+        st.friend_remove(&a).unwrap();
+        let a = add_friend(&st, 'a');
+        assert_eq!(st.friends.get_friend(&a).unwrap().unwrap().trust, Ask);
     }
 
     #[test]

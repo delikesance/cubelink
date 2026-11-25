@@ -7,11 +7,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use core_lib::hearth::server::{ram_pressure_warning, server_ram_mb};
 use core_lib::hearth::world;
 use core_lib::instance::InstanceKind;
 use core_lib::manifest::{build_manifest, manifest_hash, ManifestOptions};
 use core_lib::types::{
-    HearthCard, HearthDetail, HearthHostPrompt, HearthInvite, HearthWorld, Instance,
+    HearthCard, HearthDetail, HearthExport, HearthHostPrompt, HearthInvite, HearthRamWarning, HearthWorld, Instance,
 };
 use p2p_lib::hearth::lease::Decision;
 use p2p_lib::hearth::model::{GroupOp, GroupId, PackPin};
@@ -21,11 +22,15 @@ use serde::Serialize;
 use tauri::State;
 
 use crate::error::{sanitize, user_msg};
-use crate::hearth::{key_hex, parse_key, Begin, HearthRuntime, HostParams, LeaveError, Play, EULA_REQUIRED, HOST_STEPS, JOIN_STEPS, LEAVE_FLUSH_WAIT};
+use crate::hearth::{
+    key_hex, parse_key, Begin, HearthRuntime, HostParams, LeaveError, Play, StopMode, CONFIRM_HOST, EULA_REQUIRED, HOST_STEPS, JOIN_STEPS, LEAVE_FLUSH_WAIT,
+};
 use crate::state::AppState;
 
 /// Longueur maximale du nom d'un groupe (caractères).
 const MAX_NAME: usize = 64;
+/// Budget global de l'arrêt des serveurs de groupe quand la machine s'éteint (tous les groupes ensemble).
+pub const SHUTDOWN_BUDGET: Duration = Duration::from_secs(25);
 
 /// Réponse de `hearth_eula`.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq, specta::Type)]
@@ -356,10 +361,21 @@ impl AppState {
             return Err("un lancement de ce serveur est déjà en cours".into());
         }
         let r = self.hearth_play_inner(g, &instance).await;
+        rt.settle_confirmation(&g, &r);
         if r.is_err() {
             rt.set_play(&g, None);
         }
         r
+    }
+
+    /// « Héberger quand même » : la personne a lu l'avertissement d'une erreur `confirm_host|…` (docs/hearth.md § 1). La
+    /// confirmation vaut 2 minutes pour **une** prise du bail ; l'écran relance ensuite la commande qui avait été refusée.
+    pub fn hearth_confirm_host(&self, id: &str) -> Result<(), String> {
+        self.hearth.require_enabled()?;
+        let g = gid(id)?;
+        self.hearth.require_state(&g)?;
+        self.hearth.grant_confirmation(&g);
+        Ok(())
     }
 
     /// « Jouer depuis la version précédente » : la dernière version est connue mais personne de joignable n'en a le
@@ -386,14 +402,66 @@ impl AppState {
             return Err("Le monde de la dernière version est de nouveau disponible : clique sur Jouer.".into());
         }
         let prev = rt.complete_head(&g).ok_or("aucune version complète sur ce PC pour repartir : il faut attendre l'auteur")?;
+        self.hearth_play_from_base(g, &instance, prev.id()).await
+    }
+
+    /// « Jouer depuis cette version » : le serveur démarre ici depuis une version complète choisie dans l'historique, pas
+    /// depuis la dernière. Si ce n'est pas la dernière, la partie en devient une branche : le groupe a alors deux versions du
+    /// monde (fourche, docs/hearth.md § 7.5) et choisit laquelle garder depuis la page du serveur. Refuse une version dont le
+    /// contenu n'est pas sur ce PC, la version actuelle (c'est « Jouer »), une fourche déjà ouverte et un serveur déjà lancé.
+    pub async fn hearth_play_from_version(self: &Arc<Self>, id: &str, version_id: &str) -> Result<(), String> {
+        self.hearth.require_enabled()?;
+        let g = gid(id)?;
+        let rt = self.hearth.clone();
+        rt.require_state(&g)?;
+        let vid = VersionId::from_hex(version_id).ok_or("identifiant de version invalide")?;
+        if self.auth_status_refresh().await.is_none() {
+            return Err("connectez-vous avant de lancer le jeu".into());
+        }
+        let instance = rt.instance_of(&g).ok_or("Installe d'abord le modpack de ce groupe : rejoins la partie d'un ami du groupe pour le récupérer.")?;
+        if rt.active(&g).is_some() {
+            return Err("le serveur de ce groupe tourne déjà".into());
+        }
+        if rt.is_fork(&g) {
+            return Err("Deux versions du monde existent : choisis laquelle garder depuis la page du serveur.".into());
+        }
+        let v = rt.version(&g, &vid).ok_or("cette version n'existe plus")?;
+        if !rt.world_complete(&v) {
+            return Err(format!("Le contenu de la version {} n'est plus sur ce PC : elle ne peut pas servir de départ.", v.header.number));
+        }
+        if rt.head(&g).is_some_and(|h| h.id() == vid) {
+            return Err("C'est déjà la version actuelle : clique sur Jouer.".into());
+        }
+        self.hearth_play_from_base(g, &instance, vid).await
+    }
+
+    /// Le bail et le démarrage du serveur depuis `base` (commun à « Jouer depuis la n° N » et « Jouer depuis cette version »).
+    async fn hearth_play_from_base(self: &Arc<Self>, g: GroupId, instance: &str, base: VersionId) -> Result<(), String> {
+        let rt = self.hearth.clone();
         if !rt.try_begin_play(&g, HOST_STEPS) {
             return Err("un lancement de ce serveur est déjà en cours".into());
         }
-        let r = self.hearth_host(g, &instance, Some(prev.id())).await;
+        let r = self.hearth_host(g, instance, Some(base)).await;
+        rt.settle_confirmation(&g, &r);
         if r.is_err() {
             rt.set_play(&g, None);
         }
         r
+    }
+
+    /// « Exporter en monde solo » (docs/hearth.md § 8) : copie une version complète du monde du groupe dans les mondes de
+    /// l'instance liée, sous « <groupe> (export du groupe) », avec ton joueur remis dedans. Sans `version_id` : la version
+    /// actuelle, ou la dernière complète sur ce PC.
+    pub async fn hearth_export_solo(self: &Arc<Self>, id: &str, version_id: Option<&str>) -> Result<HearthExport, String> {
+        self.hearth.require_enabled()?;
+        let g = gid(id)?;
+        let rt = self.hearth.clone();
+        rt.require_state(&g)?;
+        let version = version_id.map(|v| VersionId::from_hex(v).ok_or("identifiant de version invalide")).transpose()?;
+        let instance = rt.instance_of(&g).ok_or("Choisis d'abord l'instance de ce groupe : l'export s'écrit dans ses mondes.")?;
+        let saves = self.instances.game_dir(&instance).map_err(|e| user_msg(&e))?.join("saves");
+        let uuid = self.auth_status().map(|p| core_lib::auth::accounts::profile_uuid(&p).to_string());
+        rt.export_solo(g, version, &saves, uuid).await
     }
 
     /// Ferme le jeu en cours s'il s'agit de la même instance (par exemple après une passation, le client est resté au menu).
@@ -418,15 +486,16 @@ impl AppState {
                 return Err("Deux versions du monde existent : choisis laquelle garder depuis la page du serveur.".into());
             }
             match rt.decision_for(&g, &round).ok_or("ce groupe n'existe plus")? {
-                // Personne d'autre n'est joignable : on héberge quand même (docs/hearth.md § 1). Les amis rejoignent mon nœud à leur
-                // arrivée ; le monde leur parvient par la file d'envoi. Le bail « au mieux » demande une seconde confirmation
-                // (`best_effort_pending`) : le clic sur Jouer vaut pour les deux, on ne fait pas cliquer deux fois.
+                // Personne d'autre n'est joignable : héberger seul est possible (docs/hearth.md § 1) mais demande une confirmation
+                // explicite, jamais le simple clic sur Jouer : sans `hearth_confirm_host`, rien n'est annoncé ni démarré et l'erreur
+                // `confirm_host|alone|…` fait poser la question. Confirmé, la prise du bail (`begin_starting`) consomme la
+                // confirmation : pas de seconde demande. Aucune relance automatique ici.
                 Decision::Blocked => {
-                    let r = self.hearth_host(g, instance, None).await;
-                    if r.is_err() && rt.best_effort_pending(&g) {
-                        return self.hearth_host(g, instance, None).await;
+                    if !rt.confirmation_pending(&g) {
+                        let names: Vec<String> = round.unreachable.iter().map(|k| rt.name_of(k).replace(['|', ';'], " ")).collect();
+                        return Err(format!("{CONFIRM_HOST}|alone|{}", names.join(";")));
                     }
-                    return r;
+                    return self.hearth_host(g, instance, None).await;
                 }
                 Decision::Unclean { holder, .. } => {
                     let name = rt.name_of(&holder);
@@ -541,16 +610,22 @@ impl AppState {
         rt.prepare_world(g, head).await?;
         rt.set_play(&g, Some(Play::Launching { steps: HOST_STEPS, index: 1 }));
         let settings = self.settings_get();
+        // Le serveur et le jeu partagent la mémoire de ce PC : le serveur reçoit sa propre part, pas celle du jeu.
+        let client_mb = self.launch_ram_mb(inst);
+        let physical_mb = core_lib::sysmem::physical_memory_mb();
+        let ram_mb = server_ram_mb(client_mb, physical_mb);
+        eprintln!("[cubelink] mémoire : jeu {client_mb} Mo, serveur {ram_mb} Mo, PC {physical_mb:?} Mo");
+        if let Some(message) = ram_pressure_warning(client_mb, ram_mb, physical_mb) {
+            // Non bloquant : le serveur démarre quand même.
+            let name = rt.state(&g).map(|s| s.name).unwrap_or_default();
+            rt.emit_json("hearth://ram_warning", &HearthRamWarning { group_id: g.to_hex(), name, message });
+        }
         let params = HostParams {
             instance_id: instance.to_string(),
             minecraft: inst.minecraft.clone(),
             loader: inst.loader.clone(),
             mods_src: game_dir.join("mods"),
-            // Le client de l'hôte se lance ensuite sur le même PC (`hearth_join`) : serveur + client tiennent dans la RAM.
-            ram_mb: {
-                let client = self.launch_ram_mb(inst);
-                core_lib::instance::hearth_server_ram_mb(client, client, core_lib::sysmem::physical_ram_mb())
-            },
+            ram_mb,
             java_override: settings.java_path.as_deref().map(PathBuf::from),
             java_root: self.paths.java.clone(),
         };
@@ -649,10 +724,31 @@ impl AppState {
     /// Arrête tous les serveurs de groupe de ce PC (fermeture de Cubelink) : publication, bail relâché, partage fermé. Le
     /// second appelant attend la fin du premier.
     pub async fn hearth_stop_all(self: &Arc<Self>) {
+        self.hearth_stop_all_with(StopMode::Normal).await;
+    }
+
+    /// [`Self::hearth_stop_all`] avec le mode d'arrêt. En [`StopMode::Shutdown`] (la machine s'éteint), tous les groupes sont
+    /// arrêtés ensemble sous un budget global court ([`SHUTDOWN_BUDGET`]) au lieu de 150 s chacun.
+    pub async fn hearth_stop_all_with(self: &Arc<Self>, mode: StopMode) {
         let _one_at_a_time = self.hearth.stop_all_guard().await;
-        for g in self.hearth.active_groups() {
-            if tokio::time::timeout(Duration::from_secs(150), self.hearth_stop_inner(g)).await.is_err() {
-                tracing::warn!("l'arrêt du serveur du groupe {g} a pris trop de temps à la fermeture");
+        match mode {
+            StopMode::Normal => {
+                for g in self.hearth.active_groups() {
+                    if tokio::time::timeout(Duration::from_secs(150), self.hearth_stop_inner(g)).await.is_err() {
+                        tracing::warn!("l'arrêt du serveur du groupe {g} a pris trop de temps à la fermeture");
+                    }
+                }
+            }
+            StopMode::Shutdown => {
+                let mut stops = tokio::task::JoinSet::new();
+                for g in self.hearth.active_groups() {
+                    let st = self.clone();
+                    stops.spawn(async move { st.hearth_stop_inner_with(g, StopMode::Shutdown).await });
+                }
+                let all = async { while stops.join_next().await.is_some() {} };
+                if tokio::time::timeout(SHUTDOWN_BUDGET, all).await.is_err() {
+                    tracing::warn!("l'arrêt des serveurs de groupe a dépassé {} s : la machine s'éteint", SHUTDOWN_BUDGET.as_secs());
+                }
             }
         }
     }
@@ -660,9 +756,13 @@ impl AppState {
     /// Arrête le serveur du groupe `g` et ferme tout ce qui s'y rattache (partage, accès, état de lancement). Appelé aussi
     /// quand le serveur s'arrête tout seul.
     pub(crate) async fn hearth_stop_inner(self: &Arc<Self>, g: GroupId) {
+        self.hearth_stop_inner_with(g, StopMode::Normal).await;
+    }
+
+    pub(crate) async fn hearth_stop_inner_with(self: &Arc<Self>, g: GroupId, mode: StopMode) {
         // Groupe oublié pendant la partie : le serveur est déjà arrêté, il ne reste que le partage et l'état à fermer.
         if self.hearth.active(&g).is_some() {
-            match self.hearth.finish_hosting(g).await {
+            match self.hearth.finish_hosting_with(g, mode).await {
                 Ok(_) => {}
                 Err(e) => tracing::warn!("arrêt du serveur du groupe {g} : {e}"),
             }
@@ -703,6 +803,7 @@ impl AppState {
             self.hearth_host(g, &instance, base).await
         }
         .await;
+        rt.settle_confirmation(&g, &r);
         if r.is_err() {
             rt.set_play(&g, None);
         }
@@ -794,6 +895,13 @@ pub async fn hearth_play(state: S<'_>, id: String) -> Result<(), String> {
     state.inner().hearth_play(&id).await
 }
 
+/// Confirme l'hébergement sans la majorité du groupe, après une erreur `confirm_host|…` de la commande qui démarre le serveur.
+#[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
+pub fn hearth_confirm_host(state: S<'_>, id: String) -> Result<(), String> {
+    state.hearth_confirm_host(&id)
+}
+
 /// Arrête le serveur du groupe hébergé sur ce PC (monde publié, bail relâché).
 #[tauri::command(rename_all = "snake_case")]
 #[specta::specta(rename_all = "snake_case")]
@@ -806,6 +914,20 @@ pub async fn hearth_stop(state: S<'_>, id: String) -> Result<(), String> {
 #[specta::specta(rename_all = "snake_case")]
 pub async fn hearth_play_from_previous(state: S<'_>, id: String) -> Result<(), String> {
     state.inner().hearth_play_from_previous(&id).await
+}
+
+/// Jouer depuis une version complète choisie dans l'historique (branche : fourche à résoudre).
+#[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
+pub async fn hearth_play_from_version(state: S<'_>, id: String, version_id: String) -> Result<(), String> {
+    state.inner().hearth_play_from_version(&id, &version_id).await
+}
+
+/// Exporter une version du monde du groupe en monde solo, dans les mondes de l'instance liée.
+#[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
+pub async fn hearth_export_solo(state: S<'_>, id: String, version_id: Option<String>) -> Result<HearthExport, String> {
+    state.inner().hearth_export_solo(&id, version_id.as_deref()).await
 }
 
 /// Choix du groupe après une partie mal terminée.
@@ -836,7 +958,7 @@ pub async fn hearth_remove_member(state: S<'_>, id: String, public_key: String) 
     state.hearth_remove_member(&id, &public_key).await
 }
 
-/// Quitte le groupe, après avoir attendu (jusqu'à 5 min) que ma dernière partie soit remise à un membre. Rejette `{ code: "last_member" | "unreachable" | "outbox_pending" | "orphan_pending" | "other", message? }` : rien n'est supprimé dans ces cas. `force: true` saute l'attente de la file d'envoi (la dernière partie est perdue pour le groupe) et la garde d'une fin de partie non publiée (elle est supprimée avec le monde).
+/// Quitte le groupe, après avoir attendu (jusqu'à 5 min) que ma dernière partie soit remise à `min(2, autres membres)` membres (sortie immédiate si trop peu sont en ligne pour y arriver, ou si les amis l'ont refusée : `HearthSettings.outbox_failed`). Rejette `{ code: "last_member" | "unreachable" | "outbox_pending" | "orphan_pending" | "other", message? }` : rien n'est supprimé dans ces cas. `force: true` saute l'attente de la file d'envoi (la dernière partie est perdue pour le groupe) et la garde d'une fin de partie non publiée (elle est supprimée avec le monde).
 #[tauri::command(rename_all = "snake_case")]
 #[specta::specta(rename_all = "snake_case")]
 pub async fn hearth_leave(state: S<'_>, id: String, force: Option<bool>) -> Result<(), LeaveError> {

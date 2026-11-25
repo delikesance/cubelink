@@ -2,7 +2,8 @@
   "identifier": "default",
   "windows": ["main"],
   "permissions": [
-    "core:default",
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
     "core:window:allow-minimize",
     "core:window:allow-close",
     "core:window:allow-toggle-maximize",
@@ -12,7 +13,6 @@
     "core:window:allow-set-fullscreen",
     "core:window:allow-start-dragging",
     "core:window:allow-hide",
-    "dialog:default",
     "dialog:allow-open",
     "dialog:allow-save",
     "opener:default",

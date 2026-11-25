@@ -39,8 +39,10 @@ pulldown-cmark = { version = "0.13", default-features = false, features = ["html
 toml = { version = "1.2", default-features = false, features = ["parse", "serde", "std"] }
 
 [target.'cfg(windows)'.dependencies]
-# Seulement pour `hidden_spawn` (essai « fenêtre du jeu cachée au départ ») ; `Win32_UI_Shell` : ses tests.
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_UI_Shell"] }
+# `hidden_spawn` (essai « fenêtre du jeu cachée au départ ») ; `Win32_UI_Shell` : ses tests ; `Win32_NetworkManagement_IpHelper`
+# et `Win32_Networking_WinSock` : liste des sockets en écoute du serveur Hearth (`hearth::netguard`).
+# `Win32_System_SystemInformation` : mémoire physique (`sysmem`).
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_SystemInformation", "Win32_UI_Shell", "Win32_NetworkManagement_IpHelper", "Win32_Networking_WinSock"] }
 
 [target.'cfg(unix)'.dev-dependencies]
 # `live_many_objects` : abaisse la limite de descripteurs pour prouver que le balayage n'en garde aucun d'ouvert.

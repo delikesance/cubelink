@@ -3,8 +3,8 @@ import "./create.css";
 import { useBack, useScreenTitle, useServices } from "../../app/context";
 import { navigate } from "../../app/router";
 import { peekPrepareDeferred, setImportWarning, setPrepareDeferred } from "../../app/importWarning";
-import type { Loader } from "../../services/types";
-import { Button, Field, Input, RAM_DEFAULT, Select, RamPicker, useDefaultRam, useSystemRam } from "../../ui";
+import type { DetectedInstance, Launcher, Loader } from "../../services/types";
+import { Badge, Button, Field, Input, ProgressBar, RAM_DEFAULT, Select, RamPicker, useDefaultRam, useSystemRam } from "../../ui";
 import { ICONS, Icon } from "../../ui";
 
 export const RECOMMENDED_VERSION = "1.21.1";
@@ -17,6 +17,17 @@ const LOADERS: { value: Loader; label: string }[] = [
   { value: "forge", label: "Forge" },
 ];
 const isPack = (p: string) => /\.(mrpack|zip)$/i.test(p);
+const LAUNCHER_LABEL: Record<Launcher, string> = { prism: "Prism", curseforge: "CurseForge", modrinth: "Modrinth" };
+const LOADER_LABEL: Record<Loader, string> = { vanilla: "Sans mods", neoforge: "NeoForge", fabric: "Fabric", quilt: "Quilt", forge: "Forge" };
+
+/** « Minecraft 1.21.1 · Fabric 0.16.5 · 42 mods · mondes » : ce que le joueur reconnaît de son instance. */
+export function describeDetected(d: DetectedInstance): string {
+  const loader = d.loader.loader === "vanilla" ? LOADER_LABEL.vanilla : `${LOADER_LABEL[d.loader.loader]}${d.loader.version ? ` ${d.loader.version}` : ""}`;
+  const parts = [`Minecraft ${d.minecraft}`, loader];
+  if (d.mod_count > 0) parts.push(`${d.mod_count} mod${d.mod_count > 1 ? "s" : ""}`);
+  if (d.has_saves) parts.push("avec ses mondes");
+  return parts.join(" · ");
+}
 
 /** Renvoie un message d'erreur en français, ou null si le nom est valide. */
 export function validateName(raw: string): string | null {
@@ -54,7 +65,7 @@ export default function Create({ pickMrpack }: CreateProps = {}) {
   const uid = useId();
   const alive = useRef(true);
 
-  const [view, setView] = useState<"choose" | "form">("choose");
+  const [view, setView] = useState<"choose" | "form" | "launcher">("choose");
   const [name, setName] = useState("");
   const [nameError, setNameError] = useState<string | null>(null);
   const [versions, setVersions] = useState<string[] | null>(null);
@@ -71,6 +82,12 @@ export default function Create({ pickMrpack }: CreateProps = {}) {
   const [pathOpen, setPathOpen] = useState(false);
   const [path, setPath] = useState("");
   const rootRef = useRef<HTMLDivElement>(null);
+  // Import depuis un autre lanceur.
+  const [found, setFound] = useState<DetectedInstance[] | null>(null);
+  const [manual, setManual] = useState(false);
+  const [folder, setFolder] = useState("");
+  const [importing, setImporting] = useState<string | null>(null);
+  const [copied, setCopied] = useState<{ done: number; total: number } | null>(null);
 
   useEffect(() => {
     alive.current = true;
@@ -101,6 +118,7 @@ export default function Create({ pickMrpack }: CreateProps = {}) {
   useEffect(() => services.onImportWarning((e) => setImportWarning(e.missing)), [services]);
   useEffect(() => services.onImportProgress((e) => { if (alive.current) setProgress(e.message); }), [services]);
   useEffect(() => services.onImportDeferred((e) => setPrepareDeferred(e.message)), [services]);
+  useEffect(() => services.onBrowseProgress((e) => { if (e.total > 0) setCopied({ done: e.done, total: e.total }); }), [services]);
 
   const back = useBack("main");
   const backRef = useRef(back);
@@ -195,6 +213,52 @@ export default function Create({ pickMrpack }: CreateProps = {}) {
     }
   };
 
+  /** Cherche les instances des autres lanceurs : dossiers habituels, ou le dossier `at` choisi à la main. */
+  const scanLaunchers = async (at?: string) => {
+    setError(null);
+    setFound(null);
+    try {
+      const list = await services.launcherImportScan(at ?? null);
+      if (!alive.current) return;
+      setFound(list);
+      if (list.length === 0) setManual(true);
+    } catch (err) {
+      if (alive.current) { setFound([]); setManual(true); setError(messageOf(err)); }
+    }
+  };
+
+  const openLaunchers = () => {
+    setView("launcher");
+    setManual(false);
+    setFolder("");
+    void scanLaunchers();
+  };
+
+  const pickLauncherFolder = async () => {
+    setError(null);
+    try {
+      const chosen = await services.pickFolder();
+      if (chosen) { setFolder(chosen); await scanLaunchers(chosen); }
+    } catch (err) {
+      if (alive.current) { setError(messageOf(err)); setManual(true); }
+    }
+  };
+
+  const importFrom = async (d: DetectedInstance) => {
+    if (busy) return;
+    setError(null);
+    setImportWarning(null);
+    setCopied(null);
+    setBusy(true);
+    setImporting(d.path);
+    try {
+      const imported = await services.launcherImportRun(d.path, d.launcher, { ram_mb: ram });
+      if (alive.current) openCreated(imported?.id);
+    } catch (err) {
+      if (alive.current) { setError(messageOf(err)); setBusy(false); setImporting(null); }
+    }
+  };
+
   const nameId = `${uid}-name`;
   const mcId = `${uid}-mc`;
   const idx = Math.max(0, LOADERS.findIndex((l) => l.value === loader));
@@ -217,6 +281,9 @@ export default function Create({ pickMrpack }: CreateProps = {}) {
             <Choice icon={<Icon d={ICONS.folder} size={28} />} title="Importer un fichier"
               text="Un modpack .mrpack ou .zip déjà téléchargé. Tu peux aussi le déposer ici." disabled={busy}
               onClick={() => { void onImportClick(); }} />
+            <Choice icon={<Icon d={ICONS.download} size={28} />} title="Importer depuis un autre lanceur"
+              text="Tes instances et tes mondes de Prism, CurseForge ou Modrinth, sans rien retélécharger." disabled={busy}
+              onClick={openLaunchers} />
           </div>
           {pathOpen && (
             <div className="create-path">
@@ -238,6 +305,65 @@ export default function Create({ pickMrpack }: CreateProps = {}) {
           </div>
           <div className="create-actions">
             <Button variant="secondary" className="create-cancel" icon={<Icon d={ICONS.close} size={20} />} onClick={cancel}>Annuler</Button>
+          </div>
+        </div>
+      ) : view === "launcher" ? (
+        <div className="create-wrap create-launchers" aria-busy={busy}>
+          <header className="create-head enter">
+            <h1>Importer depuis un autre lanceur</h1>
+            <p>Tes instances restent intactes chez l'autre lanceur : Cubelink en fait une copie.</p>
+          </header>
+          {found === null && !error && <p className="create-info" role="status">Recherche de tes instances…</p>}
+          {found !== null && found.length > 0 && (
+            <ul className="create-found" aria-label="Instances trouvées">
+              {found.map((d) => (
+                <li key={`${d.launcher}:${d.path}`} className="cl-card create-found-item">
+                  <div className="create-found-main">
+                    <strong className="create-found-name">{d.name}</strong>
+                    <Badge>{LAUNCHER_LABEL[d.launcher]}</Badge>
+                    <span className="create-found-tx">{describeDetected(d)}</span>
+                    {d.unsupported && <span className="create-found-why">{d.unsupported}</span>}
+                    {importing === d.path && (
+                      <ProgressBar className="create-found-bar" label={`Import de ${d.name}`} value={copied ? (copied.done / copied.total) * 100 : null} />
+                    )}
+                  </div>
+                  <Button disabled={busy || !!d.unsupported} loading={importing === d.path} aria-label={`Importer ${d.name}`} onClick={() => { void importFrom(d); }}>
+                    {importing === d.path ? "Copie…" : "Importer"}
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          )}
+          {found !== null && found.length === 0 && !error && (
+            <p className="create-info" role="status">Aucune instance trouvée aux emplacements habituels. Choisis le dossier d'une instance, ou celui de ton lanceur.</p>
+          )}
+          {found !== null && (
+            <div className="create-path">
+              <div className="create-path-row">
+                <Button variant="secondary" disabled={busy} icon={<Icon d={ICONS.folder} size={20} />} onClick={() => { void pickLauncherFolder(); }}>Choisir un dossier…</Button>
+                {!manual && <Button variant="secondary" disabled={busy} onClick={() => setManual(true)}>Saisir un chemin</Button>}
+              </div>
+              {manual && (
+                <Field label="Dossier d'une instance ou d'un lanceur">
+                  {(p) => (
+                    <div className="create-path-row">
+                      <Input {...p} type="text" value={folder} placeholder="C:\Users\moi\AppData\Roaming\PrismLauncher" autoComplete="off"
+                        onChange={(e) => setFolder(e.target.value)}
+                        onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); void scanLaunchers(folder.trim()); } }} />
+                      <Button disabled={busy || !folder.trim()} onClick={() => { void scanLaunchers(folder.trim()); }}>Chercher</Button>
+                    </div>
+                  )}
+                </Field>
+              )}
+            </div>
+          )}
+          <div className="create-live" aria-live="polite">
+            {busy && <p className="create-info">Copie en cours : cela peut prendre un moment si tu as de gros mondes.</p>}
+            {error && <p className="create-error" role="alert">{error}</p>}
+          </div>
+          <div className="create-actions">
+            <Button variant="secondary" disabled={busy} onClick={() => { setView("choose"); setError(null); }}>Autre méthode</Button>
+            <Button variant="secondary" disabled={busy} className="create-cancel" icon={<Icon d={ICONS.close} size={20} />} onClick={cancel}>Annuler</Button>
           </div>
         </div>
       ) : (

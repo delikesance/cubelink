@@ -6,7 +6,7 @@ import { HearthLeaveError } from "../../services/types";
 import { HearthSection } from "./HearthSection";
 import { HearthMoments } from "./Moments";
 import Hearth from "./index";
-import { parseHeadUnavailable } from "./format";
+import { parseConfirmHost, parseHeadUnavailable } from "./format";
 
 afterEach(cleanup);
 
@@ -17,9 +17,9 @@ function shell(services: ReturnType<typeof createFakeServices>, params: Record<s
   return { navigate, goBack, value };
 }
 
-function home(g?: Parameters<ReturnType<typeof createFakeServices>["seedHearth"]>[0]) {
+function home(g?: Parameters<ReturnType<typeof createFakeServices>["seedHearth"]>[0], detail?: Parameters<ReturnType<typeof createFakeServices>["seedHearth"]>[1]) {
   const services = createFakeServices({ tickMs: 0 });
-  if (g) services.seedHearth(g);
+  if (g) services.seedHearth(g, detail);
   const navigate = vi.fn();
   render(<HearthSection services={services} navigate={navigate} />);
   return { services, navigate };
@@ -79,7 +79,7 @@ describe("Accueil : serveurs de groupe", () => {
     expect(screen.getByRole("progressbar", { name: /Sync/ }).getAttribute("aria-valuenow")).toBe("42");
     const blocked = screen.getByRole("listitem", { name: "Serveur Hors ligne" });
     expect(within(blocked).getByText("Aucun membre en ligne")).toBeTruthy();
-    expect(within(blocked).getByText(/Tu peux lancer le serveur : ils le rejoindront à leur arrivée/)).toBeTruthy();
+    expect(within(blocked).getByText(/Tu peux lancer le serveur après une confirmation : ils le rejoindront à leur arrivée/)).toBeTruthy();
     expect(within(blocked).getByRole("button", { name: "Jouer sur Hors ligne" })).toBeTruthy();
     const fork = screen.getByRole("listitem", { name: "Serveur Fourche" });
     expect(within(fork).getByText("Deux versions existent")).toBeTruthy();
@@ -134,6 +134,72 @@ describe("Accueil : serveurs de groupe", () => {
     const dlg = await screen.findByRole("dialog");
     expect(within(dlg).getByRole("button", { name: "Attendre Alice" })).toBeTruthy();
     expect(within(dlg).queryByRole("button", { name: /Jouer depuis/ })).toBeNull();
+  });
+
+  const duo = {
+    members: [
+      { public_key: "me", name: "Moi", online: true, is_me: true, is_creator: true, sync: "ok" as const, version: 1, unseen_days: null },
+      { public_key: "b", name: "Bob", online: false, is_me: false, is_creator: false, sync: "ok" as const, version: 1, unseen_days: 2 },
+    ],
+  };
+
+  it("aucun membre joignable (#93) : Jouer ouvre la confirmation, Annuler n'héberge rien", async () => {
+    const { services } = home({ id: "g1", name: "Les copains", state: "blocked" }, duo);
+    services.setHearthEula(true);
+    fireEvent.click(await screen.findByRole("button", { name: "Jouer sur Les copains" }));
+    const dlg = await screen.findByRole("dialog", { name: "Héberger sans les autres ?" });
+    expect(within(dlg).getByText(/Aucun autre membre n'est joignable pour l'instant \(Bob\)/)).toBeTruthy();
+    expect(within(dlg).getByText(/deux versions du monde et le groupe choisira laquelle garder/)).toBeTruthy();
+    expect(document.activeElement).toBe(within(dlg).getByRole("button", { name: "Annuler" }));
+    fireEvent.click(within(dlg).getByRole("button", { name: "Annuler" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    await act(async () => { await Promise.resolve(); });
+    expect(services.hearthCalls).toEqual([{ kind: "Play", args: ["g1"] }]);
+    expect(screen.queryByText("Tu héberges · 1 joueur")).toBeNull();
+    // Un nouveau clic redemande : le clic ne vaut jamais confirmation.
+    fireEvent.click(screen.getByRole("button", { name: "Jouer sur Les copains" }));
+    await screen.findByRole("dialog", { name: "Héberger sans les autres ?" });
+    expect(services.hearthCalls.map((c) => c.kind)).toEqual(["Play", "Play"]);
+  });
+
+  it("aucun membre joignable (#93) : Héberger quand même confirme puis relance Jouer, une seule fois", async () => {
+    const { services } = home({ id: "g1", name: "Les copains", state: "blocked" }, duo);
+    services.setHearthEula(true);
+    fireEvent.click(await screen.findByRole("button", { name: "Jouer sur Les copains" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Héberger quand même" }));
+    await screen.findByText("Tu héberges · 1 joueur");
+    expect(services.hearthCalls.map((c) => c.kind)).toEqual(["Play", "ConfirmHost", "Play"]);
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("confirmation puis contrat Minecraft : J'accepte relance Jouer sans redemander la confirmation", async () => {
+    const { services } = home({ id: "g1", name: "Les copains", state: "blocked" }, duo);
+    fireEvent.click(await screen.findByRole("button", { name: "Jouer sur Les copains" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Héberger quand même" }));
+    fireEvent.click(await screen.findByRole("button", { name: "J'accepte" }));
+    await screen.findByText("Tu héberges · 1 joueur");
+    expect(services.hearthCalls.map((c) => c.kind)).toEqual(["Play", "ConfirmHost", "Play", "EulaAccept", "Play"]);
+  });
+
+  it("bail au mieux (#93) : la boîte dit combien de membres sont joignables", async () => {
+    const { services } = home({ id: "g1", name: "Les copains" });
+    services.setHearthEula(true);
+    services.setHearthBestEffort({ acks: 2, members: 4, needed: 3 });
+    fireEvent.click(await screen.findByRole("button", { name: "Jouer sur Les copains" }));
+    const dlg = await screen.findByRole("dialog", { name: "Héberger sans les autres ?" });
+    expect(within(dlg).getByText(/Seulement 2 membres sont joignables sur 4 \(toi compris\) : il en faut 3/)).toBeTruthy();
+    fireEvent.click(within(dlg).getByRole("button", { name: "Héberger quand même" }));
+    await screen.findByText("Tu héberges · 1 joueur");
+    expect(services.hearthCalls.map((c) => c.kind)).toEqual(["Play", "ConfirmHost", "Play"]);
+  });
+
+  it("parseConfirmHost : lit les deux formats, ignore les autres erreurs", () => {
+    expect(parseConfirmHost("confirm_host|alone|Bob;Chloé")).toEqual({ kind: "alone", offline: ["Bob", "Chloé"] });
+    expect(parseConfirmHost(new Error("confirm_host|alone|"))).toEqual({ kind: "alone", offline: [] });
+    expect(parseConfirmHost("confirm_host|best_effort|2|4|3")).toEqual({ kind: "best_effort", acks: 2, members: 4, needed: 3 });
+    expect(parseConfirmHost("confirm_host|best_effort|x|4|3")).toBeNull();
+    expect(parseConfirmHost("head_unavailable|3||Alice")).toBeNull();
+    expect(parseConfirmHost("Java introuvable.")).toBeNull();
   });
 
   it("parseHeadUnavailable : lit le format stable, ignore les autres erreurs", () => {
@@ -226,6 +292,21 @@ describe("Moments du groupe", () => {
     dlg = await screen.findByRole("alertdialog", { name: "Ton serveur est encore ouvert" });
     fireEvent.click(within(dlg).getByRole("button", { name: "Arrêter le serveur" }));
     await waitFor(() => expect(services.hearthCalls[1]).toEqual({ kind: "Stop", args: ["g1"] }));
+  });
+});
+
+describe("Mémoire du PC", () => {
+  it("avertissement de mémoire : message affiché, non bloquant, « Compris » le ferme", async () => {
+    const services = createFakeServices({ tickMs: 0 });
+    render(<HearthMoments services={services} />);
+    await act(async () => {});
+    act(() => { services.emitHearthRamWarning({ group_id: "g1", name: "Les copains", message: "Ton PC a 16 Go de mémoire : le serveur et le jeu risquent d'en manquer." }); });
+    const dlg = await screen.findByRole("dialog", { name: "Ton PC risque de manquer de mémoire" });
+    expect(within(dlg).getByText(/Ton PC a 16 Go de mémoire/)).toBeTruthy();
+    expect(within(dlg).getByText(/démarre quand même/)).toBeTruthy();
+    fireEvent.click(within(dlg).getByRole("button", { name: "Compris" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(services.hearthCalls).toEqual([]);
   });
 });
 
@@ -365,7 +446,7 @@ describe("Page du serveur", () => {
 
   it("Quitter alors que ma dernière partie n'est pas partie (#56) : boîte « Quitter quand même », hearthLeave rappelé avec force, rien n'est jeté avant", async () => {
     const services = createFakeServices({ tickMs: 0 });
-    services.seedHearth({ id: "g10", name: "Les copains" }, { members: [{ ...me }, { ...noor }], settings: { keep_background: false, disk_bytes: 1, outbox_pending: 1, instance_name: "x" } });
+    services.seedHearth({ id: "g10", name: "Les copains" }, { members: [{ ...me }, { ...noor }], settings: { keep_background: false, disk_bytes: 1, outbox_pending: 1, outbox_failed: null, instance_name: "x" } });
     const s = shell(services, { id: "g10" });
     render(<ShellContext.Provider value={s.value}><Hearth /></ShellContext.Provider>);
     fireEvent.click(within(await clickQuitter()).getByRole("button", { name: "Quitter" }));
@@ -390,7 +471,7 @@ describe("Page du serveur", () => {
 
   it("Quitter quand même, puis personne n'est joignable : on retombe sur la confirmation de suppression avec la partie perdue", async () => {
     const services = createFakeServices({ tickMs: 0 });
-    services.seedHearth({ id: "g12", name: "Les copains" }, { members: [{ ...me }, { ...noor }], settings: { keep_background: false, disk_bytes: 1, outbox_pending: 2, instance_name: "x" } });
+    services.seedHearth({ id: "g12", name: "Les copains" }, { members: [{ ...me }, { ...noor }], settings: { keep_background: false, disk_bytes: 1, outbox_pending: 2, outbox_failed: null, instance_name: "x" } });
     services.hearthLeave = async (gid, force) => {
       services.hearthCalls.push({ kind: "Leave", args: force ? [gid, true] : [gid] });
       throw new HearthLeaveError(force ? "unreachable" : "outbox_pending");
@@ -480,8 +561,8 @@ describe("Page du serveur", () => {
     const { services } = page({ id: "g1" }, { id: "g1", name: "Les copains" });
     services.setHearthDetail("g1", {
       versions: [
-        { id: "v3", number: 3, kind: "session", author: "k", author_name: "Alex", created_at: 1_760_000_100, played_secs: 3600, total_size: 400_000_000, is_head: true, side_branch: false },
-        { id: "v2", number: 2, kind: "checkpoint", author: "k", author_name: "Noor", created_at: 1_760_000_000, played_secs: 900, total_size: 390_000_000, is_head: false, side_branch: false },
+        { id: "v3", number: 3, kind: "session", author: "k", author_name: "Alex", created_at: 1_760_000_100, played_secs: 3600, total_size: 400_000_000, is_head: true, side_branch: false, available: true },
+        { id: "v2", number: 2, kind: "checkpoint", author: "k", author_name: "Noor", created_at: 1_760_000_000, played_secs: 900, total_size: 390_000_000, is_head: false, side_branch: false, available: true },
       ],
     });
     fireEvent.click(await screen.findByRole("tab", { name: "Historique" }));
@@ -491,6 +572,118 @@ describe("Page du serveur", () => {
     fireEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Restaurer" }));
     await waitFor(() => expect(services.hearthCalls).toEqual([{ kind: "Restore", args: ["g1", "v2"] }]));
     await screen.findByText(/Version 4 · Restauration · actuelle/);
+  });
+
+  it("Historique : une version dont le contenu est libéré n'a pas de bouton Restaurer (#96)", async () => {
+    const { services } = page({ id: "g1" }, { id: "g1", name: "Les copains" });
+    services.setHearthDetail("g1", {
+      versions: [
+        { id: "v3", number: 3, kind: "session", author: "k", author_name: "Alex", created_at: 1_760_000_100, played_secs: 3600, total_size: 400_000_000, is_head: true, side_branch: false, available: true },
+        { id: "v2", number: 2, kind: "checkpoint", author: "k", author_name: "Noor", created_at: 1_760_000_000, played_secs: 900, total_size: 390_000_000, is_head: false, side_branch: false, available: true },
+        { id: "v1", number: 1, kind: "session", author: "k", author_name: "Noor", created_at: 1_750_000_000, played_secs: 900, total_size: 380_000_000, is_head: false, side_branch: false, available: false },
+      ],
+    });
+    fireEvent.click(await screen.findByRole("tab", { name: "Historique" }));
+    expect(await screen.findByRole("button", { name: "Restaurer la version 2" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Restaurer la version 1" })).toBeNull();
+    expect(screen.getAllByText(/contenu libéré de ce PC/)).toHaveLength(1);
+  });
+
+  const threeVersions = [
+    { id: "v3", number: 3, kind: "session", author: "k", author_name: "Alex", created_at: 1_760_000_100, played_secs: 3600, total_size: 400_000_000, is_head: true, side_branch: false, available: true },
+    { id: "v2", number: 2, kind: "checkpoint", author: "k", author_name: "Noor", created_at: 1_760_000_000, played_secs: 900, total_size: 390_000_000, is_head: false, side_branch: false, available: true },
+    { id: "v1", number: 1, kind: "session", author: "k", author_name: "Noor", created_at: 1_750_000_000, played_secs: 900, total_size: 380_000_000, is_head: false, side_branch: false, available: false },
+  ] as const;
+
+  it("Historique : Exporter une version complète écrit un monde solo sans rien changer au groupe (#101)", async () => {
+    const { services } = page({ id: "g1" }, { id: "g1", name: "Les copains" });
+    services.setHearthDetail("g1", { versions: [...threeVersions] });
+    fireEvent.click(await screen.findByRole("tab", { name: "Historique" }));
+    expect(screen.queryByRole("button", { name: "Exporter la version 1 en monde solo" })).toBeNull();
+    fireEvent.click(await screen.findByRole("button", { name: "Exporter la version 2 en monde solo" }));
+    await screen.findByText(/Monde exporté : « Les copains \(export du groupe\) » \(version 2\), dans les mondes de Create: Aeronautics/);
+    fireEvent.click(screen.getByRole("button", { name: "Exporter la version 3 en monde solo" }));
+    await screen.findByText(/« Les copains \(export du groupe\) 2 » \(version 3\)/);
+    expect(services.hearthCalls).toEqual([{ kind: "ExportSolo", args: ["g1", "v2"] }, { kind: "ExportSolo", args: ["g1", "v3"] }]);
+    expect(screen.getByText(/Version 3 · Partie · actuelle/)).toBeTruthy();
+  });
+
+  it("Réglages : Exporter en monde solo prend la dernière version, et dit quand c'est la dernière complète (#101)", async () => {
+    const { services } = page({ id: "g1" }, { id: "g1", name: "Les copains" });
+    services.setHearthDetail("g1", { versions: threeVersions.map((v) => ({ ...v, available: v.number === 2 })) });
+    fireEvent.click(await screen.findByRole("tab", { name: "Réglages" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Exporter en monde solo" }));
+    const msg = await screen.findByText(/Monde exporté : « Les copains \(export du groupe\) » \(version 2\)/);
+    expect(msg.textContent).toMatch(/La dernière version n'est pas complète sur ce PC : c'est la version 2, la dernière complète/);
+    expect(services.hearthCalls).toEqual([{ kind: "ExportSolo", args: ["g1"] }]);
+  });
+
+  it("Réglages : sans instance liée, l'export est désactivé et dit pourquoi (#101)", async () => {
+    page({ id: "g1" }, { id: "g1", name: "Les copains", instance_id: null, can_host: false, state: "pack_missing" });
+    fireEvent.click(await screen.findByRole("tab", { name: "Réglages" }));
+    expect((await screen.findByRole("button", { name: "Exporter en monde solo" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText(/Choisis d'abord l'instance de ce groupe/)).toBeTruthy();
+  });
+
+  it("Historique : Jouer depuis cette version explique la fourche, demande confirmation, puis lance (#101)", async () => {
+    const { services } = page({ id: "g1" }, { id: "g1", name: "Les copains" });
+    services.setHearthEula(true);
+    services.setHearthDetail("g1", { versions: [...threeVersions] });
+    fireEvent.click(await screen.findByRole("tab", { name: "Historique" }));
+    expect(screen.queryByRole("button", { name: "Jouer depuis la version 1" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Jouer depuis la version 3" })).toBeNull();
+    fireEvent.click(await screen.findByRole("button", { name: "Jouer depuis la version 2" }));
+    const dlg = await screen.findByRole("alertdialog");
+    expect(within(dlg).getByText(/deux versions du monde/)).toBeTruthy();
+    fireEvent.click(within(dlg).getByRole("button", { name: "Annuler" }));
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+    expect(services.hearthCalls).toEqual([]);
+    fireEvent.click(screen.getByRole("button", { name: "Jouer depuis la version 2" }));
+    fireEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Jouer depuis cette version" }));
+    await waitFor(() => expect(services.hearthCalls).toEqual([{ kind: "PlayFromVersion", args: ["g1", "v2"] }]));
+  });
+
+  it("Historique : Jouer depuis cette version est masqué pendant une partie, sans instance ou avec une fourche (#101)", async () => {
+    const { services } = page({ id: "g1" }, { id: "g1", name: "Les copains", state: "hosted" });
+    services.setHearthDetail("g1", { versions: [...threeVersions] });
+    fireEvent.click(await screen.findByRole("tab", { name: "Historique" }));
+    expect(await screen.findByRole("button", { name: "Exporter la version 2 en monde solo" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Jouer depuis la version 2" })).toBeNull();
+  });
+
+  it("Quitter : propose d'exporter le monde d'abord, sans changer l'action de la boîte (#101)", async () => {
+    const { services, s } = twoMembers("g11");
+    const dlg = await clickQuitter();
+    expect(within(dlg).getByText(/Tu peux d'abord exporter le monde en solo/)).toBeTruthy();
+    fireEvent.click(within(dlg).getByRole("button", { name: "Exporter en monde solo" }));
+    await within(dlg).findByText(/Monde exporté : « Les copains \(export du groupe\) »/);
+    expect(within(dlg).queryByRole("button", { name: "Exporter en monde solo" })).toBeNull();
+    expect(services.hearthCalls).toEqual([{ kind: "ExportSolo", args: ["g11"] }]);
+    expect(s.navigate).not.toHaveBeenCalled();
+    fireEvent.click(within(dlg).getByRole("button", { name: "Quitter" }));
+    await waitFor(() => expect(services.hearthCalls.map((c) => c.kind)).toEqual(["ExportSolo", "Leave"]));
+  });
+
+  it("Supprimer de ce PC (dernier membre) : l'export reste proposé, et une erreur d'export s'affiche sans bloquer la suppression (#101)", async () => {
+    const services = createFakeServices({ tickMs: 0 });
+    services.seedHearth({ id: "g12", name: "Les copains" }, { members: [{ ...me }] });
+    services.hearthExportSolo = async () => { throw new Error("Disque plein."); };
+    const s = shell(services, { id: "g12" });
+    render(<ShellContext.Provider value={s.value}><Hearth /></ShellContext.Provider>);
+    const dlg = await clickQuitter();
+    fireEvent.click(within(dlg).getByRole("button", { name: "Exporter en monde solo" }));
+    await within(dlg).findByText("Disque plein.");
+    fireEvent.click(within(dlg).getByRole("button", { name: "Supprimer le monde" }));
+    await waitFor(() => expect(services.hearthCalls).toEqual([{ kind: "Forget", args: ["g12"] }]));
+  });
+
+  it("Quitter sans instance liée : pas d'export proposé (#101)", async () => {
+    const services = createFakeServices({ tickMs: 0 });
+    services.seedHearth({ id: "g13", name: "Les copains", instance_id: null, can_host: false, state: "pack_missing" }, { members: [{ ...me }, { ...noor }] });
+    const s = shell(services, { id: "g13" });
+    render(<ShellContext.Provider value={s.value}><Hearth /></ShellContext.Provider>);
+    const dlg = await clickQuitter();
+    expect(within(dlg).queryByText(/exporter le monde/)).toBeNull();
   });
 
   it("Réglages : garder le serveur, proposer la mise à jour du modpack (pas de bouton Quitter ici)", async () => {
@@ -505,6 +698,13 @@ describe("Page du serveur", () => {
     // un seul « Quitter » sur la page : celui de ma ligne dans Membres, pas de doublon dans Réglages
     expect(screen.queryByRole("button", { name: /^Quitter/ })).toBeNull();
     expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it("Réglages : une partie refusée par les amis (#99) est expliquée au lieu du simple compteur", async () => {
+    page({ id: "g20" }, { id: "g20", name: "Les copains" }, { settings: { keep_background: false, disk_bytes: 1, outbox_pending: 1, outbox_failed: "Ta dernière partie (2,5 Go) n'a pas été envoyée : elle est beaucoup plus grosse que la précédente.", instance_name: "x" } });
+    fireEvent.click(await screen.findByRole("tab", { name: "Réglages" }));
+    expect(await screen.findByText(/Ta dernière partie \(2,5 Go\) n'a pas été envoyée/)).toBeTruthy();
+    expect(screen.queryByText(/attend d'être envoyée/)).toBeNull();
   });
 
   it("deux versions : choisir celle à garder résout la fourche", async () => {
@@ -562,6 +762,42 @@ describe("Page du serveur", () => {
     expect(within(card).getByText(/Une fin de partie n'a pas été publiée/)).toBeTruthy();
     fireEvent.click(within(card).getByRole("button", { name: /Voir la fin de partie non publiée/ }));
     expect(navigate).toHaveBeenCalledWith("hearth", { id: "g1" });
+  });
+
+  const alexCrash = { public_key: "k", name: "Alex", online: false };
+
+  it("plantage du serveur d'un ami (#98) : la carte et la page disent le mod probable", async () => {
+    home({ id: "g1", name: "Les copains", crash: { host: alexCrash, mine: false, mod_hint: "Sodium (sodium)" } });
+    const card = await screen.findByRole("listitem", { name: "Serveur Les copains" });
+    expect(within(card).getByText("Le serveur de Alex a planté (mod probable : Sodium (sodium)).")).toBeTruthy();
+  });
+
+  it("plantage sans mod connu : cause inconnue ; chez l'hôte, le monde est gardé de côté", async () => {
+    page({ id: "g1" }, { id: "g1", name: "Les copains", crash: { host: { ...alexCrash, name: "Toi" }, mine: true, mod_hint: null }, orphans: 1 }, { orphans: [orphan] });
+    await screen.findByText("Ton serveur a planté (cause inconnue).");
+    expect(screen.getByText(/gardé de côté sur ce PC/)).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Une fin de partie n'a pas été publiée" })).toBeTruthy();
+  });
+
+  it("sans plantage connu, aucun message", async () => {
+    home({ id: "g1", name: "Les copains" });
+    await screen.findByRole("listitem", { name: "Serveur Les copains" });
+    expect(screen.queryByText(/a planté/)).toBeNull();
+  });
+
+  it("chat vocal (§ 6.7) : la carte et la page disent que le mod n'est pas pris en charge", async () => {
+    home({ id: "g1", name: "Les copains", voice_unsupported: true });
+    const card = await screen.findByRole("listitem", { name: "Serveur Les copains" });
+    expect(within(card).getByText(/Chat vocal non pris en charge/)).toBeTruthy();
+    cleanup();
+    page({ id: "g1" }, { id: "g1", name: "Les copains", voice_unsupported: true });
+    expect(await screen.findByText("Chat vocal non pris en charge")).toBeTruthy();
+  });
+
+  it("sans chat vocal dans le modpack, aucun message de voix", async () => {
+    home({ id: "g1", name: "Les copains" });
+    await screen.findByRole("listitem", { name: "Serveur Les copains" });
+    expect(screen.queryByText(/Chat vocal/)).toBeNull();
   });
 
   it("modpack absent : associer une instance locale", async () => {

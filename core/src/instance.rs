@@ -355,6 +355,14 @@ impl InstanceStore {
         Ok(self.with_live_mod_count(id, stored.instance))
     }
 
+    /// Remplace le loader (mise à jour d'un modpack qui change la version du loader). Relit `instance.json`.
+    pub fn set_loader(&self, id: &str, loader: LoaderSpec) -> Result<Instance> {
+        let mut stored = self.read_meta(id)?;
+        stored.instance.loader = loader;
+        self.write_meta(id, &stored)?;
+        Ok(self.with_live_mod_count(id, stored.instance))
+    }
+
     /// Nombre de fichiers `.jar` dans `mods/`.
     pub fn mod_count(&self, id: &str) -> Result<u32> {
         let mods = self.game_dir(id)?.join("mods");

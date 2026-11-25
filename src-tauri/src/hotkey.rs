@@ -31,6 +31,22 @@ pub fn running_after(state: &str) -> Option<bool> {
     }
 }
 
+/// Pur : charge utile de `launch://state` -> le jeu tourne-t-il ? `None` si elle est illisible ou ne change rien.
+pub fn running_from_payload(payload: &Value) -> Option<bool> {
+    payload.get("state").and_then(Value::as_str).and_then(running_after)
+}
+
+/// État de lancement d'un jeu (appelé par Rust seul, depuis le sink d'événements) : enregistre ou libère le raccourci.
+pub fn on_launch_state(app: &AppHandle, payload: &Value) {
+    let Some(now) = running_from_payload(payload) else { return };
+    let Some(ctl) = app.try_state::<Arc<HotkeyCtl>>() else { return };
+    if ctl.game_running.swap(now, Ordering::SeqCst) != now {
+        let h = app.clone();
+        // Ne pas bloquer l'émetteur.
+        std::thread::spawn(move || apply_settings(&h));
+    }
+}
+
 /// Valide un raccourci (format du plugin) : erreur française claire sinon.
 pub fn validate_hotkey(h: &str) -> Result<(), String> {
     let sc = Shortcut::from_str(h.trim())
@@ -299,19 +315,22 @@ pub fn apply_settings(app: &AppHandle) {
 /// Écoute le jeu, les invitations et les demandes. Appelée une fois depuis `setup` ; n'échoue jamais.
 pub fn setup(app: &AppHandle, test_mode: bool) {
     app.manage(Arc::new(HotkeyCtl::default()));
-    let h = app.clone();
-    app.listen("launch://state", move |ev| {
-        let state = serde_json::from_str::<Value>(ev.payload())
-            .ok()
-            .and_then(|v| v.get("state").and_then(Value::as_str).and_then(running_after));
-        let Some(now) = state else { return };
-        let Some(ctl) = h.try_state::<Arc<HotkeyCtl>>() else { return };
-        if ctl.game_running.swap(now, Ordering::SeqCst) != now {
-            let h = h.clone();
-            // Le gestionnaire d'événement ne doit pas bloquer l'émetteur.
-            std::thread::spawn(move || apply_settings(&h));
+    // `launch://state` n'est plus écouté : le webview ne peut plus émettre d'événement (voir capabilities/default.json) et l'état
+    // arrive par appel direct depuis le sink d'événements (`on_launch_state`). Seul le mode test l'écoute, car les E2E
+    // simulent l'état du jeu depuis la page.
+    if test_mode {
+        let h = app.clone();
+        app.listen("launch://state", move |ev| {
+            if let Ok(v) = serde_json::from_str::<Value>(ev.payload()) {
+                on_launch_state(&h, &v);
+            }
+        });
+        // Les E2E émettent des événements depuis la page (`plugin:event|emit`) : permission réservée au mode test.
+        let cap = r#"{"identifier":"test-emit","windows":["main"],"permissions":["core:event:allow-emit","core:event:allow-emit-to"]}"#;
+        if let Err(e) = app.add_capability(cap) {
+            eprintln!("[Cubelink] capacité de test non ajoutée : {e}");
         }
-    });
+    }
     // Repli : le jeu a repris sa propre fenêtre, le panneau « en jeu » n'existe plus pour lui ; le raccourci est rendu
     // aux autres applications.
     let h = app.clone();
@@ -360,6 +379,17 @@ mod tests {
         assert_eq!(running_after("exited"), Some(false));
         assert_eq!(running_after("failed"), Some(false));
         assert_eq!(running_after("preparing"), None);
+    }
+
+    #[test]
+    fn etat_du_jeu_depuis_la_charge_utile() {
+        let p = |s: &str| serde_json::json!({ "id": "x", "state": s, "message": "" });
+        assert_eq!(running_from_payload(&p("running")), Some(true));
+        assert_eq!(running_from_payload(&p("exited")), Some(false));
+        assert_eq!(running_from_payload(&p("failed")), Some(false));
+        assert_eq!(running_from_payload(&p("preparing")), None);
+        assert_eq!(running_from_payload(&serde_json::json!({ "state": 3 })), None);
+        assert_eq!(running_from_payload(&serde_json::json!("running")), None);
     }
 
     #[test]

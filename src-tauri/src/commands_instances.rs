@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
+use core_lib::import_launcher::{self, DetectedInstance, ImportParams, Launcher, Roots};
 use core_lib::instance::{MAX_RAM_MB, MIN_RAM_MB};
 use core_lib::launch_args::{build_command, LaunchSpec, LaunchVersion};
 use core_lib::launch_run::{self, LaunchEvent, LaunchPhase, LaunchStateEvent};
@@ -59,6 +60,37 @@ pub fn validate_mrpack_path(path: &str) -> Result<PathBuf, String> {
         return Err("le fichier du modpack est introuvable".into());
     }
     p.canonicalize().map_err(|_| "le fichier du modpack est illisible".to_string())
+}
+
+/// Dossiers où chercher les autres lanceurs : le profil de l'utilisateur, ou le dossier de test en mode test.
+fn launcher_roots() -> Roots {
+    let h = crate::test_hooks::hooks();
+    match (&h.launcher_home, h.test_mode) {
+        (Some(home), true) => Roots { appdata: Some(home.join("AppData")), home: Some(home.clone()), data_home: Some(home.join(".local/share")) },
+        _ => Roots::from_env(),
+    }
+}
+
+/// Imports d'instances d'un autre lanceur en cours (une instance source n'est importée qu'une fois à la fois).
+static LAUNCHER_IMPORTS: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+struct LauncherImportGuard(PathBuf);
+
+impl LauncherImportGuard {
+    fn begin(path: &Path) -> Option<Self> {
+        let mut running = LAUNCHER_IMPORTS.lock().unwrap_or_else(|e| e.into_inner());
+        if running.iter().any(|p| p == path) {
+            return None;
+        }
+        running.push(path.to_path_buf());
+        Some(Self(path.to_path_buf()))
+    }
+}
+
+impl Drop for LauncherImportGuard {
+    fn drop(&mut self) {
+        LAUNCHER_IMPORTS.lock().unwrap_or_else(|e| e.into_inner()).retain(|p| *p != self.0);
+    }
 }
 
 /// Traduit un événement de lancement en état du contrat.
@@ -455,6 +487,72 @@ impl AppState {
         }
     }
 
+    /// Instances trouvées chez Prism, la Modrinth App et la CurseForge App (dossiers habituels), ou dans le dossier `path`
+    /// choisi à la main. Lecture seule.
+    pub async fn launcher_import_scan(&self, path: Option<String>) -> Result<Vec<DetectedInstance>, String> {
+        let folder = match path.map(|p| p.trim().to_string()).filter(|p| !p.is_empty()) {
+            Some(p) => {
+                let f = PathBuf::from(p);
+                if !f.is_dir() {
+                    return Err("ce dossier est introuvable".into());
+                }
+                Some(f)
+            }
+            None => None,
+        };
+        let roots = launcher_roots();
+        tokio::task::spawn_blocking(move || match folder {
+            Some(f) => import_launcher::scan_folder(&f),
+            None => import_launcher::scan_known(&roots),
+        })
+        .await
+        .map_err(|_| "recherche interrompue".to_string())
+    }
+
+    /// Importe l'instance du dossier `path`. Elle est relue sur le disque (aucune confiance dans ce que l'interface a reçu
+    /// d'une recherche), copiée sans jamais modifier la source, puis le jeu est préparé comme pour une instance neuve.
+    pub async fn launcher_import_run(&self, path: &str, launcher: Launcher, name: Option<String>, ram_mb: Option<u32>) -> Result<Instance, String> {
+        let ram_mb = ram_mb.unwrap_or(core_lib::instance::RAM_DEFAULT);
+        if ram_mb != core_lib::instance::RAM_DEFAULT && !(MIN_RAM_MB..=MAX_RAM_MB).contains(&ram_mb) {
+            return Err(format!("la mémoire doit être comprise entre {MIN_RAM_MB} et {MAX_RAM_MB} Mo"));
+        }
+        let folder = PathBuf::from(path.trim());
+        let key = folder.canonicalize().map_err(|_| "le dossier de l'instance est introuvable".to_string())?;
+        let _running = LauncherImportGuard::begin(&key).ok_or("cette instance est déjà en cours d'import")?;
+        let mut det = {
+            let f = key.clone();
+            tokio::task::spawn_blocking(move || import_launcher::load_instance(&f, launcher))
+                .await
+                .map_err(|_| "import interrompu".to_string())?
+                .map_err(|e| user_msg(&e))?
+        };
+        if det.unsupported.is_none() {
+            // Version du loader absente chez l'autre lanceur : la recommandée, cherchée AVANT de copier des Go de mondes.
+            det.loader.version = resolve_loader_version(&det.minecraft, &det.loader).await.map_err(|e| user_msg(&e))?;
+        }
+        let name = name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
+        let (instances, index, store_root) = (self.instances.clone(), self.store.clone(), self.paths.store.clone());
+        let emit = self.emit.clone();
+        let progress: core_lib::mrpack::FilesProgress =
+            Arc::new(move |d, t| emit("browse://progress", serde_json::json!({ "done": d, "total": t, "label": "Import de l'instance" })));
+        let params = ImportParams { name, ram_mb, ..ImportParams::default() };
+        let inst = tokio::task::spawn_blocking(move || {
+            import_launcher::import_instance(&det, &params, &instances, &store_root, &index, Some(progress), Arc::new(AtomicBool::new(false)))
+        })
+        .await
+        .map_err(|_| "import interrompu".to_string())?
+        .map_err(|e| user_msg(&e))?;
+        let noop: Progress = Arc::new(|_| {});
+        let java_setting = JavaSetting::for_instance(inst.java_path.as_deref(), self.settings_get().java_path);
+        if let Err(e) = ensure_game(&self.paths, &inst, java_setting, noop).await {
+            let _ = self.instances.delete(&inst.id);
+            return Err(user_msg(&e));
+        }
+        // Illustration : recherche silencieuse par nom, meilleur effort (hors ligne ou sans résultat, l'instance est rendue telle quelle).
+        let art = tokio::time::timeout(std::time::Duration::from_secs(20), self.instances_art_lookup(&inst.id, true)).await;
+        Ok(art.ok().and_then(Result::ok).unwrap_or(inst))
+    }
+
     pub async fn minecraft_versions(&self) -> Result<Vec<String>, String> {
         let m = crate::install::versions_client().fetch_manifest().await.map_err(|e| user_msg(&e))?;
         Ok(release_ids(&m))
@@ -487,6 +585,9 @@ impl AppState {
         }
         if !valid_id(id) {
             return Err("identifiant d'instance invalide".into());
+        }
+        if crate::commands_browse::pack_update_running(id) {
+            return Err("une mise à jour du modpack est en cours : attends qu'elle se termine avant de jouer".into());
         }
         let inst = self.instances.get(id).map_err(|e| user_msg(&e))?;
         let profile = self.auth_status_refresh().await.ok_or("connectez-vous avant de lancer le jeu")?;
@@ -821,6 +922,20 @@ pub async fn instances_import_mrpack(
     state.instances_import_mrpack(&path, name, minecraft, loader, ram_mb).await
 }
 
+/// Cherche les instances de Prism / MultiMC, de la Modrinth App et de la CurseForge App (dossiers habituels Windows et Linux, Flatpak compris) ou, avec `path`, dans le dossier choisi (une instance, un dossier d'instances ou la racine d'un lanceur). Lecture seule : rien n'est écrit chez l'autre lanceur. Une instance au loader inconnu de Cubelink est listée avec `unsupported` (raison) et n'est pas importable.
+#[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
+pub async fn launcher_import_scan(state: State<'_, Arc<AppState>>, path: Option<String>) -> Result<Vec<DetectedInstance>, String> {
+    state.launcher_import_scan(path).await
+}
+
+/// Importe l'instance du dossier `path` (relue sur le disque, jamais l'objet reçu d'une recherche) : version de Minecraft et loader repris (version du loader recommandée si le lanceur ne la donne pas), `mods/`, `config/`, `saves/`, `resourcepacks/`, `shaderpacks/`, `options.txt` et `servers.dat` placés dans une nouvelle instance. Les jars et zips de packs vont dans le magasin par hash puis sont liés (lien physique, repli copie), le reste est copié ; la source n'est jamais modifiée ni liée, les liens symboliques ne sont pas suivis. Échec : l'instance n'est pas créée. Progression par `browse://progress`, puis recherche silencieuse de l'illustration par nom (20 s au plus).
+#[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
+pub async fn launcher_import_run(state: State<'_, Arc<AppState>>, path: String, launcher: Launcher, name: Option<String>, ram_mb: Option<u32>) -> Result<Instance, String> {
+    state.launcher_import_run(&path, launcher, name, ram_mb).await
+}
+
 /// Lance l'instance. Progression par `launch://state`, sortie du jeu par `launch://log`.
 #[tauri::command(rename_all = "snake_case")]
 #[specta::specta(rename_all = "snake_case")]
@@ -839,6 +954,33 @@ pub async fn minecraft_versions(state: State<'_, Arc<AppState>>) -> Result<Vec<S
 mod tests {
     use super::*;
     use crate::state::test_support::test_state;
+
+    #[test]
+    fn un_import_d_instance_ne_demarre_pas_deux_fois_sur_le_meme_dossier() {
+        let d = tempfile::tempdir().unwrap();
+        let (a, b) = (d.path().join("a"), d.path().join("b"));
+        let g = LauncherImportGuard::begin(&a).expect("premier import");
+        assert!(LauncherImportGuard::begin(&a).is_none(), "même dossier : refusé");
+        assert!(LauncherImportGuard::begin(&b).is_some(), "autre dossier : accepté");
+        drop(g);
+        assert!(LauncherImportGuard::begin(&a).is_some(), "libéré à la fin");
+    }
+
+    #[tokio::test]
+    async fn import_d_un_autre_lanceur_valide_ses_entrees_avant_de_toucher_au_disque() {
+        let d = tempfile::tempdir().unwrap();
+        let (st, _) = test_state(d.path());
+        let nothing = d.path().join("rien");
+        assert!(st.launcher_import_scan(Some(nothing.display().to_string())).await.is_err());
+        let e = st.launcher_import_run(&nothing.display().to_string(), Launcher::Prism, None, None).await.unwrap_err();
+        assert!(e.contains("introuvable"), "{e}");
+        let e = st.launcher_import_run(&d.path().display().to_string(), Launcher::Prism, None, Some(12)).await.unwrap_err();
+        assert!(e.contains("mémoire"), "{e}");
+        // Un dossier qui n'est pas une instance de ce lanceur : refusé, aucune instance créée.
+        let e = st.launcher_import_run(&d.path().display().to_string(), Launcher::Curseforge, None, None).await.unwrap_err();
+        assert!(e.contains("instance"), "{e}");
+        assert!(st.instances_list().is_empty());
+    }
 
     #[tokio::test]
     async fn attach_pack_origin_known_hash_unknown_and_explicit() {

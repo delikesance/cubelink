@@ -19,11 +19,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
-use core_lib::hearth::server::{log_message, InstallRequest, LineSink, ServerConfig, ServerInstaller};
+use core_lib::hearth::server::{diagnose_failure, log_message, InstallRequest, LineSink, ServerConfig, ServerInstaller};
 use core_lib::instance::InstanceStore;
 use core_lib::types::{
     HearthBlocker, HearthBranch, HearthCard, HearthDetail, HearthInvite, HearthMember, HearthMemberLite, HearthOrphan, HearthProposal,
-    HearthSettings, HearthStateKind, HearthUnclean, HearthVersion, LoaderSpec,
+    HearthCrash, HearthExport, HearthSettings, HearthStateKind, HearthUnclean, HearthVersion, LoaderSpec,
 };
 use iroh::{Endpoint, EndpointAddr};
 use p2p_lib::friends_db::FriendsDb;
@@ -36,7 +36,7 @@ use p2p_lib::hearth::model::{GroupId, GroupOp, GroupState, OpHash, PackPin, Prop
 use p2p_lib::hearth::outbox::{MemberReplica, Outbox, Replica};
 use p2p_lib::hearth::proto::{HearthConn, HearthDelegate, NetError};
 use p2p_lib::hearth::store::{Group, GroupKey, GroupStore};
-use p2p_lib::hearth::sync::{human_size, FetchOptions, GroupMembers, PublishedWorld, SyncError, WorldStore};
+use p2p_lib::hearth::sync::{check_incoming, human_size, FetchOptions, GroupMembers, PublishedWorld, SyncError, WorldStore};
 use p2p_lib::hearth::version::{SignedVersion, VersionGraph, VersionHeader, VersionId, VersionKind, VersionPoint};
 use p2p_lib::identity::Identity;
 use p2p_lib::presence::PeerKey;
@@ -51,6 +51,12 @@ pub const EULA_REQUIRED: &str = "eula_required";
 /// a le contenu. Format : `head_unavailable|<n° de la tête>|<n° de la dernière version complète, ou vide>|<nom de l'auteur>`.
 /// L'écran propose « Attendre » et, s'il y a une version complète, « Jouer depuis la n° N ».
 pub const HEAD_UNAVAILABLE: &str = "head_unavailable";
+/// Préfixe de l'erreur des commandes qui démarrent le serveur (`hearth_play`, `hearth_unclean_choice`,
+/// `hearth_play_from_previous`) quand héberger sans la majorité du groupe demande une confirmation explicite (docs/hearth.md
+/// § 1). Formats : `confirm_host|alone|<noms hors ligne séparés par ;>` (aucun autre membre joignable) et
+/// `confirm_host|best_effort|<accusés>|<membres>|<nécessaires>` (des membres joignables, mais sans majorité). L'écran pose la
+/// question ; « Héberger quand même » appelle `hearth_confirm_host` puis relance la commande.
+pub const CONFIRM_HOST: &str = "confirm_host";
 /// Message de `fetch_version` quand aucun membre n'est en ligne pour fournir le monde.
 const NO_MEMBER_ONLINE: &str = "aucun membre du groupe n'est joignable pour récupérer le monde";
 /// Délai entre deux sondes des membres.
@@ -61,10 +67,54 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(8);
 pub const ROUND_HELLO_TIMEOUT: Duration = Duration::from_secs(4);
 /// Attente du bail d'un concurrent après un `ClaimConflict` sur un claim (il annonce son bail `Starting`).
 const CLAIM_YIELD_WAIT: Duration = Duration::from_secs(12);
-/// Durée pendant laquelle un premier « Jouer » sur un bail « au mieux » attend la confirmation (le second clic).
-const BEST_EFFORT_CONFIRM: Duration = Duration::from_secs(120);
+/// Durée de validité d'une confirmation explicite d'héberger sans la majorité du groupe (`hearth_confirm_host`).
+const HOST_CONFIRM_WINDOW: Duration = Duration::from_secs(120);
 /// Période des points de reprise pendant une partie.
 pub const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(10 * 60);
+/// Un serveur sans joueur pendant ce temps s'arrête, même avec « Garder le serveur ouvert » (docs/hearth.md § 7.3).
+pub const IDLE_STOP: Duration = Duration::from_secs(30 * 60);
+/// Période de la surveillance du serveur vide.
+pub const IDLE_POLL: Duration = Duration::from_secs(30);
+
+/// Délais de la partie hébergée (injectables : les tests les raccourcissent).
+#[derive(Debug, Clone, Copy)]
+pub struct Timings {
+    pub checkpoint: Duration,
+    pub idle_stop: Duration,
+    pub idle_poll: Duration,
+}
+
+impl Default for Timings {
+    fn default() -> Self {
+        Self { checkpoint: CHECKPOINT_INTERVAL, idle_stop: IDLE_STOP, idle_poll: IDLE_POLL }
+    }
+}
+
+/// Protège une collection du ramasse-miettes des versions tant qu'il est en vie (restauration en cours).
+struct GcHold<'a> {
+    rt: &'a HearthRuntime,
+    collection: [u8; 32],
+}
+
+impl<'a> GcHold<'a> {
+    fn new(rt: &'a HearthRuntime, collection: [u8; 32]) -> Self {
+        *lock(&rt.gc_hold).entry(collection).or_insert(0) += 1;
+        Self { rt, collection }
+    }
+}
+
+impl Drop for GcHold<'_> {
+    fn drop(&mut self) {
+        let mut h = lock(&self.rt.gc_hold);
+        if let Some(n) = h.get_mut(&self.collection) {
+            *n -= 1;
+            if *n == 0 {
+                h.remove(&self.collection);
+            }
+        }
+    }
+}
+
 /// Jours sans nouvelles avant de pouvoir continuer sans un membre.
 pub const CONTINUE_AFTER_DAYS: u32 = 7;
 /// Versions plus jeunes que cela sont gardées par le ramasse-miettes des versions.
@@ -84,6 +134,42 @@ const LEAVE_FLUSH_POLL: Duration = Duration::from_millis(250);
 const FORGET_STOP_GRACE: Duration = Duration::from_secs(20);
 /// Délai laissé au serveur pour s'arrêter proprement (sauvegarde du monde).
 const SERVER_STOP_GRACE: Duration = Duration::from_secs(90);
+/// Même délai quand la machine s'éteint : Windows laisse quelques secondes avant « Arrêter quand même », systemd 90 s pour
+/// tout Cubelink. Passé ce délai, le serveur est tué (le monde peut perdre les dernières minutes : le marqueur de session
+/// reste, le prochain « Jouer » met ce monde de côté).
+const SERVER_STOP_GRACE_SHUTDOWN: Duration = Duration::from_secs(20);
+/// Attente maximale de l'annonce de fin de partie aux autres membres quand la machine s'éteint (le réseau tombe vite).
+const RELEASE_BROADCAST_SHUTDOWN: Duration = Duration::from_secs(8);
+/// Annonce faite aux joueurs du serveur quand l'hôte éteint son PC (§ 7.3).
+/// Intervalle minimal entre deux mesures de la place prise par un groupe, hors libération et rapatriement.
+const GROUP_BYTES_EVERY: Duration = Duration::from_secs(60);
+
+pub const SHUTDOWN_ANNOUNCEMENT: &str = "L'hôte éteint son PC : la partie s'arrête. Les derniers instants peuvent ne pas être gardés.";
+
+/// Comment un serveur de groupe prend fin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopMode {
+    /// Fermeture de Cubelink ou fin de partie : le monde est publié (version `Session`), délais généreux.
+    Normal,
+    /// Arrêt de la machine ou du processus (fin de session, SIGTERM) : il n'y a pas le temps de hacher ni d'envoyer des
+    /// Go. Annonce aux joueurs, `stop` borné, bail relâché avec `Shutdown`, **rien n'est publié** et le marqueur de
+    /// session reste : le monde est mis de côté au prochain « Jouer » (§ 7.3, § 7.5).
+    Shutdown,
+}
+
+/// Raison annoncée aux autres membres. Pur. Un plantage et une perte de bail (`fenced`) gardent leur raison, car ils
+/// décrivent ce qui est arrivé au monde ; l'arrêt de la machine ne passe qu'avant la fin normale.
+fn release_reason(fenced: bool, crash: Option<&CrashInfo>, mode: StopMode) -> ReleaseReason {
+    if fenced {
+        ReleaseReason::Suspend
+    } else if let Some(c) = crash {
+        ReleaseReason::Crashed { mod_hint: c.mod_hint.clone() }
+    } else if mode == StopMode::Shutdown {
+        ReleaseReason::Shutdown
+    } else {
+        ReleaseReason::Stopped
+    }
+}
 /// Attente maximale du démarrage du serveur d'un autre membre (bail `Starting`).
 const START_WAIT_MAX: Duration = Duration::from_secs(15 * 60);
 /// Pas d'observation de ce démarrage.
@@ -162,8 +248,14 @@ pub trait RunningServer: Send + Sync {
     fn flush_end(&self) -> BoxFut<'_, Result<(), String>>;
     /// `stop`, puis arrêt forcé après `grace`.
     fn stop(&self, grace: Duration) -> BoxFut<'_, ()>;
-    /// Le serveur s'est arrêté (plantage ou `stop`).
-    fn wait_exit(&self) -> BoxFut<'_, ()>;
+    /// Le serveur s'est arrêté (plantage ou `stop`) : rend son code de sortie (`-1` s'il est inconnu).
+    fn wait_exit(&self) -> BoxFut<'_, i32>;
+    /// Les `n` dernières lignes de la sortie du serveur (pour chercher le mod en cause après un plantage).
+    fn recent_lines(&self, n: usize) -> Vec<String>;
+    /// Annonce `text` aux joueurs connectés (`tellraw`). Sans effet par défaut : une annonce manquée ne bloque rien.
+    fn say(&self, _text: &str) -> BoxFut<'_, ()> {
+        Box::pin(async {})
+    }
 }
 
 pub trait ServerRunner: Send + Sync {
@@ -210,9 +302,16 @@ impl RunningServer for RealServer {
             self.0.stop(grace).await;
         })
     }
-    fn wait_exit(&self) -> BoxFut<'_, ()> {
-        Box::pin(async move {
-            self.0.wait_exit().await;
+    fn wait_exit(&self) -> BoxFut<'_, i32> {
+        Box::pin(async move { self.0.wait_exit().await })
+    }
+    fn recent_lines(&self, n: usize) -> Vec<String> {
+        self.0.recent_lines(n)
+    }
+    fn say(&self, text: &str) -> BoxFut<'_, ()> {
+        let (s, text) = (self.0.clone(), text.to_string());
+        run_local(move || async move {
+            let _ = s.say(&text).await;
         })
     }
 }
@@ -432,9 +531,27 @@ pub struct ActiveHost {
     players: Arc<Mutex<BTreeSet<String>>>,
     /// Quelqu'un est déjà entré sur ce serveur : le monde peut contenir du jeu non publié, même si tout le monde est parti.
     ever_joined: Arc<AtomicBool>,
+    /// Un joueur est entré depuis le dernier point de reprise (un drapeau, pas un compteur : celui qui entre puis sort entre
+    /// deux points compte aussi). Sans joueur depuis le dernier point, le suivant est sauté.
+    played_since_checkpoint: Arc<AtomicBool>,
     tasks: Mutex<Vec<JoinHandle<()>>>,
     stopping: AtomicBool,
+    /// Le serveur est mort seul avec un code d'erreur (sans arrêt demandé) : le monde n'est pas publié (§ 7.5).
+    crashed: Mutex<Option<CrashInfo>>,
 }
+
+/// Plantage du serveur d'une partie hébergée.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CrashInfo {
+    pub code: i32,
+    /// Mod probablement en cause, d'après la fin de la sortie du serveur.
+    pub mod_hint: Option<String>,
+}
+
+/// Nombre de lignes de la sortie du serveur lues pour trouver le mod en cause d'un plantage.
+const CRASH_TAIL_LINES: usize = 1000;
+/// Longueur maximale du mod probable gardé ou affiché (il vient aussi d'un autre membre).
+const MOD_HINT_MAX: usize = 120;
 
 impl ActiveHost {
     pub fn players(&self) -> u32 {
@@ -537,6 +654,17 @@ pub struct HearthRuntime {
     active: Mutex<HashMap<GroupId, Arc<ActiveHost>>>,
     /// Collections dont on a tout le contenu (répond à `HaveVersion`, qui est synchrone).
     complete: Mutex<HashSet<[u8; 32]>>,
+    /// Le premier inventaire de `complete` (démarrage) est fini : avant, un « pas complet » est peut-être seulement « pas
+    /// encore compté ».
+    complete_scanned: AtomicBool,
+    /// Octets des blobs de chaque groupe dans le magasin (« place prise sur ce disque »), recalculés en tâche de fond :
+    /// après un rapatriement, une libération et au démarrage. La page du serveur (synchrone) ne fait que les lire.
+    group_bytes: Mutex<HashMap<GroupId, u64>>,
+    /// Date de la dernière mesure de chaque groupe : le ramasse-miettes, appelé à chaque synchro, ne remesure pas à chaque fois.
+    group_bytes_at: Mutex<HashMap<GroupId, Instant>>,
+    /// Collections qu'une restauration ou une résolution de fourche vient de rapatrier et qui n'ont pas encore leur
+    /// version : le ramasse-miettes des versions n'y touche pas.
+    gc_hold: Mutex<HashMap<[u8; 32], usize>>,
     /// Mondes en cours de rapatriement : pour cent.
     fetching: Mutex<HashMap<GroupId, u8>>,
     /// Groupes dont une sonde tourne déjà.
@@ -551,12 +679,19 @@ pub struct HearthRuntime {
     /// Fin d'une partie hébergée qui s'arrête d'elle-même (plantage) : l'application arrête aussi le partage, l'accès et
     /// l'état de lancement.
     end_hook: Mutex<Option<EndHook>>,
+    /// Délais des points de reprise et de l'arrêt du serveur vide.
+    timings: Mutex<Timings>,
     /// Une seule fermeture générale à la fois : la seconde attend la première.
     stop_all: tokio::sync::Mutex<()>,
     /// Horloges (injectables : les tests font « dormir » la machine sans attendre).
     clock: Mutex<Arc<dyn Clock>>,
-    /// Groupes dont un premier « Jouer » a reçu un bail « au mieux » : le second clic vaut confirmation.
-    best_effort: Mutex<HashMap<GroupId, Instant>>,
+    /// Confirmations explicites d'héberger sans la majorité du groupe (`hearth_confirm_host`), valables [`HOST_CONFIRM_WINDOW`].
+    confirmations: Mutex<HashMap<GroupId, Instant>>,
+    /// Dernier plantage de serveur connu par groupe (hôte, mod probable) : annoncé par `LeaseRelease { Crashed }`, ou vu
+    /// chez moi. Effacé dès qu'un nouveau bail est accepté ou que je lance un serveur.
+    crashes: Mutex<HashMap<GroupId, (PeerKey, Option<String>)>>,
+    /// Simple Voice Chat présent dans les mods d'une instance : (date du dossier `mods`, réponse), par instance.
+    voice_cache: Mutex<HashMap<String, (Option<std::time::SystemTime>, bool)>>,
     me_weak: Weak<HearthRuntime>,
 }
 
@@ -640,9 +775,6 @@ pub enum RenewTick {
     Fenced,
 }
 
-/// Début du message d'un bail « au mieux » (voir [`HearthRuntime::begin_starting`]).
-pub const BEST_EFFORT_NOTE: &str = "Le groupe n'est pas assez joignable pour une prise du serveur sûre : si un autre membre joue de son côté, il y aura deux versions à départager.";
-
 /// Réaction de l'application à la fin d'une partie hébergée (voir `HearthRuntime::set_end_hook`).
 pub type EndHook = Arc<dyn Fn(GroupId) -> BoxFut<'static, ()> + Send + Sync>;
 
@@ -720,6 +852,10 @@ impl HearthRuntime {
             play: Mutex::new(HashMap::new()),
             active: Mutex::new(HashMap::new()),
             complete: Mutex::new(HashSet::new()),
+            complete_scanned: AtomicBool::new(false),
+            group_bytes: Mutex::new(HashMap::new()),
+            group_bytes_at: Mutex::new(HashMap::new()),
+            gc_hold: Mutex::new(HashMap::new()),
             fetching: Mutex::new(HashMap::new()),
             probing: Mutex::new(HashSet::new()),
             background: Mutex::new(Vec::new()),
@@ -727,9 +863,12 @@ impl HearthRuntime {
             starting: Mutex::new(HashMap::new()),
             oversize: Mutex::new(HashSet::new()),
             end_hook: Mutex::new(None),
+            timings: Mutex::new(Timings::default()),
             stop_all: tokio::sync::Mutex::new(()),
             clock: Mutex::new(Arc::new(SystemClock)),
-            best_effort: Mutex::new(HashMap::new()),
+            confirmations: Mutex::new(HashMap::new()),
+            crashes: Mutex::new(HashMap::new()),
+            voice_cache: Mutex::new(HashMap::new()),
             me_weak: w.clone(),
         }))
     }
@@ -757,6 +896,11 @@ impl HearthRuntime {
     /// Remplace le lanceur de serveur (tests).
     pub fn set_runner(&self, r: Arc<dyn ServerRunner>) {
         *lock(&self.runner) = r;
+    }
+
+    /// Remplace les délais de la partie hébergée (tests).
+    pub fn set_timings(&self, t: Timings) {
+        *lock(&self.timings) = t;
     }
 
     /// Remplace le lanceur du jeu (tests).
@@ -1015,6 +1159,12 @@ impl HearthRuntime {
         }
         self.emit_state();
         true
+    }
+
+    /// Un lancement est en cours (installation du serveur, bail `Starting` déjà annoncé aux amis, ouverture du jeu) : ni
+    /// serveur actif ni jeu pour l'instant, mais l'arrêt de l'application le laisserait orphelin.
+    pub fn any_launching(&self) -> bool {
+        lock(&self.play).values().any(|p| matches!(p, Play::Launching { .. }))
     }
 
     pub fn play_of(&self, gid: &GroupId) -> Option<Play> {
@@ -1362,6 +1512,9 @@ impl HearthRuntime {
                 break;
             }
         }
+        // Un membre qui ne fait que rejoindre reçoit toutes les versions : c'est ici, après chaque synchro (sonde, Hello,
+        // rattrapage), qu'il libère les mondes des vieilles, comme l'hôte le fait à la fin d'une partie.
+        self.gc_versions(gid).await;
     }
 
     /// Rapatrie le monde d'une version (sans l'écrire sur le disque de jeu). Sans effet s'il est déjà là.
@@ -1387,6 +1540,13 @@ impl HearthRuntime {
             let _ = world.adopt(&gid, &coll).await;
             lock(&self.complete).insert(coll);
             return Ok(());
+        }
+        // Garde-fou de croissance AVANT tout le reste (présence, rapatriement déjà en cours) : le refus ne dépend ni du
+        // réseau ni d'un autre téléchargement, et l'émetteur le lit tout de suite (`refused_version`, #99).
+        let previous_total = v.header.parent.and_then(|p| self.version(&gid, &p)).map(|p| p.header.total_size);
+        let growth = FetchOptions { previous_total, confirmed, ..FetchOptions::default() };
+        if let Err(SyncError::Oversize { expected, previous }) = check_incoming(v.header.total_size, &growth) {
+            return Err(self.oversize_refusal(v, expected, previous));
         }
         let addrs = self.online_addrs(&gid, prefer);
         if addrs.is_empty() {
@@ -1419,7 +1579,6 @@ impl HearthRuntime {
         });
         let net = self.net()?;
         // Garde-fous avant le premier octet : une grande `total_size` ne coûte à l'émetteur que sa signature.
-        let previous_total = v.header.parent.and_then(|p| self.version(&gid, &p)).map(|p| p.header.total_size);
         let opts = FetchOptions {
             on_progress: Some(on_progress),
             previous_total,
@@ -1433,21 +1592,25 @@ impl HearthRuntime {
             Ok(_) => {
                 lock(&self.complete).insert(coll);
                 lock(&self.oversize).remove(&v.id());
+                self.refresh_group_bytes(gid).await;
                 Ok(())
             }
-            Err(SyncError::Oversize { expected, previous }) => {
-                lock(&self.oversize).insert(v.id());
-                Err(format!(
-                    "La partie de {} fait {} contre {} avant. Elle n'est pas téléchargée toute seule : relance Jouer si tu veux la récupérer quand même.",
-                    self.name_of(&v.header.author),
-                    human_size(expected),
-                    human_size(previous),
-                ))
-            }
+            Err(SyncError::Oversize { expected, previous }) => Err(self.oversize_refusal(v, expected, previous)),
             Err(e) => Err(e.to_string()),
         };
         self.emit_state();
         out
+    }
+
+    /// Retient qu'on refuse cette version (trop grosse d'un coup) et rend le message pour la personne.
+    fn oversize_refusal(&self, v: &SignedVersion, expected: u64, previous: u64) -> String {
+        lock(&self.oversize).insert(v.id());
+        format!(
+            "La partie de {} fait {} contre {} avant. Elle n'est pas téléchargée toute seule : relance Jouer si tu veux la récupérer quand même.",
+            self.name_of(&v.header.author),
+            human_size(expected),
+            human_size(previous),
+        )
     }
 
     /// Fait le point sur ce qu'on a déjà en entier (démarrage).
@@ -1461,8 +1624,21 @@ impl HearthRuntime {
                     lock(&self.complete).insert(c);
                 }
             }
+            // À l'ouverture de l'application : ce qu'un ancien Cubelink a laissé s'accumuler est libéré, et la place
+            // prise est mesurée une première fois.
+            self.gc_versions(gid).await;
         }
+        self.complete_scanned.store(true, Ordering::SeqCst);
         self.emit_state();
+    }
+
+    /// Comme [`Self::world_complete`], mais tant que l'inventaire du démarrage n'est pas fini, regarde aussi le magasin :
+    /// l'export proposé juste après le lancement ne doit pas échouer sur un monde qui est bien là.
+    async fn world_complete_now(&self, v: &SignedVersion) -> bool {
+        if self.world_complete(v) {
+            return true;
+        }
+        !self.complete_scanned.load(Ordering::SeqCst) && self.world_on_disk_complete(v).await
     }
 
     fn start_background(self: &Arc<Self>) {
@@ -1477,6 +1653,20 @@ impl HearthRuntime {
         lock(&self.background).push(probe);
         let rt = self.clone();
         let reach: Arc<dyn Fn() -> Vec<Arc<dyn Replica>> + Send + Sync> = Arc::new(move || rt.reachable_replicas());
+        // Quorum de la file : `min(2, autres membres)` accusés par version (#99).
+        let weak = Arc::downgrade(self);
+        self.outbox.set_others(Arc::new(move |gid| {
+            weak.upgrade().and_then(|rt| rt.state(gid).map(|st| rt.others(&st).len())).unwrap_or(1)
+        }));
+        // Un accusé d'un membre qui a quitté le groupe depuis ne compte plus pour le quorum.
+        let weak = Arc::downgrade(self);
+        self.outbox.set_members(Arc::new(move |gid, key| {
+            weak.upgrade()
+                .and_then(|rt| rt.state(gid).map(|st| rt.others(&st).iter().any(|k| key_hex(k) == key)))
+                .unwrap_or(true)
+        }));
+        // Les versions abandonnées ou refusées sont rejouées une fois par démarrage : un ami a pu confirmer entre-temps.
+        self.outbox.retry_failed();
         *lock(&self.drain) = Some(self.outbox.spawn_drain_loop(reach, Duration::from_secs(30)));
     }
 
@@ -1641,15 +1831,26 @@ impl HearthRuntime {
         if head.id() == from || head.header.collection == src.header.collection {
             return Err("c'est déjà la version actuelle".into());
         }
-        self.fetch_version_user(gid, &src, None).await?;
-        self.record_version(
+        // La version n'est plus sur ce PC (libérée par le ramasse-miettes) : on la rapatrie chez un membre en ligne, et sinon
+        // on le dit en clair plutôt que de montrer l'erreur de transfert.
+        let hold = GcHold::new(self, src.header.collection);
+        if let Err(e) = self.fetch_version_user(gid, &src, None).await {
+            return Err(if e == NO_MEMBER_ONLINE && !self.world_complete(&src) {
+                "le contenu de cette version n'est plus sur ce PC et aucun membre ne l'a en ligne".into()
+            } else {
+                e
+            });
+        }
+        let out = self.record_version(
             gid,
             VersionKind::Restore { from },
             Some((head.id(), head.header.number)),
             0,
             src.header.collection,
             src.header.total_size,
-        )
+        );
+        drop(hold);
+        out
     }
 
     /// Fourche : garde la version `keep`. Chaque autre tête reçoit une version `Restore` de `keep`.
@@ -1660,6 +1861,7 @@ impl HearthRuntime {
         if !open.iter().any(|h| h.header.collection == kept.header.collection) {
             return Err("cette version n'est pas l'une des deux en jeu".into());
         }
+        let _hold = GcHold::new(self, kept.header.collection);
         self.fetch_version_user(gid, &kept, None).await?;
         for h in open.into_iter().filter(|h| h.header.collection != kept.header.collection) {
             self.record_version(
@@ -1674,11 +1876,22 @@ impl HearthRuntime {
         Ok(())
     }
 
-    /// Libère les mondes des vieilles versions (gardées : tête, parent, moins de 14 jours, file d'envoi).
+    /// Libère les mondes des vieilles versions (gardées : têtes, parent, partie matérialisée, file d'envoi, moins de
+    /// 14 jours depuis la réception ici). Chez tous les membres, pas seulement l'hôte. Les en-têtes restent : l'historique
+    /// garde la ligne, sans le bouton « Restaurer » (voir `HearthVersion.available`).
     pub async fn gc_versions(&self, gid: GroupId) {
+        self.gc_versions_at(gid, now_secs().max(0) as u64).await;
+    }
+
+    /// [`HearthRuntime::gc_versions`] avec l'heure donnée (tests).
+    pub async fn gc_versions_at(&self, gid: GroupId, now: u64) {
         let Ok(world) = self.world() else { return };
-        let now = now_secs().max(0) as u64;
+        // Un rapatriement du groupe est en cours : ce qu'il vient de télécharger ne doit pas disparaître sous ses pieds.
+        if lock(&self.fetching).contains_key(&gid) {
+            return;
+        }
         let mut keep: HashSet<[u8; 32]> = self.outbox.pinned_collections().into_iter().map(|(_, c)| c).collect();
+        keep.extend(lock(&self.gc_hold).keys().copied());
         let all: Vec<SignedVersion> = self.with_group(&gid, |g| g.graph().iter().map(|(_, v)| v.clone()).collect()).unwrap_or_default();
         let mut keep_ids: HashSet<VersionId> = HashSet::new();
         for h in self.heads_of(&gid).unwrap_or_default() {
@@ -1687,7 +1900,9 @@ impl HearthRuntime {
         }
         keep_ids.extend(self.materialized(&gid));
         for v in &all {
-            if keep_ids.contains(&v.id()) || v.header.created_at + KEEP_VERSIONS_SECS > now {
+            // L'âge court depuis l'arrivée sur ce PC, pas depuis `created_at` que l'auteur déclare lui-même.
+            let received = self.with_group(&gid, |g| g.received_at(&v.id())).ok().flatten().unwrap_or(now);
+            if keep_ids.contains(&v.id()) || received.saturating_add(KEEP_VERSIONS_SECS) > now {
                 keep.insert(v.header.collection);
             }
         }
@@ -1698,6 +1913,45 @@ impl HearthRuntime {
                 let _ = world.release(&gid, &c).await;
             }
         }
+        // La mesure recharge toutes les collections du groupe : refaite après une libération, ou si elle date de plus d'une
+        // minute (ce passage a lieu à chaque synchro). Un rapatriement remesure de son côté.
+        let stale = lock(&self.group_bytes_at).get(&gid).is_none_or(|t| t.elapsed() >= GROUP_BYTES_EVERY);
+        if !released.is_empty() || stale {
+            self.refresh_group_bytes(gid).await;
+        }
+        if !released.is_empty() {
+            self.emit_state();
+        }
+    }
+
+    /// Mesure les blobs du groupe dans le magasin et garde le résultat pour la page du serveur.
+    pub async fn refresh_group_bytes(&self, gid: GroupId) {
+        let Ok(world) = self.world() else { return };
+        let bytes = world.group_bytes(&gid).await;
+        lock(&self.group_bytes).insert(gid, bytes);
+        lock(&self.group_bytes_at).insert(gid, Instant::now());
+    }
+
+    /// Place prise par le groupe : ses blobs (mesurés en tâche de fond) plus ses petits fichiers (en-têtes, opérations,
+    /// file d'envoi). Avant la première mesure, repli sur la taille signée des mondes complets, sans doublon de
+    /// collection : jamais « 300 Mo » quand le magasin en pèse bien plus.
+    fn group_disk_bytes(&self, gid: &GroupId) -> u64 {
+        let files = dir_size(&self.store.group_dir(gid));
+        if let Some(b) = lock(&self.group_bytes).get(gid) {
+            return files + b;
+        }
+        let complete = lock(&self.complete).clone();
+        let mut seen: HashSet<[u8; 32]> = HashSet::new();
+        let estimate: u64 = self
+            .with_group(gid, |g| {
+                g.graph()
+                    .iter()
+                    .filter(|(_, v)| complete.contains(&v.header.collection) && seen.insert(v.header.collection))
+                    .map(|(_, v)| v.header.total_size)
+                    .sum()
+            })
+            .unwrap_or(0);
+        files + estimate
     }
 }
 
@@ -1746,6 +2000,12 @@ impl HearthDelegate for HearthRuntime {
         coll.is_some_and(|c| lock(&self.complete).contains(&c))
     }
 
+    /// Une version offerte que `fetch_version` a refusée pour sa taille (`oversize`) : l'émetteur le sait tout de suite
+    /// au lieu d'attendre en vain (#99). Elle redevient normale dès que la personne confirme (Jouer).
+    fn refused_version(&self, _group: &GroupId, version: &VersionId) -> Option<String> {
+        lock(&self.oversize).contains(version).then(|| "oversize".to_string())
+    }
+
     fn on_status(&self, from: PeerKey, group: &GroupId, op_seq: u64, heads: &[VersionId], complete_heads: Option<&[VersionId]>) {
         // Sa version : ce qu'il peut servir en entier (un nœud ancien qui ne le dit pas : ses têtes).
         let announced = complete_heads.unwrap_or(heads);
@@ -1788,11 +2048,16 @@ impl HearthDelegate for HearthRuntime {
             });
         }
         if matches!(r, Ok(Observed::Accepted)) {
+            lock(&self.crashes).remove(&gid);
             // Je suis moi-même en train d'héberger : si ce bail gagne et que personne ne joue sur mon serveur, je cède.
-            if self.active(&gid).is_some_and(|a| a.players() == 0) && self.arbitrate_now(&gid).is_some() {
-                tracing::warn!("un autre bail l'emporte sur celui du groupe {gid} : ce serveur s'arrête");
-                let rt = self.arc();
-                spawn(async move { rt.abort_hosting(gid).await });
+            // Le bail adverse est renouvelé toutes les quelques secondes : `fenced` garantit une seule fin de partie.
+            if let Some(host) = self.active(&gid).filter(|a| a.players() == 0) {
+                if self.arbitrate_now(&gid).is_some() && !host.fenced.swap(true, Ordering::SeqCst) {
+                    tracing::warn!("un autre bail l'emporte sur celui du groupe {gid} : ce serveur s'arrête et publie sa session");
+                    let rt = self.arc();
+                    // Tâche détachée : la fin de partie dure jusqu'à l'arrêt du serveur et la publication.
+                    spawn(async move { rt.yield_hosting(host).await });
+                }
             }
             self.emit_state();
         }
@@ -1819,11 +2084,16 @@ impl HearthDelegate for HearthRuntime {
         group: &GroupId,
         lease_id: LeaseId,
         last_seq: u64,
-        _reason: ReleaseReason,
+        reason: ReleaseReason,
         version: Option<VersionId>,
     ) {
         lock(&self.leases).release_lease(group, &from, &lease_id, last_seq, Instant::now());
         let gid = *group;
+        if let ReleaseReason::Crashed { mod_hint } = reason {
+            if last_seq > 0 {
+                self.note_crash(gid, from, mod_hint);
+            }
+        }
         // `last_seq == 0` : un candidat qui renonce à son claim, aucune partie n'avait été annoncée.
         if let (Some(Play::Joined { holder }), Some(st)) = (self.play_of(&gid), self.state(&gid)) {
             if last_seq > 0 && holder == from && self.active(&gid).is_none() {
@@ -1915,6 +2185,7 @@ impl HearthDelegate for HearthRuntime {
             spawn(async move {
                 if rt.pull_from_wanting(gid, from, &wanted, full).await.is_ok() && rt.version(&gid, &v.id()).is_some() {
                     let _ = rt.fetch_version(gid, &v, Some(from)).await;
+                    rt.gc_versions(gid).await;
                 }
             });
             return Ok(());
@@ -1922,6 +2193,8 @@ impl HearthDelegate for HearthRuntime {
         let rt = self.arc();
         spawn(async move {
             let _ = rt.fetch_version(gid, &version, Some(from)).await;
+            // Une version offerte par un membre : le monde reçu, on libère les vieilles (comme après une synchro).
+            rt.gc_versions(gid).await;
         });
         self.emit_state();
         Ok(())
@@ -2021,14 +2294,30 @@ impl HearthRuntime {
     }
 
     /// Versions de ce groupe encore en file d'envoi (une remise réussie à un membre retire l'entrée).
-    fn group_pending(&self, gid: &GroupId) -> Vec<(VersionId, u32)> {
-        self.outbox.pending().iter().filter(|e| e.group_id() == *gid).map(|e| (e.id(), e.attempts)).collect()
+    fn group_pending(&self, gid: &GroupId) -> Vec<(VersionId, u32, bool)> {
+        self.outbox.pending().iter().filter(|e| e.group_id() == *gid).map(|e| (e.id(), e.attempts, e.failed.is_some())).collect()
     }
 
-    /// Attend que la file d'envoi du groupe soit vidée, donc que chaque version ait été remise à au moins un membre
-    /// (#56 : `forget_now` jette ce qui reste en file). Rend `true` quand elle est vide. Rend `false` tout de suite si aucun
-    /// membre ne répond, ou si une remise vient d'échouer ; sinon au bout de `timeout`. Ne supprime rien : la boucle
-    /// d'envoi continue en fond tant que le groupe existe.
+    /// Une version en file de ce groupe ne peut pas atteindre son quorum (`min(2, autres membres)` accusés), même avec
+    /// tous les membres actuellement en ligne qui ne l'ont ni confirmée ni refusée.
+    fn quorum_out_of_reach(&self, gid: &GroupId) -> bool {
+        let Some(st) = self.state(gid) else { return false };
+        let others = self.others(&st);
+        let need = others.len().clamp(1, 2);
+        let others_hex: BTreeSet<String> = others.iter().map(key_hex).collect();
+        let online: Vec<String> = others.iter().filter(|k| self.is_online(gid, k)).map(key_hex).collect();
+        self.outbox.pending().iter().filter(|e| e.group_id() == *gid).any(|e| {
+            let live = e.stored.iter().filter(|k| others_hex.contains(*k)).count();
+            let more = online.iter().filter(|k| !e.stored.contains(*k) && !e.refused.contains_key(*k)).count();
+            live + more < need
+        })
+    }
+
+    /// Attend que la file d'envoi du groupe soit vidée, donc que chaque version ait été remise à `min(2, autres membres)`
+    /// membres (#56 : `forget_now` jette ce qui reste en file). Rend `true` quand elle est vide. Rend `false` tout de suite
+    /// si aucun membre ne répond, si trop peu répondent pour atteindre ce nombre, si une version a été refusée pour de bon
+    /// ou si une remise vient d'échouer ; sinon au bout de `timeout`. Ne supprime rien : la boucle d'envoi continue en fond
+    /// tant que le groupe existe.
     pub async fn flush_group_outbox(self: &Arc<Self>, gid: &GroupId, timeout: Duration) -> bool {
         let mut base = self.group_pending(gid);
         if base.is_empty() {
@@ -2036,6 +2325,11 @@ impl HearthRuntime {
         }
         // Présence fraîche : le cache peut dater de la dernière ronde (une minute) et garder en ligne un ami parti.
         if self.probe_round(*gid).await.answers.is_empty() {
+            return false;
+        }
+        // Chaque version doit être remise à `min(2, autres membres)` membres (#99) : si trop peu sont en ligne pour y
+        // arriver, inutile d'attendre cinq minutes.
+        if self.quorum_out_of_reach(gid) {
             return false;
         }
         let deadline = Instant::now() + timeout;
@@ -2050,9 +2344,16 @@ impl HearthRuntime {
                 last = now.len();
                 self.emit_state();
             }
-            // Une tentative de plus sur une version encore en file : le dernier passage a échoué chez tous les membres.
-            base.retain(|(id, _)| now.iter().any(|(n, _)| n == id));
-            let failed = now.iter().any(|(id, a)| base.iter().find(|(b, _)| b == id).is_some_and(|(_, a0)| a > a0));
+            base.retain(|(id, ..)| now.iter().any(|(n, ..)| n == id));
+            // Une version refusée pour de bon (`failed`) n'arrivera pas en attendant : sortie tout de suite. Sinon, il faut
+            // qu'autant d'échecs de remise que de membres en ligne se soient ajoutés : un seul échec chez un seul membre
+            // (un faux « en ligne ») ne suffit pas, les autres peuvent encore confirmer le quorum.
+            let online = self
+                .state(gid)
+                .map_or(1, |st| self.others(&st).iter().filter(|k| self.is_online(gid, k)).count().max(1) as u32);
+            let failed = now.iter().any(|(id, a, dead)| {
+                *dead || base.iter().find(|(b, ..)| b == id).is_some_and(|(_, a0, _)| a.saturating_sub(*a0) >= online)
+            });
             if failed || Instant::now() >= deadline {
                 return false;
             }
@@ -2101,7 +2402,8 @@ impl HearthRuntime {
         lock(&self.leases).forget_group(gid);
         lock(&self.status).retain(|(g, _), _| g != gid);
         lock(&self.play).remove(gid);
-        lock(&self.best_effort).remove(gid);
+        lock(&self.confirmations).remove(gid);
+        lock(&self.crashes).remove(gid);
         for e in self.outbox.pending().into_iter().filter(|e| e.group_id() == *gid) {
             let _ = self.outbox.remove(&e.id());
         }
@@ -2569,6 +2871,87 @@ impl HearthRuntime {
         Ok(())
     }
 
+    /// « Exporter en monde solo » (docs/hearth.md § 8) : écrit le monde d'une version du groupe dans `saves_dir`, sous le nom
+    /// « <groupe> (export du groupe) » (suivi de 2, 3… si ce nom est pris : un monde existant n'est jamais remplacé), puis
+    /// remet le joueur `player_uuid` dans `Data.Player` pour qu'il le retrouve en solo. On lit le magasin de versions, pas
+    /// `server/world` : l'export marche pendant qu'une partie tourne (il donne alors la dernière version publiée) et ne
+    /// touche ni au serveur ni à la version matérialisée.
+    ///
+    /// `version` : une version précise, qui doit être complète sur ce PC (comme `HearthVersion.available` : une version dont le
+    /// contenu a été libéré n'est plus protégée dans le magasin, même si ses blobs y traînent encore un moment). Sans elle : la version actuelle, ou, si son contenu
+    /// n'est pas ici, la dernière version complète (`fallback`). Une fourche demande de choisir.
+    pub async fn export_solo(
+        self: &Arc<Self>,
+        gid: GroupId,
+        version: Option<VersionId>,
+        saves_dir: &Path,
+        player_uuid: Option<String>,
+    ) -> Result<HearthExport, String> {
+        let st = self.require_state(&gid)?;
+        let (v, fallback) = match version {
+            Some(id) => {
+                let v = self.version(&gid, &id).ok_or("cette version n'existe plus")?;
+                if !self.world_complete_now(&v).await {
+                    return Err(format!("Le contenu de la version {} n'est plus sur ce PC : elle ne peut pas être exportée.", v.header.number));
+                }
+                (v, false)
+            }
+            None => {
+                if self.is_fork(&gid) {
+                    return Err("Deux versions du monde existent : choisis laquelle exporter depuis l'historique, ou garde l'une d'elles.".into());
+                }
+                let head = self.head(&gid).ok_or("ce groupe n'a pas encore de monde à exporter")?;
+                if self.world_complete_now(&head).await {
+                    (head, false)
+                } else {
+                    let prev = self.complete_head(&gid).ok_or("aucune version de ce monde n'est complète sur ce PC : il faut d'abord la recevoir")?;
+                    (prev, true)
+                }
+            }
+        };
+        let world = self.world()?;
+        std::fs::create_dir_all(saves_dir).map_err(|e| format!("le dossier des mondes est inaccessible : {e}"))?;
+        let base = export_folder_base(&st.name);
+        let mut world_name = base.clone();
+        for n in 2..1000 {
+            if saves_dir.join(&world_name).exists() {
+                world_name = format!("{base} {n}");
+            } else {
+                break;
+            }
+        }
+        let dest = saves_dir.join(&world_name);
+        if dest.exists() {
+            return Err("trop d'exports du même groupe : supprime les anciens depuis la liste des mondes du jeu".into());
+        }
+        // Le monde s'écrit dans un dossier caché voisin, puis prend son nom d'un coup : la liste des mondes du jeu ne voit
+        // jamais un export à moitié écrit, et un monde existant n'est jamais remplacé (le renommage échoue s'il existe).
+        let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or_default();
+        let tmp = saves_dir.join(format!(".cubelink-export-{nonce:x}"));
+        let done = async {
+            world.materialize(&v.header.collection, &tmp).await.map_err(|e| e.to_string())?;
+            let (t, name, uuid) = (tmp.clone(), world_name.clone(), player_uuid.as_deref().and_then(core_lib::hearth::nbt::dashed_uuid));
+            let prepared = tokio::task::spawn_blocking(move || {
+                // Le marqueur Hearth ferait refuser ce monde au partage solo (§ 6.4) : l'export est un monde ordinaire.
+                let _ = std::fs::remove_file(t.join("cubelink-hearth.json"));
+                core_lib::hearth::nbt::prepare_solo_world(&t, &name, uuid.as_deref())
+            })
+            .await
+            .map_err(|_| "l'export a été interrompu".to_string())?
+            .map_err(|e| format!("le monde exporté est illisible : {e:#}"))?;
+            std::fs::rename(&tmp, &dest).map_err(|e| format!("impossible de créer le monde exporté : {e}"))?;
+            Ok::<_, String>(prepared)
+        }
+        .await;
+        match done {
+            Ok(p) => Ok(HearthExport { world_name, version_number: v.header.number, fallback, has_player: p.has_player }),
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&tmp);
+                Err(e)
+            }
+        }
+    }
+
     /// Installe et démarre le serveur dédié du groupe. `base` : la version dont part la partie.
     pub async fn start_server(
         self: &Arc<Self>,
@@ -2581,13 +2964,15 @@ impl HearthRuntime {
         }
         let players: Arc<Mutex<BTreeSet<String>>> = Arc::default();
         let ever_joined = Arc::new(AtomicBool::new(false));
-        let (pl, ej, rt) = (players.clone(), ever_joined.clone(), self.clone());
+        let played = Arc::new(AtomicBool::new(false));
+        let (pl, ej, pc, rt) = (players.clone(), ever_joined.clone(), played.clone(), self.clone());
         let on_line: LineSink = Arc::new(move |line| {
             if let Some((joined, name)) = parse_player_event(line) {
                 {
                     let mut set = lock(&pl);
                     if joined {
                         ej.store(true, Ordering::SeqCst);
+                        pc.store(true, Ordering::SeqCst);
                         set.insert(name);
                     } else {
                         set.remove(&name);
@@ -2635,6 +3020,7 @@ impl HearthRuntime {
             Some(e) => self.resign(lock(&e.lease).ready()),
             None => self.new_signed_lease(gid, LeasePhase::Ready, base, new_lease_id()),
         };
+        lock(&self.crashes).remove(&gid);
         let host = Arc::new(ActiveHost {
             group: gid,
             instance_id: p.instance_id,
@@ -2646,8 +3032,10 @@ impl HearthRuntime {
             fenced: AtomicBool::new(false),
             players,
             ever_joined,
+            played_since_checkpoint: played,
             tasks: Mutex::new(Vec::new()),
             stopping: AtomicBool::new(false),
+            crashed: Mutex::new(None),
         });
         lock(&self.active).insert(gid, host.clone());
         Ok(host)
@@ -2708,15 +3096,29 @@ impl HearthRuntime {
         (acks, conflicts, silent)
     }
 
-    /// Un premier « Jouer » a-t-il reçu un bail « au mieux » il y a moins de [`BEST_EFFORT_CONFIRM`] ? (Le second clic vaut
-    /// confirmation ; la confirmation est consommée.)
-    fn take_best_effort_confirmation(&self, gid: &GroupId) -> bool {
-        lock(&self.best_effort).remove(gid).is_some_and(|t| t.elapsed() < BEST_EFFORT_CONFIRM)
+    /// Une confirmation explicite (`hearth_confirm_host`) vaut-elle encore pour ce groupe ? Elle est consommée.
+    fn take_confirmation(&self, gid: &GroupId) -> bool {
+        lock(&self.confirmations).remove(gid).is_some_and(|t| t.elapsed() < HOST_CONFIRM_WINDOW)
     }
 
-    /// Un bail « au mieux » attend la confirmation de la personne (un second « Jouer »).
-    pub fn best_effort_pending(&self, gid: &GroupId) -> bool {
-        lock(&self.best_effort).get(gid).is_some_and(|t| t.elapsed() < BEST_EFFORT_CONFIRM)
+    /// La personne a confirmé « Héberger quand même » : valable [`HOST_CONFIRM_WINDOW`], pour une seule prise du bail.
+    pub fn grant_confirmation(&self, gid: &GroupId) {
+        lock(&self.confirmations).insert(*gid, Instant::now());
+    }
+
+    /// Une confirmation valable existe-t-elle pour ce groupe ? (Sans la consommer.)
+    pub fn confirmation_pending(&self, gid: &GroupId) -> bool {
+        lock(&self.confirmations).get(gid).is_some_and(|t| t.elapsed() < HOST_CONFIRM_WINDOW)
+    }
+
+    /// Fin d'une commande qui démarre le serveur : la confirmation ne survit pas, sauf si on attend seulement l'EULA (l'écran
+    /// relance la commande juste après). Sans cela, un échec ou un Join laisserait une confirmation périmée servir à un clic
+    /// ultérieur, sans nouvelle question.
+    pub fn settle_confirmation(&self, gid: &GroupId, r: &Result<(), String>) {
+        if r.as_ref().err().is_some_and(|e| e == EULA_REQUIRED) {
+            return;
+        }
+        lock(&self.confirmations).remove(gid);
     }
 
     /// Un concurrent a la main : on cède. Le verrou du claim tombe ici et chez les témoins.
@@ -2730,14 +3132,14 @@ impl HearthRuntime {
     /// Premier temps de la prise du bail, en deux phases :
     ///
     /// 1. **Claim** : `LeaseClaim` à tous les membres joignables ; majorité stricte des membres (moi compris) = bail
-    ///    **sûr**, sinon **au mieux** : la première fois, une erreur dédiée ([`HearthRuntime::best_effort_pending`]) demande
-    ///    la confirmation (un second « Jouer » vaut confirmation). Un `ClaimConflict` fait céder : on rejoint le bail
+    ///    **sûr**, sinon **au mieux** : sans confirmation explicite ([`HearthRuntime::grant_confirmation`]), l'erreur
+    ///    [`CONFIRM_HOST`] demande la confirmation à la personne (le clic sur « Jouer » n'en tient pas lieu). Un `ClaimConflict` fait céder : on rejoint le bail
     ///    existant, ou on attend l'annonce du concurrent.
     /// 2. **Annonce** d'un bail `Starting` aux membres en ligne dès qu'on a choisi d'héberger (l'installation et le démarrage
     ///    d'un gros pack prennent des minutes), attente d'une contre-annonce, puis renouvellement tant que le serveur n'est
     ///    pas prêt.
     pub async fn begin_starting(self: &Arc<Self>, gid: GroupId, base: Option<(VersionId, u64)>) -> Result<Begin, String> {
-        let confirmed = self.take_best_effort_confirmation(&gid);
+        let confirmed = self.take_confirmation(&gid);
         let lease = self.new_signed_lease(gid, LeasePhase::Starting, base, new_lease_id());
         let claim = Claim::of(&lease);
         let members = self.state(&gid).map_or(1, |s| s.members.len());
@@ -2757,11 +3159,7 @@ impl HearthRuntime {
             }
             ClaimOutcome::BestEffort { acks, needed, members } if !confirmed => {
                 self.cede_claim(gid, claim.lease_id).await;
-                lock(&self.best_effort).insert(gid, Instant::now());
-                self.emit_state();
-                return Err(format!(
-                    "{BEST_EFFORT_NOTE} ({acks} membre(s) sur {members} joignable(s), {needed} nécessaires pour une prise sûre.) Clique encore sur Jouer pour héberger quand même."
-                ));
+                return Err(format!("{CONFIRM_HOST}|best_effort|{acks}|{members}|{needed}"));
             }
             ClaimOutcome::BestEffort { .. } | ClaimOutcome::Safe { .. } => {}
         }
@@ -2984,24 +3382,51 @@ impl HearthRuntime {
         let (rt, h) = (self.clone(), host.clone());
         let checkpoints = spawn(async move {
             loop {
-                tokio::time::sleep(CHECKPOINT_INTERVAL).await;
-                if let Err(e) = rt.checkpoint(&h).await {
-                    tracing::warn!("point de reprise du groupe {} : {e}", h.group);
+                let every = lock(&rt.timings).checkpoint;
+                tokio::time::sleep(every).await;
+                rt.checkpoint_tick(&h).await;
+            }
+        });
+        let (rt, h) = (self.clone(), host.clone());
+        let idle = spawn(async move {
+            let mut idle_since: Option<Instant> = None;
+            loop {
+                let t = *lock(&rt.timings);
+                tokio::time::sleep(t.idle_poll).await;
+                if h.players() > 0 {
+                    idle_since = None;
+                    continue;
+                }
+                let since = *idle_since.get_or_insert_with(Instant::now);
+                if since.elapsed() >= t.idle_stop {
+                    tracing::info!("serveur du groupe {} arrêté : aucun joueur depuis {} min", h.group, t.idle_stop.as_secs() / 60);
+                    // Tâche détachée, comme `watch` : la fin de partie abandonne les tâches de l'hôte, dont celle-ci.
+                    let (rt, gid) = (rt.clone(), h.group);
+                    spawn(async move { rt.idle_stop(gid).await });
+                    break;
                 }
             }
         });
         let (rt, h) = (self.clone(), host.clone());
         let watch = spawn(async move {
-            h.server.wait_exit().await;
+            let code = h.server.wait_exit().await;
             if !h.stopping.load(Ordering::SeqCst) {
-                tracing::warn!("le serveur du groupe {} s'est arrêté seul", h.group);
+                // Un code non nul sans arrêt demandé est un plantage (ou un processus tué : `-1`). Code 0 : le serveur a
+                // fini proprement (un `/stop` tapé dans sa console), son monde est complet et se publie comme une fin normale.
+                if code != 0 {
+                    let mod_hint = diagnose_failure(&h.server.recent_lines(CRASH_TAIL_LINES));
+                    tracing::warn!("le serveur du groupe {} a planté (code {code}, mod probable : {mod_hint:?})", h.group);
+                    *lock(&h.crashed) = Some(CrashInfo { code, mod_hint });
+                } else {
+                    tracing::warn!("le serveur du groupe {} s'est arrêté seul", h.group);
+                }
                 // Tâche détachée : la fin de partie abandonne les tâches de l'hôte, dont celle-ci. Lancée d'ici, elle serait
                 // annulée à son premier point d'attente (la publication) et le plantage ne serait jamais traité jusqu'au bout.
                 let gid = h.group;
                 spawn(async move { rt.host_ended(gid).await });
             }
         });
-        lock(&host.tasks).extend([renew, checkpoints, watch]);
+        lock(&host.tasks).extend([renew, checkpoints, idle, watch]);
     }
 
     /// Le serveur d'une partie s'est arrêté seul : l'application ferme tout (partage, accès, état de lancement) ; sans
@@ -3016,34 +3441,105 @@ impl HearthRuntime {
         }
     }
 
-    /// Point de reprise : le serveur cesse d'écrire, le monde est publié, le serveur reprend.
-    pub async fn checkpoint(self: &Arc<Self>, host: &Arc<ActiveHost>) -> Result<SignedVersion, String> {
+    /// Un tour de la boucle des points de reprise : sauté si personne n'a joué depuis le précédent (le monde n'a pas pu
+    /// changer). Un point en échec est retenté au tour suivant.
+    async fn checkpoint_tick(self: &Arc<Self>, host: &Arc<ActiveHost>) {
+        if !host.played_since_checkpoint.swap(false, Ordering::SeqCst) && host.players() == 0 {
+            return;
+        }
+        if let Err(e) = self.checkpoint(host).await {
+            host.played_since_checkpoint.store(true, Ordering::SeqCst);
+            eprintln!("[cubelink] point de reprise du groupe {} : {e}", host.group);
+        }
+    }
+
+    /// Publie le monde de `dir` sauf s'il est identique à la version `tip` (même collection) : alors rien n'est signé ni mis
+    /// en file d'envoi, et on rend `None`. Aucune suspension entre la publication des fichiers et l'enregistrement.
+    async fn publish_if_changed(
+        self: &Arc<Self>,
+        gid: GroupId,
+        dir: &Path,
+        tip: Option<(VersionId, u64)>,
+        played_secs: u64,
+    ) -> Result<Option<SignedVersion>, String> {
+        let pw: PublishedWorld = self.world()?.publish_dir(&gid, dir).await.map_err(|e| e.to_string())?;
+        if tip.and_then(|t| self.version(&gid, &t.0)).is_some_and(|v| v.header.collection == pw.collection) {
+            return Ok(None);
+        }
+        self.record_version(gid, VersionKind::Checkpoint, tip, played_secs, pw.collection, pw.total_size).map(Some)
+    }
+
+    /// Point de reprise : le serveur cesse d'écrire, le monde est publié, le serveur reprend. Rend `None` quand le monde est
+    /// identique à la dernière version de la chaîne (rien n'est publié).
+    pub async fn checkpoint(self: &Arc<Self>, host: &Arc<ActiveHost>) -> Result<Option<SignedVersion>, String> {
         let begun = host.server.flush_begin().await;
         let published = if begun.is_ok() {
             let dir = host.server.world_dir();
             let tip = *lock(&host.tip);
-            Some(self.publish_version(host.group, &dir, VersionKind::Checkpoint, tip, host.started.elapsed().as_secs()).await)
+            Some(self.publish_if_changed(host.group, &dir, tip, host.started.elapsed().as_secs()).await)
         } else {
             None
         };
-        // `save-on` est toujours tenté, même si `save-off` n'a pas confirmé (la commande a pu partir sans réponse).
-        let resumed = host.server.flush_end().await;
         // La version est déjà enregistrée et en file d'envoi : elle devient le parent de la suivante quoi qu'il arrive
         // ensuite. Sinon la `Session` finale aurait le même parent et le groupe verrait une fourche après une partie normale.
-        if let Some(Ok(v)) = &published {
+        // Cette avance doit rester AVANT tout `await` : `flush_end` attend `save-on` (jusqu'à 30 s) et `finish_hosting` peut
+        // annuler cette tâche pendant l'attente ; entre l'enregistrement de la version et l'avance du tip, il n'y a aucune
+        // suspension, donc aucune annulation possible.
+        if let Some(Ok(Some(v))) = &published {
             *lock(&host.tip) = Some((v.id(), v.header.number));
             // Si la partie se termine mal après ce point, la fin de partie repartira de lui.
             if let Err(e) = self.write_session_marker(&host.group, Some((v.id(), v.header.number))) {
                 eprintln!("[cubelink] marqueur de session non mis à jour : {e}");
             }
         }
+        // `save-on` est toujours tenté, même si `save-off` n'a pas confirmé (la commande a pu partir sans réponse).
+        let resumed = host.server.flush_end().await;
         begun?;
         let v = published.ok_or("point de reprise non fait")??;
         resumed?;
         Ok(v)
     }
 
-    /// Abandonne l'hébergement sans rien publier (un autre membre a gardé la main) : le serveur est arrêté, le bail relâché.
+    /// Le serveur est resté vide trop longtemps : fin de partie complète, comme `yield_hosting` (publication de la `Session`
+    /// si quelqu'un est entré, bail relâché, partage fermé par `end_hook`). Si personne n'est jamais entré, il n'y a rien à
+    /// publier : le serveur est seulement arrêté.
+    async fn idle_stop(self: &Arc<Self>, gid: GroupId) {
+        let Some(host) = self.active(&gid) else { return };
+        // Un joueur a pu entrer depuis que la surveillance a constaté le vide (la tâche est détachée) : le serveur reste.
+        if host.players() > 0 {
+            return;
+        }
+        if !host.ever_joined.load(Ordering::SeqCst) {
+            self.abort_hosting(gid).await;
+        }
+        self.host_ended(gid).await;
+    }
+
+    /// Un autre bail l'emporte pendant que mon serveur est vide : fin de partie complète, comme l'auto-exclusion après
+    /// veille. Le jeu depuis le dernier point de reprise est publié comme branche (`Suspend`), puis l'application ferme le
+    /// partage, le tunnel et l'état de lancement (`end_hook`). Si personne n'est jamais entré, il n'y a rien à publier :
+    /// le serveur est seulement arrêté, puis le partage fermé. `host.fenced` est déjà posé par l'appelant.
+    async fn yield_hosting(self: &Arc<Self>, host: Arc<ActiveHost>) {
+        let gid = host.group;
+        if host.ever_joined.load(Ordering::SeqCst) {
+            // `save-all flush`, puis `save-on` : l'arrêt qui suit enregistre le monde (`save-off` l'en empêcherait).
+            if host.server.flush_begin().await.is_ok() {
+                let _ = host.server.flush_end().await;
+            }
+            // Un joueur est entré pendant l'écriture : le serveur reste, la prochaine annonce du bail adverse réessaiera.
+            if host.players() > 0 {
+                host.fenced.store(false, Ordering::SeqCst);
+                return;
+            }
+            self.host_ended(gid).await;
+        } else {
+            self.abort_hosting(gid).await;
+            self.host_ended(gid).await;
+        }
+    }
+
+    /// Abandonne l'hébergement sans rien publier (un autre membre a gardé la main au démarrage, avant tout joueur) : le
+    /// serveur est arrêté, le bail relâché.
     pub async fn abort_hosting(self: &Arc<Self>, gid: GroupId) {
         let Some(host) = lock(&self.active).remove(&gid) else { return };
         host.stopping.store(true, Ordering::SeqCst);
@@ -3070,42 +3566,97 @@ impl HearthRuntime {
         self.emit_state();
     }
 
+    /// Retient le plantage d'un serveur du groupe pour l'afficher (carte et page du serveur).
+    fn note_crash(&self, gid: GroupId, host: PeerKey, mod_hint: Option<String>) {
+        let hint = mod_hint.map(|h| h.chars().take(MOD_HINT_MAX).collect::<String>()).filter(|h| !h.trim().is_empty());
+        lock(&self.crashes).insert(gid, (host, hint));
+    }
+
     /// Fin de la partie : le serveur s'arrête, le monde est publié (version `Session`), le bail est relâché.
     /// Rend la version publiée.
+    ///
+    /// Si le serveur a planté (mort seul avec un code d'erreur), rien n'est publié : cela propagerait peut-être le chunk
+    /// qui fait planter le serveur (§ 7.5). Le monde est mis de côté comme une fin de partie non publiée (l'hôte le publie
+    /// ou le jette), la tête reste le dernier point de reprise et le bail est relâché avec `Crashed`.
     pub async fn finish_hosting(self: &Arc<Self>, gid: GroupId) -> Result<Option<SignedVersion>, String> {
+        self.finish_hosting_with(gid, StopMode::Normal).await
+    }
+
+    /// [`Self::finish_hosting`] avec le mode d'arrêt. En [`StopMode::Shutdown`] : annonce aux joueurs, `stop` borné, aucune
+    /// publication (le marqueur de session reste, sauf si personne n'est jamais entré), `LeaseRelease { Shutdown }` portant
+    /// le dernier point de reprise, envoi borné, pas de ramasse-miettes. Un plantage garde la priorité (monde mis de côté,
+    /// raison `Crashed`).
+    pub async fn finish_hosting_with(self: &Arc<Self>, gid: GroupId, mode: StopMode) -> Result<Option<SignedVersion>, String> {
         let host = lock(&self.active).remove(&gid).ok_or("aucun serveur n'est lancé pour ce groupe")?;
         host.stopping.store(true, Ordering::SeqCst);
         for t in std::mem::take(&mut *lock(&host.tasks)) {
             t.abort();
         }
-        host.server.stop(SERVER_STOP_GRACE).await;
+        let shutdown = mode == StopMode::Shutdown;
+        if shutdown && host.players() > 0 {
+            host.server.say(SHUTDOWN_ANNOUNCEMENT).await;
+        }
+        host.server.stop(if shutdown { SERVER_STOP_GRACE_SHUTDOWN } else { SERVER_STOP_GRACE }).await;
         let dir = host.server.world_dir();
         let tip = *lock(&host.tip);
-        let published = if dir.is_dir() {
+        let crash = lock(&host.crashed).take();
+        let published = if crash.is_some() {
+            Ok(None)
+        } else if shutdown {
+            // Pas de publication : le monde reste sur le disque, le marqueur de session aussi (voir plus bas).
+            Ok(None)
+        } else if dir.is_dir() {
             self.publish_version(gid, &dir, VersionKind::Session, tip, host.started.elapsed().as_secs()).await.map(Some)
         } else {
             Ok(None)
         };
-        match &published {
-            Ok(Some(v)) => {
+        match (&published, &crash) {
+            // Plantage : le marqueur reste jusqu'à la mise de côté ; si elle échoue, le prochain « Jouer » la refait.
+            (_, Some(c)) => {
+                self.note_crash(gid, self.me, c.mod_hint.clone());
+                if !host.ever_joined.load(Ordering::SeqCst) {
+                    // Personne n'est jamais entré : rien à garder, pas de « fin de partie non publiée » à gérer.
+                    self.clear_session_marker(&gid);
+                } else if let Err(e) = self.shelve_unpublished_world(gid).await {
+                    eprintln!("[cubelink] groupe {gid} : le monde du serveur planté n'a pas pu être mis de côté : {e}");
+                }
+            }
+            (Ok(Some(v)), None) => {
                 self.set_materialized(&gid, Some(v.id()));
                 self.clear_session_marker(&gid);
             }
+            // Arrêt de la machine : le monde n'est pas publié, le marqueur reste pour que le prochain « Jouer » le mette de
+            // côté. Personne n'est jamais entré : rien à garder.
+            (Ok(None), None) if shutdown && host.ever_joined.load(Ordering::SeqCst) => {}
             // Pas de dossier de monde : rien à publier. Une publication en échec laisse le marqueur : le prochain « Jouer »
             // mettra le monde de côté au lieu de l'écraser.
-            Ok(None) => self.clear_session_marker(&gid),
-            Err(_) => {}
+            (Ok(None), None) => self.clear_session_marker(&gid),
+            (Err(_), None) => {}
         }
-        let vid = published.as_ref().ok().and_then(|v| v.as_ref().map(SignedVersion::id));
+        // Après un plantage ou un arrêt de la machine, la tête annoncée est le dernier point de reprise publié (la base de
+        // la partie sinon).
+        let vid = match &crash {
+            Some(_) => tip.map(|t| t.0),
+            None if shutdown => tip.map(|t| t.0),
+            None => published.as_ref().ok().and_then(|v| v.as_ref().map(SignedVersion::id)),
+        };
         let l = lock(&host.lease).clone();
-        let reason = if host.fenced.load(Ordering::SeqCst) { ReleaseReason::Suspend } else { ReleaseReason::Stopped };
+        let reason = release_reason(host.fenced.load(Ordering::SeqCst), crash.as_ref(), mode);
         let visit: Visit = Arc::new(move |c| {
             let reason = reason.clone();
             Box::pin(async move { c.release_lease(&gid, l.lease_id, l.seq, reason, vid).await })
         });
-        self.broadcast(gid, true, visit).await;
+        if shutdown {
+            if tokio::time::timeout(RELEASE_BROADCAST_SHUTDOWN, self.broadcast(gid, true, visit)).await.is_err() {
+                eprintln!("[cubelink] groupe {gid} : la fin de partie n'a pas atteint tous les membres avant l'arrêt de la machine");
+            }
+        } else {
+            self.broadcast(gid, true, visit).await;
+        }
         self.access.close_group(&gid);
-        self.gc_versions(gid).await;
+        if !shutdown {
+            self.gc_versions(gid).await;
+        }
         self.emit_state();
         published
     }
@@ -3122,6 +3673,25 @@ fn loader_name(l: &LoaderSpec) -> String {
 impl HearthRuntime {
     pub fn emit_state(&self) {
         self.emit_json("hearth://state", &self.cards());
+    }
+
+    /// Le dossier `mods` de l'instance contient Simple Voice Chat (ou un addon), repéré sur le nom des jars : le serveur
+    /// du groupe ne le charge pas (§ 6.7). Le cache est par dossier et date de modification, la carte est recalculée souvent.
+    fn pack_has_voice_chat(&self, instance_id: &str) -> bool {
+        let Ok(dir) = self.instances.game_dir(instance_id) else { return false };
+        let mods = dir.join("mods");
+        let stamp = std::fs::metadata(&mods).and_then(|m| m.modified()).ok();
+        let mut cache = lock(&self.voice_cache);
+        if let Some((s, v)) = cache.get(instance_id) {
+            if *s == stamp {
+                return *v;
+            }
+        }
+        let found = std::fs::read_dir(&mods)
+            .map(|rd| rd.filter_map(Result::ok).any(|e| core_lib::hearth::netguard::is_voice_chat_file(&e.file_name().to_string_lossy())))
+            .unwrap_or(false);
+        cache.insert(instance_id.to_string(), (stamp, found));
+        found
     }
 
     pub fn cards(&self) -> Vec<HearthCard> {
@@ -3156,6 +3726,8 @@ impl HearthRuntime {
             instance_id: instance_id.clone(),
             version: heads.first().map(|h| h.header.number),
             orphans: self.orphan_count(gid) as u32,
+            crash: None,
+            voice_unsupported: instance_id.as_deref().is_some_and(|i| self.pack_has_voice_chat(i)),
         };
         let decision = self.decision(gid);
         let holder_of = |k: &PeerKey| Some(self.lite(&st, k));
@@ -3207,6 +3779,11 @@ impl HearthRuntime {
         }
         if let (HearthStateKind::PackMissing, Some(Decision::Join(h))) = (card.state, decision) {
             card.host = holder_of(&h);
+        }
+        if matches!(card.state, HearthStateKind::Idle | HearthStateKind::PackMissing) {
+            card.crash = lock(&self.crashes)
+                .get(gid)
+                .map(|(k, hint)| HearthCrash { host: self.lite(&st, k), mine: *k == self.me, mod_hint: hint.clone() });
         }
         Some(card)
     }
@@ -3263,6 +3840,7 @@ impl HearthRuntime {
             .collect();
         let mainline: HashSet<VersionId> = head.as_ref().map(|h| graph.ancestry(&h.id()).into_iter().collect()).unwrap_or_default();
         let head_ids: HashSet<VersionId> = heads.iter().map(SignedVersion::id).collect();
+        let complete = lock(&self.complete).clone();
         let mut versions: Vec<HearthVersion> = graph
             .iter()
             .map(|(id, v)| HearthVersion {
@@ -3281,6 +3859,7 @@ impl HearthRuntime {
                 total_size: v.header.total_size,
                 is_head: head_ids.contains(id),
                 side_branch: v.header.epoch < st.epoch && head.is_some() && !mainline.contains(id),
+                available: complete.contains(&v.header.collection),
             })
             .collect();
         versions.sort_by(|a, b| b.number.cmp(&a.number).then(a.id.cmp(&b.id)));
@@ -3332,11 +3911,24 @@ impl HearthRuntime {
         };
         let settings = HearthSettings {
             keep_background: meta.keep_background,
-            disk_bytes: dir_size(&self.store.group_dir(gid)),
+            disk_bytes: self.group_disk_bytes(gid),
             outbox_pending: self.outbox.pending().iter().filter(|e| e.group_id() == *gid).count() as u32,
+            outbox_failed: self.outbox_failed_text(gid),
             instance_name: self.instance_of(gid).and_then(|i| self.instances.get(&i).ok()).map(|i| i.name),
         };
         Ok(HearthDetail { card, members, versions, proposals, blocker, fork, orphans: self.orphans_view(gid), settings })
+    }
+
+    /// Phrase affichable sur la version de ce groupe que les amis ont refusée pour de bon (file d'envoi, état `failed`).
+    fn outbox_failed_text(&self, gid: &GroupId) -> Option<String> {
+        let e = self.outbox.pending().into_iter().rfind(|e| e.group_id() == *gid && e.failed.is_some())?;
+        let size = human_size(e.version.header.total_size);
+        Some(match e.failed.as_deref() {
+            Some("oversize") => format!(
+                "Ta dernière partie ({size}) n'a pas été envoyée : elle est beaucoup plus grosse que la précédente et tes amis ne la prennent pas toute seule. Elle sera récupérée chez toi quand un ami clique sur Jouer ; garde Cubelink ouvert d'ici là."
+            ),
+            _ => format!("Ta dernière partie ({size}) n'a pas pu être envoyée : tes amis l'ont refusée."),
+        })
     }
 
     /// Le membre qui bloque le groupe (bannière « Continuer sans X »), s'il y en a un.
@@ -3446,9 +4038,29 @@ fn dir_size(root: &Path) -> u64 {
     total
 }
 
+/// Nom du dossier d'un export : le nom du groupe sans caractère interdit dans un nom de dossier, suivi de « (export du groupe) ».
+fn export_folder_base(group: &str) -> String {
+    let clean: String = group.chars().map(|c| if c.is_control() || "/\\:*?\"<>|".contains(c) { '-' } else { c }).collect();
+    let clean: String = clean.trim().trim_end_matches('.').chars().take(60).collect();
+    let clean = clean.trim();
+    if clean.is_empty() { "Monde du groupe (export du groupe)".to_string() } else { format!("{clean} (export du groupe)") }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn raison_de_fin_de_partie_plantage_et_suspend_gardent_la_priorite() {
+        let crash = CrashInfo { code: 1, mod_hint: Some("Sodium".into()) };
+        for mode in [StopMode::Normal, StopMode::Shutdown] {
+            assert_eq!(release_reason(true, None, mode), ReleaseReason::Suspend);
+            assert_eq!(release_reason(true, Some(&crash), mode), ReleaseReason::Suspend);
+            assert_eq!(release_reason(false, Some(&crash), mode), ReleaseReason::Crashed { mod_hint: Some("Sodium".into()) });
+        }
+        assert_eq!(release_reason(false, None, StopMode::Normal), ReleaseReason::Stopped);
+        assert_eq!(release_reason(false, None, StopMode::Shutdown), ReleaseReason::Shutdown);
+    }
 
     #[test]
     fn world_stats_compte_les_fichiers_et_ignore_un_dossier_vide() {

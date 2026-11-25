@@ -17,7 +17,6 @@ import { useContextMenu, type MenuItem } from "../../app/useContextMenu";
 import { useModCheckGate } from "../../app/useModCheck";
 import { Modal } from "./Modal";
 import { HearthSection } from "../Hearth/HearthSection";
-import { HearthMoments } from "../Hearth/Moments";
 import { RemoveFriendDialog } from "../Friends/RemoveFriend";
 
 const LOADERS: Record<string, string> = {
@@ -444,7 +443,6 @@ export default function Main() {
       </aside>
       {ctx.menu}
       {gate.modal}
-      <HearthMoments services={services} />
       {toRemove && (
         <RemoveFriendDialog
           services={services} friend={toRemove.friend}

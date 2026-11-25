@@ -16,7 +16,9 @@ use std::time::Duration;
 
 use common::{befriend, wait_for, world, Node};
 use core_lib::types::HearthStateKind;
-use cubelink_app::hearth::{BoxFut, ClientLauncher, LeaveError, RenewTick, RunningServer, ServerRunner, ServerSpec, EULA_REQUIRED};
+use cubelink_app::hearth::{
+    BoxFut, ClientLauncher, LeaveError, RenewTick, RunningServer, ServerRunner, ServerSpec, StopMode, Timings, EULA_REQUIRED,
+};
 use cubelink_app::state::{lock, AppState};
 use p2p_lib::hearth::lease::{Lease, ManualClock};
 use p2p_lib::hearth::model::{GroupId, GroupOp};
@@ -35,6 +37,12 @@ struct FakeServer {
     dir: PathBuf,
     task: tokio::task::JoinHandle<()>,
     calls: Arc<Mutex<Vec<&'static str>>>,
+    /// `save-on` n'est jamais confirmé (serveur chargé) : `flush_end` reste en attente après avoir noté l'appel.
+    hang_end: Arc<std::sync::atomic::AtomicBool>,
+    /// Code de sortie : `wait_exit` rend dès qu'il est posé (le test fait « mourir » le serveur sans passer par `stop`).
+    exit: tokio::sync::watch::Receiver<Option<i32>>,
+    /// Sortie du serveur, telle que la lit `recent_lines`.
+    log: Arc<Mutex<Vec<String>>>,
 }
 
 impl RunningServer for FakeServer {
@@ -50,6 +58,9 @@ impl RunningServer for FakeServer {
     }
     fn flush_end(&self) -> BoxFut<'_, Result<(), String>> {
         self.calls.lock().unwrap().push("save-on");
+        if self.hang_end.load(std::sync::atomic::Ordering::SeqCst) {
+            return Box::pin(std::future::pending());
+        }
         Box::pin(async { Ok(()) })
     }
     fn stop(&self, _grace: Duration) -> BoxFut<'_, ()> {
@@ -59,8 +70,24 @@ impl RunningServer for FakeServer {
         self.task.abort();
         Box::pin(async {})
     }
-    fn wait_exit(&self) -> BoxFut<'_, ()> {
-        Box::pin(std::future::pending())
+    fn wait_exit(&self) -> BoxFut<'_, i32> {
+        let mut rx = self.exit.clone();
+        Box::pin(async move {
+            let code = rx.wait_for(Option::is_some).await.ok().and_then(|c| *c);
+            match code {
+                Some(c) => c,
+                // L'émetteur est gardé par le lanceur : sans code posé, le serveur tourne.
+                None => std::future::pending().await,
+            }
+        })
+    }
+    fn recent_lines(&self, n: usize) -> Vec<String> {
+        let l = self.log.lock().unwrap();
+        l[l.len().saturating_sub(n)..].to_vec()
+    }
+    fn say(&self, _text: &str) -> BoxFut<'_, ()> {
+        self.calls.lock().unwrap().push("say");
+        Box::pin(async {})
     }
 }
 
@@ -68,11 +95,24 @@ impl RunningServer for FakeServer {
 struct FakeRunner {
     calls: Arc<Mutex<Vec<&'static str>>>,
     specs: Arc<Mutex<Vec<ServerSpec>>>,
+    hang_end: Arc<std::sync::atomic::AtomicBool>,
+    /// Lignes de log que le prochain serveur « a écrites ».
+    log: Arc<Mutex<Vec<String>>>,
+    /// Pour faire mourir le serveur en cours avec un code de sortie.
+    exit_tx: Arc<Mutex<Option<tokio::sync::watch::Sender<Option<i32>>>>>,
+}
+
+impl FakeRunner {
+    /// Le serveur en cours meurt seul avec ce code de sortie (sans `stop` demandé).
+    fn die(&self, code: i32) {
+        self.exit_tx.lock().unwrap().as_ref().expect("aucun serveur lancé").send(Some(code)).unwrap();
+    }
 }
 
 impl ServerRunner for FakeRunner {
     fn start(&self, spec: ServerSpec) -> BoxFut<'static, Result<Arc<dyn RunningServer>, String>> {
-        let (calls, specs) = (self.calls.clone(), self.specs.clone());
+        let (calls, specs, hang_end) = (self.calls.clone(), self.specs.clone(), self.hang_end.clone());
+        let (log, exit_slot) = (self.log.clone(), self.exit_tx.clone());
         Box::pin(async move {
             let world = spec.dir.join("world");
             std::fs::create_dir_all(&world).unwrap();
@@ -97,7 +137,9 @@ impl ServerRunner for FakeRunner {
             calls.lock().unwrap().push("start");
             let dir = spec.dir.clone();
             specs.lock().unwrap().push(spec);
-            Ok(Arc::new(FakeServer { port, dir, task, calls }) as Arc<dyn RunningServer>)
+            let (tx, exit) = tokio::sync::watch::channel(None);
+            *exit_slot.lock().unwrap() = Some(tx);
+            Ok(Arc::new(FakeServer { port, dir, task, calls, hang_end, exit, log }) as Arc<dyn RunningServer>)
         })
     }
 }
@@ -317,7 +359,13 @@ async fn serveur_de_groupe_de_la_creation_a_la_fourche() {
     let v2 = b.rt().head(&g).unwrap();
     assert_eq!(v2.header.kind, VersionKind::Session);
     assert_eq!(v2.header.author, a.key());
-    wait_for("file d'envoi d'Alice vidée (B a tout)", 40, || a.rt().pending_outbox() == 0).await;
+    // Trois membres : la version doit être confirmée par `min(2, 2)` = 2 membres (#99). Bob seul ne la libère pas.
+    wait_for("Bob a confirmé la n° 2 (un accusé sur deux)", 40, || {
+        a.rt().outbox().pending().iter().any(|e| e.version.header.number == 2 && e.stored.len() == 1)
+    })
+    .await;
+    let queued: Vec<(u64, usize)> = a.rt().outbox().pending().iter().map(|e| (e.version.header.number, e.stored.len())).collect();
+    assert!(queued.contains(&(2, 1)), "Carol est hors ligne : la n° 2 reste en file, avec l'accusé de Bob : {queued:?}");
     b.close_game();
 
     // 6. Seconde partie : B quitte pendant qu'Alice joue. La version part dans la file, puis arrive chez C.
@@ -331,12 +379,15 @@ async fn serveur_de_groupe_de_la_creation_a_la_fourche() {
     // signée et enregistrée : on l'attend au lieu de la lire tout de suite (course vue en CI, tests-linux).
     wait_for("version 3 publiée chez Alice", 30, || a.rt().head(&g).is_some_and(|h| h.header.number == 3)).await;
     tokio::time::sleep(Duration::from_secs(2)).await;
-    assert_eq!(a.rt().pending_outbox(), 1, "personne de joignable : la version 3 attend en file");
+    assert!(a.rt().outbox().pending().iter().any(|e| e.version.header.number == 3), "personne de joignable : la n° 3 attend en file");
+    assert!(a.rt().pending_outbox() >= 2, "les versions à un seul accusé (Bob) attendent aussi : Carol est partie");
     c.restart().await;
     c.rt().probe_all().await;
     wait_for("C a rattrapé la version 3", 40, || c.rt().head(&g).is_some_and(|h| h.header.number == 3 && c.rt().world_complete(&h))).await;
     a.rt().probe_all().await;
-    wait_for("file d'envoi d'Alice vidée (C a tout)", 40, || a.rt().pending_outbox() == 0).await;
+    // Les n° 1 et 2 ont leurs deux accusés (Bob, Carol) ; la n° 3 n'en a qu'un (Carol) tant que Bob est hors ligne.
+    wait_for("les n° 1 et 2 sont livrées à Bob et Carol", 40, || a.rt().pending_outbox() == 1).await;
+    assert!(a.rt().outbox().pending().iter().all(|e| e.version.header.number == 3 && e.stored.len() == 1));
     assert_eq!(c.rt().head(&g).unwrap().id(), a.rt().head(&g).unwrap().id());
 
     // 7. Bail expiré : l'hôte a disparu sans relâcher son bail, B voit « partie mal terminée ».
@@ -344,6 +395,8 @@ async fn serveur_de_groupe_de_la_creation_a_la_fourche() {
     b.rt().probe_all().await;
     wait_for("B à jour", 40, || b.rt().head(&g).is_some_and(|h| h.header.number == 3 && b.rt().world_complete(&h))).await;
     let head3 = b.rt().head(&g).unwrap();
+    a.rt().probe_all().await;
+    wait_for("file d'envoi d'Alice vidée (Bob et Carol ont tout)", 40, || a.rt().pending_outbox() == 0).await;
     // Alice a disparu (PC éteint) : si elle répondait sans bail, Bob effacerait le sien (bail périmé).
     b.node.be.add_peer_addr(c.node.be.endpoint_addr()); // Chloé a changé d'adresse en redémarrant : seule elle reste joignable.
     a.stop().await;
@@ -431,9 +484,11 @@ async fn serveur_de_groupe_de_la_creation_a_la_fourche() {
     }
 }
 
-/// Personne d'autre en ligne : on peut quand même lancer le serveur (les amis le rejoindront), sans second clic.
+/// Personne d'autre en ligne (#93) : le clic sur Jouer ne démarre rien et demande une confirmation explicite
+/// (`confirm_host|alone|…`) ; après `hearth_confirm_host`, le serveur démarre une seule fois, sans seconde demande ni relance
+/// automatique, et la confirmation est consommée.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn on_peut_heberger_sans_personne_d_autre_en_ligne() {
+async fn heberger_seul_demande_une_confirmation_explicite() {
     let (a, b) = (Peer::start("Alice").await, Peer::start("Bob").await);
     befriend(&a.node, &b.node).await;
     wait_for("ami chez Bob", 20, || b.node.st.friends.is_friend(&a.node.key()).unwrap()).await;
@@ -441,12 +496,146 @@ async fn on_peut_heberger_sans_personne_d_autre_en_ligne() {
     let g = GroupId::from_hex(&card.id).unwrap();
     a.node.st.hearth_eula_accept();
     b.stop().await;
-    // Bob est hors ligne : la carte le dit (bloquée), mais un seul clic sur Jouer démarre quand même le serveur et le jeu.
     assert_eq!(a.state_of(&g), HearthStateKind::Blocked);
-    assert!(a.launcher.launched.lock().unwrap().is_empty());
+
+    // Premier clic : la question, rien d'annoncé ni de démarré. Un second clic ne vaut pas confirmation.
+    for _ in 0..2 {
+        let e = a.node.st.hearth_play(&card.id).await.unwrap_err();
+        assert_eq!(e, "confirm_host|alone|Bob", "{e}");
+        assert!(a.launcher.launched.lock().unwrap().is_empty(), "rien ne démarre sans confirmation");
+        assert!(a.runner.calls.lock().unwrap().is_empty(), "aucun serveur démarré");
+        assert!(a.rt().active(&g).is_none());
+        assert!(!a.rt().confirmation_pending(&g), "poser la question ne confirme rien");
+        assert_eq!(a.state_of(&g), HearthStateKind::Blocked);
+    }
+
+    // Confirmé : un seul démarrage, la confirmation est consommée.
+    a.node.st.hearth_confirm_host(&card.id).unwrap();
+    assert!(a.rt().confirmation_pending(&g));
     a.node.st.hearth_play(&card.id).await.unwrap();
     assert!(!a.launcher.launched.lock().unwrap().is_empty(), "le serveur et le jeu ont démarré");
+    let starts = a.runner.calls.lock().unwrap().iter().filter(|c| **c == "start").count();
+    assert_eq!(starts, 1, "un seul démarrage, pas de relance automatique");
+    assert!(!a.rt().confirmation_pending(&g), "la confirmation est consommée");
     a.stop().await;
+}
+
+/// L'EULA manquant n'efface pas la confirmation (l'écran relance juste après « J'accepte »), un échec ou une autre décision
+/// l'efface : une confirmation périmée ne sert jamais à un clic ultérieur.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn la_confirmation_survit_a_l_eula_et_ne_survit_pas_a_un_echec() {
+    let (a, b) = (Peer::start("Alice").await, Peer::start("Bob").await);
+    befriend(&a.node, &b.node).await;
+    wait_for("ami chez Bob", 20, || b.node.st.friends.is_friend(&a.node.key()).unwrap()).await;
+    let card = a.node.st.hearth_create("Duo", &a.instance, None, vec![b.node.key()]).await.unwrap();
+    let g = GroupId::from_hex(&card.id).unwrap();
+    b.stop().await;
+
+    a.node.st.hearth_confirm_host(&card.id).unwrap();
+    assert_eq!(a.node.st.hearth_play(&card.id).await.unwrap_err(), EULA_REQUIRED);
+    assert!(a.rt().confirmation_pending(&g), "l'EULA ne perd pas la confirmation");
+    a.node.st.hearth_eula_accept();
+    a.node.st.hearth_play(&card.id).await.unwrap();
+    assert_eq!(a.runner.calls.lock().unwrap().iter().filter(|c| **c == "start").count(), 1);
+    assert!(!a.rt().confirmation_pending(&g));
+
+    // Un échec autre que l'EULA, ou une fin réussie (Join, Sync…), efface la confirmation ; seul l'EULA la garde.
+    for (r, kept) in [(Err("boum".to_string()), false), (Ok(()), false), (Err(EULA_REQUIRED.to_string()), true)] {
+        a.node.st.hearth_confirm_host(&card.id).unwrap();
+        a.rt().settle_confirmation(&g, &r);
+        assert_eq!(a.rt().confirmation_pending(&g), kept, "{r:?}");
+        a.rt().settle_confirmation(&g, &Err("fin".into()));
+    }
+    a.stop().await;
+}
+
+/// Bail « au mieux » avec des membres joignables mais sans majorité (§ 3.4) : le même contrat, `confirm_host|best_effort|…`,
+/// sans rien annoncer ; confirmé, un seul démarrage.
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn bail_au_mieux_demande_la_meme_confirmation() {
+    let (peers, g, id) = group_of(&["Alice", "Bob", "Chloe", "Dan"]).await;
+    let a = &peers[0];
+    peers[2].stop().await;
+    peers[3].stop().await;
+    let e = a.node.st.hearth_play(&id).await.unwrap_err();
+    assert_eq!(e, "confirm_host|best_effort|2|4|3", "{e}");
+    assert!(a.runner.calls.lock().unwrap().is_empty(), "aucun serveur démarré");
+    assert!(a.rt().active(&g).is_none());
+    assert!(!a.rt().confirmation_pending(&g));
+    // Un second clic ne vaut pas confirmation.
+    assert!(a.node.st.hearth_play(&id).await.unwrap_err().starts_with("confirm_host|best_effort|"));
+    assert!(a.launcher.launched.lock().unwrap().is_empty());
+
+    a.node.st.hearth_confirm_host(&id).unwrap();
+    a.node.st.hearth_play(&id).await.unwrap();
+    assert_eq!(a.runner.calls.lock().unwrap().iter().filter(|c| **c == "start").count(), 1, "un seul démarrage");
+    assert_eq!(a.state_of(&g), HearthStateKind::Hosting);
+    assert!(!a.rt().confirmation_pending(&g));
+    for p in &peers[..2] {
+        p.stop().await;
+    }
+}
+
+/// Simple Voice Chat dans les mods de l'instance (§ 6.7) : la carte porte `voice_unsupported`, qui suit l'ajout et le
+/// retrait du jar (le serveur du groupe ne charge pas le chat vocal).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn carte_signale_le_chat_vocal_non_pris_en_charge() {
+    let a = Peer::start("Alice").await;
+    let b = Peer::start("Bob").await;
+    befriend(&a.node, &b.node).await;
+    wait_for("ami chez Bob", 20, || b.node.st.friends.is_friend(&a.node.key()).unwrap()).await;
+    let card = a.node.st.hearth_create("Duo", &a.instance, None, vec![b.node.key()]).await.unwrap();
+    b.stop().await;
+    let g = GroupId::from_hex(&card.id).unwrap();
+    assert!(!a.rt().card(&g).unwrap().voice_unsupported);
+    let mods = a.node.st.instances.game_dir(&a.instance).unwrap().join("mods");
+    std::fs::create_dir_all(&mods).unwrap();
+    std::fs::write(mods.join("lithium-fabric-0.13.jar"), b"x").unwrap();
+    assert!(!a.rt().card(&g).unwrap().voice_unsupported, "un autre mod ne déclenche rien");
+    std::fs::write(mods.join("voicechat-fabric-1.21.1-2.5.26.jar"), b"x").unwrap();
+    // La date du dossier change à chaque ajout : le cache ne masque pas le nouveau jar.
+    assert!(a.rt().card(&g).unwrap().voice_unsupported);
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    std::fs::remove_file(mods.join("voicechat-fabric-1.21.1-2.5.26.jar")).unwrap();
+    assert!(!a.rt().card(&g).unwrap().voice_unsupported);
+    a.stop().await;
+}
+
+/// Point de reprise interrompu pendant l'attente de `save-on` (arrêt du serveur au même moment) : la version de reprise
+/// est déjà enregistrée, la `Session` finale doit en être l'enfant. Sinon V et S seraient deux enfants du même parent :
+/// deux têtes, donc une fausse fourche « Deux versions » après une partie normale.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn point_de_reprise_interrompu_pendant_save_on_ne_fourche_pas() {
+    let (peers, g, id) = group_of(&["Alice", "Bob"]).await;
+    let a = &peers[0];
+    a.node.st.hearth_play(&id).await.unwrap();
+    assert_eq!(a.state_of(&g), HearthStateKind::Hosting);
+    let host = a.rt().active(&g).expect("serveur d'Alice");
+    a.runner.hang_end.store(true, std::sync::atomic::Ordering::SeqCst);
+    let before = a.runner.calls.lock().unwrap().iter().filter(|c| **c == "save-on").count();
+    let rt = a.rt().clone();
+    let h = host.clone();
+    let task = tokio::spawn(async move { rt.checkpoint(&h).await.map(|v| v.expect("le monde a changé : une version est publiée")) });
+    // `save-on` est demandé : la version de reprise est déjà publiée, et la tâche attend la confirmation.
+    wait_for("point de reprise en attente de save-on", 30, || {
+        a.runner.calls.lock().unwrap().iter().filter(|c| **c == "save-on").count() > before
+    })
+    .await;
+    let v = a.rt().head(&g).expect("la version de reprise est la tête");
+    assert_eq!(v.header.kind, VersionKind::Checkpoint);
+    // L'arrêt annule la tâche comme le fait `finish_hosting` (`t.abort()`), puis publie la Session.
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    a.runner.hang_end.store(false, std::sync::atomic::Ordering::SeqCst);
+    let s = a.rt().finish_hosting(g).await.unwrap().expect("la session est publiée");
+    assert_eq!(s.header.kind, VersionKind::Session);
+    assert_eq!(s.header.parent, Some(v.id()), "la session prolonge le point de reprise");
+    assert_eq!(s.header.number, v.header.number + 1);
+    assert_eq!(a.rt().head(&g).expect("une seule tête").id(), s.id());
+    assert!(!a.rt().is_fork(&g), "aucune fourche");
+    for p in &peers {
+        p.stop().await;
+    }
 }
 
 /// Crée un groupe (Alice crée, les autres acceptent l'invitation et relient leur instance), sans monde de départ.
@@ -491,7 +680,7 @@ async fn deux_candidats_simultanes_un_seul_heberge() {
     for r in [&ra, &rb] {
         if let Err(e) = r {
             assert!(
-                e.contains("démarre déjà") || e.contains("pas assez joignable") || e.contains("réessaie"),
+                e.contains("démarre déjà") || e.contains("confirm_host|best_effort|") || e.contains("réessaie"),
                 "refus inattendu d'un candidat : {e}"
             );
         }
@@ -569,6 +758,159 @@ async fn auto_exclusion_apres_veille() {
     for p in &peers {
         p.stop().await;
     }
+}
+
+/// Alice héberge ; `joined` : Steve entre puis sort (le serveur compte 0 joueur mais le monde a été joué). Rend le
+/// groupe, Bob ayant publié une version plus récente et son bail `Ready` étant prêt à être reçu par Alice.
+async fn alice_heberge_et_bob_a_un_bail_plus_fort(joined: bool) -> (Vec<Peer>, GroupId, Lease) {
+    let (peers, g, id) = group_of(&["Alice", "Bob"]).await;
+    let (a, b) = (&peers[0], &peers[1]);
+    a.node.st.hearth_play(&id).await.unwrap();
+    assert_eq!(a.state_of(&g), HearthStateKind::Hosting);
+    assert_eq!(a.node.be.shared_instance().as_deref(), Some(a.instance.as_str()), "le monde est partagé");
+    if joined {
+        let on_line = a.runner.specs.lock().unwrap()[0].on_line.clone();
+        on_line("[12:00:00] [Server thread/INFO]: Steve joined the game");
+        on_line("[12:09:00] [Server thread/INFO]: Steve left the game");
+        std::fs::write(a.runner.specs.lock().unwrap()[0].dir.join("world").join("neuf-minutes.txt"), "9 minutes de jeu").unwrap();
+    }
+    let host = a.rt().active(&g).expect("serveur d'Alice");
+    assert_eq!(host.players(), 0);
+    // Bob a publié une version plus récente que la base d'Alice : son bail l'emporte au départage.
+    let dir = b.dir.path().join("monde-de-bob");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("level.dat"), "monde de Bob").unwrap();
+    let v = b.rt().publish_version(g, &dir, VersionKind::Session, None, 60).await.unwrap();
+    wait_for("version de Bob chez Alice", 30, || a.rt().version(&g, &v.id()).is_some()).await;
+    let lease = Lease::new(g, b.key(), Some((v.id(), v.header.number))).signed(&*b.node.st.identity);
+    (peers, g, lease)
+}
+
+/// Un bail concurrent qui l'emporte alors que mon serveur est vide, après une vraie partie : la session est publiée
+/// comme branche (`Suspend`), le serveur est arrêté après `save-all flush`, et le partage est fermé (`host_stop_sharing`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bail_concurrent_serveur_vide_publie_et_ferme_le_partage() {
+    let (peers, g, lease) = alice_heberge_et_bob_a_un_bail_plus_fort(true).await;
+    let (a, b) = (&peers[0], &peers[1]);
+    let before = a.rt().heads_of(&g).unwrap().len();
+    // Le bail adverse est renouvelé toutes les quelques secondes : plusieurs réceptions, une seule fin de partie.
+    for _ in 0..3 {
+        a.rt().on_lease(b.key(), lease.clone());
+    }
+    wait_for("serveur d'Alice arrêté", 30, || a.rt().active(&g).is_none()).await;
+    wait_for("partage fermé", 30, || a.node.be.shared_instance().is_none()).await;
+    assert_ne!(a.state_of(&g), HearthStateKind::Hosting);
+    assert_eq!(a.runner.calls.lock().unwrap().clone(), ["start", "save-off", "save-on", "stop"], "save-all flush, puis un seul stop");
+    wait_for("bail relâché chez Bob", 20, || b.rt().lease_of_holder(&g, &a.key()).is_none()).await;
+    // La session d'Alice est publiée : une branche de plus, visible comme fourche chez Alice et chez Bob.
+    a.rt().probe_all().await;
+    b.rt().probe_all().await;
+    wait_for("session d'Alice publiée (fourche)", 30, || a.rt().is_fork(&g) && a.rt().heads_of(&g).unwrap().len() > before).await;
+    wait_for("fourche chez Bob", 30, || b.rt().is_fork(&g)).await;
+    for p in &peers {
+        p.stop().await;
+    }
+}
+
+/// Personne n'est jamais entré : rien à publier. Le serveur s'arrête quand même et le partage est fermé.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bail_concurrent_serveur_jamais_joue_ne_publie_rien_mais_ferme_le_partage() {
+    let (peers, g, lease) = alice_heberge_et_bob_a_un_bail_plus_fort(false).await;
+    let (a, b) = (&peers[0], &peers[1]);
+    let before = a.rt().heads_of(&g).unwrap().len();
+    a.rt().on_lease(b.key(), lease);
+    wait_for("serveur d'Alice arrêté", 30, || a.rt().active(&g).is_none()).await;
+    wait_for("partage fermé", 30, || a.node.be.shared_instance().is_none()).await;
+    assert_eq!(a.runner.calls.lock().unwrap().clone(), ["start", "stop"], "pas de publication : pas de save-all");
+    assert_eq!(a.rt().heads_of(&g).unwrap().len(), before, "aucune version publiée");
+    wait_for("bail relâché chez Bob", 20, || b.rt().lease_of_holder(&g, &a.key()).is_none()).await;
+    for p in &peers {
+        p.stop().await;
+    }
+}
+
+/// Un joueur est connecté : un bail concurrent ne coupe pas le serveur.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bail_concurrent_serveur_occupe_continue() {
+    let (peers, g, lease) = alice_heberge_et_bob_a_un_bail_plus_fort(true).await;
+    let (a, b) = (&peers[0], &peers[1]);
+    let on_line = a.runner.specs.lock().unwrap()[0].on_line.clone();
+    on_line("[12:10:00] [Server thread/INFO]: Steve joined the game");
+    assert_eq!(a.rt().active(&g).unwrap().players(), 1);
+    a.rt().on_lease(b.key(), lease);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(a.rt().active(&g).is_some(), "le serveur occupé reste");
+    assert_eq!(a.state_of(&g), HearthStateKind::Hosting);
+    assert!(!a.runner.calls.lock().unwrap().contains(&"stop"));
+    assert!(a.node.be.shared_instance().is_some());
+    for p in &peers {
+        p.stop().await;
+    }
+}
+
+/// « Redémarrer et installer » avec un serveur de groupe actif (#108) : le serveur est arrêté proprement AVANT
+/// l'installation (sous Windows l'installeur ferme le processus) : monde publié, bail relâché, partage
+/// fermé. Son partage ne compte pas comme un partage à fermer à la main. Un second appel ne refait rien.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn mise_a_jour_arrete_le_serveur_de_groupe_et_publie_le_monde() {
+    let (peers, g, _lease) = alice_heberge_et_bob_a_un_bail_plus_fort(true).await;
+    let (a, b) = (&peers[0], &peers[1]);
+    let before = a.rt().heads_of(&g).unwrap().len();
+    assert!(a.node.be.shared_instance().is_some(), "le serveur partage son monde");
+    // Tant que le joueur est dans la partie, l'installation est refusée ; le jeu fermé, le serveur reste en arrière-plan.
+    assert!(a.node.st.update_blocker().is_some_and(|m| m.contains("partie est en cours")));
+    *lock(&a.node.st.game) = None;
+    assert_eq!(a.node.st.update_blocker(), None, "un serveur de groupe seul ne bloque pas");
+    a.node.st.prepare_update_install().await.unwrap();
+    assert!(a.rt().active(&g).is_none(), "serveur arrêté");
+    assert!(a.node.be.shared_instance().is_none(), "partage fermé");
+    assert_eq!(a.runner.calls.lock().unwrap().clone(), ["start", "stop"], "un arrêt propre, une seule fois");
+    wait_for("bail relâché chez Bob", 20, || b.rt().lease_of_holder(&g, &a.key()).is_none()).await;
+    a.rt().probe_all().await;
+    assert!(a.rt().heads_of(&g).unwrap().len() > before, "la session est publiée");
+    // Idempotent : rien de plus à arrêter.
+    a.node.st.prepare_update_install().await.unwrap();
+    assert_eq!(a.runner.calls.lock().unwrap().iter().filter(|c| **c == "stop").count(), 1);
+    for p in &peers {
+        p.stop().await;
+    }
+}
+
+/// Une partie ou un téléchargement de monde en cours : l'installation est refusée AVANT de toucher au serveur de groupe.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn mise_a_jour_refusee_sans_rien_arreter_pendant_une_partie_ou_un_transfert() {
+    let (peers, g, id) = group_of(&["Alice", "Bob"]).await;
+    let a = &peers[0];
+    a.node.st.hearth_play(&id).await.unwrap();
+    assert!(a.rt().active(&g).is_some());
+    *lock(&a.node.st.game) = Some(a.instance.clone());
+    let e = a.node.st.prepare_update_install().await.unwrap_err();
+    assert!(e.contains("partie est en cours"), "{e}");
+    *lock(&a.node.st.game) = None;
+    *lock(&a.node.st.join) = Some(cubelink_app::state::JoinSession { control: Arc::default(), last: Arc::default() });
+    let e = a.node.st.prepare_update_install().await.unwrap_err();
+    assert!(e.contains("téléchargement de monde"), "{e}");
+    assert!(a.rt().active(&g).is_some(), "le serveur n'a pas été arrêté");
+    assert!(!a.runner.calls.lock().unwrap().contains(&"stop"));
+    *lock(&a.node.st.join) = None;
+    a.node.st.prepare_update_install().await.unwrap();
+    assert!(a.rt().active(&g).is_none());
+    for p in &peers {
+        p.stop().await;
+    }
+}
+
+/// Un partage ouvert à la main (hors serveur de groupe) : l'installation est refusée tant qu'il dure.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn mise_a_jour_refusee_pendant_un_partage_manuel() {
+    let a = Peer::start("Alice").await;
+    assert_eq!(a.node.st.update_blocker(), None);
+    a.node.st.host_start_sharing(&a.instance, 0).await.unwrap();
+    let e = a.node.st.prepare_update_install().await.unwrap_err();
+    assert!(e.contains("partages"), "{e}");
+    a.node.st.host_stop_sharing();
+    a.node.st.prepare_update_install().await.unwrap();
+    a.stop().await;
 }
 
 /// Interrupteur de sécurité : coupé, les commandes refusent avec un message clair, la lecture d'état reste possible, et le
@@ -939,8 +1281,9 @@ async fn alice_plante() -> (Vec<Peer>, GroupId, String, p2p_lib::hearth::version
     let d1 = peers[0].dir.path().join("monde-1");
     small_world(&d1, "monde n° 1");
     let v1 = peers[0].rt().publish_version(g, &d1, VersionKind::Session, None, 60).await.unwrap();
-    peers[1].stop().await; // Bob est hors ligne : un seul clic sur Jouer suffit à héberger.
+    peers[1].stop().await; // Bob est hors ligne : héberger seul demande une confirmation explicite (#93).
     let a = &peers[0];
+    a.node.st.hearth_confirm_host(&id).unwrap();
     a.node.st.hearth_play(&id).await.unwrap();
     assert_eq!(a.state_of(&g), HearthStateKind::Hosting);
     assert!(a.rt().has_session_marker(&g), "le marqueur de session est écrit au démarrage du serveur");
@@ -982,6 +1325,8 @@ async fn partie_mal_terminee_le_monde_est_mis_de_cote_puis_publie() {
     let (heads_before, outbox_before) = (a.rt().heads_of(&g).unwrap().len(), a.rt().pending_outbox());
     assert_eq!(a.rt().head(&g).unwrap().id(), v2.id());
 
+    // Bob est toujours hors ligne : héberger seul est confirmé explicitement (#93).
+    a.node.st.hearth_confirm_host(&id).unwrap();
     a.node.st.hearth_play(&id).await.unwrap();
     assert_eq!(a.state_of(&g), HearthStateKind::Hosting);
     let world = a.rt().server_dir(&g).join("world");
@@ -1001,8 +1346,9 @@ async fn partie_mal_terminee_le_monde_est_mis_de_cote_puis_publie() {
     // Fin propre de la nouvelle partie : le marqueur disparaît, la fin de partie reste gardée.
     a.close_game();
     wait_for("serveur arrêté", 30, || a.state_of(&g) != HearthStateKind::Hosting).await;
-    // La carte quitte « Hosting » au tout début de la fin de partie, avant la publication et le retrait du marqueur.
+    // L'état quitte `Hosting` dès le début de la fin de partie : on attend la publication, qui retire le marqueur.
     wait_for("marqueur de session retiré", 30, || !a.rt().has_session_marker(&g)).await;
+    assert!(!a.rt().has_session_marker(&g), "la fin propre retire le marqueur");
     assert_eq!(orphan_files(a, &g).len(), 1);
     wait_for("version de fin publiée", 30, || a.rt().head(&g).is_some_and(|h| h.id() != v2.id())).await;
     let head_after = a.rt().head(&g).unwrap();
@@ -1038,6 +1384,8 @@ async fn partie_mal_terminee_tete_inchangee_n_est_pas_republiee_toute_seule() {
     assert_eq!(a.rt().materialized(&g), Some(v1.id()), "le cas du ticket : materialized == tête");
     let (versions_before, outbox_before) = (a.rt().heads_of(&g).unwrap().len(), a.rt().pending_outbox());
 
+    // Bob est toujours hors ligne : héberger seul est confirmé explicitement (#93).
+    a.node.st.hearth_confirm_host(&id).unwrap();
     a.node.st.hearth_play(&id).await.unwrap();
     let served = read_tree(&a.rt().server_dir(&g).join("world"));
     assert!(!served.iter().any(|(n, _)| n == "region-jouee.mca"), "la tête est remise à neuf");
@@ -1064,11 +1412,622 @@ async fn mise_de_cote_impossible_ne_supprime_rien() {
     a.node.st.hearth_eula_accept();
     // `orphans` est un fichier : le dossier de la fin de partie ne peut pas être créé.
     std::fs::write(a.rt().server_dir(&g).join("orphans"), b"x").unwrap();
+    // Bob est toujours hors ligne : héberger seul est confirmé explicitement (#93).
+    a.node.st.hearth_confirm_host(&id).unwrap();
     let e = a.node.st.hearth_play(&id).await.unwrap_err();
     assert!(e.contains("mise de côté") || e.contains("de côté"), "{e}");
     assert_eq!(std::fs::read(a.rt().server_dir(&g).join("world/region-jouee.mca")).unwrap(), SENTINELLE, "le monde est intact");
     assert!(a.rt().has_session_marker(&g));
     assert_eq!(a.node.st.hearth.detail(&g).unwrap().orphans.len(), 0);
+    for p in &peers {
+        p.stop().await;
+    }
+}
+
+const JOINED: &str = "[12:00:00] [Server thread/INFO]: Steve joined the game";
+const LEFT: &str = "[12:05:00] [Server thread/INFO]: Steve left the game";
+
+fn timings(checkpoint_ms: u64, idle_stop_ms: u64) -> Timings {
+    Timings { checkpoint: Duration::from_millis(checkpoint_ms), idle_stop: Duration::from_millis(idle_stop_ms), idle_poll: Duration::from_millis(100) }
+}
+
+fn on_line_of(a: &Peer) -> core_lib::hearth::server::LineSink {
+    a.runner.specs.lock().unwrap()[0].on_line.clone()
+}
+
+fn world_file(a: &Peer, name: &str, contents: &str) {
+    std::fs::write(a.runner.specs.lock().unwrap()[0].dir.join("world").join(name), contents).unwrap();
+}
+
+/// Serveur sans joueur : aucun point de reprise n'est publié (ticket #94), mais un appel direct reste possible.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn serveur_vide_ne_publie_aucun_point_de_reprise() {
+    let (peers, g, id) = group_of(&["Alice", "Bob"]).await;
+    let a = &peers[0];
+    a.rt().set_timings(timings(150, 3_600_000));
+    a.node.st.hearth_play(&id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert!(a.rt().head(&g).is_none(), "aucun joueur : aucune version");
+    assert!(!a.runner.calls.lock().unwrap().contains(&"save-off"), "le serveur n'est même pas mis en pause");
+    // Un appel direct force le point (le monde est nouveau : une version).
+    let host = a.rt().active(&g).unwrap();
+    let v = a.rt().checkpoint(&host).await.unwrap().expect("monde nouveau : une version");
+    assert_eq!(v.header.kind, VersionKind::Checkpoint);
+    for p in &peers {
+        p.stop().await;
+    }
+}
+
+/// Un joueur entré puis sorti entre deux points compte ; un monde identique à la tête ne produit pas de version, et
+/// `save-on` est quand même envoyé ; sans nouveau joueur, plus de point.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn point_de_reprise_seulement_si_joueur_et_monde_change() {
+    let (peers, g, id) = group_of(&["Alice", "Bob"]).await;
+    let a = &peers[0];
+    a.rt().set_timings(timings(1500, 3_600_000));
+    a.node.st.hearth_play(&id).await.unwrap();
+    // Entré puis sorti avant le premier point : il compte.
+    let on_line = on_line_of(a);
+    on_line(JOINED);
+    world_file(a, "region-1.mca", "un");
+    on_line(LEFT);
+    wait_for("premier point de reprise", 30, || a.rt().head(&g).is_some()).await;
+    let v1 = a.rt().head(&g).unwrap();
+    assert_eq!(v1.header.kind, VersionKind::Checkpoint);
+    assert_eq!(v1.header.number, 1);
+    // Personne depuis : plusieurs tours sans rien publier, même si le monde change.
+    world_file(a, "region-2.mca", "deux");
+    tokio::time::sleep(Duration::from_millis(4000)).await;
+    assert_eq!(a.rt().head(&g).unwrap().id(), v1.id(), "aucun joueur depuis le dernier point : rien");
+    // Un joueur revient mais le monde ne bouge pas par rapport à la tête : rien non plus, et save-on est bien envoyé.
+    let host = a.rt().active(&g).unwrap();
+    a.rt().checkpoint(&host).await.unwrap().expect("region-2 est nouveau");
+    let v2 = a.rt().head(&g).unwrap();
+    assert_eq!(v2.header.number, 2);
+    let (offs, ons) = {
+        let c = a.runner.calls.lock().unwrap();
+        (c.iter().filter(|c| **c == "save-off").count(), c.iter().filter(|c| **c == "save-on").count())
+    };
+    assert_eq!(offs, ons, "chaque save-off est suivi d'un save-on");
+    on_line(JOINED);
+    tokio::time::sleep(Duration::from_millis(4000)).await;
+    assert_eq!(a.rt().head(&g).unwrap().id(), v2.id(), "monde identique à la tête : aucune version");
+    let ons_after = a.runner.calls.lock().unwrap().iter().filter(|c| **c == "save-on").count();
+    assert!(ons_after > ons, "le point a bien eu lieu (save-on), sans publier");
+    assert!(a.runner.calls.lock().unwrap().iter().filter(|c| **c == "save-off").count() == ons_after);
+    // Joueur resté connecté et monde changé : un point de plus.
+    world_file(a, "region-3.mca", "trois");
+    wait_for("point de reprise avec joueur", 30, || a.rt().head(&g).is_some_and(|h| h.header.number == 3)).await;
+    for p in &peers {
+        p.stop().await;
+    }
+}
+
+/// Serveur vide trop longtemps (même avec « garder ouvert ») : il s'arrête, la session est publiée, le partage fermé et le
+/// bail relâché. Un joueur connecté empêche l'arrêt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn serveur_vide_s_arrete_apres_l_inactivite() {
+    let (peers, g, id) = group_of(&["Alice", "Bob"]).await;
+    let (a, b) = (&peers[0], &peers[1]);
+    a.rt().set_timings(timings(3_600_000, 2000));
+    a.rt().set_keep_background(&g, true);
+    a.node.st.hearth_play(&id).await.unwrap();
+    assert_eq!(a.state_of(&g), HearthStateKind::Hosting);
+    on_line_of(a)(JOINED);
+    world_file(a, "region-jouee.mca", "jouée");
+    tokio::time::sleep(Duration::from_millis(3500)).await;
+    assert!(a.rt().active(&g).is_some(), "un joueur est connecté : le serveur reste");
+    on_line_of(a)(LEFT);
+    wait_for("serveur arrêté après inactivité", 30, || a.rt().active(&g).is_none()).await;
+    wait_for("partage fermé", 30, || a.node.be.shared_instance().is_none()).await;
+    assert_ne!(a.state_of(&g), HearthStateKind::Hosting);
+    let calls = a.runner.calls.lock().unwrap().clone();
+    assert_eq!(calls.iter().filter(|c| **c == "stop").count(), 1, "un seul arrêt : {calls:?}");
+    let s = a.rt().head(&g).expect("la session est publiée");
+    assert_eq!(s.header.kind, VersionKind::Session);
+    assert!(!a.rt().has_session_marker(&g), "la session publiée efface le marqueur");
+    wait_for("bail relâché chez Bob", 20, || b.rt().lease_of_holder(&g, &a.key()).is_none()).await;
+    for p in &peers {
+        p.stop().await;
+    }
+}
+
+/// Personne n'est jamais entré : arrêt sans rien publier, marqueur effacé, partage fermé.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn serveur_jamais_rejoint_s_arrete_sans_version() {
+    let (peers, g, id) = group_of(&["Alice", "Bob"]).await;
+    let (a, b) = (&peers[0], &peers[1]);
+    a.rt().set_timings(timings(3_600_000, 1500));
+    a.node.st.hearth_play(&id).await.unwrap();
+    assert!(a.rt().has_session_marker(&g));
+    wait_for("serveur arrêté", 30, || a.rt().active(&g).is_none()).await;
+    wait_for("partage fermé", 30, || a.node.be.shared_instance().is_none()).await;
+    assert_eq!(a.runner.calls.lock().unwrap().clone(), ["start", "stop"], "rien à publier : pas de save-all");
+    assert!(a.rt().head(&g).is_none(), "aucune version publiée");
+    assert!(!a.rt().has_session_marker(&g));
+    assert_ne!(a.state_of(&g), HearthStateKind::Hosting);
+    wait_for("bail relâché chez Bob", 20, || b.rt().lease_of_holder(&g, &a.key()).is_none()).await;
+    for p in &peers {
+        p.stop().await;
+    }
+}
+
+/// Alice et Bob, la n° 1 complète chez les deux, Alice héberge (Bob en ligne). `log` : ce que le serveur d'Alice écrit.
+async fn alice_heberge_avec_bob(log: &[&str]) -> (Vec<Peer>, GroupId, String, p2p_lib::hearth::version::SignedVersion) {
+    let (peers, g, id) = group_of(&["Alice", "Bob"]).await;
+    let (a, b) = (&peers[0], &peers[1]);
+    let d1 = a.dir.path().join("monde-1");
+    small_world(&d1, "monde n° 1");
+    let v1 = a.rt().publish_version(g, &d1, VersionKind::Session, None, 60).await.unwrap();
+    wait_for("n° 1 complète chez Bob", 40, || b.rt().head(&g).is_some_and(|h| h.id() == v1.id() && b.rt().world_complete(&h))).await;
+    *a.runner.log.lock().unwrap() = log.iter().map(|l| (*l).to_string()).collect();
+    a.rt().probe_all().await;
+    a.node.st.hearth_play(&id).await.unwrap();
+    assert_eq!(a.state_of(&g), HearthStateKind::Hosting);
+    wait_for("Bob voit la partie d'Alice", 20, || b.state_of(&g) == HearthStateKind::Hosted).await;
+    (peers, g, id, v1)
+}
+
+/// La machine s'éteint (fin de session, SIGTERM) pendant qu'un joueur est là : annonce aux joueurs, `stop`, aucune publication
+/// (la tête et la file d'envoi ne bougent pas), le marqueur de session reste, le bail est relâché (Bob ne voit plus la partie,
+/// sans plantage annoncé). Deux arrêts simultanés (deux signaux) n'arrêtent qu'une fois. Au « Jouer » suivant, le monde non
+/// publié est mis de côté au lieu d'être écrasé (ticket n° 109, docs/hearth.md § 7.3).
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn arret_de_la_machine_ne_publie_rien_garde_le_monde_et_relache_le_bail() {
+    let (peers, g, id, v1) = alice_heberge_avec_bob(&[]).await;
+    let (a, b) = (&peers[0], &peers[1]);
+    on_line_of(a)(JOINED);
+    std::fs::write(a.rt().server_dir(&g).join("world/region-jouee.mca"), SENTINELLE).unwrap();
+    let (heads_before, outbox_before) = (a.rt().heads_of(&g).unwrap().len(), a.rt().pending_outbox());
+
+    tokio::join!(a.node.st.hearth_stop_all_with(StopMode::Shutdown), a.node.st.hearth_stop_all_with(StopMode::Shutdown));
+
+    assert_eq!(a.runner.calls.lock().unwrap().clone(), ["start", "say", "stop"], "annonce puis un seul arrêt, pas de save-all");
+    assert!(a.rt().active(&g).is_none());
+    assert_eq!(a.rt().head(&g).unwrap().id(), v1.id(), "la tête n'a pas bougé");
+    assert_eq!((a.rt().heads_of(&g).unwrap().len(), a.rt().pending_outbox()), (heads_before, outbox_before), "rien n'est publié");
+    assert!(a.rt().has_session_marker(&g), "le marqueur reste : le monde n'est pas publié");
+    assert!(a.rt().card(&g).unwrap().crash.is_none());
+    assert_ne!(a.state_of(&g), HearthStateKind::Hosting);
+
+    wait_for("bail relâché chez Bob", 20, || b.rt().lease_of_holder(&g, &a.key()).is_none()).await;
+    wait_for("Bob ne voit plus la partie", 20, || b.state_of(&g) != HearthStateKind::Hosted).await;
+    assert!(b.rt().card(&g).unwrap().crash.is_none(), "un arrêt de la machine n'est pas un plantage");
+    assert_eq!(b.rt().head(&g).unwrap().id(), v1.id());
+
+    // Le monde n'est pas perdu : le prochain « Jouer » le met de côté (l'hôte choisit ensuite de le publier ou de le jeter).
+    a.rt().probe_all().await;
+    a.node.st.hearth_play(&id).await.unwrap();
+    assert_eq!(orphan_files(a, &g).len(), 1);
+    assert!(orphan_files(a, &g)[0].iter().any(|(n, c)| n == "region-jouee.mca" && c == SENTINELLE));
+    for p in &peers {
+        p.stop().await;
+    }
+}
+
+/// Arrêt de la machine alors que personne n'est jamais entré : rien à garder (marqueur effacé), pas d'annonce.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn arret_de_la_machine_sans_joueur_ne_garde_rien() {
+    let (peers, g, _id, v1) = alice_heberge_avec_bob(&[]).await;
+    let (a, b) = (&peers[0], &peers[1]);
+    a.node.st.hearth_stop_all_with(StopMode::Shutdown).await;
+    assert_eq!(a.runner.calls.lock().unwrap().clone(), ["start", "stop"]);
+    assert!(!a.rt().has_session_marker(&g));
+    assert_eq!(a.rt().head(&g).unwrap().id(), v1.id());
+    wait_for("bail relâché chez Bob", 20, || b.rt().lease_of_holder(&g, &a.key()).is_none()).await;
+    for p in &peers {
+        p.stop().await;
+    }
+}
+
+/// Le serveur meurt seul avec un code d'erreur : rien n'est publié (la tête et la file d'envoi ne bougent pas), le monde est
+/// mis de côté chez l'hôte, le bail est relâché avec `Crashed` et Bob voit le mod probable (ticket n° 98). L'hôte peut
+/// ensuite publier cette partie comme une branche, qui ne devient pas la tête toute seule.
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn plantage_du_serveur_ne_publie_rien_et_previent_les_autres() {
+    let (peers, g, id, v1) = alice_heberge_avec_bob(&[
+        "[12:00:00] [main/INFO]: Loading Minecraft 1.21.1 with Fabric Loader 0.16.0",
+        "[12:03:10] [Server thread/ERROR]: Mod 'Sodium' (sodium) 0.5.8 a planté pendant le tick",
+    ])
+    .await;
+    let (a, b) = (&peers[0], &peers[1]);
+    on_line_of(a)(JOINED);
+    std::fs::write(a.rt().server_dir(&g).join("world/region-jouee.mca"), SENTINELLE).unwrap();
+    let (heads_before, outbox_before) = (a.rt().heads_of(&g).unwrap().len(), a.rt().pending_outbox());
+
+    a.runner.die(1);
+    // L'état quitte `Hosting` dès le début de la fin de partie : on attend que le monde planté soit mis de côté.
+    wait_for("monde planté mis de côté", 30, || a.rt().card(&g).unwrap().orphans == 1).await;
+    wait_for("plantage retenu", 30, || a.rt().card(&g).unwrap().crash.is_some()).await;
+    assert_eq!(a.rt().head(&g).unwrap().id(), v1.id(), "la tête n'a pas bougé");
+    assert_eq!((a.rt().heads_of(&g).unwrap().len(), a.rt().pending_outbox()), (heads_before, outbox_before), "rien n'est publié");
+    assert!(a.rt().active(&g).is_none());
+
+    // Le monde planté est gardé de côté chez l'hôte, intact.
+    assert!(!a.rt().has_session_marker(&g));
+    assert_eq!(orphan_files(a, &g).len(), 1);
+    assert!(orphan_files(a, &g)[0].iter().any(|(n, c)| n == "region-jouee.mca" && c == SENTINELLE));
+    let ca = a.rt().card(&g).unwrap();
+    assert_eq!((ca.state, ca.orphans), (HearthStateKind::Idle, 1));
+    assert_eq!(ca.crash.as_ref().unwrap().mod_hint.as_deref(), Some("Sodium (sodium)"));
+
+    // Bob : le bail est libéré, le plantage est annoncé avec le mod probable.
+    wait_for("plantage chez Bob", 20, || b.rt().card(&g).unwrap().crash.is_some()).await;
+    let cb = b.rt().card(&g).unwrap();
+    let crash = cb.crash.unwrap();
+    assert_eq!(cb.state, HearthStateKind::Idle);
+    assert_eq!((crash.host.public_key, crash.mod_hint.as_deref()), (a.node.key(), Some("Sodium (sodium)")));
+    assert_eq!(b.rt().head(&g).unwrap().id(), v1.id());
+
+    // Le monde mis de côté ne se publie que sur le choix de l'hôte : une Session enfant de la n° 1 (la tête n'a pas avancé
+    // entre-temps, donc elle la prolonge ; si le groupe avait avancé, ce serait une fourche, voir `partie_mal_terminee_*`).
+    let oid = a.node.st.hearth.detail(&g).unwrap().orphans[0].id.clone();
+    a.node.st.hearth_orphan_publish(&id, &oid).await.unwrap();
+    assert_eq!(orphan_files(a, &g).len(), 0);
+    let head = a.rt().head(&g).unwrap();
+    assert_eq!((head.header.kind, head.header.parent, head.header.number), (VersionKind::Session, Some(v1.id()), 2));
+    for p in &peers {
+        p.stop().await;
+    }
+}
+
+/// Un plantage sans mod identifiable dit « cause inconnue » ; le prochain serveur efface l'annonce, et une fin propre
+/// ensuite publie comme avant.
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn plantage_sans_mod_connu_puis_nouvelle_partie_publiee() {
+    let (peers, g, id, v1) = alice_heberge_avec_bob(&["[12:00:00] [Server thread/ERROR]: Exception in server tick loop"]).await;
+    let (a, b) = (&peers[0], &peers[1]);
+    a.runner.die(-1);
+    wait_for("serveur d'Alice arrêté", 30, || a.state_of(&g) != HearthStateKind::Hosting).await;
+    wait_for("plantage chez Bob", 20, || b.rt().card(&g).unwrap().crash.is_some()).await;
+    // Personne n'est jamais entré : pas de « fin de partie non publiée » à gérer chez l'hôte.
+    wait_for("marqueur retiré", 30, || !a.rt().has_session_marker(&g)).await;
+    assert_eq!(a.rt().card(&g).unwrap().orphans, 0);
+    assert_eq!(b.rt().card(&g).unwrap().crash.unwrap().mod_hint, None);
+    assert_eq!(a.rt().head(&g).unwrap().id(), v1.id());
+
+    // Nouvelle partie chez Alice : l'annonce disparaît, la fin propre publie une Session.
+    a.rt().probe_all().await;
+    a.node.st.hearth_play(&id).await.unwrap();
+    assert_eq!(a.state_of(&g), HearthStateKind::Hosting);
+    assert!(a.rt().card(&g).unwrap().crash.is_none());
+    wait_for("Bob voit la partie", 20, || b.state_of(&g) == HearthStateKind::Hosted).await;
+    assert!(b.rt().card(&g).unwrap().crash.is_none());
+    a.close_game();
+    wait_for("serveur d'Alice arrêté", 30, || a.state_of(&g) != HearthStateKind::Hosting).await;
+    wait_for("monde publié", 30, || !a.rt().has_session_marker(&g)).await;
+    assert!(a.rt().card(&g).unwrap().crash.is_none());
+    let head = a.rt().head(&g).unwrap();
+    assert_eq!((head.header.kind, head.header.parent), (VersionKind::Session, Some(v1.id())));
+    for p in &peers {
+        p.stop().await;
+    }
+}
+
+/// Code 0 sans arrêt demandé (un `/stop` tapé dans la console du serveur) : fin propre, le monde est publié et le bail
+/// relâché avec `Stopped`, comme avant.
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn serveur_arrete_proprement_de_lui_meme_publie_la_session() {
+    let (peers, g, _id, v1) = alice_heberge_avec_bob(&[]).await;
+    let (a, b) = (&peers[0], &peers[1]);
+    a.runner.die(0);
+    wait_for("serveur d'Alice arrêté", 30, || a.state_of(&g) != HearthStateKind::Hosting).await;
+    wait_for("monde publié", 30, || !a.rt().has_session_marker(&g)).await;
+    let head = a.rt().head(&g).unwrap();
+    assert_eq!((head.header.kind, head.header.parent), (VersionKind::Session, Some(v1.id())));
+    assert_eq!(a.rt().card(&g).unwrap().orphans, 0);
+    wait_for("version 2 chez Bob", 40, || b.rt().head(&g).is_some_and(|h| h.header.number == 2 && b.rt().world_complete(&h))).await;
+    assert!(b.rt().card(&g).unwrap().crash.is_none());
+    for p in &peers {
+        p.stop().await;
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// #96 : un membre qui ne fait que rejoindre libère aussi les vieilles versions
+// ---------------------------------------------------------------------------------------------------------
+
+/// Un monde d'environ `len` octets, distinct selon `seed`.
+fn big_world(dir: &Path, seed: u8, len: usize) {
+    std::fs::create_dir_all(dir).unwrap();
+    let data: Vec<u8> = (0..len).map(|i| (i as u8).wrapping_mul(31).wrapping_add(seed).wrapping_add((i >> 8) as u8)).collect();
+    std::fs::write(dir.join("region.mca"), data).unwrap();
+}
+
+/// Alice publie quatre versions, Bob (qui ne fait que rejoindre) les reçoit toutes. Sa synchro libère toute seule les
+/// vieilles (date de réception ici, pas `created_at`), la page du serveur mesure les blobs, « Restaurer » n'est proposé
+/// que pour les mondes présents.
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn un_membre_qui_ne_fait_que_rejoindre_libere_les_vieilles_versions() {
+    let (peers, g, _id) = group_of(&["Alice", "Bob"]).await;
+    let (a, b) = (&peers[0], &peers[1]);
+    let mut vs = Vec::new();
+    for n in 1..=3u8 {
+        let d = a.dir.path().join(format!("monde-{n}"));
+        big_world(&d, n, 60_000);
+        let parent = vs.last().map(|v: &p2p_lib::hearth::version::SignedVersion| (v.id(), v.header.number));
+        let v = a.rt().publish_version(g, &d, VersionKind::Session, parent, 60).await.unwrap();
+        wait_for("monde complet chez Bob", 40, || b.rt().head(&g).is_some_and(|h| h.id() == v.id() && b.rt().world_complete(&h))).await;
+        vs.push(v);
+    }
+    let (v1, v2, v3) = (&vs[0], &vs[1], &vs[2]);
+    let detail = || b.node.st.hearth.detail(&g).unwrap();
+    let d = detail();
+    assert!(d.versions.iter().all(|v| v.available), "Bob a les trois mondes");
+    // La place mesurée, ce sont les blobs (3 x 60 Ko), pas les quelques Ko d'en-têtes du dossier du groupe.
+    assert!(d.settings.disk_bytes >= 180_000, "les blobs comptent : {}", d.settings.disk_bytes);
+    let full = d.settings.disk_bytes;
+
+    // Récent : rien n'est libéré, même 13 jours plus tard.
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    b.rt().gc_versions_at(g, now + 13 * 86_400).await;
+    assert!(vs.iter().all(|v| b.rt().world_complete(v)), "moins de 14 jours depuis la réception : tout reste");
+
+    // La n° 1 est arrivée chez Bob il y a 20 jours : la prochaine synchro (après la n° 4 d'Alice) la libère toute seule.
+    let file = b.rt().server_dir(&g).parent().unwrap().join("versions").join(format!("{}.json", v1.id()));
+    let old = std::time::SystemTime::now() - Duration::from_secs(20 * 86_400);
+    std::fs::File::options().write(true).open(&file).unwrap().set_modified(old).unwrap();
+    let d4 = a.dir.path().join("monde-4");
+    big_world(&d4, 4, 60_000);
+    let v4 = a.rt().publish_version(g, &d4, VersionKind::Session, Some((v3.id(), 3)), 60).await.unwrap();
+    wait_for("n° 4 chez Bob", 40, || b.rt().head(&g).is_some_and(|h| h.id() == v4.id() && b.rt().world_complete(&h))).await;
+    wait_for("n° 1 libérée par la synchro", 40, || !b.rt().world_complete(v1)).await;
+    assert!(b.rt().world_complete(v2) && b.rt().world_complete(v3) && b.rt().world_complete(&v4), "récentes, parent et tête restent");
+    let d = detail();
+    let avail = |n: u64| d.versions.iter().find(|v| v.number == n).unwrap().available;
+    assert_eq!((avail(1), avail(2), avail(3), avail(4)), (false, true, true, true));
+    assert!(d.versions.len() == 4, "l'historique garde la ligne de la n° 1");
+
+    // 15 jours plus tard : seules la tête (n° 4) et son parent (n° 3) restent ; la place mesurée baisse.
+    b.rt().gc_versions_at(g, now + 15 * 86_400).await;
+    assert!(!b.rt().world_complete(v2) && b.rt().world_complete(v3) && b.rt().world_complete(&v4));
+    let d = detail();
+    assert!(d.versions.iter().filter(|v| v.available).count() == 2);
+    assert!(d.settings.disk_bytes < full, "n° 1 et n° 2 libérées : {} contre {full}", d.settings.disk_bytes);
+    assert!(d.settings.disk_bytes >= 120_000, "les blobs des deux versions gardées comptent encore");
+
+    for p in &peers {
+        p.stop().await;
+    }
+}
+
+/// Bob était éteint pendant les n° 2 et n° 3 : à son retour il reprend la tête (n° 3) mais pas le monde de la n° 2, dont il
+/// n'a que l'en-tête. Alice éteinte, restaurer la n° 2 dit en clair que le contenu n'est plus sur ce PC et que personne ne
+/// l'a en ligne, pas l'erreur de transfert ; la page du serveur ne propose pas « Restaurer » (`available` faux) (#96).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn restaurer_un_monde_absent_sans_personne_en_ligne_le_dit_en_clair() {
+    let (mut peers, g, id) = group_of(&["Alice", "Bob"]).await;
+    let d1 = peers[0].dir.path().join("monde-1");
+    big_world(&d1, 1, 10_000);
+    let v1 = peers[0].rt().publish_version(g, &d1, VersionKind::Session, None, 60).await.unwrap();
+    wait_for("n° 1 complète chez Bob", 40, || peers[1].rt().head(&g).is_some_and(|h| h.id() == v1.id() && peers[1].rt().world_complete(&h))).await;
+    peers[1].stop().await;
+    let mut parent = (v1.id(), 1);
+    let mut vs = Vec::new();
+    for n in 2..=3u8 {
+        let d = peers[0].dir.path().join(format!("monde-{n}"));
+        big_world(&d, n, 10_000);
+        let v = peers[0].rt().publish_version(g, &d, VersionKind::Session, Some(parent), 60).await.unwrap();
+        parent = (v.id(), u64::from(n));
+        vs.push(v);
+    }
+    let v3 = vs.pop().unwrap();
+    let v2 = vs.pop().unwrap();
+    peers[1].restart().await;
+    peers[1].rt().probe_all().await;
+    let b = &peers[1];
+    wait_for("n° 3 complète chez Bob", 60, || b.rt().head(&g).is_some_and(|h| h.id() == v3.id() && b.rt().world_complete(&h))).await;
+    assert!(!b.rt().world_complete(&v2), "seule la tête est rapatriée : Bob n'a que l'en-tête de la n° 2");
+    peers[0].stop().await;
+    b.rt().probe_all().await;
+    let d = b.node.st.hearth.detail(&g).unwrap();
+    assert!(d.versions.iter().find(|v| v.number == 2).is_some_and(|v| !v.available), "la n° 2 n'a pas de contenu ici");
+    assert!(d.versions.iter().find(|v| v.number == 1).is_some_and(|v| v.available));
+    let err = b.node.st.hearth_restore(&id, &v2.id().to_hex()).await.unwrap_err();
+    assert!(err.contains("n'est plus sur ce PC"), "{err}");
+    b.stop().await;
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// #99 : file d'envoi (regroupement des points de reprise, refus explicite d'une version trop grosse)
+// ---------------------------------------------------------------------------------------------------------
+
+/// Deux points de reprise de la même lignée en file : seul le dernier est envoyé (la Session, elle, n'est jamais
+/// regroupée). Bob, hors ligne pendant ce temps, reçoit le dernier, rattrape l'en-tête du premier auprès d'Alice, et la
+/// file d'Alice se vide.
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn file_d_envoi_ne_garde_que_le_dernier_point_de_reprise() {
+    let (mut peers, g, id) = group_of(&["Alice", "Bob"]).await;
+    let d1 = peers[0].dir.path().join("monde-1");
+    small_world(&d1, "monde n° 1");
+    let v1 = peers[0].rt().publish_version(g, &d1, VersionKind::Session, None, 60).await.unwrap();
+    wait_for("n° 1 complète chez Bob", 40, || peers[1].rt().head(&g).is_some_and(|h| h.id() == v1.id() && peers[1].rt().world_complete(&h))).await;
+    peers[1].stop().await;
+    let mut parent = (v1.id(), 1);
+    let mut cps = Vec::new();
+    for n in 2..=3u64 {
+        let d = peers[0].dir.path().join(format!("monde-{n}"));
+        small_world(&d, &format!("point de reprise n° {n}"));
+        let v = peers[0].rt().publish_version(g, &d, VersionKind::Checkpoint, Some(parent), 60).await.unwrap();
+        parent = (v.id(), n);
+        cps.push(v);
+    }
+    let (c3, c2) = (cps.pop().unwrap(), cps.pop().unwrap());
+    let a = &peers[0];
+    let queued: Vec<u64> = a.rt().outbox().pending().iter().map(|e| e.version.header.number).collect();
+    assert!(queued.contains(&3) && !queued.contains(&2), "le point de reprise n° 2 est remplacé par le n° 3 : {queued:?}");
+    assert_eq!(queued.len(), a.rt().pending_outbox());
+
+    peers[1].restart().await;
+    peers[1].rt().probe_all().await;
+    let b = &peers[1];
+    wait_for("le point de reprise n° 3 est complet chez Bob", 60, || {
+        b.rt().head(&g).is_some_and(|h| h.id() == c3.id() && b.rt().world_complete(&h))
+    })
+    .await;
+    assert!(b.rt().version(&g, &c2.id()).is_some(), "Bob a rattrapé l'en-tête du n° 2 auprès d'Alice");
+    peers[0].rt().probe_all().await;
+    wait_for("file d'Alice vidée", 40, || peers[0].rt().pending_outbox() == 0).await;
+    let _ = id;
+    for p in &peers {
+        p.stop().await;
+    }
+}
+
+/// Une version bien plus grosse que la précédente (plus de 3 fois + 2 Gio, `Oversize`) est refusée par Bob sans qu'il en
+/// tire un octet : Alice le sait tout de suite, ne la repousse plus, l'affiche (`outbox_failed`) et « Quitter » n'attend pas
+/// cinq minutes. La version reste en file et épinglée (Bob pourra la tirer chez elle après un « Jouer » confirmé).
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn file_d_envoi_refus_explicite_d_une_version_trop_grosse() {
+    let (peers, g, id) = group_of(&["Alice", "Bob"]).await;
+    let (a, b) = (&peers[0], &peers[1]);
+    let d1 = a.dir.path().join("monde-1");
+    small_world(&d1, "monde n° 1");
+    let v1 = a.rt().publish_version(g, &d1, VersionKind::Session, None, 60).await.unwrap();
+    wait_for("n° 1 complète chez Bob", 40, || b.rt().head(&g).is_some_and(|h| h.id() == v1.id() && b.rt().world_complete(&h))).await;
+    wait_for("file d'Alice vidée", 40, || a.rt().pending_outbox() == 0).await;
+    // 2,5 Gio annoncés pour un monde de quelques octets : l'en-tête est signé, le contenu n'existe pas (et n'est jamais lu).
+    let v2 = a.rt().record_version(g, VersionKind::Session, Some((v1.id(), 1)), 90, [9; 32], 5 * (1 << 29)).unwrap();
+    wait_for("la version est refusée pour de bon", 40, || a.rt().outbox().pending().iter().any(|e| e.id() == v2.id() && e.failed.is_some())).await;
+    let e = a.rt().outbox().pending().into_iter().find(|e| e.id() == v2.id()).unwrap();
+    assert_eq!(e.failed.as_deref(), Some("oversize"));
+    assert_eq!(e.attempts, 1, "une seule remise : le refus arrête les tentatives");
+    assert!(!b.rt().world_complete(&v2), "Bob n'a rien tiré");
+    let d = a.node.st.hearth.detail(&g).unwrap();
+    assert_eq!(d.settings.outbox_pending, 1);
+    assert!(d.settings.outbox_failed.as_deref().is_some_and(|t| t.contains("n'a pas été envoyée")), "{:?}", d.settings.outbox_failed);
+    // Aucune nouvelle tentative : ni sur réveil, ni au passage suivant de la boucle.
+    a.rt().outbox().wake();
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(a.rt().outbox().pending().iter().find(|e| e.id() == v2.id()).unwrap().attempts, 1);
+    assert!(a.rt().outbox().pinned_collections().iter().any(|(_, c)| *c == v2.header.collection), "la version reste épinglée");
+    // Quitter ne patiente pas : la version refusée ne partira pas toute seule.
+    a.close_game();
+    let t = std::time::Instant::now();
+    assert_eq!(a.node.st.hearth_leave(&id, false).await.unwrap_err(), LeaveError::OutboxPending);
+    assert!(t.elapsed() < Duration::from_secs(30), "pas d'attente de 5 minutes ({:?})", t.elapsed());
+    for p in &peers {
+        p.stop().await;
+    }
+}
+
+const ALICE_UUID: &str = "0123456789abcdef0123456789abcdef";
+const ALICE_UUID_DASHED: &str = "01234567-89ab-cdef-0123-456789abcdef";
+
+/// Un vrai monde de serveur dédié : `level.dat` et fichier joueur en NBT gzip (le joueur a `n` niveaux d'expérience).
+fn nbt_world(dir: &Path, n: i32) {
+    use core_lib::hearth::nbt::{write_gz, Nbt, Tag};
+    let k = |s: &str| s.as_bytes().to_vec();
+    std::fs::create_dir_all(dir.join("region")).unwrap();
+    std::fs::create_dir_all(dir.join("playerdata")).unwrap();
+    let level = Tag::Compound(vec![(
+        k("Data"),
+        Tag::Compound(vec![(k("LevelName"), Tag::String(k("world"))), (k("DataVersion"), Tag::Int(3955)), (k("ModTag"), Tag::LongArray(vec![1, 2, 3]))]),
+    )]);
+    write_gz(&dir.join("level.dat"), &Nbt { name: vec![], root: level }).unwrap();
+    let player = Tag::Compound(vec![(k("XpLevel"), Tag::Int(n)), (k("Pos"), Tag::List(6, vec![Tag::Double(1.5), Tag::Double(70.0), Tag::Double(-2.0)]))]);
+    write_gz(&dir.join(format!("playerdata/{ALICE_UUID_DASHED}.dat")), &Nbt { name: vec![], root: player }).unwrap();
+    std::fs::write(dir.join("region/r.0.0.mca"), (0..50_000u32).map(|i| (i as u8).wrapping_add(n as u8)).collect::<Vec<u8>>()).unwrap();
+    std::fs::write(dir.join("session.lock"), b"verrou").unwrap();
+}
+
+/// « Exporter en monde solo » et « Jouer depuis cette version », sur de vrais fichiers : le monde d'une version est copié
+/// dans les mondes de l'instance sous « <groupe> (export du groupe) » avec le joueur remis dans `Data.Player`, jamais par
+/// dessus un monde existant, et une version dont le contenu a été libéré est refusée. Jouer depuis une ancienne version
+/// complète démarre le serveur depuis elle et fait apparaître une fourche à la fin de la partie.
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn exporter_en_monde_solo_et_jouer_depuis_une_version() {
+    use core_lib::hearth::nbt::{read_gz, Tag};
+    let (peers, g, id) = group_of(&["Alice", "Bob"]).await;
+    let (a, b) = (&peers[0], &peers[1]);
+    *lock(&a.node.st.profile) = Some(core_lib::types::Profile::Online { name: "Alice".into(), uuid: ALICE_UUID.into() });
+    let mut vs: Vec<p2p_lib::hearth::version::SignedVersion> = Vec::new();
+    for n in 1..=3 {
+        let d = a.dir.path().join(format!("monde-{n}"));
+        nbt_world(&d, n * 10);
+        let parent = vs.last().map(|v| (v.id(), v.header.number));
+        let v = a.rt().publish_version(g, &d, VersionKind::Session, parent, 60).await.unwrap();
+        wait_for("monde complet chez Bob", 40, || b.rt().head(&g).is_some_and(|h| h.id() == v.id() && b.rt().world_complete(&h))).await;
+        vs.push(v);
+    }
+    let saves = a.node.st.instances.game_dir(&a.instance).unwrap().join("saves");
+    let xp = |dir: &Path| -> Option<Tag> {
+        let mut l = read_gz(&dir.join("level.dat")).unwrap();
+        l.root.get_mut("Data").unwrap().get_mut("Player").and_then(|p| p.get_mut("XpLevel").map(|t| t.clone()))
+    };
+    let level_name = |dir: &Path| -> Tag {
+        let mut l = read_gz(&dir.join("level.dat")).unwrap();
+        l.root.get_mut("Data").unwrap().get_mut("LevelName").unwrap().clone()
+    };
+
+    // 1. Sans version : la dernière (n° 3), joueur remis dans level.dat, rien d'exclu, copie fidèle au magasin.
+    let e1 = a.node.st.hearth_export_solo(&id, None).await.unwrap();
+    assert_eq!((e1.world_name.as_str(), e1.version_number, e1.fallback, e1.has_player), ("Les copains (export du groupe)", 3, false, true));
+    let w1 = saves.join(&e1.world_name);
+    assert_eq!(xp(&w1), Some(Tag::Int(30)), "Data.Player vient de playerdata/<uuid>.dat de la n° 3");
+    assert_eq!(level_name(&w1), Tag::String(b"Les copains (export du groupe)".to_vec()));
+    let mut l = read_gz(&w1.join("level.dat")).unwrap();
+    assert_eq!(l.root.get_mut("Data").unwrap().get_mut("ModTag"), Some(&mut Tag::LongArray(vec![1, 2, 3])), "les tags inconnus passent tels quels");
+    let files: Vec<String> = read_tree(&w1).into_iter().map(|(n, _)| n).collect();
+    assert!(files.contains(&"region/r.0.0.mca".to_string()) && files.contains(&format!("playerdata/{ALICE_UUID_DASHED}.dat")));
+    assert!(!files.iter().any(|n| n == "session.lock"), "le verrou de session n'est pas exporté");
+    assert_eq!(std::fs::read(w1.join("region/r.0.0.mca")).unwrap(), std::fs::read(a.dir.path().join("monde-3/region/r.0.0.mca")).unwrap());
+    assert!(!std::fs::read_dir(&saves).unwrap().flatten().any(|e| e.file_name().to_string_lossy().starts_with('.')), "aucun dossier temporaire ne traîne");
+
+    // 2. Un monde du joueur qui porte déjà ce nom n'est jamais remplacé : l'export suivant prend un autre nom. Une version
+    //    précise s'exporte avec son propre joueur.
+    std::fs::write(w1.join("note.txt"), b"a moi").unwrap();
+    let e2 = a.node.st.hearth_export_solo(&id, Some(&vs[0].id().to_hex())).await.unwrap();
+    assert_eq!((e2.world_name.as_str(), e2.version_number), ("Les copains (export du groupe) 2", 1));
+    assert_eq!(xp(&saves.join(&e2.world_name)), Some(Tag::Int(10)));
+    assert_eq!(std::fs::read(w1.join("note.txt")).unwrap(), b"a moi", "le premier export est intact");
+    assert_eq!(a.node.st.hearth_export_solo(&id, Some(&vs[1].id().to_hex())).await.unwrap().world_name, "Les copains (export du groupe) 3");
+
+    // 3. Un autre compte (pas de fichier joueur à son UUID) : le monde s'exporte quand même, sans `Data.Player`.
+    *lock(&a.node.st.profile) = Some(core_lib::types::Profile::Online { name: "Zoe".into(), uuid: "ffffffffffffffffffffffffffffffff".into() });
+    let e4 = a.node.st.hearth_export_solo(&id, None).await.unwrap();
+    assert!(!e4.has_player);
+    assert_eq!(xp(&saves.join(&e4.world_name)), None);
+    *lock(&a.node.st.profile) = Some(core_lib::types::Profile::Online { name: "Alice".into(), uuid: ALICE_UUID.into() });
+
+    // 4. Refus clairs : version inconnue, identifiant invalide, groupe désactivé.
+    assert!(a.node.st.hearth_export_solo(&id, Some(&"00".repeat(32))).await.unwrap_err().contains("n'existe plus"));
+    assert!(a.node.st.hearth_export_solo(&id, Some("zz")).await.is_err());
+    assert_eq!(std::fs::read_dir(&saves).unwrap().count(), 4, "les refus n'ont rien créé");
+
+    // 5. La n° 1 est libérée de ce PC (plus de 14 jours, ni tête ni parent) : « Exporter » et « Jouer depuis cette version »
+    //    la refusent sans rien écrire ; la tête et les versions complètes restent exportables.
+    wait_for("file d'envoi vidée", 40, || a.rt().pending_outbox() == 0).await;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    a.rt().gc_versions_at(g, now + 15 * 86_400).await;
+    assert!(!a.rt().world_complete(&vs[0]) && a.rt().world_complete(&vs[1]) && a.rt().world_complete(&vs[2]));
+    let err = a.node.st.hearth_export_solo(&id, Some(&vs[0].id().to_hex())).await.unwrap_err();
+    assert!(err.contains("n'est plus sur ce PC"), "{err}");
+    assert_eq!(std::fs::read_dir(&saves).unwrap().count(), 4);
+    let err = a.node.st.hearth_play_from_version(&id, &vs[0].id().to_hex()).await.unwrap_err();
+    assert!(err.contains("n'est plus sur ce PC"), "{err}");
+    let err = a.node.st.hearth_play_from_version(&id, &vs[2].id().to_hex()).await.unwrap_err();
+    assert!(err.contains("clique sur Jouer"), "la version actuelle se joue avec Jouer : {err}");
+    assert!(a.runner.calls.lock().unwrap().is_empty(), "aucun refus n'a démarré de serveur");
+
+    // 6. Jouer depuis la n° 2 : le serveur part de son monde, et la partie, une fois publiée, fait une fourche avec la n° 3.
+    a.rt().probe_all().await;
+    a.node.st.hearth_play_from_version(&id, &vs[1].id().to_hex()).await.unwrap();
+    assert_eq!(a.state_of(&g), HearthStateKind::Hosting);
+    let served = read_tree(&a.rt().server_dir(&g).join("world"));
+    let from_v2 = std::fs::read(a.dir.path().join("monde-2/region/r.0.0.mca")).unwrap();
+    assert!(served.iter().any(|(n, d)| n == "region/r.0.0.mca" && *d == from_v2), "le serveur sert le monde de la n° 2, pas celui de la n° 3");
+    assert!(a.node.st.hearth_play_from_version(&id, &vs[1].id().to_hex()).await.unwrap_err().contains("tourne déjà"));
+    a.close_game();
+    wait_for("serveur arrêté", 30, || a.state_of(&g) != HearthStateKind::Hosting).await;
+    assert!(a.rt().is_fork(&g), "la partie depuis la n° 2 est une branche à côté de la n° 3");
+    let heads: Vec<u64> = { let mut h: Vec<u64> = a.rt().heads_of(&g).unwrap().iter().map(|v| v.header.number).collect(); h.sort(); h };
+    assert_eq!(heads, vec![3, 3]);
+    let err = a.node.st.hearth_play_from_version(&id, &vs[1].id().to_hex()).await.unwrap_err();
+    assert!(err.contains("Deux versions du monde"), "pas de seconde branche tant que la fourche est ouverte : {err}");
+    // Avec une fourche, l'export sans version demande de choisir ; avec une version, il marche.
+    assert!(a.node.st.hearth_export_solo(&id, None).await.unwrap_err().contains("Deux versions"));
+    assert_eq!(a.node.st.hearth_export_solo(&id, Some(&vs[2].id().to_hex())).await.unwrap().version_number, 3);
     for p in &peers {
         p.stop().await;
     }

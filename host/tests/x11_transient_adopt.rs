@@ -1,6 +1,6 @@
 //! Scene X11, chemin TRANSITOIRE (celui de tout bureau : un gestionnaire de fenetres tourne, `wm_present`) : la fenetre du jeu n'est
 //! PAS reparentee dans la scene, elle reste fille de la racine avec `WM_TRANSIENT_FOR` = launcher, `_MOTIF_WM_HINTS` sans decoration et
-//! `SKIP_TASKBAR` ; calee en coordonnees ECRAN, garee en -32000 hors du jeu, panneau decoupe par XShape, restituee au repli.
+//! `SKIP_TASKBAR` ; calee en coordonnees ECRAN, garee en -32000 hors du jeu, panneau par redimensionnement, restituee au repli.
 //! Le gestionnaire est SIMULE par la seule propriete `_NET_SUPPORTING_WM_CHECK` (`FakeWmMark`, posee AVANT `GameHost::embed`, qui
 //! lit `wm_present` une fois) : le serveur execute telles quelles les requetes de placement, les lectures X11 sont exactes. Ce que
 //! cela ne dit pas (cadre, contraintes de position, focus repris) : voir `x11_transient_openbox`. Voir aussi `common_x11`.
@@ -94,17 +94,14 @@ fn jeu_transitoire_adopte_pose_clippe_gare_et_rendu() {
     let (px, py, pw, ph) = parent.to_screen(zone);
     assert_eq!(window_under_pointer((px + 10) as i16, (py + 10) as i16), win, "la souris atteint le jeu");
 
-    // ---- panneau « en jeu » : le jeu garde sa taille, sa bande de droite est rognee (forme ET zone d'entree) ; le launcher dessous
+    // ---- panneau « en jeu » : le jeu transitoire est redimensionne (largeur - panneau, sans XShape) ; le launcher dessous
     assert!(host.set_panel(true, 150));
-    wait_until("jeu rogne par le panneau", T, || input_shape(win).len() == 1 && input_shape(win)[0].width as i32 == zw - 150);
-    assert_eq!(size(win), (zw, zh), "le jeu garde sa taille (rognee, pas redimensionnee)");
-    for shape in [input_shape(win), bounding_shape(win)] {
-        assert_eq!((shape[0].x, shape[0].y, shape[0].width as i32, shape[0].height as i32), (0, 0, zw - 150, zh), "forme du jeu rognee de la bande du panneau");
-    }
+    wait_until("jeu redimensionne par le panneau", T, || size(win) == (zw - 150, zh));
+    assert!(!bounding_shaped(win) && !input_shaped(win), "pas de rognage XShape en mode transitoire");
     assert_eq!(window_under_pointer((px + pw - 20) as i16, (py + ph / 2) as i16), parent.xid, "la bande du panneau est rendue au launcher");
     assert_eq!(window_under_pointer((px + 10) as i16, (py + 10) as i16), win, "le reste du jeu reste cliquable");
     assert!(host.set_panel(false, 0));
-    wait_until("forme d'origine rendue", T, || !bounding_shaped(win) && !input_shaped(win));
+    wait_until("taille d'origine rendue", T, || size(win) == (zw, zh));
     assert_eq!(window_under_pointer((px + pw - 20) as i16, (py + ph / 2) as i16), win, "plus de panneau : toute la zone est au jeu");
 
     // ---- le launcher se deplace : le jeu le suit, en coordonnees ecran

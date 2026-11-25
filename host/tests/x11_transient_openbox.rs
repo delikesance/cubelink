@@ -49,13 +49,12 @@ fn jeu_transitoire_sous_openbox() {
     wait_until("rideau ouvert sur le jeu", T, || host.in_game() && !visible(curtain));
     assert!(on_screen(win));
 
-    // ---- panneau : bande de droite rognee (forme et zone d'entree de la fenetre cliente)
+    // ---- panneau : fenetre transitoire redimensionnee (largeur - panneau)
     assert!(host.set_panel(true, 150));
-    wait_until("jeu rogne par le panneau", T, || input_shape(win).len() == 1 && input_shape(win)[0].width as i32 == zw - 150);
-    assert_eq!(bounding_shape(win).len(), 1);
-    assert_eq!(size(win), (zw, zh), "le jeu garde sa taille");
+    wait_until("jeu redimensionne par le panneau", T, || size(win) == (zw - 150, zh));
+    assert!(!bounding_shaped(win) && !input_shaped(win), "pas de rognage XShape en mode transitoire");
     assert!(host.set_panel(false, 0));
-    wait_until("forme d'origine rendue", T, || !bounding_shaped(win) && !input_shaped(win));
+    wait_until("taille d'origine rendue", T, || size(win) == (zw, zh));
 
     // ---- retour au launcher : le jeu est gare (10 x 10). Openbox, comme Mutter, ramene une fenetre geree dans l'ecran : le garage
     // a -32000 n'est pas tenu a la lettre. Ce qui compte : plus de jeu sur la zone de jeu, pas un jeu visible (reste au plus un coin).

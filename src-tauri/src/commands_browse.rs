@@ -116,13 +116,18 @@ impl AppState {
         browse::versions(&providers(), source, id, kind, minecraft, loader).await.map_err(|e| user_msg(&e))
     }
 
-    /// Compatibilité d'un mod avec une instance avant installation : déjà installé, version recommandée, blocages.
+    /// Mod : compatibilité avec l'instance avant installation (déjà installé, version recommandée, blocages). Pack de ressources / shader : `installed` seulement.
     pub async fn browse_check(&self, source: &str, id: &str, kind: &str, instance_id: &str, version_id: Option<&str>) -> Result<ContentCheck, String> {
         let source = BrowseSource::parse(source).map_err(|e| user_msg(&e))?;
-        if BrowseKind::parse(kind).map_err(|e| user_msg(&e))? != BrowseKind::Mod {
+        let kind = BrowseKind::parse(kind).map_err(|e| user_msg(&e))?;
+        if kind == BrowseKind::Modpack {
             return Ok(ContentCheck::default());
         }
         let (inst, dir) = self.instance_game_dir(instance_id)?;
+        if kind != BrowseKind::Mod {
+            // Pack de ressources / shader : seulement l'état « installé » (pas de simulation de compatibilité).
+            return Ok(browse::installed_check(&dir, kind, source, id));
+        }
         let p = providers();
         mod_fix::check_content(&p, &inst.minecraft, inst.loader.loader, &dir, &self.paths.store, &self.store, &DlOptions::default(), source, id, version_id)
             .await
@@ -167,7 +172,7 @@ impl AppState {
     async fn install_modpack(&self, p: &Providers, input: &BrowseInstallInput, dl: &DlOptions) -> Result<BrowseInstallResult, String> {
         let tmp = self.paths.root.join("tmp").join(format!("browse-{}", uuid_like()));
         let cb = |d: u32, t: u32, l: &str| self.emit_browse_progress(d, t, l);
-        let file = browse::fetch_modpack(p, input, &self.paths.store, &self.store, &tmp, dl, &cb).await.map_err(|e| {
+        let (file, origin) = browse::fetch_modpack(p, input, &self.paths.store, &self.store, &tmp, dl, &cb).await.map_err(|e| {
             let _ = std::fs::remove_dir_all(&tmp);
             user_msg(&e)
         })?;
@@ -178,10 +183,11 @@ impl AppState {
                 serde_json::json!({ "done": d, "total": t, "label": "Installation du modpack" }),
             );
         });
-        let res = self.import_pack_file(&file.display().to_string(), None, None, None, input.ram_mb, Some(progress)).await;
+        let res = self.import_pack_file(&file.display().to_string(), None, None, None, input.ram_mb, Some(progress), Some(origin)).await;
         let _ = std::fs::remove_dir_all(&tmp);
         let (instance, missing) = res?;
-        // Illustrations : meilleur effort, un échec n'affecte jamais l'installation.
+        // Illustrations : meilleur effort, un échec n'affecte jamais l'installation. L'origine est déjà posée sur
+        // l'instance (import_pack_file) : elles ne sont pas cherchées par nom.
         let instance = core_lib::art::try_apply_art(p, &self.instances, instance, input.source, &input.id).await;
         Ok(BrowseInstallResult { instance, installed: Vec::new(), missing })
     }
@@ -301,7 +307,7 @@ fn uuid_like() -> String {
     format!("{n:x}-{}", std::process::id())
 }
 
-/// Recherche dans le catalogue (Modrinth ou CurseForge).
+/// Recherche dans le catalogue (Modrinth ou CurseForge). Pour une instance Quilt, la recherche de mods inclut aussi les mods Fabric (OU de facettes sur Modrinth, pas de `modLoaderType` sur CurseForge).
 #[tauri::command(rename_all = "snake_case")]
 #[specta::specta(rename_all = "snake_case")]
 pub async fn browse_search(state: State<'_, Arc<AppState>>, query: BrowseQuery) -> Result<BrowsePage, String> {
@@ -322,7 +328,7 @@ pub async fn browse_versions(
     state.browse_versions(&source, &id, &kind, minecraft.as_deref(), loader.as_deref()).await
 }
 
-/// Installe un projet du catalogue (nouvelle instance pour un modpack). Progression par `browse://progress`.
+/// Installe un projet du catalogue (nouvelle instance pour un modpack). Un mod remplace les jars du même mod déjà présents sous un autre nom (modpack, ajout manuel) : ils vont dans `mods/.cubelink-backup/<id>/` (restaurables avec `mods_fix_undo` sur cet id ; le résultat de `browse_install` ne le renvoie pas encore, donc l'interface n'offre pas d'annulation). Une dépendance déjà fournie par un jar activé sous un autre nom est ignorée. Un pack de ressources ou un shader remplace les anciennes versions du même projet (sans sauvegarde : il se retélécharge) ; sa provenance est consignée dans `.cubelink-mods.json` sous la clé `dossier/fichier` (`shaderpacks/x.zip`), les mods gardent leur clé nue. Un pack posé avant ce correctif n'a pas de provenance. Pour un modpack, l'origine installée (`Instance.pack` : `source`, `project_id`, `version_id` de la version réellement téléchargée ; pour CurseForge, l'id du fichier) est enregistrée dans `instance.json` avant la récupération de l'illustration. Progression par `browse://progress`.
 #[tauri::command(rename_all = "snake_case")]
 #[specta::specta(rename_all = "snake_case")]
 pub async fn browse_install(state: State<'_, Arc<AppState>>, input: BrowseInstallInput) -> Result<BrowseInstallResult, String> {
@@ -350,7 +356,7 @@ pub async fn mods_check(state: State<'_, Arc<AppState>>, instance_id: String) ->
     state.mods_check(&instance_id).await
 }
 
-/// Compatibilité d'un mod du catalogue avec une instance (mods seulement ; autres types : résultat vide).
+/// Mod : compatibilité avec une instance (déjà installé, version recommandée, verdicts, blocages). Pack de ressources et shader : seulement `installed` (fichiers du projet encore présents dans `resourcepacks/` ou `shaderpacks/`, d'après la provenance ; pas de verdicts). Modpack : résultat vide.
 #[tauri::command(rename_all = "snake_case")]
 #[specta::specta(rename_all = "snake_case")]
 pub async fn browse_check(state: State<'_, Arc<AppState>>, source: String, id: String, kind: String, instance_id: String, version_id: Option<String>) -> Result<ContentCheck, String> {

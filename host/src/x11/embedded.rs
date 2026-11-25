@@ -5,8 +5,10 @@
 //! et peut recevoir le focus clavier (`XSetInputFocus`). Le panneau « en jeu » reduit la scene : le jeu garde sa taille, rognee.
 //! Le rideau est une fenetre ARGB `override-redirect` au-dessus de tout, calee sur la zone, traversee par la souris.
 //!
-//! Repli si le reparentage est refuse : `WM_TRANSIENT_FOR` = launcher, `_MOTIF_WM_HINTS` sans decoration, `SKIP_TASKBAR`, calage
-//! en coordonnees ecran (non verifie sans gestionnaire de fenetres reel).
+//! Repli si le reparentage est refuse (et d'office des qu'un gestionnaire de fenetres tourne) : `WM_TRANSIENT_FOR` = launcher,
+//! `_MOTIF_WM_HINTS` sans decoration, `SKIP_TASKBAR`, calage en coordonnees ecran, garage hors ecran, panneau decoupe par XShape.
+//! Verifie par `tests/x11_transient_adopt.rs` (gestionnaire simule par `_NET_SUPPORTING_WM_CHECK`) et `tests/x11_transient_openbox.rs`
+//! (vrai gestionnaire, `openbox`) ; pas sous Mutter, KWin ni XWayland.
 
 use std::time::Instant;
 
@@ -125,13 +127,14 @@ pub(super) fn sync(s: &Shared) {
     let Some(g) = cur.filter(|_| placed).filter(|g| util::exists(&s.conn, *g)) else { return };
     let inner = (w - pw).max(1);
     if transient {
-        // le jeu garde la taille de la zone entiere (son contenu ne bouge pas) ; la bande du panneau est rognee par XShape
-        let want = Some((g, w, h));
+        // Fenetre geree par le gestionnaire de fenetres (GNOME / XWayland) : on la redimensionne vraiment quand le panneau
+        // s'ouvre. Un rognage XShape suffit a l'affichage mais XWayland ignore la zone d'entree rognee : la fenetre du jeu
+        // garderait les clics au-dessus du panneau, visible mais inerte.
+        let want = Some((g, x, y, inner, h));
         if std::mem::replace(&mut s.lock().game_rect, want) != want {
-            place(s, g, (x, y, w, h));
+            place(s, g, (x, y, inner, h));
             let _ = s.conn.map_window(g);
         }
-        clip_game(s, g, pw, w, h);
         return;
     }
     let (restage, remap, regame) = {
@@ -140,8 +143,8 @@ pub(super) fn sync(s: &Shared) {
         let restage = st.stage_rect != Some(want);
         st.stage_rect = Some(want);
         let remap = !std::mem::replace(&mut st.stage_mapped, true);
-        let regame = st.game_rect != Some((g, w, h));
-        st.game_rect = Some((g, w, h));
+        let regame = st.game_rect != Some((g, 0, 0, w, h));
+        st.game_rect = Some((g, 0, 0, w, h));
         (restage, remap, regame)
     };
     if restage {
@@ -160,21 +163,6 @@ pub(super) fn sync(s: &Shared) {
     if moved || restage || regame {
         notify_game(s, g, false);
     }
-}
-
-/// Rogne la bande de droite (`pw` px) de la fenetre transitoire du jeu : forme et zone d'entree, pour que le panneau du launcher,
-/// dessous, reste visible et cliquable. `pw` = 0 : forme d'origine rendue.
-fn clip_game(s: &Shared, g: u32, pw: i32, w: i32, h: i32) {
-    let key = Some((g, pw.min(w - 1).max(0)));
-    if std::mem::replace(&mut s.lock().game_clip, key) == key {
-        return;
-    }
-    let c = &s.conn;
-    let rect = [Rectangle { x: 0, y: 0, width: clamp_u16((w - pw).max(1)), height: clamp_u16(h) }];
-    for kind in [shape::SK::BOUNDING, shape::SK::INPUT] {
-        let _ = if pw > 0 { shape::rectangles(c, shape::SO::SET, kind, ClipOrdering::UNSORTED, g, 0, 0, &rect).map(drop) } else { shape::mask(c, shape::SO::SET, kind, g, 0, 0, x11rb::NONE).map(drop) };
-    }
-    s.flush();
 }
 
 /// Envoie au jeu le `ConfigureNotify` SYNTHETIQUE de l'ICCCM 4.1.5 : sa geometrie reelle (taille du serveur) en coordonnees
@@ -593,20 +581,35 @@ pub(super) fn shown(s: &Shared, win: u32) {
 /// Le jeu a deplace ou redimensionne SA fenetre (`e` : sa geometrie dans la scene). Ce qui n'est pas notre calage est une
 /// correction a refaire, et peut etre un plein ecran : fenetre de la taille de l'ecran alors que la zone n'est pas l'ecran.
 pub(super) fn game_moved(s: &Shared, win: u32, got: (i32, i32, i32, i32)) {
-    let (zone, current, closing, fullscreen, placed, known) = {
+    let (zone, current, closing, fullscreen, placed, known, transient) = {
         let st = s.lock();
-        (st.view, st.current == Some(win), st.close_asked, st.fullscreen, st.machine.flow().placed() && !st.pose_pending, st.origin.contains_key(&win) && st.adopted.contains(&win))
+        (
+            st.view,
+            st.current == Some(win),
+            st.close_asked,
+            st.fullscreen,
+            st.machine.flow().placed() && !st.pose_pending,
+            st.origin.contains_key(&win) && st.adopted.contains(&win),
+            st.origin.get(&win).is_some_and(|o| o.transient),
+        )
     };
-    if !known || got == (0, 0, zone.2, zone.3) {
+    if !known {
+        return;
+    }
+    // notre propre calage : (0, 0) dans la scene ; en transitoire, le jeu est enfant de la racine et son ConfigureNotify est en
+    // coordonnees ecran. Sans ce second cas, l'echo de notre recalage serait pris pour un mouvement du jeu (plein ecran quitte aussitot).
+    let ours = if transient { to_screen(s, zone) } else { Some((0, 0, zone.2, zone.3)) };
+    if ours == Some(got) {
         return;
     }
     if got.0 <= -30000 {
         return; // notre propre garage
     }
-    let (sw, sh) = util::screen_size(&s.conn, s.root);
     if current && !closing {
-        let covers = (got.2, got.3) == (sw, sh);
-        let on = if fullscreen { covers || s.lock().fullscreen_msg } else { covers && (zone.2, zone.3) != (sw, sh) };
+        // le moniteur du launcher, pas le bureau virtuel : un jeu 1920 x 1080 sur le moniteur de 3840 x 1080 est en plein ecran
+        let (_, _, mw, mh) = util::monitor_rect(&s.conn, s.root, s.parent);
+        let covers = (got.2, got.3) == (mw, mh);
+        let on = if fullscreen { covers || s.lock().fullscreen_msg } else { covers && (zone.2, zone.3) != (mw, mh) };
         if on != fullscreen {
             set_fullscreen(s, on, if on { "fenetre a la taille de l'ecran" } else { "fenetre plus a la taille de l'ecran" });
         }
@@ -767,8 +770,12 @@ fn give_back(s: &Shared, r: &Returned, front: bool) {
         let _ = c.delete_property(g, a._NET_WM_STATE);
     }
     let (ox, oy, ow, oh) = r.origin.rect;
-    let (x, y, w, h) = if show || ox <= -30000 || oy <= -30000 { guard::returned_rect(util::work_area(c, a, s.root), (ow, oh)) } else { (ox, oy, ow, oh) };
-    let _ = c.reparent_window(g, s.root, clamp16(x), clamp16(y));
+    let (x, y, w, h) = if show || ox <= -30000 || oy <= -30000 { guard::returned_rect(util::work_area(c, a, s.root, s.parent), (ow, oh)) } else { (ox, oy, ow, oh) };
+    if !r.origin.transient {
+        let _ = c.reparent_window(g, s.root, clamp16(x), clamp16(y));
+    }
+    // transitoire : la fenetre n'a jamais quitte le gestionnaire de fenetres (elle est dans SON cadre) ; la reparenter vers la
+    // racine la ferait demonter et la laisserait cachee. Le gestionnaire la replace lui-meme a la demande de `place`.
     place(s, g, (x, y, w, h));
     if show {
         raise(s, g);

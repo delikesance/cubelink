@@ -43,6 +43,7 @@
     "windows": { "wix": { "language": "fr-FR" } }
   },
   "plugins": {
+    "deep-link": { "desktop": { "schemes": ["cubelink"] } },
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDVEQzYxOThBNEIwNkQ0MjQKUldRazFBWkxpaG5HWFJWS1A5Skg2eWd0NTNBY3Y2U2hiQ0t3ajV5VVF0a0MzR0l0SFJZcWJ4YTMK",
       "endpoints": ["https://github.com/delikesance/cubelink/releases/latest/download/latest.json"]

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import "./mycode.css";
 import { useServices } from "../../app/context";
 import { Button } from "../../ui";
+import { useEscapeCancel } from "../../ui/useEscapeCancel";
 
 type State =
   | { step: "loading" }
@@ -33,6 +34,9 @@ export default function MyCode() {
     };
   }, []);
 
+  // Échap annule la confirmation (sans quitter Paramètres) ; avalé sans effet pendant la régénération.
+  useEscapeCancel(confirming, () => { if (!busy) setConfirming(false); });
+
   const load = useCallback(async () => {
     setState({ step: "loading" });
     try {
@@ -44,6 +48,14 @@ export default function MyCode() {
   }, [services]);
 
   useEffect(() => { void load(); }, [load]);
+
+  // Mes adresses changent après le montage (réseau, IPv6, port ouvert sur la box quelques secondes après le
+  // démarrage) : le code contient mes adresses, on le redemande sans clignotement ni message d'erreur.
+  useEffect(() => services.onFriendCodeChanged(() => {
+    void services.friendMyCode().then((code) => {
+      if (alive.current) setState((s) => (s.step === "ready" && s.code === code ? s : { step: "ready", code }));
+    }, () => {});
+  }), [services]);
 
   const say = (msg: string) => {
     setNotice(msg);
@@ -71,6 +83,21 @@ export default function MyCode() {
       selectCode();
       if (timer.current) clearTimeout(timer.current);
       setNotice("Copie impossible : le code est sélectionné, utilise Ctrl+C.");
+    }
+  };
+
+  // Le lien est demandé au moment du clic : il suit toujours le code courant (jeton compris).
+  const copyLink = async () => {
+    if (state.step !== "ready") return;
+    try {
+      const link = await services.friendMyLink();
+      if (!navigator.clipboard?.writeText) throw new Error("indisponible");
+      await navigator.clipboard.writeText(link);
+      if (alive.current) say("Lien copié");
+    } catch {
+      if (!alive.current) return;
+      if (timer.current) clearTimeout(timer.current);
+      setNotice("Copie du lien impossible : copie plutôt le code.");
     }
   };
 
@@ -113,7 +140,7 @@ export default function MyCode() {
 
       {confirming && (
         <div className="mycode-confirm" role="group" aria-label="Confirmer le nouveau code">
-          <p>Ton ancien code ne fonctionnera plus. Tes amis actuels ne sont pas affectés. Continuer&nbsp;?</p>
+          <p>Ton ancien code ne permettra plus de t'envoyer de nouvelles demandes d'ami. Tes amis actuels ne sont pas affectés. Ta clé ne change pas : ton appareil reste joignable par la connexion de base. Continuer&nbsp;?</p>
           <div className="mycode-actions">
             <Button variant="danger" onClick={() => { void regenerate(); }} loading={busy}>Générer un nouveau code</Button>
             <Button variant="secondary" onClick={() => setConfirming(false)} disabled={busy}>Annuler</Button>
@@ -133,13 +160,16 @@ export default function MyCode() {
         {state.step === "ready" && (
           <>
             <code className="mycode-code" ref={codeRef} aria-label={`Mon code ami : ${state.code}`}>{state.code}</code>
-            <Button variant="secondary" className={notice === "Copié" ? "is-copied" : undefined} onClick={() => { void copy(); }}>{notice === "Copié" ? "Copié" : "Copier"}</Button>
+            <div className="mycode-actions">
+              <Button variant="secondary" className={notice === "Copié" ? "is-copied" : undefined} onClick={() => { void copy(); }}>{notice === "Copié" ? "Copié" : "Copier"}</Button>
+              <Button variant="secondary" className={notice === "Lien copié" ? "is-copied" : undefined} onClick={() => { void copyLink(); }}>{notice === "Lien copié" ? "Lien copié" : "Copier mon lien"}</Button>
+            </div>
           </>
         )}
       </div>
 
-      <div className="mycode-live" aria-live="polite" aria-atomic="true">{notice === "Copié" ? "" : notice}</div>
-      <span className="mycode-help">Ce code ne contient aucun secret. Il permet à ton ami de te joindre&nbsp;: ne le publie pas.</span>
+      <div className="mycode-live" aria-live="polite" aria-atomic="true">{notice === "Copié" || notice === "Lien copié" ? "" : notice}</div>
+      <span className="mycode-help">Ce code permet à ton ami de te joindre et de t'envoyer une demande&nbsp;: ne le publie pas. Trop partagé&nbsp;? Génère-en un nouveau. Le lien fait la même chose&nbsp;: un clic dessus ouvre Cubelink chez ton ami (Discord ne le rend pas cliquable&nbsp;: colle plutôt le code).</span>
     </section>
   );
 }

@@ -1,4 +1,5 @@
-import { useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { setBackGuard } from "../../app/router";
 import "./install.css";
 import { Button, Card } from "../../ui";
 import { ICONS, Icon } from "../../ui";
@@ -53,6 +54,15 @@ export function TransferPanel({ t, failure, extraError, extra, status, onCancell
     s === "done" ? "Terminée" : s === "todo" ? "À venir"
       : i === 1 && p ? `En cours · ${p.files_done} sur ${p.files_total}` : "En cours";
   const finished = phase === "done" || phase === "failed";
+
+  // Transfert actif : Retour (barre de titre, Alt+←, souris) ne quitte pas l'écran, il ouvre la confirmation
+  // d'annulation. Sinon l'écran serait démonté, sans plus d'interface ni de lancement automatique.
+  useEffect(() => {
+    if (finished) return;
+    return setBackGuard(() => { setConfirming(true); return true; });
+  }, [finished]);
+  // Fin ou échec pendant la confirmation : elle n'a plus de sens.
+  useEffect(() => { if (finished) setConfirming(false); }, [finished]);
 
   return (
     <>
@@ -136,9 +146,6 @@ export function TransferPanel({ t, failure, extraError, extra, status, onCancell
         <span className="inst-note" role="note">
           {unknownMods.length > 1 ? `${unknownMods.length} mods reçus ne sont pas référencés` : "Un mod reçu n'est pas référencé"} dans les catalogues : {unknownMods.join(", ")}.
         </span>
-      )}
-      {p?.via_relay && (
-        <span className="inst-note">Transfert via un relais (serveur intermédiaire), plus lent qu'une connexion directe. Les fichiers restent vérifiés par leur empreinte.</span>
       )}
     </>
   );

@@ -16,12 +16,11 @@ test('T1 : B ajoute A, codes de verification identiques, A accepte, presence en 
   const codeB = ((await verifyB.textContent()) ?? '').trim();
   expect(codeB).not.toBe('');
 
-  // A voit le badge (Accueil), puis la demande dans l'onglet Demandes.
+  // A voit le lien « 1 demande » (Accueil), puis la demande en tete de Parametres > Amis.
   await gotoRoute(appA, 'main');
-  await expect(appA.page.getByRole('button', { name: /^Amis \(1 demande\)/ })).toBeVisible({ timeout: 30_000 });
+  await expect(appA.page.getByRole('button', { name: '1 demande', exact: true })).toBeVisible({ timeout: 30_000 });
   await gotoRoute(appA, 'friends');
-  await expect(appA.page.getByRole('tab', { name: /Demandes/ }).getByLabel('1 demande en attente')).toBeVisible({ timeout: 30_000 });
-  await appA.page.getByRole('tab', { name: /Demandes/ }).click();
+  await expect(appA.page.getByLabel('1 demande en attente')).toBeVisible({ timeout: 30_000 });
   await expect(appA.page.getByRole('heading', { name: `Demande de ${NAME_B}` })).toBeVisible();
   const verifyA = appA.page.getByLabel('Code de vérification', { exact: true });
   await expect(verifyA).toBeVisible();
@@ -38,14 +37,12 @@ test('T1 : B ajoute A, codes de verification identiques, A accepte, presence en 
     await expect.poll(async () => (await invoke<{ presence: string }[]>(app.page, 'friend_list'))[0]?.presence, { timeout: 60_000 }).toBe('online');
   }
 
-  // Chacun voit l'autre dans sa liste d'amis (Accueil) avec la presence en ligne.
+  // Chacun voit l'autre dans la colonne d'amis de l'Accueil (onglet « Tous » par defaut) avec la presence en ligne.
   for (const [app, other] of [[appA, NAME_B], [appB, NAME_A]] as const) {
     await gotoRoute(app, 'main');
-    await app.page.getByRole('button', { name: /^Amis/ }).click();
-    const friends = app.page.getByRole('dialog', { name: 'Amis · 1' });
+    const friends = app.page.getByRole('complementary', { name: 'Amis' }).getByRole('list', { name: 'Amis' });
     await expect(friends.getByText(other).first()).toBeVisible({ timeout: 20_000 });
-    await expect(friends.getByRole('list', { name: 'Amis' })).toBeVisible();
-    await expect(friends.getByText('En ligne')).toBeVisible({ timeout: 30_000 });
+    await expect(friends.getByText('En ligne', { exact: true })).toBeVisible({ timeout: 30_000 });
   }
   const la = await invoke<{ friend: { name: string }; presence: string }[]>(appA.page, 'friend_list');
   expect(la[0].friend.name).toBe(NAME_B);
@@ -82,14 +79,58 @@ test('T1 negatif : code invalide, soi-meme, refus', async ({ world }) => {
   await sendRequest(appB, codeA);
   await expect(appB.page.getByLabel(/^Code de vérification : /)).toBeVisible({ timeout: 30_000 });
   await gotoRoute(appA, 'friends');
-  await appA.page.getByRole('tab', { name: /Demandes/ }).click();
   await appA.page.getByRole('button', { name: `Refuser ${NAME_B}` }).click({ timeout: 30_000 });
   await expect(appA.page.getByText(`Demande de ${NAME_B} refusée.`)).toBeVisible();
   await expect(appA.page.getByText('Aucune demande en attente.')).toBeVisible();
+  // Le demandeur apprend le refus (formulation neutre), sans changer d'écran.
+  await expect(appB.page.getByText("Ta demande n'a pas été acceptée.").first()).toBeVisible({ timeout: 30_000 });
   await new Promise((r) => setTimeout(r, 1500));
   expect((await invoke<unknown[]>(appA.page, 'friend_list')).length).toBe(0);
   expect((await invoke<unknown[]>(appB.page, 'friend_list')).length).toBe(0);
   await gotoRoute(appA, 'main');
-  await appA.page.getByRole('button', { name: /^Amis/ }).click();
-  await expect(appA.page.getByRole('dialog', { name: 'Amis · 0' })).toBeVisible();
+  await expect(appA.page.getByRole('complementary', { name: 'Amis' }).getByText("Aucun ami pour l'instant.")).toBeVisible();
+});
+
+test('T1 annulation : B annule sa demande, elle disparait chez A et B peut redemander tout de suite', async ({ world }) => {
+  const { appA, appB } = world;
+  await loginBoth(world);
+  const codeA = await readMyCode(appA);
+  await sendRequest(appB, codeA);
+  await expect(appB.page.getByLabel(/^Code de vérification : /)).toBeVisible({ timeout: 30_000 });
+  await expect.poll(async () => (await invoke<{ total: number }>(appA.page, 'friend_requests', { offset: 0, limit: 5, query: null })).total, { timeout: 30_000 }).toBe(1);
+
+  await appB.page.getByRole('button', { name: 'Annuler la demande' }).click();
+  await expect(appB.page.getByLabel(/^Code de vérification : /)).toHaveCount(0);
+  await expect.poll(async () => (await invoke<{ total: number }>(appA.page, 'friend_requests', { offset: 0, limit: 5, query: null })).total, { timeout: 30_000 }).toBe(0);
+
+  // Pas de « déjà en cours » : la nouvelle demande part tout de suite.
+  await sendRequest(appB, codeA);
+  await expect(appB.page.getByLabel(/^Code de vérification : /)).toBeVisible({ timeout: 30_000 });
+  await expect.poll(async () => (await invoke<{ total: number }>(appA.page, 'friend_requests', { offset: 0, limit: 5, query: null })).total, { timeout: 30_000 }).toBe(1);
+});
+
+test('T1 retrait : A retire B, B n\'obtient plus de PONG et A n\'a plus d\'ami', async ({ world }) => {
+  const { appA, appB } = world;
+  await loginBoth(world);
+  const codeA = await readMyCode(appA);
+  await sendRequest(appB, codeA);
+  await expect(appB.page.getByLabel(/^Code de vérification : /)).toBeVisible({ timeout: 30_000 });
+  await expect.poll(async () => (await invoke<{ items: { public_key: string }[] }>(appA.page, 'friend_requests', { offset: 0, limit: 5, query: null })).items.length, { timeout: 30_000 }).toBe(1);
+  const keyB = (await invoke<{ items: { public_key: string }[] }>(appA.page, 'friend_requests', { offset: 0, limit: 5, query: null })).items[0].public_key;
+  await invoke(appA.page, 'friend_accept', { public_key: keyB });
+  for (const app of [appA, appB]) {
+    await expect.poll(async () => (await invoke<{ presence: string }[]>(app.page, 'friend_list'))[0]?.presence, { timeout: 60_000 }).toBe('online');
+  }
+
+  // A retire B depuis Paramètres > Amis : confirmation, puis la liste se vide.
+  await gotoRoute(appA, 'friends');
+  await appA.page.getByRole('button', { name: `Retirer ${NAME_B} de mes amis` }).click();
+  const dialog = appA.page.getByRole('alertdialog', { name: 'Retirer cet ami ?' });
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole('button', { name: 'Retirer' }).click();
+  await expect(appA.page.getByText(`${NAME_B} n'est plus dans tes amis.`)).toBeVisible();
+  expect((await invoke<unknown[]>(appA.page, 'friend_list')).length).toBe(0);
+
+  // Chez B, la sonde de A n'obtient plus de PONG : A apparaît hors ligne.
+  await expect.poll(async () => (await invoke<{ presence: string }[]>(appB.page, 'friend_list'))[0]?.presence, { timeout: 120_000 }).toBe('offline');
 });

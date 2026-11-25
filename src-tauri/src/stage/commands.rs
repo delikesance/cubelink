@@ -40,6 +40,14 @@ pub fn stage_supported() -> bool {
     stage_supported_on(cfg!(windows), cfg!(target_os = "linux"), x11)
 }
 
+/// Le joueur redonne sa chance a la Scene apres une coupure de session (replis de suite) : le prochain lancement y retourne.
+/// Rend vrai si ce prochain lancement ira dans la Scene (hote present, reglage « Jeu integre » actif).
+#[tauri::command(rename_all = "snake_case")]
+#[specta::specta(rename_all = "snake_case")]
+pub fn stage_retry(state: State<'_, Arc<AppState>>) -> bool {
+    state.stage.retry()
+}
+
 /// Ouvre (`true`) ou ferme (`false`) le panneau « en jeu » (Echap, bouton Fermer).
 #[tauri::command(rename_all = "snake_case")]
 #[specta::specta(rename_all = "snake_case")]

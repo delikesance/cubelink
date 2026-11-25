@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use p2p_lib::friends_db::FriendsDb;
 use p2p_lib::hearth::model::GroupId;
 use p2p_lib::presence::{FriendLookup, PeerKey};
+use p2p_lib::reach::Reach;
 use p2p_lib::transfer::send::PeerAuthorizer;
 use p2p_lib::tunnel::TunnelAuthorizer;
 
@@ -75,6 +76,12 @@ impl SessionAccess {
         }
     }
 
+    /// Retire l'accès d'invité (monde solo) de ce pair. Les groupes Hearth ne sont pas touchés : l'appartenance à un
+    /// groupe ne dépend pas de l'amitié (voir `docs/hearth.md`).
+    pub fn revoke_guest(&self, key: &PeerKey) {
+        lock(&self.inner).guests.remove(key);
+    }
+
     /// Fin de la partie d'un groupe : plus aucun accès à ce groupe. Le monde solo partagé en parallèle n'est pas touché.
     pub fn close_group(&self, group: &GroupId) {
         let mut sets = lock(&self.inner);
@@ -90,6 +97,11 @@ impl SessionAccess {
         sets.guests.clear();
         sets.groups.clear();
         sets.serving = None;
+    }
+
+    /// Le monde solo est fermé : plus aucun invité pour lui. L'accès des groupes n'est pas touché.
+    pub fn clear_guests(&self) {
+        lock(&self.inner).guests.clear();
     }
 
     /// Vrai si ce pair a une entrée, pour une cible quelconque (sans tenir compte de l'amitié).
@@ -153,6 +165,18 @@ impl FriendsAuthz {
         &self.access
     }
 
+    /// Pourquoi ce pair ne peut pas rejoindre la partie : `NotFriend` s'il n'est pas ami (la seule raison qui ne
+    /// révèle rien de la partie : un inconnu qui connaît la clé de l'hôte n'apprend ni qu'il sert un groupe ni son
+    /// état), sinon `NotInvited` : ami non invité ou invitation retirée, ou ami retiré du groupe servi. Un ancien
+    /// membre qui n'est pas ami n'est pas distinguable d'un inconnu : il reçoit `NotFriend`.
+    pub fn join_denial(&self, key: &PeerKey) -> Reach {
+        if self.is_friend_hex(&hex::encode(key)) {
+            Reach::NotInvited
+        } else {
+            Reach::NotFriend
+        }
+    }
+
     /// Ce pair peut-il rejoindre la partie en cours (tunnel, manifeste, fichiers) ? Seule la cible servie compte : un
     /// invité (qui doit encore être ami accepté) pour un monde solo, un membre pour un groupe, personne d'autre.
     pub fn may_join(&self, key: &PeerKey) -> bool {
@@ -174,6 +198,9 @@ impl PeerAuthorizer for FriendsAuthz {
 impl TunnelAuthorizer for FriendsAuthz {
     fn is_allowed(&self, public_key: &[u8; 32]) -> bool {
         self.may_join(public_key)
+    }
+    fn denial(&self, public_key: &[u8; 32]) -> Reach {
+        self.join_denial(public_key)
     }
 }
 
@@ -213,6 +240,29 @@ mod tests {
         assert!(PeerAuthorizer::is_allowed(&a, &key.to_uppercase()));
         assert!(TunnelAuthorizer::is_allowed(&a, &[0xab; 32]));
         assert!(!access.allow_friend(&[0xab; 32]), "déjà autorisé");
+    }
+
+    #[test]
+    fn raison_du_refus_ami_non_invite_ou_non_ami_ou_membre_retire() {
+        let (a, access, _, _) = authz(true);
+        // Ami non invité : « pas invité » (il peut demander à rejoindre), pas « pas ami ».
+        assert_eq!(TunnelAuthorizer::denial(&a, &[0xab; 32]), Reach::NotInvited);
+        assert_eq!(a.join_denial(&[0xab; 32]), Reach::NotInvited);
+        // Non-ami : « pas ami », même s'il figure dans la liste d'accès.
+        access.allow_friend(&[0xcd; 32]);
+        assert_eq!(TunnelAuthorizer::denial(&a, &[0xcd; 32]), Reach::NotFriend);
+        // Invité révoqué (fin de partie, invitation annulée) : redevient « pas invité ».
+        assert!(access.allow_friend(&[0xab; 32]));
+        access.revoke(&[0xab; 32]);
+        assert_eq!(TunnelAuthorizer::denial(&a, &[0xab; 32]), Reach::NotInvited);
+        // Groupe servi : un inconnu ne doit rien apprendre (« pas ami »), même retiré du groupe ; un ami retiré est « pas invité ».
+        let g = GroupId([7; 16]);
+        access.allow_members(g, [[0xcd; 32], [0xab; 32]]);
+        access.revoke_member(&g, &[0xcd; 32]);
+        access.revoke_member(&g, &[0xab; 32]);
+        assert_eq!(TunnelAuthorizer::denial(&a, &[0xcd; 32]), Reach::NotFriend);
+        assert_eq!(TunnelAuthorizer::denial(&a, &[0xee; 32]), Reach::NotFriend);
+        assert_eq!(TunnelAuthorizer::denial(&a, &[0xab; 32]), Reach::NotInvited);
     }
 
     #[test]

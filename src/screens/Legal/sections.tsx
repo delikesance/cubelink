@@ -30,10 +30,11 @@ export const SECTIONS: LegalSection[] = [
         <ul>
           <li>Ton pseudo Minecraft, affiché à tes amis. Cubelink ne le vérifie pas auprès d'eux.</li>
           <li>Une clé publique générée au premier lancement, qui identifie ton installation.</li>
-          <li>Ton adresse IP, visible de tes amis en connexion directe et du relais quand il transmet ton trafic.</li>
-          <li>Un cache local de mods, sur ton disque.</li>
+          <li>Ton adresse IP, visible de tes amis en connexion directe, et écrite dans ton code ami (jusqu'à 8 adresses). Aucun serveur intermédiaire ne la voit.</li>
+          <li>Le fait qu'un jeu tourne chez toi (statut «&nbsp;en jeu&nbsp;»), visible de tes amis.</li>
+          <li>Un cache local de mods, sur ton disque. Pour un monde de groupe Hearth, une copie du monde est conservée chez les autres membres du groupe.</li>
         </ul>
-        <p>Cubelink ne stocke ni ton compte ni ta liste d'amis sur un serveur. Un relais peut transmettre ton trafic quand la connexion directe échoue.</p>
+        <p>Cubelink ne stocke ni ton compte ni ta liste d'amis sur un serveur, et ne publie ni ta clé ni ton adresse dans un annuaire public. Aucun relais ni service tiers ne relie tes amis à toi. Cubelink peut démarrer avec ta session (réglage modifiable) pour que tes amis te retrouvent. Les images des descriptions de mods viennent de sites tiers, qui voient ton adresse IP.</p>
         <details className="legal-more">
           <summary>En savoir plus</summary>
           <p>Ta liste d'amis reste sur ton ordinateur, et aucune donnée de compte n'est conservée sur un serveur du projet. La connexion à ton compte Microsoft se fait directement entre ton ordinateur et Microsoft.</p>
@@ -43,11 +44,11 @@ export const SECTIONS: LegalSection[] = [
     ),
   },
   {
-    id: "relais", label: "Le relais", content: (
+    id: "relais", label: "Pas de relais", content: (
       <>
-        <h3>Le relais</h3>
-        <p>Un relais est un serveur intermédiaire. Il transmet ton trafic quand la connexion directe échoue, ou si tu as choisi «&nbsp;Passer toujours par le relais&nbsp;». Il voit alors ton adresse IP.</p>
-        <p>Ce que le relais peut lire du contenu transmis n'est pas encore établi&nbsp;: ne pars pas du principe qu'il ne voit rien. Cette partie sera précisée une fois le fonctionnement du relais validé.</p>
+        <h3>Pas de relais</h3>
+        <p>Un relais est un serveur intermédiaire qui transmet du trafic quand deux appareils ne peuvent pas se joindre. Cubelink n'en utilise aucun&nbsp;: ni les relais publics du projet Iroh (société n0), ni un relais de Cubelink. Tes connexions avec tes amis sont directes, et aucun annuaire public ne connaît ta clé ni ton adresse.</p>
+        <p>Pour que ça marche, au moins l'un de vous deux doit être joignable&nbsp;: adresse IPv6 ou IPv4 publique, ou port ouvert automatiquement sur ta box (UPnP). En attendant la découverte par DHT Mainline et des relais Cubelink, deux amis tous deux derrière un réseau très fermé (NAT strict ou CGNAT, sans IPv6 ni UPnP) peuvent ne pas se joindre. Réglages, onglet Réseau, «&nbsp;Tester ma connexion&nbsp;» indique où tu en es.</p>
       </>
     ),
   },

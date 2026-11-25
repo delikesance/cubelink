@@ -2,9 +2,9 @@ import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } fr
 import "./create.css";
 import { useBack, useScreenTitle, useServices } from "../../app/context";
 import { navigate } from "../../app/router";
-import { setImportWarning } from "../../app/importWarning";
+import { peekPrepareDeferred, setImportWarning, setPrepareDeferred } from "../../app/importWarning";
 import type { Loader } from "../../services/types";
-import { Button, Field, Input, RAM_DEFAULT, Select, RamPicker, useDefaultRam } from "../../ui";
+import { Button, Field, Input, RAM_DEFAULT, Select, RamPicker, useDefaultRam, useSystemRam } from "../../ui";
 import { ICONS, Icon } from "../../ui";
 
 export const RECOMMENDED_VERSION = "1.21.1";
@@ -62,9 +62,12 @@ export default function Create({ pickMrpack }: CreateProps = {}) {
   const [loader, setLoader] = useState<Loader>("neoforge");
   const [ram, setRam] = useState(RAM_DEFAULT);
   const defaultRam = useDefaultRam(services);
+  const systemRam = useSystemRam(services);
   const [advanced, setAdvanced] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** Étape en cours de la préparation du jeu (après création ou import), pour ne pas laisser un spinner muet. */
+  const [progress, setProgress] = useState<string | null>(null);
   const [pathOpen, setPathOpen] = useState(false);
   const [path, setPath] = useState("");
   const rootRef = useRef<HTMLDivElement>(null);
@@ -96,6 +99,8 @@ export default function Create({ pickMrpack }: CreateProps = {}) {
   }, [services]);
 
   useEffect(() => services.onImportWarning((e) => setImportWarning(e.missing)), [services]);
+  useEffect(() => services.onImportProgress((e) => { if (alive.current) setProgress(e.message); }), [services]);
+  useEffect(() => services.onImportDeferred((e) => setPrepareDeferred(e.message)), [services]);
 
   const back = useBack("main");
   const backRef = useRef(back);
@@ -115,9 +120,9 @@ export default function Create({ pickMrpack }: CreateProps = {}) {
     return () => document.removeEventListener("keydown", onEsc);
   }, []);
 
-  /** Page de la nouvelle instance si son id est connu, sinon l'accueil. */
+  /** Page de la nouvelle instance si son id est connu, sinon l'accueil (aussi quand le jeu n'a pas pu être préparé : l'avis s'y affiche). */
   const openCreated = (id?: string) => {
-    if (id) navigate("instance", { id });
+    if (id && !peekPrepareDeferred()) navigate("instance", { id });
     else navigate("main");
   };
 
@@ -131,6 +136,8 @@ export default function Create({ pickMrpack }: CreateProps = {}) {
       return;
     }
     setError(null);
+    setProgress(null);
+    setPrepareDeferred(null);
     setBusy(true);
     try {
       const created = await services.instancesCreate({ name: name.trim(), minecraft, loader: { loader, version: "" }, ram_mb: ram });
@@ -146,6 +153,8 @@ export default function Create({ pickMrpack }: CreateProps = {}) {
     if (!file) { setError("Indique le chemin du modpack (.mrpack ou .zip)."); return; }
     setError(null);
     setImportWarning(null);
+    setProgress(null);
+    setPrepareDeferred(null);
     setBusy(true);
     try {
       // Nom, version et loader servent seulement aux zip sans métadonnées.
@@ -224,7 +233,7 @@ export default function Create({ pickMrpack }: CreateProps = {}) {
             </div>
           )}
           <div className="create-live" aria-live="polite">
-            {busy && <p className="create-info">Opération en cours…</p>}
+            {busy && <p className="create-info" role="status">{progress ?? "Opération en cours…"}</p>}
             {error && <p className="create-error" role="alert">{error}</p>}
           </div>
           <div className="create-actions">
@@ -269,13 +278,13 @@ export default function Create({ pickMrpack }: CreateProps = {}) {
             </button>
             {advanced && (
               <div id={`${uid}-adv`} className="create-adv-body enter">
-                <RamPicker value={ram} onChange={setRam} defaultMb={defaultRam} disabled={busy} />
+                <RamPicker value={ram} onChange={setRam} defaultMb={defaultRam} systemMb={systemRam} disabled={busy} />
               </div>
             )}
           </div>
 
           <div className="create-live" aria-live="polite">
-            {busy && <p className="create-info">Opération en cours…</p>}
+            {busy && <p className="create-info" role="status">{progress ?? "Opération en cours…"}</p>}
             {error && <p className="create-error" role="alert">{error}</p>}
           </div>
 

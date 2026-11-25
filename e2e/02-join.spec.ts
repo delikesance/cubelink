@@ -22,7 +22,7 @@ test('T2 : plan affiche, mod maison inconnu, confiance requise, non-ami refuse, 
   await expect(appB.page.getByRole('heading', { name: "Impossible de rejoindre pour l'instant" })).toBeVisible({ timeout: 20_000 });
   await expect(appB.page.getByRole('button', { name: 'Rejoindre et jouer' })).toHaveCount(0);
   await appB.page.getByRole('button', { name: 'Annuler' }).click();
-  await appB.page.waitForSelector('main[data-route="main"]');
+  await appB.page.waitForSelector('main[data-route="main"]', { timeout: 15_000 });
 
   // Amitie, puis presence en ligne cote B.
   await makeFriends(appA, appB);
@@ -35,11 +35,12 @@ test('T2 : plan affiche, mod maison inconnu, confiance requise, non-ami refuse, 
   const before = { instances: countFiles(st.paths.instances), store: countFiles(st.paths.store) };
   expect(await invoke<unknown[]>(appB.page, 'instances_list')).toHaveLength(0);
 
-  // B : Accueil (rechargee pour lire la presence) puis « Rejoindre Alice ».
-  await gotoRoute(appB, 'main');
+  // B : Accueil (remonte pour lire invitations et presence) puis « Rejoindre Alice » dans les parties en cours
+  // (la colonne d'amis a un bouton du meme nom : on cible la liste des parties).
   await gotoRoute(appB, 'friends');
-  await appB.page.getByRole('button', { name: `Rejoindre ${NAME_A}` }).click();
-  await appB.page.waitForSelector('main[data-route="join"]');
+  await gotoRoute(appB, 'main');
+  await appB.page.getByRole('list', { name: 'Parties en cours' }).getByRole('button', { name: `Rejoindre ${NAME_A}` }).click();
+  await appB.page.waitForSelector('main[data-route="join"]', { timeout: 15_000 });
   await expect(appB.page.getByRole('heading', { level: 1, name: `Rejoindre ${NAME_A}` })).toBeVisible({ timeout: 30_000 });
 
   // Le plan : version, loader, fichiers a recevoir.
@@ -64,9 +65,18 @@ test('T2 : plan affiche, mod maison inconnu, confiance requise, non-ami refuse, 
   await trust.uncheck();
   await expect(join).toBeDisabled();
 
-  // Annuler : retour a l'ecran precedent (Amis), rien telecharge ni installe.
+  // B joue avec un compte hors ligne : avertissement non bloquant (l'avertissement disque dépend du runner : non asserté ici).
+  const heads = dialog.getByTestId('join-warnings');
+  await expect(heads.getByText(/compte hors ligne/)).toBeVisible();
+  const plan = await invoke<{ warnings: { kind: string }[] }>(appB.page, 'join_plan', { friend_public_key: keyA });
+  expect(plan.warnings.map((w) => w.kind)).toContain('offline_account');
+  await trust.check();
+  await expect(join).toBeEnabled();
+  await trust.uncheck();
+
+  // Annuler : retour a l'ecran precedent (Accueil), rien telecharge ni installe.
   await dialog.getByRole('button', { name: 'Annuler' }).click();
-  await appB.page.waitForSelector('main[data-route="friends"]');
+  await appB.page.waitForSelector('main[data-route="main"]', { timeout: 15_000 });
   await new Promise((r) => setTimeout(r, 2000));
   expect(await invoke<unknown[]>(appB.page, 'instances_list')).toHaveLength(0);
   expect(countFiles(st.paths.instances)).toBe(before.instances);

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useServices, useShell } from "../../app/context";
 import { useAccounts } from "../../app/useAccounts";
 import { Button, Card } from "../../ui";
+import { useEscapeCancel } from "../../ui/useEscapeCancel";
 import { SkinHead } from "../../app/AccountSwitcher";
 import { ICONS, Icon } from "../../ui";
 import { OfflineForm } from "../Login/OfflineForm";
@@ -40,6 +41,8 @@ export function Accounts({ onError }: { onError: (message: string | null) => voi
   useEffect(() => {
     if (confirming) cancelRef.current?.focus();
   }, [confirming]);
+  // Échap annule la confirmation de retrait au lieu de quitter Paramètres.
+  useEscapeCancel(confirming !== null, () => setConfirming(null));
 
   if (!state) return <Card as="section" aria-label="Comptes" className="acc-card"><p className="set-hint" role="status">Chargement des comptes…</p></Card>;
 

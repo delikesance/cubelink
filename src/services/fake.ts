@@ -1,10 +1,10 @@
 import { validateOfflineName } from "./accounts";
-import { HEARTH_EULA_REQUIRED } from "./types";
+import { HEARTH_EULA_REQUIRED, HEARTH_HEAD_UNAVAILABLE, HearthLeaveError } from "./types";
 import type {
   AccountInfo, AccountsState, BrowseHit, BrowseInstallResult, BrowseKind, BrowseProgressEvent, BrowseSource, BrowseVersion, FixPlan, FixProgressEvent, FixResult, ModCheck, ModEntry, ModIssue,
-  CreateInstanceInput, DeviceCode, HostState, Invite, JoinAnswer, JoinRequest, ImportWarningEvent, LaunchLogEvent, FriendRequest, FriendWithPresence, Instance, InstanceArt,
-  JoinPlan, LaunchState, Manifest, PresenceEvent, UnknownModsEvent, Profile, Services, Settings,
-  StageFallback, StageState, TransferProgress, Unsubscribe, UpdateState,
+  CreateInstanceInput, DeviceCode, HostState, Invite, JoinAnswer, JoinRequest, ImportWarningEvent, ImportProgressEvent, ImportDeferredEvent, LaunchLogEvent, FriendRequest, FriendWithPresence, Instance, InstanceArt,
+  JoinPlan, JoinWarning, LaunchState, Manifest, PresenceEvent, UnknownModsEvent, Profile, Services, Settings,
+  StageFallback, StageState, TransferProgress, TunnelStateEvent, Unsubscribe, UpdateState,
   HearthCard, HearthDetail, HearthHandover, HearthHostPrompt, HearthInvite, HearthMember, HearthMemberLite,
 } from "./types";
 
@@ -21,15 +21,29 @@ export interface FakeOptions {
   accounts?: AccountInfo[];
   /** Réponse de `stageSupported` (zone de jeu intégrée). Faux par défaut : comme dans un navigateur. */
   stageSupported?: boolean;
+  /** Taille du faux cache de mods, en octets (12,4 Go par défaut). */
+  cacheBytes?: number;
+  /** Espace libre simulé (octets) pour l'avertissement disque de `joinPlan` ; absent = mesure impossible, pas d'avertissement. */
+  freeDiskBytes?: number;
 }
 
 /** Commandes de test exposées par le faux service. */
 export interface FakeControls {
   setPickedFiles(paths: string[]): void;
+  /** Test : chemin renvoyé par pickSavePath (`null` : le sélecteur est annulé). Défaut : un chemin fictif. */
+  setSavePath(path: string | null): void;
+  /** Test : sauvegardes d'identité demandées (`export`/`import` avec leurs arguments) et redémarrages. */
+  readonly identityCalls: Array<{ kind: "export" | "import" | "restart"; path?: string; passphrase?: string }>;
   /** Simule un glisser-déposer natif de fichiers sur la fenêtre. */
   dropFiles(paths: string[]): void;
   /** Test : émet un événement host://state. */
   emitHostState(e: HostState): void;
+  /** Test : une demande reçue expire (retirée sans décision) : friend://request_removed. */
+  expireRequest(publicKey: string): void;
+  /** Test : la demande envoyée avec ce code reçoit une réponse (friend://accepted, friend://refused ou friend://request_expired). Sans effet si elle a été annulée. */
+  answerSentRequest(code: string, answer: "accepted" | "refused" | "expired", name?: string): void;
+  /** Test : un lien ami est ouvert depuis le système (`pending: true` : au démarrage, repris au montage ; sinon événement friend://link). */
+  openFriendLink(link: string, opts?: { pending?: boolean }): void;
   /** Test : reçoit une invitation (friend://invite + friend://invites). */
   emitInvite(i: Partial<Invite> & { public_key: string }): Invite;
   /** Test : un ami demande à rejoindre ma partie (friend://join_request + friend://join_requests). */
@@ -42,6 +56,8 @@ export interface FakeControls {
   readonly joinRequestCalls: Array<{ kind: "ask" | "answer"; arg: string; accept?: boolean }>;
   /** Test : appels de commandes de jeu enregistrés (switch, join, invite). */
   readonly gameCalls: Array<{ kind: "switch" | "join" | "invite" | "close"; arg: string; instanceId?: string }>;
+  /** Test : émet tunnel://state (charge utile brute, comme Rust). */
+  emitTunnelState(e: TunnelStateEvent): void;
   /** Test : fusionne `patch` dans l'état de mise à jour et émet update://state (ex. available, downloading, ready). */
   emitUpdateState(patch: Partial<UpdateState>): void;
   /** Test : état (fusionné) auquel aboutit la prochaine updateCheck ; par défaut up_to_date. */
@@ -60,6 +76,8 @@ export interface FakeControls {
   emitHearthHostPrompt(e: HearthHostPrompt): void;
   /** Test : le contrat d'utilisation de Minecraft est déjà accepté (ou non). Défaut : non. */
   setHearthEula(accepted: boolean): void;
+  /** Test : la dernière version n'a de contenu chez personne : `hearthPlay` rejette avec `head_unavailable` jusqu'à `hearthPlayFromPrevious`. `previous: null` : aucune version complète. */
+  setHearthHeadUnavailable(info: { author: string; head: number; previous: number | null } | null): void;
   /** Test : commandes Hearth reçues, dans l'ordre (nom sans préfixe `hearth`, arguments). */
   readonly hearthCalls: Array<{ kind: string; args: unknown[] }>;
   /** Test : fusionne `patch` dans l'état de la zone de jeu et émet stage://state. */
@@ -69,8 +87,13 @@ export interface FakeControls {
   /** Test : émet stage://fullscreen. */
   emitStageFullscreen(on: boolean): void;
   /** Test : appels enregistrés de stageView, stagePanel, stageLayout et setFullscreen, dans l'ordre. */
-  readonly stageCalls: Array<{ cmd: "view" | "panel" | "layout" | "fullscreen"; arg: unknown }>;
+  readonly stageCalls: Array<{ cmd: "view" | "panel" | "layout" | "fullscreen" | "retry"; arg?: unknown }>;
 }
+
+/** Clé publique renvoyée par les sauvegardes d'identité simulées. */
+export const FAKE_IDENTITY_KEY = "ab".repeat(32);
+/** Phrase de passe que `identityImport` simulé refuse (« phrase incorrecte »). */
+export const WRONG_PASSPHRASE = "mauvaise phrase";
 
 /** Hash du manifeste simulé, renvoyé par `joinPlan` et exigé par `joinStart`. */
 export const FAKE_MANIFEST_HASH = "f".repeat(64);
@@ -219,9 +242,11 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     { name: "Efe", uuid: "61699b2e-d327-4a01-9f1e-0ea8c3f06bc6" },
   ];
   let codeN = 1;
+  let pendingLink: string | null = null;
+  let cacheBytes = opts.cacheBytes ?? 12_400_000_000;
   let settings: Settings = {
-    language: "fr", default_ram_mb: 4096, java_path: null,
-    trust_default: "ask", allow_relay: true, close_on_launch: false, relay_only: false, share_mods: true, discovery: true, lan_auto: true,
+    language: "fr", default_ram_mb: 0, java_path: null, ram_auto_migrated: true,
+    trust_default: "ask", close_on_launch: false, share_mods: true, lan_auto: true,
     overlay_enabled: true, overlay_hotkey: "Ctrl+Shift+C", embedded_game: true, start_with_os: true, open_to_all_friends: false,
   };
   // Champs que Rust renvoie toujours (voir `Instance` dans bindings.ts), vides par défaut.
@@ -243,6 +268,8 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
   }];
   const artOf = (id: string) => need(id);
   let requests: FriendRequest[] = Array.from({ length: requestCount }, (_, i) => makeRequest(i));
+  /** Demandes d'ami envoyées en attente de réponse (par code, en minuscules). */
+  const sentRequests = new Set<string>();
   const friends: FriendWithPresence[] = [
     { friend: { public_key: hex(1, 64), name: "Alex", trust: "ask", added_at: NOW - 86400 }, presence: "online", in_game: true, last_seen: null },
     { friend: { public_key: hex(2, 64), name: "Noor", trust: "always", added_at: NOW - 172800 }, presence: "offline", in_game: false, last_seen: NOW - 3 * 3600 },
@@ -255,6 +282,9 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
   const joinHeld = new Map<string, (a: JoinAnswer) => void>();
   const joinRequestCalls: Array<{ kind: "ask" | "answer"; arg: string; accept?: boolean }> = [];
   const gameCalls: Array<{ kind: "switch" | "join" | "invite" | "close"; arg: string; instanceId?: string }> = [];
+  const identityCalls: Array<{ kind: "export" | "import" | "restart"; path?: string; passphrase?: string }> = [];
+  let identityStaged = false;
+  let savePath: string | null | undefined;
 
   const listeners = {
     auth: new Set<(p: Profile | null) => void>(),
@@ -262,19 +292,28 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     launch: new Set<(s: LaunchState) => void>(),
     transfer: new Set<(p: TransferProgress) => void>(),
     presence: new Set<(e: PresenceEvent) => void>(),
+    link: new Set<() => void>(),
     request: new Set<(r: FriendRequest) => void>(),
+    requestRemoved: new Set<(e: { public_key: string }) => void>(),
+    accepted: new Set<(e: { public_key: string; name: string }) => void>(),
+    refused: new Set<(e: { public_key: string }) => void>(),
+    expired: new Set<(e: { public_key: string }) => void>(),
     unknown: new Set<(e: UnknownModsEvent) => void>(),
     log: new Set<(e: LaunchLogEvent) => void>(),
     browse: new Set<(e: BrowseProgressEvent) => void>(),
     fix: new Set<(e: FixProgressEvent) => void>(),
     drop: new Set<(p: string[]) => void>(),
     warning: new Set<(e: ImportWarningEvent) => void>(),
+    importProgress: new Set<(e: ImportProgressEvent) => void>(),
+    importDeferred: new Set<(e: ImportDeferredEvent) => void>(),
     host: new Set<(e: HostState) => void>(),
     invite: new Set<(i: Invite) => void>(),
     invites: new Set<(l: Invite[]) => void>(),
+    codeChanged: new Set<(v: void) => void>(),
     joinRequest: new Set<(r: JoinRequest) => void>(),
     joinRequests: new Set<(l: JoinRequest[]) => void>(),
     update: new Set<(s: UpdateState) => void>(),
+    tunnel: new Set<(e: TunnelStateEvent) => void>(),
     hearthState: new Set<(l: HearthCard[]) => void>(),
     hearthInvites: new Set<(l: HearthInvite[]) => void>(),
     hearthHandover: new Set<(e: HearthHandover) => void>(),
@@ -308,6 +347,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
   const hearthGroups = new Map<string, HearthDetail>();
   let hearthInvs: HearthInvite[] = [];
   let hearthEula = false;
+  let hearthHeadMissing: { author: string; head: number; previous: number | null } | null = null;
   /** Le faux service part avec Hearth activé (le vrai réglage est coupé par défaut) ; `hearthSetEnabled` le change. */
   let hearthOn = true;
   let hearthN = 0;
@@ -352,10 +392,10 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     const card: HearthCard = {
       minecraft: "1.21.1", loader: "NeoForge", state: "idle", host: null, players: 0, progress: null, step: null, step_index: null,
       step_count: 3, unclean: null, members_online: [], members_total: members.length, is_creator: true, can_host: true,
-      instance_id: "inst-aeronautics", version: 1, ...p,
+      instance_id: "inst-aeronautics", version: 1, orphans: d.orphans?.length ?? 0, ...p,
     };
     const g: HearthDetail = {
-      card, members, proposals: [], blocker: null, fork: [],
+      card, members, proposals: [], blocker: null, fork: [], orphans: [],
       versions: [{ id: `v-${p.id}-1`, number: 1, kind: "session", author: ME.public_key, author_name: ME.name, created_at: NOW - 86400, played_secs: 5400, total_size: 380_000_000, is_head: true, side_branch: false }],
       settings: { keep_background: false, disk_bytes: 380_000_000, outbox_pending: 0, instance_name: "Create: Aeronautics" },
       ...d,
@@ -454,7 +494,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
       phase,
       files_done: Math.floor(ratio * files_total), files_total,
       bytes_done: Math.floor(ratio * bytes_total), bytes_total,
-      speed_bps: phase === "receiving" ? 1_500_000 : 0, via_relay: false,
+      speed_bps: phase === "receiving" ? 1_500_000 : 0,
     };
   }
   function stopTimer() { if (timer) { clearInterval(timer); timer = null; } }
@@ -489,6 +529,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
       };
       if (loginDelayMs <= 0) done(); else setTimeout(done, loginDelayMs);
     }),
+    authCancelLogin: async () => {},
     authLogout: async () => {
       accounts = accounts.filter((a) => a.id !== active);
       active = accounts[0]?.id ?? null;
@@ -528,6 +569,9 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
       if (!input.name.trim()) throw new Error("Le nom de l'instance est obligatoire.");
       const inst: Instance = { ...noExtras, id: `inst-${instances.length + 1}`, ...input, mod_count: 0 };
       instances.push(inst);
+      emit(listeners.importProgress, { message: "Téléchargement du jeu…" });
+      // Simulation d'une préparation qui échoue (réseau coupé) : l'instance est conservée.
+      if (/hors ligne|offline/i.test(input.name)) emit(listeners.importDeferred, { instance_id: inst.id, message: "réseau indisponible" });
       return { ...inst };
     },
     instancesImportMrpack: async (path) => {
@@ -538,6 +582,8 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
         loader: { loader: "fabric", version: "0.16.5" }, ram_mb: 4096, mod_count: 12,
       };
       instances.push(inst);
+      emit(listeners.importProgress, { message: "Téléchargement du jeu…" });
+      if (/differe|deferred/i.test(path)) emit(listeners.importDeferred, { instance_id: inst.id, message: "réseau indisponible" });
       return { ...inst };
     },
     instancesLaunch: async (id) => {
@@ -572,7 +618,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
         inst.name = patch.name.trim();
       }
       if (patch.ram_mb !== undefined) inst.ram_mb = patch.ram_mb;
-      if (patch.java_path !== undefined) inst.java_path = patch.java_path;
+      if (patch.java_path !== undefined) inst.java_path = patch.java_path.trim() || null;
       if (patch.jvm_args !== undefined) inst.jvm_args = patch.jvm_args;
       if (patch.wrapper !== undefined) inst.wrapper = patch.wrapper;
       return { ...inst };
@@ -609,8 +655,12 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     },
     minecraftVersions: async () => ["1.21.4", "1.21.1", "1.20.6", "1.20.1", "1.19.4", "1.18.2"],
 
-    netTest: async () => ({ relay_connected: true, relay: "euc1-1.relay.n0.iroh.link", relay_ms: 28, udp: true, ipv6: false, direct: true, relay_only: false, partial: false }),
+    netTest: async () => ({ ipv6: false, ipv4_public: false, port_mapped: true }),
+    cacheSize: async () => cacheBytes,
+    cacheClear: async () => { const freed = cacheBytes; cacheBytes = 0; return freed; },
     friendMyCode: async () => `mcl1-${hex(codeN * 7, 24)}`,
+    friendMyLink: async () => `cubelink://add/mcl1-${hex(codeN * 7, 24)}`,
+    friendTakePendingLink: async () => { const l = pendingLink; pendingLink = null; return l; },
     friendRegenerateCode: async () => { codeN += 1; return `mcl1-${hex(codeN * 7, 24)}`; },
     friendList: async () => friends.map((f) => ({ friend: { ...f.friend }, presence: f.presence, in_game: f.in_game, last_seen: f.last_seen })),
     friendInvite: async (pk) => {
@@ -663,12 +713,24 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
       const st = g.card.state;
       if (st === "idle" || st === "unclean" || st === "blocked") {
         if (!hearthEula) throw new Error(HEARTH_EULA_REQUIRED);
+        if (hearthHeadMissing) {
+          const m = hearthHeadMissing;
+          throw new Error(`${HEARTH_HEAD_UNAVAILABLE}|${m.head}|${m.previous ?? ""}|${m.author}`);
+        }
         hearthLaunch(id, ["Mise à jour du monde", "Démarrage du serveur", "Ouverture de Minecraft"], { state: "hosting", host: { ...ME }, players: 1, unclean: null });
       } else if (st === "hosted") {
         hearthLaunch(id, ["Connexion à l'hôte", "Ouverture de Minecraft"], { state: "hosted", players: g.card.players + 1 });
       } else {
         throw new Error("Ce serveur ne peut pas être lancé pour l'instant.");
       }
+    },
+    hearthPlayFromPrevious: async (id) => {
+      hearthCalls.push({ kind: "PlayFromPrevious", args: [id] });
+      hearthCard(id);
+      if (!hearthHeadMissing || hearthHeadMissing.previous === null) throw new Error("aucune version complète sur ce PC pour repartir : il faut attendre l'auteur");
+      if (!hearthEula) throw new Error(HEARTH_EULA_REQUIRED);
+      hearthHeadMissing = null;
+      hearthLaunch(id, ["Mise à jour du monde", "Démarrage du serveur", "Ouverture de Minecraft"], { state: "hosting", host: { ...ME }, players: 1, unclean: null });
     },
     hearthStop: async (id) => {
       hearthCalls.push({ kind: "Stop", args: [id] });
@@ -705,9 +767,15 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
       hearthSync(g);
       hearthEmit();
     },
-    hearthLeave: async (id) => {
-      hearthCalls.push({ kind: "Leave", args: [id] });
-      hearthCard(id);
+    hearthLeave: async (id, force) => {
+      hearthCalls.push({ kind: "Leave", args: force ? [id, true] : [id] });
+      const g = hearthCard(id);
+      // Comme Rust : le dernier membre ne peut pas quitter, rien n'est supprimé.
+      if (g.members.length <= 1) throw new HearthLeaveError("last_member");
+      // Comme Rust : une partie encore en file n'est pas jetée sans `force`.
+      if (!force && g.settings.outbox_pending > 0) throw new HearthLeaveError("outbox_pending");
+      // Comme Rust : une fin de partie non publiée, gardée de côté, n'est pas supprimée sans `force`.
+      if (!force && g.orphans.length > 0) throw new HearthLeaveError("orphan_pending");
       hearthGroups.delete(id);
       hearthEmit();
     },
@@ -757,6 +825,23 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
       g.fork = [];
       hearthPatch(id, { state: "idle" });
     },
+    hearthOrphanPublish: async (id, orphanId) => {
+      hearthCalls.push({ kind: "OrphanPublish", args: [id, orphanId] });
+      const g = hearthCard(id);
+      if (!g.orphans.some((o) => o.id === orphanId)) throw new Error("Cette partie n'existe plus sur ce PC.");
+      g.orphans = g.orphans.filter((o) => o.id !== orphanId);
+      g.card.orphans = g.orphans.length;
+      newVersion(g, "session");
+      hearthEmit();
+    },
+    hearthOrphanDiscard: async (id, orphanId) => {
+      hearthCalls.push({ kind: "OrphanDiscard", args: [id, orphanId] });
+      const g = hearthCard(id);
+      if (!g.orphans.some((o) => o.id === orphanId)) throw new Error("Cette partie n'existe plus sur ce PC.");
+      g.orphans = g.orphans.filter((o) => o.id !== orphanId);
+      g.card.orphans = g.orphans.length;
+      hearthEmit();
+    },
     hearthSetBackground: async (id, on) => {
       hearthCalls.push({ kind: "SetBackground", args: [id, on] });
       hearthCard(id).settings.keep_background = on;
@@ -795,6 +880,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     emitHearthHandover: (e) => emit(listeners.hearthHandover, e),
     emitHearthHostPrompt: (e) => emit(listeners.hearthHostPrompt, e),
     setHearthEula: (a) => { hearthEula = a; },
+    setHearthHeadUnavailable: (i) => { hearthHeadMissing = i; },
     hearthCalls,
     friendInvites: async () => invites.map((i) => ({ ...i })),
     friendInviteDismiss: async (id) => {
@@ -825,9 +911,15 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     },
     gameJoinFriend: async (pk, instanceId) => { gameCalls.push({ kind: "join", arg: pk, instanceId }); },
     friendSendRequest: async (code) => {
-      if (!/^mcl1-[0-9a-f]{8,}$/i.test(code.trim())) throw new Error("Code ami invalide.");
+      // Comme `friend_code::parse` : le lien cubelink://add/<code> (ou l'ancien launcher://add/) vaut le code.
+      const bare = code.trim().replace(/^(cubelink|launcher):\/\/add\//i, "").replace(/\/$/, "");
+      if (!/^mcl1-[0-9a-f]{8,}$/i.test(bare)) throw new Error("Code ami invalide.");
+      const key = bare.toLowerCase();
+      if (sentRequests.has(key)) throw new Error("Une demande est déjà en cours pour ce pair.");
+      sentRequests.add(key);
       return verifyCode(code.length);
     },
+    friendCancelRequest: async (code) => { sentRequests.delete(code.trim().replace(/^(cubelink|launcher):\/\/add\//i, "").replace(/\/$/, "").toLowerCase()); },
     friendRequests: async ({ offset, limit, query }) => {
       const q = query?.trim().toLowerCase();
       const all = q ? requests.filter((r) => r.name.toLowerCase().includes(q)) : requests;
@@ -847,11 +939,22 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
       requests = requests.filter((x) => x.public_key !== pk);
     },
     friendRefuseAll: async () => { const n = requests.length; requests = []; return n; },
+    friendRemove: async (pk) => {
+      const i = friends.findIndex((f) => f.friend.public_key === pk);
+      if (i >= 0) friends.splice(i, 1);
+    },
 
-    joinPlan: async (): Promise<JoinPlan> => ({
-      manifest: makeManifest(), manifest_hash: FAKE_MANIFEST_HASH, cached: 91, to_receive: 3, to_receive_bytes: bytes_total,
-      unknown_mods: ["mods/mod-maison.jar"], unknown_unchecked: [], unknown_scripts: [], unknown_trusted: [],
-    }),
+    joinPlan: async (): Promise<JoinPlan> => {
+      // Comme le backend : disque d'abord (reçu + 1 Gio de marge), puis compte hors ligne actif.
+      const warnings: JoinWarning[] = [];
+      const need = bytes_total + 1_073_741_824;
+      if (opts.freeDiskBytes !== undefined && opts.freeDiskBytes < need) warnings.push({ kind: "disk", need, free: opts.freeDiskBytes });
+      if (accounts.find((a) => a.id === active)?.kind === "offline") warnings.push({ kind: "offline_account" });
+      return {
+        manifest: makeManifest(), manifest_hash: FAKE_MANIFEST_HASH, cached: 91, to_receive: 3, to_receive_bytes: bytes_total,
+        unknown_mods: ["mods/mod-maison.jar"], unknown_unchecked: [], unknown_scripts: [], unknown_trusted: [], warnings,
+      };
+    },
     joinPlay: async () => {},
     // Comme le backend : refuse un autre manifeste, et des mods inconnus sans la case de confiance.
     joinStart: async (_pk, manifestHash, acceptUnknown) => {
@@ -866,6 +969,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     joinCancel: async () => { stopTimer(); step = 0; emit(listeners.transfer, progress("failed")); },
 
     settingsGet: async () => ({ ...settings }),
+    systemRamMb: async () => 16384,
     settingsSet: async (s) => { settings = { ...s }; return { ...settings }; },
 
     browseSearch: async (q) => {
@@ -987,8 +1091,46 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
       return multiple ? ok : ok.slice(0, 1);
     },
     setPickedFiles: (paths) => { picked = paths; },
+    pickSavePath: async ({ defaultName }) => (savePath === undefined ? `/fictif/${defaultName}` : savePath),
+    setSavePath: (path) => { savePath = path; },
+    identityCalls,
+    identityExport: async (path, passphrase) => {
+      identityCalls.push({ kind: "export", path, passphrase });
+      if ([...passphrase].length < 8) throw new Error("La phrase de passe est trop courte : 8 caractères au minimum.");
+      return FAKE_IDENTITY_KEY;
+    },
+    identityImport: async (path, passphrase) => {
+      identityCalls.push({ kind: "import", path, passphrase });
+      if (passphrase === WRONG_PASSPHRASE) throw new Error("Phrase de passe incorrecte, ou fichier abîmé.");
+      identityStaged = true;
+      return FAKE_IDENTITY_KEY;
+    },
+    identityRestart: async () => {
+      if (!identityStaged) throw new Error("Aucune restauration en attente.");
+      identityCalls.push({ kind: "restart" });
+    },
     dropFiles: (paths) => emit(listeners.drop, paths),
     emitHostState: (e) => emit(listeners.host, e),
+    answerSentRequest: (code, answer, name = "Alex") => {
+      const key = code.trim().toLowerCase();
+      if (!sentRequests.delete(key)) return;
+      if (answer === "accepted") {
+        friends.push({
+          friend: { public_key: key, name, trust: "ask", added_at: NOW },
+          presence: "offline", in_game: false, last_seen: null,
+        });
+        emit(listeners.accepted, { public_key: key, name });
+      } else if (answer === "refused") emit(listeners.refused, { public_key: key });
+      else emit(listeners.expired, { public_key: key });
+    },
+    openFriendLink: (link, opts) => {
+      pendingLink = link;
+      if (!opts?.pending) emit(listeners.link, undefined);
+    },
+    expireRequest: (pk) => {
+      requests = requests.filter((x) => x.public_key !== pk);
+      emit(listeners.requestRemoved, { public_key: pk });
+    },
     emitInvite: (p) => {
       inviteN += 1;
       const f = friends.find((x) => x.friend.public_key === p.public_key);
@@ -1019,6 +1161,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     joinRequestCalls,
     gameCalls,
     emitUpdateState: (patch) => setUpdate(patch),
+    emitTunnelState: (e) => emit(listeners.tunnel, { ...e }),
     setUpdateCheckResult: (patch) => { updateCheckPatch = patch; },
     updateState: async () => ({ ...updateSt }),
     updateCheck: async () => {
@@ -1031,19 +1174,28 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
       if (updateSt.phase !== "ready") throw new Error("Aucune mise à jour prête à installer.");
     },
     onUpdateState: (cb) => sub(listeners.update, cb),
+    onTunnelState: (cb) => sub(listeners.tunnel, cb),
 
     onAuthState: (cb) => sub(listeners.auth, cb),
     onAccountsState: (cb) => sub(listeners.accounts, cb),
     onLaunchState: (cb) => sub(listeners.launch, cb),
     onLaunchLog: (cb) => sub(listeners.log, cb),
     onImportWarning: (cb) => sub(listeners.warning, cb),
+    onImportProgress: (cb) => sub(listeners.importProgress, cb),
+    onImportDeferred: (cb) => sub(listeners.importDeferred, cb),
     hostState: async () => null,
     onHostState: (cb) => sub(listeners.host, cb),
     onTransferProgress: (cb) => sub(listeners.transfer, cb),
     onFriendPresence: (cb) => sub(listeners.presence, cb),
+    onFriendLink: (cb) => sub(listeners.link, cb),
     onFriendRequest: (cb) => sub(listeners.request, cb),
+    onFriendRequestRemoved: (cb) => sub(listeners.requestRemoved, cb),
+    onFriendAccepted: (cb) => sub(listeners.accepted, cb),
+    onFriendRefused: (cb) => sub(listeners.refused, cb),
+    onFriendRequestExpired: (cb) => sub(listeners.expired, cb),
     onFriendInvite: (cb) => sub(listeners.invite, cb),
     onFriendInvites: (cb) => sub(listeners.invites, cb),
+    onFriendCodeChanged: (cb) => sub(listeners.codeChanged, () => cb()),
     onFriendJoinRequest: (cb) => sub(listeners.joinRequest, cb),
     onFriendJoinRequests: (cb) => sub(listeners.joinRequests, cb),
     onUnknownMods: (cb) => sub(listeners.unknown, cb),
@@ -1053,6 +1205,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     onFilesDropped: (cb) => sub(listeners.drop, cb),
 
     stageSupported: async () => opts.stageSupported === true,
+    stageRetry: async () => { stageCalls.push({ cmd: "retry" }); return opts.stageSupported === true; },
     stageState: async () => ({ ...stageSt }),
     stageView: async (game) => { stageCalls.push({ cmd: "view", arg: game }); if (stageSt.attached) setStage({ game }); },
     stagePanel: async (open) => { stageCalls.push({ cmd: "panel", arg: open }); if (stageSt.attached) setStage({ panel: open }); },

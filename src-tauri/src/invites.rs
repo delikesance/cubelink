@@ -11,8 +11,11 @@
 //! `friend://join_request` (JoinRequest) puis `friend://join_requests` (Vec<JoinRequest>, à chaque changement) ;
 //! décision par `friend_join_request_answer`. Demande envoyée (invité) : `friend_join_request` attend la décision.
 //!
-//! Point d'accroche pour une notification système : l'événement `friend://invite` (payload `Invite`), émis
-//! une fois par invitation reçue ; la file complète est dans `friend_invites` / `friend://invites`.
+//! Notification système : `hotkey.rs` écoute `friend://invite` (payload `Invite`, émis une fois par invitation reçue),
+//! `friend://request` (demande d'ami) et `friend://join_request` (payload `JoinRequest`, une fois par demande reçue),
+//! une notification par pair et par minute au plus ; un clic rouvre la fenêtre (le panneau « en jeu » avec la Scène) ; les files complètes sont dans
+//! `friend_invites` / `friend://invites` et `friend_join_requests` / `friend://join_requests`. À l'écran, les demandes
+//! sont affichées par le bandeau de la coque et par le panneau « en jeu ».
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -192,6 +195,17 @@ impl AppState {
             self.emit_invites();
         }
         changed
+    }
+
+    /// Un ami vient d'être retiré : oublie ses invitations reçues, ses demandes à rejoindre (reçues ou en cours
+    /// d'envoi) et l'invitation qu'on lui a envoyée.
+    pub(crate) fn invites_forget_friend(&self, key: &str) {
+        self.invite_remove(|i| i.public_key == key);
+        // Le demandeur en attente reçoit un refus plutôt que de patienter jusqu'à l'expiration.
+        self.backend().answer_join_request(key, false);
+        self.join_request_ended(key);
+        lock(&self.join_requests_out).remove(key);
+        lock(&self.invites_sent).remove(key);
     }
 
     /// Retire les invitations échues à `now` (secondes) ; émet `friend://invites` si la file a changé.
@@ -548,11 +562,37 @@ mod tests {
         lock(&st.settings).open_to_all_friends = true;
         st.announce_world(&mut sent).await;
         st.announce_world(&mut sent).await;
+        {
+            let got = rec.0.lock().unwrap();
+            let mut keys: Vec<_> = got.iter().map(|(k, _)| k.clone()).collect();
+            keys.sort();
+            assert_eq!(keys, vec![key(1), key(2)]);
+            assert!(got.iter().all(|(_, m)| !m.revoke && m.pack.as_deref() == Some("ATM10 Sky")));
+        }
+
+        // Monde quitté : plus d'annonce, et la table des envois est vidée pour réinviter dès la réouverture.
+        st.host_world_closed(&inst.id);
+        assert!(lock(&st.invites_sent).is_empty());
+        let n = rec.0.lock().unwrap().len();
+        st.announce_world(&mut sent).await;
+        assert!(sent.is_empty(), "table d'annonce vidée");
+        // Les révocations partent au mieux en tâche de fond ; aucune nouvelle invitation.
+        for _ in 0..50 {
+            if rec.0.lock().unwrap().len() >= n + 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(rec.0.lock().unwrap().iter().skip(n).all(|(_, m)| m.revoke), "seules des révocations sont envoyées");
+
+        // Réouverture rapide (moins de 4 min) : les amis sont réinvités aussitôt.
+        let n = rec.0.lock().unwrap().len();
+        *lock(&st.host) = Some(HostState { instance_id: inst.id.clone(), sharing: true, world_port: Some(54999) });
+        // Anti-spam de l'émetteur : on laisse l'intervalle minimal passer en vidant la table.
+        lock(&st.invites_sent).clear();
+        st.announce_world(&mut sent).await;
         let got = rec.0.lock().unwrap();
-        let mut keys: Vec<_> = got.iter().map(|(k, _)| k.clone()).collect();
-        keys.sort();
-        assert_eq!(keys, vec![key(1), key(2)]);
-        assert!(got.iter().all(|(_, m)| !m.revoke && m.pack.as_deref() == Some("ATM10 Sky")));
+        assert_eq!(got.iter().skip(n).filter(|(_, m)| !m.revoke).count(), 2);
     }
 
     #[tokio::test]

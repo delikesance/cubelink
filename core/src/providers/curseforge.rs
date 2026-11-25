@@ -131,11 +131,7 @@ impl CfResolver {
 
     pub fn with_base_url(base_url: impl Into<String>) -> Self {
         Self {
-            http: reqwest::Client::builder()
-                .user_agent(concat!("cubelink/", env!("CARGO_PKG_VERSION")))
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .unwrap_or_default(),
+            http: super::http::api_client(concat!("cubelink/", env!("CARGO_PKG_VERSION")), false),
             base_url: base_url.into().trim_end_matches('/').to_string(),
             api_base: API_BASE_URL.to_string(),
             api_key: None,

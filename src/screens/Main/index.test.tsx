@@ -3,7 +3,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { ShellContext, type ShellContextValue } from "../../app/context";
 import { createFakeServices } from "../../services/fake";
 import type { Services } from "../../services";
-import Main from "./index";
+import Main, { playingKeysOf } from "./index";
 
 afterEach(cleanup);
 
@@ -92,7 +92,7 @@ describe("Main", () => {
   it("parties en cours : une carte par ami qui héberge, Rejoindre, ami sur la tuile du pack", async () => {
     const { services, navigate } = setup();
     await screen.findByRole("group", { name: "Instances" });
-    expect(screen.getByText(/Aucune partie en cours/)).toBeTruthy();
+    expect(screen.getByText(/Aucun monde ouvert pour toi/)).toBeTruthy();
     const alex = (await services.friendList())[0].friend;
     act(() => { (services as unknown as { emitInvite: (i: object) => void }).emitInvite({ public_key: alex.public_key, world_name: "Îles flottantes", pack: "Create: Aeronautics" }); });
     const list = await screen.findByRole("list", { name: "Parties en cours" });
@@ -196,5 +196,46 @@ describe("Main", () => {
     const list = within(side()).getByRole("list", { name: "Amis" });
     fireEvent.click(await within(list).findByRole("button", { name: /^Demander à rejoindre / }));
     expect(await screen.findByText(/n'est pas en ligne/)).toBeTruthy();
+  });
+
+  it("ami en jeu sans invitation : « 1 en partie », onglet En partie, libellé « En jeu », Demander reste", async () => {
+    const { services } = setup();
+    await screen.findByRole("group", { name: "Instances" });
+    const alex = (await services.friendList())[0].friend;
+    const list = within(side()).getByRole("list", { name: "Amis" });
+    await within(list).findByText(alex.name);
+    expect(screen.getByText(/1 en partie/)).toBeTruthy();
+    expect(within(side()).getByRole("tab", { name: /^En partie · 1/ })).toBeTruthy();
+    fireEvent.click(within(side()).getByRole("tab", { name: /^En partie/ }));
+    const row = within(list).getByText(alex.name).closest("li")!;
+    expect(within(row as HTMLElement).getByText("En jeu")).toBeTruthy();
+    expect(within(row as HTMLElement).queryByText(/Joue à/)).toBeNull();
+    expect(within(row as HTMLElement).queryByText("En ligne")).toBeNull();
+    expect(within(list).getByRole("button", { name: `Demander à rejoindre ${alex.name}` })).toBeTruthy();
+    expect(screen.getByText(/Aucun monde ouvert pour toi/)).toBeTruthy();
+  });
+
+  it("ami en jeu avec invitation : « Joue à … » et il n'est compté qu'une fois", async () => {
+    const { services } = setup();
+    await screen.findByRole("group", { name: "Instances" });
+    const alex = (await services.friendList())[0].friend;
+    act(() => { (services as unknown as { emitInvite: (i: object) => void }).emitInvite({ public_key: alex.public_key, world_name: "Îles", pack: "Create: Aeronautics" }); });
+    await within(side()).findByText("Joue à Create: Aeronautics");
+    expect(screen.getByText(/1 en partie/)).toBeTruthy();
+    expect(within(side()).getByRole("tab", { name: /^En partie · 1/ })).toBeTruthy();
+    expect(within(side()).queryByText("En jeu")).toBeNull();
+  });
+});
+
+describe("playingKeysOf", () => {
+  const f = (k: string, presence: "online" | "offline", in_game: boolean) =>
+    ({ friend: { public_key: k, name: k, trust: "ask", added_at: 0 }, presence, in_game, last_seen: null }) as Parameters<typeof playingKeysOf>[0][number];
+  const inv = (k: string) => ({ public_key: k }) as Parameters<typeof playingKeysOf>[1][number];
+  it("invitation, en jeu sans invitation, doublon, hors ligne, en ligne hors jeu", () => {
+    const keys = playingKeysOf(
+      [f("a", "online", true), f("b", "online", true), f("c", "offline", true), f("d", "online", false), f("e", "offline", false)],
+      [inv("b"), inv("e")],
+    );
+    expect([...keys].sort()).toEqual(["a", "b", "e"]);
   });
 });

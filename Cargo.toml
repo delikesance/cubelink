@@ -17,19 +17,25 @@ serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 sha2 = "0.10"
-md-5 = "0.10"
+md-5 = "0.11"
 uuid = { version = "1", features = ["v3", "v4", "serde"] }
-rusqlite = { version = "0.42", features = ["bundled"] }
+rusqlite = { version = "0.43", features = ["bundled"] }
 zip = { version = "9", default-features = false, features = ["deflate"] }
 url = "2"
-aes-gcm = "0.10"
-rand = "0.8"
+aes-gcm = "0.11"
+# Sauvegarde chiffrée de l'identité (.cubelink-id) : Argon2id + XChaCha20-Poly1305.
+argon2 = { version = "0.6", default-features = false, features = ["alloc", "zeroize"] }
+chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc"] }
+zeroize = "1"
+rand = "0.10"
 ed25519-dalek = { version = "2", features = ["rand_core", "serde"] }
 data-encoding = "2"
 hex = "0.4"
 futures-util = "0.3"
 blake3 = "1.8"
 tracing = "0.1"
+# Journal applicatif (src-tauri/src/app_log.rs) : seulement le registre et le filtre ; l'ecriture passe par stage_log::Outbox.
+tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "registry", "env-filter"] }
 # Types et liaisons TypeScript générés depuis Rust (src/services/bindings.ts).
 specta = { version = "=2.0.0-rc.28", features = ["derive"] }
 # dev
@@ -45,6 +51,11 @@ opt-level = 3
 [profile.dev.package.ab_glyph]
 opt-level = 3
 [profile.dev.package.cubelink-host]
+opt-level = 3
+# Argon2id (sauvegarde d'identité) : 64 Mio x 3 passes, inutilisable sans optimisation même en debug.
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
 opt-level = 3
 
 [profile.release]

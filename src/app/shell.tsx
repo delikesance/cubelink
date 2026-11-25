@@ -2,10 +2,14 @@ import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRe
 import "./shell.css";
 import { createServices, type Services } from "../services";
 import { ShellContext, type ShellContextValue } from "./context";
+import { useFriendLinkIntake, usePendingFriendLink } from "./friendLink";
+import { useOutgoingIntake } from "./outgoingRequest";
 import { navigate, goBack, parseHash, takePendingFocus, useCanGoBack, useLocation, type RouteName } from "./router";
 import { TitleBar } from "./TitleBar";
 import { UpdateBanner } from "./UpdateBanner";
 import { StageNotice } from "./StageNotice";
+import { TunnelNotice } from "./TunnelNotice";
+import { JoinRequestBanner } from "./JoinRequestBanner";
 import { useContextMenu, useSuppressNativeMenu } from "./useContextMenu";
 import { openExternal } from "./externalLinks";
 import { useStage, useStageFullscreen, useStageLayout } from "./stage";
@@ -16,13 +20,13 @@ export { useShell, useServices, useScreenTitle, useBack } from "./context";
 export { navigate, goBack, canGoBack, useCanGoBack, ROUTES, parseHash, type RouteName } from "./router";
 
 export const ROUTE_LABELS: Record<RouteName, string> = {
-  login: "Connexion", main: "Accueil", create: "Créer une instance", install: "Installation",
+  login: "Connexion", main: "Accueil", create: "Créer une instance",
   instance: "Modpack", join: "Rejoindre", settings: "Paramètres", error: "Erreur", legal: "Mentions légales", browse: "Parcourir", hearth: "Serveur de groupe",
 };
 
 // Dossier d'écran par route. Les écrans sont chargés sans être modifiés.
 const SCREEN_DIRS: Record<RouteName, string> = {
-  login: "Login", main: "Main", create: "Create", install: "Install", join: "Join",
+  login: "Login", main: "Main", create: "Create", join: "Join",
   instance: "Instance", settings: "Settings", error: "Error", legal: "Legal", browse: "Browse", hearth: "Hearth",
 };
 type ScreenModule = { default?: ComponentType };
@@ -73,6 +77,9 @@ function Fallback({ route }: { route: RouteName }) {
   );
 }
 
+/** Écrans où un lien ami n'arrache pas l'utilisateur (connexion, transfert) : il attend la sortie de l'écran. */
+const LINK_WAITS_ON: ReadonlySet<RouteName> = new Set<RouteName>(["login", "join"]);
+
 export function Shell({ services }: { services?: Services } = {}) {
   const svc = useMemo(() => services ?? createServices(), [services]);
   const { route, params } = useLocation();
@@ -101,6 +108,15 @@ export function Shell({ services }: { services?: Services } = {}) {
     })();
     return () => { on = false; };
   }, [booting, svc]);
+
+  // Lien ami ouvert depuis le système : on ouvre Paramètres > Amis, où « Ajouter un ami » le reprend (champ prérempli,
+  // rien n'est envoyé). Sur l'écran de connexion il attend : on y va dès que la session est ouverte.
+  useFriendLinkIntake(svc);
+  useOutgoingIntake(svc);
+  const friendLink = usePendingFriendLink();
+  useEffect(() => {
+    if (friendLink && !booting && !LINK_WAITS_ON.has(route)) navigate("settings", { tab: "amis" });
+  }, [friendLink, booting, route]);
 
   // Focus sur le contenu à chaque changement de route (pas au premier rendu).
   useEffect(() => {
@@ -197,11 +213,13 @@ export function Shell({ services }: { services?: Services } = {}) {
         {linkMenu.menu}
         <UpdateBanner services={svc} />
         <StageNotice services={svc} />
+        <TunnelNotice services={svc} />
+        {route !== "login" && <JoinRequestBanner services={svc} stage={stage} />}
         <div className="stage-slot" ref={slotRef} aria-hidden="true" />
         {/* Monté (et déjà dessiné) sous la fenêtre du jeu tant que le jeu est affiché : la découpe animée de la fenêtre du jeu
             le révèle, sans flash. Fermé : inerte (ni focus ni clic). */}
         {stage.attached && stage.game && (
-          <div className="ov-dock" data-open={stage.panel || undefined} {...(stage.panel ? {} : { inert: "" })}>
+          <div className="ov-dock" data-open={stage.panel || undefined} inert={!stage.panel}>
             <InGamePanel open={stage.panel} />
           </div>
         )}

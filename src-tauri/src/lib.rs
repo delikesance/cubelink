@@ -1,5 +1,6 @@
 //! Coque Tauri. Propriété : tâche U13 (commandes), selon docs/contrats.md.
 
+pub mod app_log;
 pub mod authz;
 pub mod background;
 pub mod bindings;
@@ -9,11 +10,13 @@ pub mod commands_browse;
 pub mod commands_friends;
 pub mod commands_game;
 pub mod commands_hearth;
+pub mod commands_identity;
 pub mod commands_host;
 pub mod commands_instances;
 pub mod commands_join;
 pub mod commands_settings;
 pub mod commands_update;
+pub mod deeplink;
 pub mod error;
 pub mod iroh_backend;
 pub mod last_seen;
@@ -45,6 +48,7 @@ macro_rules! commands {
             commands_auth::auth_remove,
             commands_auth::auth_begin_login,
             commands_auth::auth_poll_login,
+            commands_auth::auth_cancel_login,
             commands_auth::auth_logout,
             commands_auth::auth_offline_login,
             commands_instances::instances_list,
@@ -63,13 +67,17 @@ macro_rules! commands {
             commands_art::instances_description,
             commands_friends::net_test,
             commands_friends::friend_my_code,
+            commands_friends::friend_my_link,
+            commands_friends::friend_take_pending_link,
             commands_friends::friend_regenerate_code,
             commands_friends::friend_list,
             commands_friends::friend_send_request,
+            commands_friends::friend_cancel_request,
             commands_friends::friend_requests,
             commands_friends::friend_accept,
             commands_friends::friend_refuse,
             commands_friends::friend_refuse_all,
+            commands_friends::friend_remove,
             commands_join::join_plan,
             commands_join::join_start,
             commands_join::join_pause,
@@ -79,7 +87,13 @@ macro_rules! commands {
             commands_join::join_close_tunnel,
             commands_join::join_play,
             commands_settings::settings_get,
+            commands_settings::system_ram_mb,
             commands_settings::settings_set,
+            commands_settings::cache_size,
+            commands_settings::cache_clear,
+            commands_identity::identity_export,
+            commands_identity::identity_import,
+            commands_identity::identity_restart,
             commands_browse::browse_search,
             commands_browse::browse_versions,
             commands_browse::browse_install,
@@ -112,6 +126,7 @@ macro_rules! commands {
             commands_hearth::hearth_play,
             commands_hearth::hearth_stop,
             commands_hearth::hearth_unclean_choice,
+            commands_hearth::hearth_play_from_previous,
             commands_hearth::hearth_set_instance,
             commands_hearth::hearth_add_member,
             commands_hearth::hearth_remove_member,
@@ -122,6 +137,8 @@ macro_rules! commands {
             commands_hearth::hearth_pack_update,
             commands_hearth::hearth_restore,
             commands_hearth::hearth_resolve_fork,
+            commands_hearth::hearth_orphan_publish,
+            commands_hearth::hearth_orphan_discard,
             commands_hearth::hearth_set_background,
             commands_hearth::hearth_eula,
             commands_hearth::hearth_eula_accept,
@@ -136,6 +153,7 @@ macro_rules! commands {
             stage::commands::stage_panel,
             stage::commands::stage_layout,
             stage::commands::stage_supported,
+            stage::commands::stage_retry,
             $($extra)*
         ]
     };
@@ -165,22 +183,14 @@ fn select_handler<R: tauri::Runtime>(
 }
 
 pub(crate) fn iroh_options(h: &test_hooks::Hooks) -> iroh_backend::IrohOptions {
-    use p2p_lib::relay::RelayChoice;
     let mut o = iroh_backend::IrohOptions::default();
     if let Some(s) = h.transfer_idle_secs {
         o.inactivity = std::time::Duration::from_secs(s);
         o.stall_retry = o.stall_retry.min(o.inactivity / 2);
     }
-    if let Some(r) = &h.relay {
-        // Mode test, relais coupé : le code ami contient les adresses directes (sinon aucun chemin sans relais).
-        if h.test_mode && *r == test_hooks::RelayMode::Disabled {
-            o.advertise_addrs = Some(true);
-        }
-        o.relay = match r {
-            test_hooks::RelayMode::Disabled => RelayChoice::Disabled,
-            test_hooks::RelayMode::Default => RelayChoice::Default,
-            test_hooks::RelayMode::Custom(u) => RelayChoice::Custom(u.clone()),
-        };
+    // Mode test : ne rien ouvrir sur la box de la machine de test (UPnP / NAT-PMP / PCP).
+    if h.test_mode {
+        o.portmap = false;
     }
     o
 }
@@ -249,6 +259,7 @@ pub fn run() {
             let written = std::fs::create_dir_all(&root).and_then(|_| std::fs::write(&conf, core_lib::launch_run::FONTCONFIG_NO_COLRV1_XML));
             match written {
                 Ok(()) => std::env::set_var("FONTCONFIG_FILE", &conf),
+                // Avant `app_log::init` (le dossier de donnees Tauri n'est connu qu'en `setup`) : stderr, la seule sortie disponible ici.
                 Err(e) => eprintln!("[Cubelink] masquage des polices COLRv1 impossible : {e}"),
             }
         }
@@ -269,6 +280,8 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec![background::BACKGROUND_ARG]),
         ))
+        // Lien `cubelink://add/<code>` : après l'instance unique (son option `deep-link` lui passe l'argument d'un second lancement).
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -279,6 +292,7 @@ pub fn run() {
                 Some(d) => d.clone(),
                 None => app.path().app_data_dir()?,
             };
+            app_log::init(&root);
             let handle = app.handle().clone();
             let sink: state::EventSink = Arc::new(move |name, payload| {
                 let _ = handle.emit(name, payload);
@@ -294,6 +308,7 @@ pub fn run() {
                 }
             }
             app.manage(st.clone());
+            deeplink::setup(app, &st, test_mode);
             // Fond : icone de notification (hors mode test : fermer y quitte, comme avant), demarrage avec la session, fenetre
             // masquee tout de suite au lancement automatique.
             if !test_mode {
@@ -359,10 +374,13 @@ pub fn run() {
                 tauri::async_runtime::spawn(async move {
                     tokio::time::sleep(std::time::Duration::from_secs(4)).await;
                     if let Err(e) = st.instances_launch(&id).await {
-                        eprintln!("[Cubelink] lancement automatique : {e}");
+                        tracing::error!("lancement automatique : {e}");
                     }
                 });
             }
+            // Cache du magasin : on recalcule les références depuis les liens durs des instances, puis on supprime les
+            // objets délies depuis plus de 3 jours. Une fois par session, longtemps après le démarrage.
+            st.store_gc_later(std::time::Duration::from_secs(60), state::STORE_GC_STARTUP_MIN_AGE);
             let opts = iroh_options(hooks);
             tauri::async_runtime::spawn(async move {
                 match iroh_backend::IrohBackend::start(&st, opts).await {
@@ -371,7 +389,7 @@ pub fn run() {
                         pending.ready(be);
                     }
                     Err(e) => {
-                        eprintln!("démarrage du réseau P2P impossible : {e}");
+                        tracing::error!("démarrage du réseau P2P impossible : {e}");
                         pending.failed(e);
                     }
                 }
@@ -407,8 +425,8 @@ fn merge_browser_args(window: Option<String>, env: Option<&str>) -> Option<Strin
 mod tests {
     use super::*;
 
-    fn hooks(test_mode: bool, relay: Option<test_hooks::RelayMode>) -> test_hooks::Hooks {
-        test_hooks::Hooks { test_mode, relay, ..Default::default() }
+    fn hooks(test_mode: bool) -> test_hooks::Hooks {
+        test_hooks::Hooks { test_mode, ..Default::default() }
     }
 
     #[test]
@@ -425,25 +443,21 @@ mod tests {
     }
 
     #[test]
-    fn relais_coupe_en_test_publie_les_adresses_directes() {
-        let o = iroh_options(&hooks(true, Some(test_hooks::RelayMode::Disabled)));
-        assert_eq!(o.advertise_addrs, Some(true));
-        assert!(matches!(o.relay, p2p_lib::relay::RelayChoice::Disabled));
-        // Autres modes de test : comportement inchangé.
-        assert_eq!(iroh_options(&hooks(true, Some(test_hooks::RelayMode::Default))).advertise_addrs, None);
-        assert_eq!(iroh_options(&hooks(true, None)).advertise_addrs, None);
-        // Hors mode test, le relais coupé ne change rien.
-        assert_eq!(iroh_options(&hooks(false, Some(test_hooks::RelayMode::Disabled))).advertise_addrs, None);
+    fn portmap_actif_sauf_en_mode_test() {
+        // Production : le port est toujours ouvert sur la box (plus de relais pour servir de secours).
+        assert!(iroh_options(&hooks(false)).portmap);
+        // Mode test : rien n'est ouvert sur la box de la machine de test.
+        assert!(!iroh_options(&hooks(true)).portmap);
     }
 
     #[test]
     fn delai_d_inactivite_configurable_en_test() {
-        let mut h = hooks(true, None);
+        let mut h = hooks(true);
         h.transfer_idle_secs = Some(4);
         let o = iroh_options(&h);
         assert_eq!(o.inactivity, std::time::Duration::from_secs(4));
         assert!(o.stall_retry <= std::time::Duration::from_secs(2));
-        assert_eq!(iroh_options(&hooks(true, None)).inactivity, iroh_backend::DEFAULT_INACTIVITY);
+        assert_eq!(iroh_options(&hooks(true)).inactivity, iroh_backend::DEFAULT_INACTIVITY);
     }
 
     #[test]

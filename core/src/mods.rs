@@ -269,27 +269,70 @@ pub fn add(game_dir: &Path, src: &Path) -> Result<ModEntry> {
     Ok(ModEntry { file: final_name, enabled: true, size: meta.len(), custom: true })
 }
 
+/// Clé de provenance d'un fichier de `dir` : nue pour `mods/` (format historique, aucune migration), `dossier/fichier`
+/// pour les packs de ressources et les shaders (un nom de fichier ne contient jamais `/`, aucune collision possible).
+pub fn provenance_key(dir: &str, name: &str) -> String {
+    if dir == "mods" {
+        name.to_string()
+    } else {
+        format!("{dir}/{name}")
+    }
+}
+
+/// Nom de fichier d'une clé de provenance appartenant à `dir`, `None` si elle est d'un autre dossier.
+fn key_in_dir<'a>(dir: &str, key: &'a str) -> Option<&'a str> {
+    if dir == "mods" {
+        (!key.contains('/')).then_some(key)
+    } else {
+        key.strip_prefix(dir).and_then(|r| r.strip_prefix('/')).filter(|n| !n.is_empty() && !n.contains('/'))
+    }
+}
+
 /// Fichiers de `mods/` provenant du projet `source`/`id` (noms activés), pour les mises à jour.
 pub fn files_of_project(game_dir: &Path, source: &str, id: &str) -> Vec<String> {
-    read_provenance(game_dir).into_iter().filter(|(_, p)| p.source == source && p.id == id).map(|(f, _)| f).collect()
+    files_of_project_in(game_dir, "mods", source, id)
+}
+
+/// Fichiers de `dir` (`mods`, `resourcepacks`, `shaderpacks`) provenant du projet `source`/`id` (noms sans dossier).
+pub fn files_of_project_in(game_dir: &Path, dir: &str, source: &str, id: &str) -> Vec<String> {
+    read_provenance(game_dir)
+        .into_iter()
+        .filter(|(_, p)| p.source == source && p.id == id)
+        .filter_map(|(k, _)| key_in_dir(dir, &k).map(str::to_string))
+        .collect()
 }
 
 /// Supprime les anciens fichiers d'un projet (hors `keep`), activés ou désactivés, et leur provenance.
 pub fn remove_old_versions(game_dir: &Path, source: &str, id: &str, keep: &[String]) -> Result<()> {
+    remove_old_versions_in(game_dir, "mods", source, id, keep)
+}
+
+/// Comme `remove_old_versions` pour un dossier donné. `keep` : noms de fichiers sans dossier. Seuls des fichiers
+/// sont supprimés (un pack décompressé en dossier reste en place) ; `.disabled` n'existe que pour les mods.
+pub fn remove_old_versions_in(game_dir: &Path, dir: &str, source: &str, id: &str, keep: &[String]) -> Result<()> {
     let _g = guard();
     let mut map = read_provenance(game_dir);
-    let dir = mods_dir(game_dir);
-    let old: Vec<String> = map.iter().filter(|(f, p)| p.source == source && p.id == id && !keep.contains(f)).map(|(f, _)| f.clone()).collect();
-    for f in &old {
-        if validate_file_name(f).is_err() {
+    let base = game_dir.join(dir);
+    let old: Vec<(String, String)> = map
+        .iter()
+        .filter(|(_, p)| p.source == source && p.id == id)
+        .filter_map(|(k, _)| key_in_dir(dir, k).map(|n| (k.clone(), n.to_string())))
+        .filter(|(_, n)| !keep.contains(n))
+        .collect();
+    for (key, name) in &old {
+        if validate_file_name(name).is_err() {
             continue;
         }
-        for p in [dir.join(f), dir.join(format!("{f}{DISABLED}"))] {
+        let mut paths = vec![base.join(name)];
+        if dir == "mods" {
+            paths.push(base.join(format!("{name}{DISABLED}")));
+        }
+        for p in paths {
             if p.is_file() {
                 let _ = std::fs::remove_file(p);
             }
         }
-        map.remove(f);
+        map.remove(key);
     }
     if !old.is_empty() {
         write_provenance(game_dir, &map)?;
@@ -416,6 +459,42 @@ mod tests {
         let names: Vec<_> = list(&g).unwrap().into_iter().map(|m| m.file).collect();
         assert_eq!(names, vec!["a-2.jar", "other.jar"]);
         assert_eq!(files_of_project(&g, "modrinth", "A"), vec!["a-2.jar"]);
+    }
+
+    #[test]
+    fn pack_provenance_is_per_folder() {
+        let (_d, g) = setup();
+        std::fs::create_dir_all(g.join("shaderpacks/dossier.zip")).unwrap();
+        for (d, n) in [("shaderpacks", "r5.1.zip"), ("shaderpacks", "r5.2.zip"), ("resourcepacks", "r5.1.zip"), ("mods", "a.jar")] {
+            std::fs::create_dir_all(g.join(d)).unwrap();
+            std::fs::write(g.join(d).join(n), b"x").unwrap();
+        }
+        let p = |id: &str| Provenance { source: "modrinth".into(), id: id.into() };
+        record_provenance(
+            &g,
+            &[
+                (provenance_key("shaderpacks", "r5.1.zip"), p("S")),
+                (provenance_key("shaderpacks", "r5.2.zip"), p("S")),
+                (provenance_key("shaderpacks", "dossier.zip"), p("S")),
+                (provenance_key("resourcepacks", "r5.1.zip"), p("S")),
+                (provenance_key("mods", "a.jar"), p("S")),
+            ],
+        )
+        .unwrap();
+        // Les clés de packs ne sont jamais prises pour des jars.
+        assert_eq!(files_of_project(&g, "modrinth", "S"), vec!["a.jar"]);
+        assert_eq!(files_of_project_in(&g, "shaderpacks", "modrinth", "S"), vec!["dossier.zip", "r5.1.zip", "r5.2.zip"]);
+        assert_eq!(files_of_project_in(&g, "resourcepacks", "modrinth", "S"), vec!["r5.1.zip"]);
+        remove_old_versions_in(&g, "shaderpacks", "modrinth", "S", &["r5.2.zip".to_string()]).unwrap();
+        assert!(!g.join("shaderpacks/r5.1.zip").exists());
+        assert!(g.join("shaderpacks/r5.2.zip").is_file());
+        assert!(g.join("shaderpacks/dossier.zip").is_dir(), "un dossier n'est jamais supprimé");
+        assert!(g.join("resourcepacks/r5.1.zip").is_file() && g.join("mods/a.jar").is_file());
+        assert_eq!(files_of_project_in(&g, "shaderpacks", "modrinth", "S"), vec!["r5.2.zip"]);
+        // Retirer les anciens mods ne touche pas aux packs.
+        remove_old_versions(&g, "modrinth", "S", &[]).unwrap();
+        assert!(!g.join("mods/a.jar").exists() && g.join("shaderpacks/r5.2.zip").is_file());
+        assert_eq!(files_of_project_in(&g, "resourcepacks", "modrinth", "S"), vec!["r5.1.zip"]);
     }
 
     #[test]

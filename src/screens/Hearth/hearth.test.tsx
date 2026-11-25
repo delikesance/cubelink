@@ -2,9 +2,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { ShellContext, type ShellContextValue } from "../../app/context";
 import { createFakeServices } from "../../services/fake";
+import { HearthLeaveError } from "../../services/types";
 import { HearthSection } from "./HearthSection";
 import { HearthMoments } from "./Moments";
 import Hearth from "./index";
+import { parseHeadUnavailable } from "./format";
 
 afterEach(cleanup);
 
@@ -106,6 +108,39 @@ describe("Accueil : serveurs de groupe", () => {
   it("sans point de reprise : reprise à la dernière version", async () => {
     home({ id: "g1", name: "Les copains", state: "unclean", unclean: { holder: { public_key: "k", name: "Alex", online: false }, checkpoint_at: null } });
     await screen.findByRole("button", { name: /Jouer depuis la dernière version/ });
+  });
+
+  it("dernière version sans contenu : Attendre ferme la boîte, Jouer depuis la n° précédente repart de celle-ci", async () => {
+    const { services } = home({ id: "g1", name: "Les copains" });
+    services.setHearthEula(true);
+    services.setHearthHeadUnavailable({ author: "Alice", head: 12, previous: 11 });
+    fireEvent.click(await screen.findByRole("button", { name: "Jouer sur Les copains" }));
+    const dlg = await screen.findByRole("dialog", { name: "La partie de Alice n'a pas fini d'être envoyée" });
+    expect(within(dlg).getByText(/Personne de connecté n'a encore le monde de la n° 12/)).toBeTruthy();
+    fireEvent.click(within(dlg).getByRole("button", { name: "Attendre Alice" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(services.hearthCalls.map((c) => c.kind)).toEqual(["Play"]);
+    fireEvent.click(screen.getByRole("button", { name: "Jouer sur Les copains" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Jouer depuis la n° 11" }));
+    await screen.findByText("Tu héberges · 1 joueur");
+    expect(services.hearthCalls.map((c) => c.kind)).toEqual(["Play", "Play", "PlayFromPrevious"]);
+  });
+
+  it("dernière version sans contenu et aucune version complète : seulement Attendre", async () => {
+    const { services } = home({ id: "g1", name: "Les copains" });
+    services.setHearthEula(true);
+    services.setHearthHeadUnavailable({ author: "Alice", head: 2, previous: null });
+    fireEvent.click(await screen.findByRole("button", { name: "Jouer sur Les copains" }));
+    const dlg = await screen.findByRole("dialog");
+    expect(within(dlg).getByRole("button", { name: "Attendre Alice" })).toBeTruthy();
+    expect(within(dlg).queryByRole("button", { name: /Jouer depuis/ })).toBeNull();
+  });
+
+  it("parseHeadUnavailable : lit le format stable, ignore les autres erreurs", () => {
+    expect(parseHeadUnavailable("head_unavailable|12|11|Alice")).toEqual({ author: "Alice", head: 12, previous: 11 });
+    expect(parseHeadUnavailable(new Error("head_unavailable|3||Alice B"))).toEqual({ author: "Alice B", head: 3, previous: null });
+    expect(parseHeadUnavailable("aucun membre du groupe n'est joignable")).toBeNull();
+    expect(parseHeadUnavailable("head_unavailable|x|1|A")).toBeNull();
   });
 
   it("premier hébergement : la boîte du contrat Minecraft s'ouvre, J'accepte relance Jouer", async () => {
@@ -251,35 +286,146 @@ describe("Page du serveur", () => {
     return { services, pk: noor };
   }
 
-  it("Quitter (ma ligne de Membres) : départ annoncé au groupe, retour à l'accueil", async () => {
+  const me = { public_key: "me", name: "Toi", online: true, is_me: true, is_creator: true, sync: "ok", version: 1, unseen_days: null } as const;
+  const noor = { public_key: "noor", name: "Noor", online: false, is_me: false, is_creator: false, sync: "ok", version: 1, unseen_days: null } as const;
+
+  /** Groupe à deux membres, ouvert sur sa page ; `leave` remplace hearthLeave. */
+  function twoMembers(id: string, leave?: () => Promise<void>) {
     const services = createFakeServices({ tickMs: 0 });
-    services.seedHearth({ id: "g3", name: "Les copains" }, {
-      members: [{ public_key: "me", name: "Toi", online: true, is_me: true, is_creator: true, sync: "ok", version: 1, unseen_days: null }],
-    });
-    const s = shell(services, { id: "g3" });
+    services.seedHearth({ id, name: "Les copains" }, { members: [{ ...me }, { ...noor }] });
+    if (leave) services.hearthLeave = async (gid) => { services.hearthCalls.push({ kind: "Leave", args: [gid] }); await leave(); };
+    const s = shell(services, { id });
     render(<ShellContext.Provider value={s.value}><Hearth /></ShellContext.Provider>);
+    return { services, s };
+  }
+  const clickQuitter = async () => {
     // sur ma ligne de l'onglet Membres, sans changer d'onglet
     fireEvent.click(await screen.findByRole("button", { name: "Quitter" }));
-    const dlg = await screen.findByRole("alertdialog");
+    return await screen.findByRole("alertdialog");
+  };
+
+  it("Quitter (ma ligne de Membres) : départ annoncé au groupe, retour à l'accueil", async () => {
+    const { services, s } = twoMembers("g3");
+    const dlg = await clickQuitter();
+    expect(within(dlg).getByText(/Le serveur continue pour les autres membres/)).toBeTruthy();
     expect(within(dlg).getByText(/même si c'est toi qui l'as créé/)).toBeTruthy();
     fireEvent.click(within(dlg).getByRole("button", { name: "Quitter" }));
     await waitFor(() => expect(services.hearthCalls).toEqual([{ kind: "Leave", args: ["g3"] }]));
     await waitFor(() => expect(s.navigate).toHaveBeenCalledWith("main"));
   });
 
-  it("Quitter quand personne n'est joignable : le monde local est quand même supprimé", async () => {
+  it("Quitter seul dans le groupe : boîte « dernier membre » véridique, hearthLeave non appelé, Supprimer efface", async () => {
     const services = createFakeServices({ tickMs: 0 });
-    services.seedHearth({ id: "g4", name: "Les copains" }, {
-      members: [{ public_key: "me", name: "Toi", online: true, is_me: true, is_creator: true, sync: "ok", version: 1, unseen_days: null }],
-    });
-    services.hearthLeave = async () => { throw new Error("Personne du groupe n'a pu être joint."); };
-    const s = shell(services, { id: "g4" });
+    services.seedHearth({ id: "g5", name: "Les copains" }, { members: [{ ...me }] });
+    const s = shell(services, { id: "g5" });
     render(<ShellContext.Provider value={s.value}><Hearth /></ShellContext.Provider>);
-    // sur ma ligne de l'onglet Membres, sans changer d'onglet
-    fireEvent.click(await screen.findByRole("button", { name: "Quitter" }));
-    fireEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Quitter" }));
-    await waitFor(() => expect(services.hearthCalls).toEqual([{ kind: "Forget", args: ["g4"] }]));
+    const dlg = await clickQuitter();
+    expect(within(dlg).getByText(/dernier membre/)).toBeTruthy();
+    expect(within(dlg).queryByText(/continue pour les autres/)).toBeNull();
+    expect(services.hearthCalls).toEqual([]);
+    fireEvent.click(within(dlg).getByRole("button", { name: "Supprimer le monde" }));
+    await waitFor(() => expect(services.hearthCalls).toEqual([{ kind: "Forget", args: ["g5"] }]));
     await waitFor(() => expect(s.navigate).toHaveBeenCalledWith("main"));
+  });
+
+  it("Quitter seul dans le groupe, puis Annuler : aucun appel, le monde reste", async () => {
+    const services = createFakeServices({ tickMs: 0 });
+    services.seedHearth({ id: "g6", name: "Les copains" }, { members: [{ ...me }] });
+    const s = shell(services, { id: "g6" });
+    render(<ShellContext.Provider value={s.value}><Hearth /></ShellContext.Provider>);
+    const dlg = await clickQuitter();
+    fireEvent.click(within(dlg).getByRole("button", { name: "Annuler" }));
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+    expect(services.hearthCalls).toEqual([]);
+    expect(s.navigate).not.toHaveBeenCalled();
+  });
+
+  it("Quitter : le dernier membre l'apprend du serveur (les autres sont partis entre-temps) : même boîte, rien supprimé avant le clic", async () => {
+    const { services, s } = twoMembers("g7", async () => { throw new HearthLeaveError("last_member"); });
+    fireEvent.click(within(await clickQuitter()).getByRole("button", { name: "Quitter" }));
+    const dlg = await screen.findByText(/dernier membre/).then(() => screen.getByRole("alertdialog"));
+    expect(within(dlg).getByRole("button", { name: "Supprimer le monde" })).toBeTruthy();
+    expect(services.hearthCalls).toEqual([{ kind: "Leave", args: ["g7"] }]);
+    expect(s.navigate).not.toHaveBeenCalled();
+    fireEvent.click(within(dlg).getByRole("button", { name: "Supprimer le monde" }));
+    await waitFor(() => expect(services.hearthCalls).toEqual([{ kind: "Leave", args: ["g7"] }, { kind: "Forget", args: ["g7"] }]));
+    await waitFor(() => expect(s.navigate).toHaveBeenCalledWith("main"));
+  });
+
+  it("Quitter quand personne n'est joignable : seconde confirmation, Forget seulement après elle", async () => {
+    const { services, s } = twoMembers("g4", async () => { throw new HearthLeaveError("unreachable"); });
+    fireEvent.click(within(await clickQuitter()).getByRole("button", { name: "Quitter" }));
+    const dlg = await screen.findByText(/ne leur sera pas annoncé/).then(() => screen.getByRole("alertdialog"));
+    expect(services.hearthCalls).toEqual([{ kind: "Leave", args: ["g4"] }]);
+    expect(s.navigate).not.toHaveBeenCalled();
+    fireEvent.click(within(dlg).getByRole("button", { name: "Supprimer quand même" }));
+    await waitFor(() => expect(services.hearthCalls).toEqual([{ kind: "Leave", args: ["g4"] }, { kind: "Forget", args: ["g4"] }]));
+    await waitFor(() => expect(s.navigate).toHaveBeenCalledWith("main"));
+  });
+
+  it("Quitter alors que ma dernière partie n'est pas partie (#56) : boîte « Quitter quand même », hearthLeave rappelé avec force, rien n'est jeté avant", async () => {
+    const services = createFakeServices({ tickMs: 0 });
+    services.seedHearth({ id: "g10", name: "Les copains" }, { members: [{ ...me }, { ...noor }], settings: { keep_background: false, disk_bytes: 1, outbox_pending: 1, instance_name: "x" } });
+    const s = shell(services, { id: "g10" });
+    render(<ShellContext.Provider value={s.value}><Hearth /></ShellContext.Provider>);
+    fireEvent.click(within(await clickQuitter()).getByRole("button", { name: "Quitter" }));
+    const dlg = await screen.findByText(/elle sera perdue pour le groupe/).then(() => screen.getByRole("alertdialog"));
+    expect(within(dlg).getByText("Ta dernière partie n'est pas encore partie")).toBeTruthy();
+    expect(services.hearthCalls).toEqual([{ kind: "Leave", args: ["g10"] }]);
+    expect(s.navigate).not.toHaveBeenCalled();
+    fireEvent.click(within(dlg).getByRole("button", { name: "Quitter quand même" }));
+    await waitFor(() => expect(services.hearthCalls).toEqual([{ kind: "Leave", args: ["g10"] }, { kind: "Leave", args: ["g10", true] }]));
+    await waitFor(() => expect(s.navigate).toHaveBeenCalledWith("main"));
+  });
+
+  it("Quitter alors que ma dernière partie n'est pas partie, puis Annuler : le monde reste", async () => {
+    const { services, s } = twoMembers("g11", async () => { throw new HearthLeaveError("outbox_pending"); });
+    fireEvent.click(within(await clickQuitter()).getByRole("button", { name: "Quitter" }));
+    const dlg = await screen.findByText(/elle sera perdue pour le groupe/).then(() => screen.getByRole("alertdialog"));
+    fireEvent.click(within(dlg).getByRole("button", { name: "Annuler" }));
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+    expect(services.hearthCalls).toEqual([{ kind: "Leave", args: ["g11"] }]);
+    expect(s.navigate).not.toHaveBeenCalled();
+  });
+
+  it("Quitter quand même, puis personne n'est joignable : on retombe sur la confirmation de suppression avec la partie perdue", async () => {
+    const services = createFakeServices({ tickMs: 0 });
+    services.seedHearth({ id: "g12", name: "Les copains" }, { members: [{ ...me }, { ...noor }], settings: { keep_background: false, disk_bytes: 1, outbox_pending: 2, instance_name: "x" } });
+    services.hearthLeave = async (gid, force) => {
+      services.hearthCalls.push({ kind: "Leave", args: force ? [gid, true] : [gid] });
+      throw new HearthLeaveError(force ? "unreachable" : "outbox_pending");
+    };
+    const s = shell(services, { id: "g12" });
+    render(<ShellContext.Provider value={s.value}><Hearth /></ShellContext.Provider>);
+    fireEvent.click(within(await clickQuitter()).getByRole("button", { name: "Quitter" }));
+    fireEvent.click(within(await screen.findByText(/elle sera perdue pour le groupe/).then(() => screen.getByRole("alertdialog"))).getByRole("button", { name: "Quitter quand même" }));
+    const dlg = await screen.findByText(/ne leur sera pas annoncé/).then(() => screen.getByRole("alertdialog"));
+    expect(within(dlg).getByText(/2 parties n'ont pas été envoyées et seront perdues/)).toBeTruthy();
+    expect(services.hearthCalls).toEqual([{ kind: "Leave", args: ["g12"] }, { kind: "Leave", args: ["g12", true] }]);
+    expect(s.navigate).not.toHaveBeenCalled();
+  });
+
+  it("Quitter quand personne n'est joignable, puis Annuler : le monde reste", async () => {
+    const { services, s } = twoMembers("g8", async () => { throw new HearthLeaveError("unreachable"); });
+    fireEvent.click(within(await clickQuitter()).getByRole("button", { name: "Quitter" }));
+    const dlg = await screen.findByText(/ne leur sera pas annoncé/).then(() => screen.getByRole("alertdialog"));
+    fireEvent.click(within(dlg).getByRole("button", { name: "Annuler" }));
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+    expect(services.hearthCalls).toEqual([{ kind: "Leave", args: ["g8"] }]);
+    expect(s.navigate).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["erreur à code « other »", () => new HearthLeaveError("other", "Trop de propositions en attente.")],
+    ["erreur ordinaire", () => new Error("Trop de propositions en attente.")],
+    ["chaîne brute", () => "Trop de propositions en attente."],
+  ])("Quitter échoue pour une autre raison (%s) : l'erreur est affichée, rien n'est supprimé, pas de retour à l'accueil", async (_n, mk) => {
+    const { services, s } = twoMembers("g9", async () => { throw mk(); });
+    fireEvent.click(within(await clickQuitter()).getByRole("button", { name: "Quitter" }));
+    expect(await screen.findByText("Trop de propositions en attente.")).toBeTruthy();
+    expect(services.hearthCalls).toEqual([{ kind: "Leave", args: ["g9"] }]);
+    expect(s.navigate).not.toHaveBeenCalled();
+    expect(screen.getByRole("alertdialog")).toBeTruthy();
   });
 
   it("Membres : ma tête vient de mon compte actif, jamais du libellé « Toi » (un autre joueur porte ce pseudo)", async () => {
@@ -372,6 +518,50 @@ describe("Page du serveur", () => {
     fireEvent.click(screen.getByRole("button", { name: "Garder la version de Noor" }));
     await waitFor(() => expect(services.hearthCalls).toEqual([{ kind: "ResolveFork", args: ["g1", "vb"] }]));
     await waitFor(() => expect(screen.queryByRole("heading", { name: "Deux versions du monde existent" })).toBeNull());
+  });
+
+  const orphan = { id: "1763600000", at: 1_763_600_000, played_secs: 480, base_number: 11, size_bytes: 52_000_000 };
+
+  it("fin de partie non publiée (#61) : bandeau, Publier appelle hearthOrphanPublish et le bandeau disparaît", async () => {
+    const { services } = page({ id: "g1" }, { id: "g1", name: "Les copains" }, { orphans: [orphan] });
+    await screen.findByRole("heading", { name: "Une fin de partie n'a pas été publiée" });
+    expect(screen.getByText(/partie de la version 11/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /^Publier la fin de partie/ }));
+    await waitFor(() => expect(services.hearthCalls).toEqual([{ kind: "OrphanPublish", args: ["g1", "1763600000"] }]));
+    await waitFor(() => expect(screen.queryByRole("heading", { name: "Une fin de partie n'a pas été publiée" })).toBeNull());
+  });
+
+  it("fin de partie non publiée : Supprimer demande confirmation avant d'appeler hearthOrphanDiscard", async () => {
+    const { services } = page({ id: "g1" }, { id: "g1", name: "Les copains" }, { orphans: [orphan] });
+    fireEvent.click(await screen.findByRole("button", { name: /^Supprimer la fin de partie/ }));
+    const dlg = await screen.findByRole("alertdialog");
+    expect(services.hearthCalls).toEqual([]);
+    fireEvent.click(within(dlg).getByRole("button", { name: "Annuler" }));
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+    expect(services.hearthCalls).toEqual([]);
+    fireEvent.click(screen.getByRole("button", { name: /^Supprimer la fin de partie/ }));
+    fireEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Supprimer" }));
+    await waitFor(() => expect(services.hearthCalls).toEqual([{ kind: "OrphanDiscard", args: ["g1", "1763600000"] }]));
+    await waitFor(() => expect(screen.queryByRole("heading", { name: "Une fin de partie n'a pas été publiée" })).toBeNull());
+  });
+
+  it("Quitter avec une fin de partie non publiée : boîte « Quitter quand même », rien n'est supprimé avant", async () => {
+    const { services, navigate } = page({ id: "g1" }, { id: "g1", name: "Les copains" }, { orphans: [orphan], members: [{ ...me }, { ...noor }] });
+    fireEvent.click(within(await clickQuitter()).getByRole("button", { name: "Quitter" }));
+    const dlg = await screen.findByText(/supprimée avec le monde/).then(() => screen.getByRole("alertdialog"));
+    expect(services.hearthCalls).toEqual([{ kind: "Leave", args: ["g1"] }]);
+    expect(navigate).not.toHaveBeenCalled();
+    fireEvent.click(within(dlg).getByRole("button", { name: "Quitter quand même" }));
+    await waitFor(() => expect(services.hearthCalls).toEqual([{ kind: "Leave", args: ["g1"] }, { kind: "Leave", args: ["g1", true] }]));
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith("main"));
+  });
+
+  it("accueil : la carte signale une fin de partie non publiée et ouvre la page du serveur", async () => {
+    const { navigate } = home({ id: "g1", name: "Les copains", orphans: 1 });
+    const card = await screen.findByRole("listitem", { name: "Serveur Les copains" });
+    expect(within(card).getByText(/Une fin de partie n'a pas été publiée/)).toBeTruthy();
+    fireEvent.click(within(card).getByRole("button", { name: /Voir la fin de partie non publiée/ }));
+    expect(navigate).toHaveBeenCalledWith("hearth", { id: "g1" });
   });
 
   it("modpack absent : associer une instance locale", async () => {

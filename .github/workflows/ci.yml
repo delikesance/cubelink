@@ -1,6 +1,7 @@
-# Vérifications à chaque pull request et à chaque push vers `canary` et `main` (aucune release ici).
+# Vérifications à chaque pull request et à chaque push vers `canary` et `main`.
 # Les jobs tournent EN PARALLÈLE (le front est rapide, le Rust est la partie longue).
-# Sur un push vers `canary`, la pré-version canary (canary.yml) n'est publiée que si les vérifications passent.
+# Sur un push vers `canary`, la pré-version canary (canary.yml) n'est publiée que si les vérifications passent ;
+# sur un push vers `main`, c'est la release (release.yml) : rien n'est publié tant qu'une vérification est rouge.
 # Actions épinglées par SHA (le commentaire donne la version) : dependabot.yml les tient à jour.
 name: ci
 
@@ -31,8 +32,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with: { node-version: 22, cache: npm }
       - run: npm ci --ignore-scripts
       - run: npm run lint
@@ -44,11 +45,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4.9.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
         id: jdk8
         with: { distribution: temurin, java-version: 8 }
-      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4.9.1
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
         id: jdk17
         with: { distribution: temurin, java-version: 17 }
       - name: Construit l'agent (JDK 17, --release 8)
@@ -65,7 +66,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Installe le compilateur de rust-toolchain.toml (version et composants).
       - name: Rust (rust-toolchain.toml)
         shell: bash
@@ -83,7 +84,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Rust (rust-toolchain.toml)
         shell: bash
         run: rustup toolchain install
@@ -102,7 +103,7 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Rust (rust-toolchain.toml)
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
@@ -119,7 +120,7 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Rust (rust-toolchain.toml)
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
@@ -127,10 +128,18 @@ jobs:
           shared-key: ci-test-linux
           save-if: ${{ github.event_name == 'push' }}
       - name: Dépendances système (avec Xvfb)
-        run: bash scripts/ci-apt.sh xvfb
+        run: bash scripts/ci-apt.sh xvfb openbox
       - name: Agent LAN (JDK 17 préinstallé sur le runner)
         run: JAVA_HOME="$JAVA_HOME_17_X64" bash core/resources/lan-agent/build.sh
+      # CUBELINK_REQUIRE_WM : sans openbox, le test X11 du mode transitoire échoue au lieu de s'ignorer en silence
       - run: xvfb-run -a cargo test --workspace
+        env:
+          CUBELINK_REQUIRE_WM: "1"
+      # Scène X11 sur deux moniteurs : la racine doit faire 3840x1080 d'emblée (sous l'écran par défaut, le test s'ignore)
+      # CUBELINK_REQUIRE_MULTIHEAD : si le serveur refuse de décrire deux moniteurs, le test échoue au lieu de s'ignorer
+      - run: xvfb-run -a -s "-screen 0 3840x1080x24" cargo test -p cubelink-host --test x11_fullscreen_multihead
+        env:
+          CUBELINK_REQUIRE_MULTIHEAD: "1"
 
   # E2E Playwright en mode simulé : l'app Tauri réelle (deux profils) contre de faux serveurs locaux
   # (auth, Mojang, Modrinth) et un faux Java. Le harnais pilote WebView2 par CDP : Windows seulement.
@@ -139,8 +148,8 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with: { node-version: 22, cache: npm }
       - name: Rust (rust-toolchain.toml)
         shell: bash
@@ -153,16 +162,66 @@ jobs:
       - name: Agent LAN (JDK 17 préinstallé sur le runner)
         shell: bash
         run: JAVA_HOME="$JAVA_HOME_17_X64" bash core/resources/lan-agent/build.sh
+      - name: Harnais E2E (logique de reconstruction)
+        run: npm run test:e2e-harness
       - name: Binaire de test (front embarqué)
         run: node e2e/harness/build.mjs
       - name: Playwright (mode simulé)
         run: npx playwright test --config e2e/playwright.config.ts
         env:
           E2E_WORKERS: '2'
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+          CUBELINK_E2E_SKIP_BUILD: '1' # déjà construit à l'étape précédente
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: failure()
         with:
           name: e2e-artifacts
+          path: e2e/artifacts
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # Essai réel Linux, NON BLOQUANT (ticket #129) : l'app Tauri réelle sous Xvfb + openbox. bindings-real.mjs la pilote par
+  # WebDriver (tauri-driver + WebKitWebDriver) et vérifie que chaque commande atteint Rust avec les bons arguments ;
+  # background.sh vérifie tray/autostart/instance unique et « fermer = masquer ». Le binaire est le build debug (il charge
+  # l'interface depuis Vite, que les deux scripts démarrent eux-mêmes). Premier essai : jamais prouvé vert, donc
+  # `continue-on-error` et absent de `needs` (canary, release). Le promouvoir en bloquant (le remettre dans `needs` des deux
+  # jobs) seulement après un run vert, sur confirmation du mainteneur, comme `e2e-windows`.
+  e2e-linux:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    continue-on-error: true
+    env:
+      TAURI_DRIVER_VERSION: '2.1.0' # version figée (reproductible)
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with: { node-version: 22, cache: npm }
+      - name: Rust (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: ci-e2e-linux
+          save-if: ${{ github.event_name == 'push' }}
+      - name: Dépendances système (Xvfb, openbox, WebDriver)
+        run: bash scripts/ci-apt.sh xvfb webkit2gtk-driver openbox xdotool wmctrl x11-utils dbus-x11
+      - run: npm ci --ignore-scripts
+      - name: Agent LAN (JDK 17 préinstallé sur le runner)
+        run: JAVA_HOME="$JAVA_HOME_17_X64" bash core/resources/lan-agent/build.sh
+      # rust-cache met aussi en cache ~/.cargo/bin (cache-bin) : l'installation (longue) n'a lieu qu'au premier run.
+      - name: Installe tauri-driver
+        run: command -v tauri-driver || cargo install tauri-driver --locked --version "$TAURI_DRIVER_VERSION"
+      - name: Binaire debug
+        run: cargo build -p cubelink
+      - name: Liaisons réelles (WebDriver)
+        run: xvfb-run -a node e2e/linux/bindings-real.mjs
+      - name: Tray, autostart, instance unique, fermer = masquer
+        if: always()
+        run: bash e2e/linux/background.sh
+        env:
+          E2E_LOG_DIR: ${{ github.workspace }}/e2e/artifacts
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: failure()
+        with:
+          name: e2e-linux-artifacts
           path: e2e/artifacts
           retention-days: 7
           if-no-files-found: ignore
@@ -172,8 +231,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: EmbarkStudios/cargo-deny-action@17aeb3c839e42274e2b8adf721c8c65edfdc74dd # v2.1.3
         with:
           command: check bans licenses sources
 
@@ -183,14 +242,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: EmbarkStudios/cargo-deny-action@17aeb3c839e42274e2b8adf721c8c65edfdc74dd # v2.1.3
         with:
           command: check advisories
 
   # Pré-version canary : seulement après un push sur `canary` et si les vérifications ont réussi.
-  # `e2e-windows` n'en fait pas (encore) partie, par décision du mainteneur (2026-11-14) : 19 scénarios ne suivent plus
-  # l'interface actuelle. Le job tourne toujours ; le remettre dans `needs` dès que la suite repasse au vert.
+  # `e2e-windows` n'en fait pas (encore) partie, par décision du mainteneur (2026-11-14) : des scénarios ne suivaient plus
+  # l'interface actuelle (ticket #66, specs remises à jour ; pas de nombre en dur, `playwright test --list` donne le compte).
+  # `e2e-linux` (essai réel Linux) est dans le même cas.
+  # Le job tourne toujours ; le remettre dans `needs` dès qu'un run Windows complet est vert (ici et dans `release`, qui a la
+  # même liste), sur confirmation du mainteneur.
   canary:
     needs: [front, agent-lan-java8, clippy-windows, tests-windows, clippy-linux, tests-linux, deny]
     if: github.event_name == 'push' && github.ref == 'refs/heads/canary'
@@ -200,3 +262,20 @@ jobs:
     secrets:
       TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
       TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+  # Release : seulement après un push sur `main` et si les vérifications ont réussi (mêmes jobs que canary, mêmes
+  # exceptions : `e2e-windows` et `advisories` ne bloquent pas). release.yml n'a plus de déclencheur `push` propre.
+  # Le job appelant doit porter `contents: write` : un workflow appelé ne peut pas élargir les permissions de l'appelant.
+  release:
+    needs: [front, agent-lan-java8, clippy-windows, tests-windows, clippy-linux, tests-linux, deny]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release.yml
+    with:
+      publish: true
+    secrets:
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+      CUBELINK_CF_API_KEY: ${{ secrets.CUBELINK_CF_API_KEY }}
+      CUBELINK_MS_CLIENT_ID: ${{ secrets.CUBELINK_MS_CLIENT_ID }}

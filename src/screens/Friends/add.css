@@ -13,3 +13,5 @@
 .add-verify{display:block;font-family:ui-monospace,Consolas,monospace;font-size:22px;font-weight:700;letter-spacing:.04em;color:var(--accent-hover);user-select:all;overflow-wrap:anywhere}
 .add-live{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
 .add-input:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+.add-sent-actions{display:flex;gap:8px}
+.add-sent-neutral{border-left-color:var(--line)}

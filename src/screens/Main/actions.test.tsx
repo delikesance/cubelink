@@ -1,12 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { ShellContext, type ShellContextValue } from "../../app/context";
-import { setImportWarning } from "../../app/importWarning";
+import { setImportWarning, setPrepareDeferred } from "../../app/importWarning";
 import { createFakeServices } from "../../services/fake";
 import type { Services } from "../../services";
 import Main from "./index";
 
-afterEach(() => { cleanup(); setImportWarning(null); });
+afterEach(() => { cleanup(); setImportWarning(null); setPrepareDeferred(null); });
 
 function setup(over: Partial<Services> = {}) {
   const services = { ...createFakeServices({ tickMs: 0, requestCount: 0 }), modsCheck: async () => ({ issues: [], checked: 0 }), ...over };
@@ -41,6 +41,36 @@ describe("Main : échec du lancement rapide", () => {
   });
 });
 
+describe("Main : échec d'appel sur le bon modpack", () => {
+  it("le bandeau nomme l'instance lancée, pas la précédente", async () => {
+    const { navigate } = setup({ instancesLaunch: async () => { throw new Error("Java introuvable."); } });
+    fireEvent.click(await screen.findByRole("button", { name: "Jouer à All the Mods 10" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("Échec du lancement de All the Mods 10");
+    expect(alert.textContent).toContain("Java introuvable.");
+    fireEvent.click(within(alert).getByRole("button", { name: "Voir les logs" }));
+    expect(navigate).toHaveBeenCalledWith("instance", { id: "inst-atm10", tab: "logs" });
+  });
+});
+
+describe("Main : préparation du jeu différée", () => {
+  it("bandeau non bloquant avec la cause, Ignorer le retire", async () => {
+    let push: (e: { instance_id: string; message: string }) => void = () => {};
+    setup({ onImportDeferred: (cb) => { push = cb; return () => {}; } });
+    await screen.findByRole("group", { name: "Instances" });
+    act(() => push({ instance_id: "inst-9", message: "réseau indisponible" }));
+    expect(screen.getByText(/le jeu n'a pas pu être préparé \(réseau indisponible\)\. Il sera téléchargé au premier lancement/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Ignorer" }));
+    expect(screen.queryByText(/premier lancement/)).toBeNull();
+  });
+
+  it("reprend l'avis reçu pendant l'import (écran Create)", async () => {
+    setPrepareDeferred("Java indisponible");
+    setup();
+    expect(await screen.findByText(/Java indisponible/)).toBeTruthy();
+  });
+});
+
 describe("Main : avertissement d'import", () => {
   it("affiche un bandeau non bloquant pour les mods manquants", async () => {
     let push: (e: { missing: string[] }) => void = () => {};
@@ -56,5 +86,19 @@ describe("Main : avertissement d'import", () => {
     setImportWarning(["jei"]);
     setup();
     expect(await screen.findByText(/1 mod introuvable : jei/)).toBeTruthy();
+  });
+});
+
+describe("Main : retirer un ami", () => {
+  it("clic droit > Retirer des amis > confirmer : friendRemove appelé, l'ami quitte la colonne", async () => {
+    const friendRemove = vi.fn(async () => {});
+    const { services } = setup({ friendRemove });
+    const [first] = await services.friendList();
+    const row = (await screen.findByText(first.friend.name, { selector: ".n" })).closest("li")!;
+    fireEvent.contextMenu(row);
+    fireEvent.click(screen.getByRole("menuitem", { name: "Retirer des amis" }));
+    fireEvent.click(within(screen.getByRole("alertdialog", { name: "Retirer cet ami ?" })).getByRole("button", { name: "Retirer" }));
+    await waitFor(() => expect(friendRemove).toHaveBeenCalledWith(first.friend.public_key));
+    await waitFor(() => expect(screen.queryByText(first.friend.name, { selector: ".n" })).toBeNull());
   });
 });

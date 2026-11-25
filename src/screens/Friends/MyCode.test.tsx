@@ -28,6 +28,19 @@ describe("Mon code ami", () => {
     expect(screen.getByLabelText(`Mon code ami : ${expected}`)).toBeTruthy();
   });
 
+  it("redemande le code quand mes adresses changent (port ouvert sur la box après le démarrage)", async () => {
+    const svc = fake();
+    let notify = () => {};
+    let code = "mcl1-aaaa";
+    const services: Services = { ...svc, friendMyCode: async () => code, onFriendCodeChanged: (cb) => { notify = cb; return () => { notify = () => {}; }; } };
+    mount(services);
+    expect(await screen.findByText("mcl1-aaaa")).toBeTruthy();
+    code = "mcl1-bbbb";
+    act(() => notify());
+    expect(await screen.findByText("mcl1-bbbb")).toBeTruthy();
+    expect(screen.queryByText("Chargement de ton code…")).toBeNull();
+  });
+
   it("copie dans le presse-papiers puis le message disparaît", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });
@@ -43,6 +56,27 @@ describe("Mon code ami", () => {
     expect(screen.queryByText("Copié")).toBeNull();
   });
 
+  it("Copier mon lien : copie le lien cubelink://add/ du service", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });
+    const svc = fake();
+    const code = await svc.friendMyCode();
+    mount(svc);
+    await screen.findByText(code);
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Copier mon lien" })); });
+    expect(writeText).toHaveBeenCalledWith(`cubelink://add/${code}`);
+    expect(screen.getByRole("button", { name: "Lien copié" })).toBeTruthy();
+  });
+
+  it("Copier mon lien : presse-papiers indisponible, message sans plantage", async () => {
+    vi.stubGlobal("navigator", { ...navigator, clipboard: undefined });
+    const svc = fake();
+    mount(svc);
+    await screen.findByLabelText(/Mon code ami : mcl1-/);
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Copier mon lien" })); });
+    expect(screen.getByText(/Copie du lien impossible/)).toBeTruthy();
+  });
+
   it("repli si le presse-papiers est indisponible", async () => {
     vi.stubGlobal("navigator", { ...navigator, clipboard: undefined });
     const svc = fake();
@@ -52,15 +86,36 @@ describe("Mon code ami", () => {
     expect(await screen.findByText(/Copie impossible/)).toBeTruthy();
   });
 
+  it("Échap annule la confirmation sans régénérer et sans propager la touche", async () => {
+    const svc = fake();
+    const old = await svc.friendMyCode();
+    const regen = vi.spyOn(svc, "friendRegenerateCode");
+    const leaked = vi.fn();
+    document.addEventListener("keydown", leaked);
+    try {
+      mount(svc);
+      await screen.findByText(old);
+      fireEvent.click(screen.getByRole("button", { name: "Générer un nouveau code" }));
+      expect(screen.getByRole("group")).toBeTruthy();
+      fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
+      expect(screen.queryByRole("group")).toBeNull();
+      expect(regen).not.toHaveBeenCalled();
+      expect(leaked).not.toHaveBeenCalled();
+      expect(screen.getByText(old)).toBeTruthy();
+    } finally {
+      document.removeEventListener("keydown", leaked);
+    }
+  });
+
   it("régénération annulable puis confirmée", async () => {
     const svc = fake();
     const old = await svc.friendMyCode();
     mount(svc);
     await screen.findByText(old);
     fireEvent.click(screen.getByRole("button", { name: "Générer un nouveau code" }));
-    expect(screen.getByText(/ancien code ne fonctionnera plus/)).toBeTruthy();
+    expect(screen.getByText(/ancien code ne permettra plus de t'envoyer de nouvelles demandes/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Annuler" }));
-    expect(screen.queryByText(/ancien code ne fonctionnera plus/)).toBeNull();
+    expect(screen.queryByText(/ancien code ne permettra plus de t'envoyer de nouvelles demandes/)).toBeNull();
     expect(screen.getByText(old)).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "Générer un nouveau code" }));

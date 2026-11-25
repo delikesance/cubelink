@@ -1,6 +1,8 @@
 // T10 : « Parcourir » (recherche + installation CurseForge/Modrinth) et mods d'instance (dont mods perso),
 // sur l'application reelle, contre tests-fixtures/browse/server.mjs (faux Modrinth /v2 + faux CurseForge /v1).
 // Captures visuelles dans e2e/artifacts/browse/.
+// La fiche d'un mod / modpack est une PAGE (« Retour aux résultats »), plus une boite de dialogue ; la liste des mods d'une
+// instance est l'onglet Mods de la page de l'instance ; la version se choisit dans le composant Select (combobox), plus un <select>.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -54,39 +56,43 @@ test('Parcourir : recherche, installation d\'un mod avec dependance, modpack, no
 
   // --- installation du mod 0 (depend obligatoirement du mod 1) ---
   await page.locator('.br-card-btn', { hasText: 'Sodium' }).first().click();
-  const dlg = page.getByRole('dialog');
-  await expect(dlg.locator('select')).toBeVisible();
+  const version = page.getByRole('combobox', { name: 'Version' });
+  await expect(version).toBeVisible();
+  await version.click(); // le composant Select : la liste (listbox) s'ouvre sur ses options
+  await expect(page.getByRole('listbox').getByRole('option').first()).toBeVisible();
+  await version.click();
+  await expect(page.getByRole('listbox')).toHaveCount(0);
   await shot(page, 'browse-detail');
-  await dlg.getByRole('button', { name: /^Installer/ }).click();
+  await page.getByRole('button', { name: /^Installer/ }).click();
   const mods = path.join(host.gameDir, 'mods');
   await expect.poll(() => fs.existsSync(mods) ? fs.readdirSync(mods).sort() : [], { timeout: 30_000 }).toEqual(expect.arrayContaining(['mod-0-1.0.0.jar', 'mod-1-1.0.0.jar']));
   await shot(page, 'browse-installed');
-  await page.keyboard.press('Escape');
+  await page.getByRole('button', { name: 'Retour aux résultats' }).click();
 
   // --- CurseForge : mod restreint (mod-5) non telechargeable ---
   await page.getByRole('button', { name: 'CurseForge' }).click();
   await page.getByRole('searchbox').fill('Xaero');
   await page.locator('.br-card-btn', { hasText: 'Xaero Minimap' }).first().click();
-  const dlg2 = page.getByRole('dialog');
-  await expect(dlg2.getByRole('button', { name: /^Installer/ })).toBeDisabled();
-  await expect(dlg2.getByRole('link', { name: /Ouvrir sur CurseForge/ })).toBeVisible();
+  await expect(page.getByRole('button', { name: /^Installer/ })).toBeDisabled();
+  await expect(page.getByRole('link', { name: /Ouvrir sur CurseForge/ })).toBeVisible();
   await shot(page, 'browse-restricted');
-  await page.keyboard.press('Escape');
+  await page.getByRole('button', { name: 'Retour aux résultats' }).click();
 
   // --- CurseForge : mod autorise (mod-0 'Sodium') installe via la cle factice ---
   await page.getByRole('searchbox').fill('Lithium');
   await page.locator('.br-card-btn', { hasText: 'Lithium' }).first().click();
-  await page.getByRole('dialog').getByRole('button', { name: /^Installer/ }).click();
+  await page.getByRole('button', { name: /^Installer/ }).click();
   await expect.poll(() => fs.readdirSync(mods).some((f) => f.startsWith('mod-1-1.0.0') ), { timeout: 30_000 }).toBeTruthy();
-  await page.keyboard.press('Escape');
+  await page.getByRole('button', { name: 'Retour aux résultats' }).click();
 
   // --- modpack Modrinth : nouvelle instance ---
   await page.getByRole('button', { name: 'Modrinth' }).click();
   await page.getByRole('tab', { name: 'Modpacks' }).click();
   await page.getByRole('searchbox').fill('Sodium');
   await page.locator('.br-card-btn', { hasText: 'Sodium' }).first().click();
-  await page.getByRole('dialog').getByRole('button', { name: /^Installer/ }).click();
-  await waitForRoute(page, 'main', 60_000);
+  await page.getByRole('button', { name: /^Installer/ }).click();
+  // La fiche reste affichee une fois le modpack installe (plus de retour automatique a l'accueil) : « Ouvrir le modpack ».
+  await expect(page.getByRole('button', { name: 'Ouvrir le modpack' })).toBeVisible({ timeout: 60_000 });
   const list = await invoke<{ name: string }[]>(page, 'instances_list');
   expect(list.some((i) => /Sodium/.test(i.name))).toBeTruthy();
 
@@ -101,11 +107,10 @@ test('Parcourir : recherche, installation d\'un mod avec dependance, modpack, no
   // refus d'une extension non jar
   await expect(invoke(page, 'mods_add', { instance_id: 'host-world', path: path.join(tmp, 'x.exe') })).rejects.toBeTruthy();
 
-  await page.evaluate(() => { window.location.hash = '#/main'; });
+  await page.evaluate(() => { window.location.hash = '#/instance?id=host-world&tab=mods'; });
   await page.reload();
-  await waitForRoute(page, 'main');
-  await page.getByRole('button', { name: 'Mods', exact: true }).click();
-  const panel = page.getByRole('dialog');
+  await waitForRoute(page, 'instance');
+  const panel = page.locator('.dr-panel'); // onglet Mods de la page de l'instance
   await expect(panel.getByText('mon-mod-perso.jar')).toBeVisible();
   await expect(panel.getByText('Personnalisé').first()).toBeVisible();
   await shot(page, 'mods-panel');
@@ -118,7 +123,6 @@ test('Parcourir : recherche, installation d\'un mod avec dependance, modpack, no
   fs.rmSync(tmp, { recursive: true, force: true });
 
   // --- captures a toutes les tailles ---
-  await page.keyboard.press('Escape');
   for (const [w, h] of [[960, 600], [1440, 900], [1920, 1080], [2560, 1440]] as const) {
     await setWindowSize(page, w, h);
     await page.evaluate(() => { window.location.hash = '#/browse?kind=mod&instance=host-world'; });

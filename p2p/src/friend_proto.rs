@@ -4,11 +4,15 @@
 //! Chaque message est signé (ed25519) sur `domaine | corps` et vérifié avant tout effet de bord.
 //!
 //! ```text
-//! A -> B  REQUEST (A, B, ts, nom, H(A|nonce_A))      engagement de A
+//! A -> B  REQUEST (A, B, ts, nom, H(A|nonce_A), jeton) engagement de A + jeton du code ami de B
 //! B -> A  COMMIT  (B, A, ts, H_A, H(B|nonce_B))      engagement de B (session = H(H_A|H_B))
 //! A -> B  REVEAL  (nonce_A)                          seulement après l'engagement de B
 //! B -> A  REVEAL  (nonce_B)                          seulement après vérification de H_A
 //! ```
+//! Le jeton (16 octets, dans le corps signé) est celui du code ami de B : B le compare à son jeton courant
+//! AVANT toute admission (ni quota, ni entrée « vu », ni événement). Absent (ancienne version) ou périmé
+//! (code régénéré), B ferme la connexion avec le code applicatif [`TOKEN_REFUSED`] : A affiche alors « ce
+//! code ami n'est plus valide ». Un ami déjà accepté n'est pas concerné (contrôlé avant le jeton).
 //! Les deux côtés calculent `verify_code(...)`. B range alors la demande (`upsert_request`, sens
 //! `In`, aucun ami) et prévient l'UI ; le flux reste ouvert jusqu'à la décision de B :
 //! `DECISION` signée (acceptation ou refus). A crée l'ami à la réception d'une acceptation valide ;
@@ -22,10 +26,10 @@ use std::time::{Duration, Instant};
 
 use core_lib::types::{Error, Friend, FriendRequest, Result, TrustLevel, VerifyCode};
 use ed25519_dalek::Signature;
-use iroh::endpoint::{Connection, RecvStream, SendStream};
+use iroh::endpoint::{Connection, ConnectionError, RecvStream, SendStream};
 use iroh::protocol::{AcceptError, ProtocolHandler, Router};
-use iroh::{Endpoint, EndpointAddr, EndpointId, RelayUrl};
-use rand::RngCore;
+use iroh::{Endpoint, EndpointAddr, EndpointId};
+use rand::Rng;
 use sha2::{Digest, Sha256};
 use tokio::sync::{oneshot, OwnedSemaphorePermit, Semaphore};
 
@@ -33,6 +37,9 @@ use crate::friend_code;
 use crate::friends_db::{Direction, FriendsDb};
 use crate::identity::Identity;
 use crate::presence::{observed_addr, AddrSink};
+
+/// Code ami sans aucune adresse IP : ancienne version (relais n0 seul), ou code généré avant que le réseau soit prêt.
+pub const OLD_CODE_MESSAGE: &str = "Ce code ne contient aucune adresse : il vient d'une ancienne version de Cubelink, ou a été généré avant que le réseau soit prêt. Demande à ton ami un nouveau code.";
 use crate::verify_code::verify_code;
 
 /// ALPN du protocole d'ajout d'ami.
@@ -50,10 +57,21 @@ const COMMIT_DOMAIN: &[u8] = b"cubelink/friend/commit/v1";
 const SESSION_DOMAIN: &[u8] = b"cubelink/friend/session/v1";
 const MAX_SEEN: usize = 4096;
 
+/// REQUEST d'une ancienne version (sans jeton) : décodé seulement pour être refusé proprement.
 const K_REQUEST: u8 = 1;
+/// REQUEST portant le jeton du code ami.
+const K_REQUEST_V2: u8 = 5;
 const K_COMMIT: u8 = 2;
 const K_REVEAL: u8 = 3;
 const K_DECISION: u8 = 4;
+
+/// Code de fermeture applicatif : le jeton du code ami est absent ou périmé.
+pub const TOKEN_REFUSED: u32 = 2;
+const TOKEN_REFUSED_REASON: &[u8] = b"code ami perime";
+/// Code de fermeture applicatif : le demandeur a annulé sa demande (distinct de `TOKEN_REFUSED`).
+const CANCELLED: u32 = 3;
+/// Message montré à l'utilisateur quand l'hôte refuse notre jeton.
+pub const STALE_CODE_MSG: &str = "Ce code ami n'est plus valide : demande à ton ami de te renvoyer son code actuel.";
 
 /// Événements pour l'UI.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,6 +82,12 @@ pub enum FriendEvent {
     Accepted(Friend),
     /// Notre demande a été refusée (clé publique hex du pair).
     Refused(String),
+    /// Une demande reçue a été retirée sans décision de l'utilisateur (l'ami a fermé son flux ou le délai
+    /// de décision est écoulé) : clé publique hex du demandeur. L'interface retire la carte.
+    RequestRemoved(String),
+    /// Notre demande envoyée est restée sans réponse (délai écoulé, ou l'autre côté a coupé) : clé publique hex
+    /// du pair. Jamais émis après une annulation volontaire.
+    Expired(String),
 }
 
 pub type EventSink = Arc<dyn Fn(FriendEvent) + Send + Sync>;
@@ -72,13 +96,15 @@ pub type EventSink = Arc<dyn Fn(FriendEvent) + Send + Sync>;
 #[derive(Debug, Clone)]
 pub struct FriendConfig {
     /// Demandes entrantes simultanées (en cours ou en attente de décision), tous pairs confondus.
+    /// Borne les demandes en attente de la décision de l'utilisateur (jusqu'à `decision_ttl`).
     pub max_pending_total: usize,
     /// Demandes acceptées par pair et par fenêtre.
     pub max_requests_per_peer: usize,
     pub rate_window: Duration,
     /// Plafond de demandes stockées dans la base (au-delà : rejet silencieux).
     pub max_stored_requests: usize,
-    /// Poignées de main simultanées (CPU).
+    /// Poignées de main simultanées (CPU). Le créneau n'est tenu que pendant l'échange des messages
+    /// (jusqu'au REVEAL), jamais pendant l'attente de la décision : sinon il borne les demandes en attente.
     pub max_concurrent_handshakes: usize,
     /// Délai par message.
     pub io_timeout: Duration,
@@ -117,7 +143,9 @@ fn check_name(name: &str) -> Result<()> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Body {
-    Request { name: String, commit: [u8; 32] },
+    Request { name: String, commit: [u8; 32], token: friend_code::Token },
+    /// REQUEST sans jeton (ancienne version de l'application).
+    LegacyRequest { name: String, commit: [u8; 32] },
     Commit { commit_a: [u8; 32], commit_b: [u8; 32] },
     Reveal { session: [u8; 32], nonce: [u8; 32] },
     Decision { session: [u8; 32], accept: bool, name: String },
@@ -146,7 +174,8 @@ fn put_str(b: &mut Vec<u8>, s: &str) {
 fn encode(msg: &Msg, id: &Identity) -> Vec<u8> {
     let mut b = Vec::with_capacity(256);
     b.push(match msg.body {
-        Body::Request { .. } => K_REQUEST,
+        Body::Request { .. } => K_REQUEST_V2,
+        Body::LegacyRequest { .. } => K_REQUEST,
         Body::Commit { .. } => K_COMMIT,
         Body::Reveal { .. } => K_REVEAL,
         Body::Decision { .. } => K_DECISION,
@@ -155,7 +184,12 @@ fn encode(msg: &Msg, id: &Identity) -> Vec<u8> {
     b.extend_from_slice(&msg.to);
     b.extend_from_slice(&msg.ts.to_be_bytes());
     match &msg.body {
-        Body::Request { name, commit } => {
+        Body::Request { name, commit, token } => {
+            put_str(&mut b, name);
+            b.extend_from_slice(commit);
+            b.extend_from_slice(token);
+        }
+        Body::LegacyRequest { name, commit } => {
             put_str(&mut b, name);
             b.extend_from_slice(commit);
         }
@@ -212,7 +246,12 @@ fn decode(frame: &[u8]) -> Result<Msg> {
     let to = r.arr()?;
     let ts = u64::from_be_bytes(r.take(8)?.try_into().expect("8 octets"));
     let parsed = match kind {
-        K_REQUEST => Body::Request { name: r.string()?, commit: r.arr()? },
+        K_REQUEST => Body::LegacyRequest { name: r.string()?, commit: r.arr()? },
+        K_REQUEST_V2 => Body::Request {
+            name: r.string()?,
+            commit: r.arr()?,
+            token: r.take(friend_code::TOKEN_LEN)?.try_into().expect("16 octets"),
+        },
         K_COMMIT => Body::Commit { commit_a: r.arr()?, commit_b: r.arr()? },
         K_REVEAL => Body::Reveal { session: r.arr()?, nonce: r.arr()? },
         K_DECISION => {
@@ -254,7 +293,7 @@ fn session_id(commit_a: &[u8; 32], commit_b: &[u8; 32]) -> [u8; 32] {
 
 fn random32() -> [u8; 32] {
     let mut n = [0u8; 32];
-    rand::rngs::OsRng.fill_bytes(&mut n);
+    rand::rand_core::UnwrapErr(rand::rngs::SysRng).fill_bytes(&mut n);
     n
 }
 
@@ -270,6 +309,19 @@ fn check_header(m: &Msg, expected_from: Option<&[u8; 32]>, me: &[u8; 32]) -> Res
         return Err(Error::Auth("horodatage hors fenêtre".into()));
     }
     Ok(())
+}
+
+/// L'hôte a-t-il refusé notre jeton (fermeture applicative [`TOKEN_REFUSED`]) ? L'erreur du flux peut
+/// arriver avant l'enregistrement de la raison de fermeture : on attend brièvement.
+async fn token_refused(conn: &Connection) -> bool {
+    let is_refusal = |c: &Connection| {
+        matches!(c.close_reason(), Some(ConnectionError::ApplicationClosed(a)) if u64::from(a.error_code) == u64::from(TOKEN_REFUSED))
+    };
+    if is_refusal(conn) {
+        return true;
+    }
+    let _ = tokio::time::timeout(Duration::from_millis(500), conn.closed()).await;
+    is_refusal(conn)
 }
 
 // ---------- framing ----------
@@ -310,7 +362,15 @@ struct State {
     pending: HashMap<String, oneshot::Sender<Decision>>,
     attempts: HashMap<String, VecDeque<Instant>>,
     seen: HashMap<[u8; 32], Instant>,
-    outgoing: HashSet<String>,
+    outgoing: HashMap<String, Outgoing>,
+    /// Compteur des demandes sortantes : distingue une demande de sa remplaçante au même pair.
+    next_out: u64,
+}
+
+/// Demande sortante en cours : sa génération, et de quoi l'annuler quand elle attend la décision.
+struct Outgoing {
+    id: u64,
+    cancel: Option<oneshot::Sender<()>>,
 }
 
 struct Shared {
@@ -322,6 +382,8 @@ struct Shared {
     name: Mutex<String>,
     state: Mutex<State>,
     handshakes: Arc<Semaphore>,
+    /// Jeton courant du code ami : seules les nouvelles demandes qui le portent sont admises.
+    token: Mutex<friend_code::Token>,
     /// Reçoit l'adresse (relais + IP) du demandeur dont la demande vient d'être acceptée.
     addr_sink: Mutex<Option<AddrSink>>,
 }
@@ -343,11 +405,16 @@ impl Drop for Admission {
 struct OutGuard {
     shared: Arc<Shared>,
     peer: String,
+    id: u64,
 }
 
 impl Drop for OutGuard {
     fn drop(&mut self) {
-        lock(&self.shared.state).outgoing.remove(&self.peer);
+        // Ne retire que sa propre demande : après une annulation, le pair peut déjà avoir une remplaçante.
+        let mut st = lock(&self.shared.state);
+        if st.outgoing.get(&self.peer).is_some_and(|o| o.id == self.id) {
+            st.outgoing.remove(&self.peer);
+        }
     }
 }
 
@@ -392,11 +459,22 @@ impl Shared {
     }
 
     /// Côté B : une connexion entrante complète.
-    async fn respond(self: &Arc<Self>, conn: &Connection, send: &mut SendStream, recv: &mut RecvStream) -> Result<()> {
+    ///
+    /// `permit` est le créneau de poignée de main : il est rendu dès que notre REVEAL est écrit, avant
+    /// l'attente de la décision (600 s), pour que la demande en attente ne bloque pas les suivantes.
+    async fn respond(
+        self: &Arc<Self>,
+        conn: &Connection,
+        send: &mut SendStream,
+        recv: &mut RecvStream,
+        permit: OwnedSemaphorePermit,
+    ) -> Result<()> {
         let t = self.cfg.io_timeout;
         let m1 = decode(&read_frame(recv, t).await?)?;
-        let Body::Request { name, commit: commit_a } = &m1.body else {
-            return Err(Error::Invalid("REQUEST attendu".into()));
+        let (name, commit_a, token) = match &m1.body {
+            Body::Request { name, commit, token } => (name, commit, Some(token)),
+            Body::LegacyRequest { name, commit } => (name, commit, None),
+            _ => return Err(Error::Invalid("REQUEST attendu".into())),
         };
         check_header(&m1, Some(conn.remote_id().as_bytes()), &self.me)?;
         if m1.from == self.me {
@@ -405,6 +483,12 @@ impl Shared {
         let peer = hex::encode(m1.from);
         if self.db.is_friend(&peer)? {
             return Err(Error::Invalid("déjà ami".into()));
+        }
+        // Nouvelle demande : le jeton doit être le courant, vérifié avant `admit` (un refus ne consomme ni
+        // quota ni entrée « vu »). Absent ou périmé : fermeture applicative lisible par le demandeur.
+        if !token.is_some_and(|t| friend_code::token_eq(t, &lock(&self.token))) {
+            conn.close(TOKEN_REFUSED.into(), TOKEN_REFUSED_REASON);
+            return Err(Error::Auth("jeton du code ami absent ou périmé".into()));
         }
         let adm = self.admit(&peer, commit_a)?;
 
@@ -426,6 +510,8 @@ impl Shared {
             return Err(Error::Integrity { expected: hex::encode(commit_a), actual: hex::encode(commitment(&m1.from, &nonce_a)) });
         }
         write_frame(send, &self.sign(m1.from, Body::Reveal { session, nonce: nonce_b })).await?;
+        // Poignée de main terminée : la suite (SQLite, attente de décision) ne coûte plus de CPU de handshake.
+        drop(permit);
 
         let code = verify_code(&self.me, &m1.from, &nonce_b, &nonce_a);
         let req = FriendRequest { public_key: peer.clone(), name: name.clone(), verify_code: code, received_at: now_secs() as i64 };
@@ -443,7 +529,7 @@ impl Shared {
             () = tokio::time::sleep(self.cfg.decision_ttl) => None,
         };
         let Some(d) = outcome else {
-            let _ = self.db.remove_request(&peer);
+            self.drop_undecided(&peer);
             drop(adm);
             return Ok(());
         };
@@ -456,15 +542,27 @@ impl Shared {
         }
         let written = write_frame(send, &msg).await;
         let _ = send.finish();
+        // Décision écrite : le pair n'est plus « actif », il peut redemander tout de suite (sinon son renvoi après un refus
+        // échouerait pendant l'attente de fermeture ci-dessous).
+        drop(adm);
         if written.is_ok() {
             // Attend que A ait lu et fermé la connexion avant de libérer la connexion.
             let _ = tokio::time::timeout(Duration::from_secs(5), conn.closed()).await;
         } else {
-            let _ = self.db.remove_request(&peer);
+            self.drop_undecided(&peer);
         }
         let _ = d.reply.send(written.map_err(|e| Error::Network(e.to_string())));
         conn.close(0u32.into(), b"done");
         Ok(())
+    }
+
+    /// Retire une demande qui ne peut plus être décidée (flux fermé, délai écoulé, écriture échouée) et
+    /// prévient l'interface si la ligne existait encore.
+    fn drop_undecided(&self, peer: &str) {
+        lock(&self.state).pending.remove(peer);
+        if self.db.remove_request(peer).unwrap_or(false) {
+            (self.sink)(FriendEvent::RequestRemoved(peer.to_string()));
+        }
     }
 
     async fn decide(&self, public_key: &str, accept: bool) -> Result<()> {
@@ -502,12 +600,11 @@ impl ProtocolHandler for FriendHandler {
             conn.close(0u32.into(), b"");
             return Ok(());
         };
-        let _permit = permit;
         let io = self.shared.cfg.io_timeout;
         let Ok(Ok((mut send, mut recv))) = tokio::time::timeout(io, conn.accept_bi()).await else {
             return Ok(());
         };
-        if let Err(e) = self.shared.respond(&conn, &mut send, &mut recv).await {
+        if let Err(e) = self.shared.respond(&conn, &mut send, &mut recv, permit).await {
             // Rejet silencieux : aucune réponse, simple fermeture.
             tracing::debug!("demande d'ami rejetée : {e}");
             conn.close(0u32.into(), b"");
@@ -553,6 +650,13 @@ impl FriendService {
         event_sink: EventSink,
         cfg: FriendConfig,
     ) -> Result<Self> {
+        // L'attente d'une décision est un état de session (flux de l'ami). Après un arrêt, les demandes
+        // reçues en base ne sont plus décidables : on les retire plutôt que d'afficher des cartes mortes.
+        match db.remove_incoming_requests() {
+            Ok(n) if n > 0 => tracing::debug!("{n} demande(s) d'ami orpheline(s) retirée(s) au démarrage"),
+            Ok(_) => {}
+            Err(e) => tracing::warn!("purge des demandes d'ami orphelines impossible : {e}"),
+        }
         let me = identity.public_key().to_bytes();
         let name = format!("Joueur-{}", &hex::encode(me)[..8]);
         let shared = Arc::new(Shared {
@@ -564,6 +668,8 @@ impl FriendService {
             me,
             name: Mutex::new(name),
             state: Mutex::new(State::default()),
+            // Jeton aléatoire par défaut : sans `set_code_token`, aucun code déjà diffusé n'est accepté.
+            token: Mutex::new(friend_code::new_token()),
             addr_sink: Mutex::new(None),
         });
         Ok(Self { shared, endpoint, router: None })
@@ -577,6 +683,17 @@ impl FriendService {
 
     pub fn handler(&self) -> FriendHandler {
         FriendHandler { shared: self.shared.clone() }
+    }
+
+    /// Jeton courant du code ami (à appeler au démarrage et à chaque régénération du code). Les demandes
+    /// déjà admises restent valides ; les nouvelles demandes portant un autre jeton sont refusées.
+    pub fn set_code_token(&self, token: friend_code::Token) {
+        *lock(&self.shared.token) = token;
+    }
+
+    /// Jeton courant.
+    pub fn code_token(&self) -> friend_code::Token {
+        *lock(&self.shared.token)
     }
 
     /// Nom Minecraft déclaré dans les demandes et acceptations.
@@ -601,23 +718,30 @@ impl FriendService {
         if peer_bytes == sh.me {
             return Err(Error::Invalid("on ne peut pas s'ajouter soi-même".into()));
         }
+        // Sans relais ni annuaire (#55), seules les IP du code permettent de joindre le pair. Un code d'une ancienne
+        // version n'a que le relais n0 de son auteur : inutilisable, on le dit en clair plutôt que d'échouer en réseau.
+        if !payload.addrs.iter().any(|a| a.parse::<SocketAddr>().is_ok()) {
+            return Err(Error::Invalid(OLD_CODE_MESSAGE.into()));
+        }
         let peer = hex::encode(peer_bytes);
         if sh.db.is_friend(&peer)? {
             return Err(Error::Invalid("déjà ami".into()));
         }
-        {
+        let out_id = {
             let mut st = lock(&sh.state);
-            if !st.outgoing.insert(peer.clone()) {
+            if st.outgoing.contains_key(&peer) {
                 return Err(Error::Invalid("une demande est déjà en cours pour ce pair".into()));
             }
-        }
-        let guard = OutGuard { shared: sh.clone(), peer: peer.clone() };
+            st.next_out += 1;
+            let id = st.next_out;
+            st.outgoing.insert(peer.clone(), Outgoing { id, cancel: None });
+            id
+        };
+        let guard = OutGuard { shared: sh.clone(), peer: peer.clone(), id: out_id };
 
         let id = EndpointId::from_bytes(&peer_bytes).map_err(|_| Error::Invalid("clé publique invalide".into()))?;
         let mut addr = EndpointAddr::new(id);
-        if let Some(r) = payload.relay.as_deref().and_then(|r| r.parse::<RelayUrl>().ok()) {
-            addr = addr.with_relay_url(r);
-        }
+        // Le relais éventuel du code est ignoré (#55) : aucun relais n'est contacté, un ancien code porte celui de n0.
         for a in payload.addrs.iter().filter_map(|a| a.parse::<SocketAddr>().ok()) {
             addr = addr.with_ip_addr(a);
         }
@@ -634,9 +758,17 @@ impl FriendService {
 
         let nonce_a = random32();
         let commit_a = commitment(&sh.me, &nonce_a);
-        write_frame(&mut send, &sh.sign(peer_bytes, Body::Request { name: sh.my_name(), commit: commit_a })).await?;
-
-        let m = decode(&read_frame(&mut recv, t).await?)?;
+        let first = async {
+            write_frame(&mut send, &sh.sign(peer_bytes, Body::Request { name: sh.my_name(), commit: commit_a, token: payload.token })).await?;
+            read_frame(&mut recv, t).await
+        }
+        .await;
+        let frame = match first {
+            Ok(f) => f,
+            // L'hôte a fermé avec le code « jeton périmé » : message clair plutôt qu'une erreur réseau.
+            Err(e) => return Err(if token_refused(&conn).await { Error::Other(STALE_CODE_MSG.into()) } else { e }),
+        };
+        let m = decode(&frame)?;
         check_header(&m, Some(&peer_bytes), &sh.me)?;
         let Body::Commit { commit_a: echoed, commit_b } = m.body else {
             return Err(Error::Invalid("COMMIT attendu".into()));
@@ -662,12 +794,30 @@ impl FriendService {
         }
         let code = verify_code(&sh.me, &peer_bytes, &nonce_a, &nonce_b);
 
+        // L'attente de la décision peut être annulée (`cancel_request`). Si la demande a déjà été remplacée ou
+        // annulée entre-temps, on s'arrête là.
+        let (cancel_tx, mut cancel_rx) = oneshot::channel::<()>();
+        {
+            let mut st = lock(&sh.state);
+            match st.outgoing.get_mut(&peer) {
+                Some(o) if o.id == out_id => o.cancel = Some(cancel_tx),
+                _ => return Err(Error::Other("Demande annulée.".into())),
+            }
+        }
         let shared = sh.clone();
         tokio::spawn(async move {
             let _guard = guard;
             let wait = shared.cfg.decision_ttl + shared.cfg.io_timeout;
+            let mut cancelled = false;
             let result: Result<()> = async {
-                let m = decode(&read_frame(&mut recv, wait).await?)?;
+                let frame = tokio::select! {
+                    r = read_frame(&mut recv, wait) => r?,
+                    _ = &mut cancel_rx => {
+                        cancelled = true;
+                        return Ok(());
+                    }
+                };
+                let m = decode(&frame)?;
                 check_header(&m, Some(&peer_bytes), &shared.me)?;
                 let Body::Decision { session: s3, accept, name } = m.body else {
                     return Err(Error::Invalid("DECISION attendue".into()));
@@ -687,22 +837,57 @@ impl FriendService {
             .await;
             if let Err(e) = result {
                 tracing::debug!("décision d'ami non appliquée : {e}");
+                (shared.sink)(FriendEvent::Expired(hex::encode(peer_bytes)));
             }
-            let _ = send.finish();
-            conn.close(0u32.into(), b"ok");
+            if cancelled {
+                // Flux et connexion fermés sans décision : chez l'ami, la demande disparaît (`RequestRemoved`).
+                conn.close(CANCELLED.into(), b"annulee");
+            } else {
+                let _ = send.finish();
+                conn.close(0u32.into(), b"ok");
+            }
         });
         Ok(code)
     }
 
+    /// Annule la demande envoyée à ce pair (clé publique hex). Le pair est libéré tout de suite (une nouvelle
+    /// demande est possible) et la demande disparaît chez lui. `false` : rien en cours (pas une erreur).
+    /// Aucun événement n'est émis. Si l'ami décide au même instant, il peut avoir accepté sans que nous le
+    /// sachions : il suffit alors de le redemander.
+    pub fn cancel_request(&self, public_key: &str) -> bool {
+        match lock(&self.shared.state).outgoing.remove(public_key) {
+            Some(o) => {
+                if let Some(tx) = o.cancel {
+                    let _ = tx.send(());
+                }
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Accepte une demande reçue : envoie l'acceptation signée puis crée l'ami.
+    /// Si la demande n'est plus décidable (flux fermé, délai écoulé, redémarrage), la ligne est retirée
+    /// et l'erreur demande de la renvoyer.
     pub async fn accept(&self, public_key: &str) -> Result<Friend> {
-        self.shared.decide(public_key, true).await?;
+        match self.shared.decide(public_key, true).await {
+            Ok(()) => {}
+            Err(Error::NotFound(_)) => {
+                self.shared.db.remove_request(public_key)?;
+                return Err(Error::Other("Cette demande a expiré : demande à ton ami de la renvoyer.".into()));
+            }
+            Err(e) => return Err(e),
+        }
         self.shared.db.accept_request(public_key)
     }
 
-    /// Refuse une demande reçue : envoie le refus signé puis retire la demande.
+    /// Refuse une demande reçue : envoie le refus signé puis retire la demande. Une demande qui n'est
+    /// plus décidable (expirée, orpheline) est simplement retirée : le refus réussit.
     pub async fn refuse(&self, public_key: &str) -> Result<()> {
-        self.shared.decide(public_key, false).await?;
+        match self.shared.decide(public_key, false).await {
+            Ok(()) | Err(Error::NotFound(_)) => {}
+            Err(e) => return Err(e),
+        }
         self.shared.db.remove_request(public_key)?;
         Ok(())
     }
@@ -750,13 +935,22 @@ mod tests {
             svc.set_name(name).unwrap();
             let code = friend_code::encode(&friend_code::FriendCodePayload {
                 public_key: ident.public_key().to_bytes(),
-                epoch: 0,
+                token: svc.code_token(),
                 relay: None,
                 addrs: ep.addr().ip_addrs().map(|a| a.to_string()).take(4).collect(),
             });
             Node { _dir: dir, ident, ep, db, svc, events, code }
         }
 
+        /// Code ami de ce nœud pour un jeton donné.
+        fn code_with(&self, token: friend_code::Token) -> String {
+            friend_code::encode(&friend_code::FriendCodePayload {
+                public_key: self.pk(),
+                token,
+                relay: None,
+                addrs: self.ep.addr().ip_addrs().map(|a| a.to_string()).take(4).collect(),
+            })
+        }
         fn pk(&self) -> [u8; 32] {
             self.ident.public_key().to_bytes()
         }
@@ -866,21 +1060,184 @@ mod tests {
         assert!(a.db.list_friends().unwrap().is_empty());
         assert!(b.db.list_friends().unwrap().is_empty());
         assert_eq!(b.db.request_count().unwrap(), 0);
-        assert!(matches!(b.svc.accept(&a.hex()).await, Err(Error::NotFound(_))));
+        let err = b.svc.accept(&a.hex()).await.unwrap_err();
+        assert!(err.to_string().contains("a expiré"), "{err}");
+        assert!(b.db.list_friends().unwrap().is_empty());
+    }
+
+    fn orphan_request(pk: &str) -> FriendRequest {
+        FriendRequest { public_key: pk.into(), name: "Alice".into(), verify_code: VerifyCode("AAAA · BBBB · CCCC · DDDD".into()), received_at: 1 }
+    }
+
+    /// Redémarre le service d'un nœud sur la même base (comme un relancement de l'application).
+    async fn restart(n: &Node) -> (FriendService, Events) {
+        n.svc.shutdown().await;
+        let events: Events = Arc::default();
+        let ev = events.clone();
+        let sink: EventSink = Arc::new(move |e| lock(&ev).push(e));
+        let svc = FriendService::start_with_config(
+            n.ep.clone(),
+            n.ident.clone(),
+            n.db.clone(),
+            sink,
+            FriendConfig { io_timeout: Duration::from_secs(5), ..FriendConfig::default() },
+        )
+        .unwrap();
+        (svc, events)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn request_orphaned_by_restart_is_purged() {
+        let a = Node::new("Alice").await;
+        let b = Node::new("Bob").await;
+        a.svc.send_request(&b.code).await.unwrap();
+        b.wait_event(|e| matches!(e, FriendEvent::IncomingRequest(_))).await;
+        assert_eq!(b.db.request_count().unwrap(), 1);
+        // B quitte sans décider puis relance : la demande ne peut plus être décidée, elle disparaît.
+        let (svc2, _) = restart(&b).await;
+        assert_eq!(b.db.request_count().unwrap(), 0);
+        // Un refus tardif (carte déjà affichée) réussit quand même.
+        svc2.refuse(&a.hex()).await.unwrap();
+        svc2.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn refuse_and_accept_tolerate_orphan_row() {
+        let b = Node::new("Bob").await;
+        let pk = "a".repeat(64);
+        b.db.upsert_request(&orphan_request(&pk), Direction::In).unwrap();
+        b.svc.refuse(&pk).await.unwrap();
+        assert_eq!(b.db.request_count().unwrap(), 0);
+
+        b.db.upsert_request(&orphan_request(&pk), Direction::In).unwrap();
+        let err = b.svc.accept(&pk).await.unwrap_err();
+        assert!(err.to_string().contains("a expiré"), "{err}");
+        assert!(!err.to_string().contains(&pk));
+        assert_eq!(b.db.request_count().unwrap(), 0);
+        assert!(b.db.list_friends().unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancel_request_removes_it_at_peer_and_frees_the_slot() {
+        let a = Node::new("Alice").await;
+        let b = Node::new("Bob").await;
+        a.svc.send_request(&b.code).await.unwrap();
+        b.wait_event(|e| matches!(e, FriendEvent::IncomingRequest(_))).await;
+        // Sans annulation, le pair est tenu.
+        assert!(a.svc.send_request(&b.code).await.unwrap_err().to_string().contains("déjà en cours"));
+
+        assert!(a.svc.cancel_request(&b.hex()));
+        // La demande disparaît chez B, sans événement chez A.
+        b.wait_event(|e| matches!(e, FriendEvent::RequestRemoved(k) if *k == a.hex())).await;
+        assert_eq!(b.db.request_count().unwrap(), 0);
+        // Le pair est libre tout de suite : nouvelle demande acceptée, puis acceptée par B.
+        a.svc.send_request(&b.code).await.unwrap();
+        b.wait_event(|e| matches!(e, FriendEvent::IncomingRequest(_))).await;
+        b.svc.accept(&a.hex()).await.unwrap();
+        a.wait_event(|e| matches!(e, FriendEvent::Accepted(_))).await;
+        assert!(a.db.is_friend(&b.hex()).unwrap());
+        let evs = a.events();
+        assert!(!evs.iter().any(|e| matches!(e, FriendEvent::Refused(_) | FriendEvent::Expired(_))), "{evs:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancel_request_without_pending_is_a_noop() {
+        let a = Node::new("Alice").await;
+        assert!(!a.svc.cancel_request(&"b".repeat(64)));
+        assert!(!a.svc.cancel_request("pas une clé"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn late_guard_of_cancelled_request_keeps_the_new_one() {
+        let a = Node::new("Alice").await;
+        let b = Node::new("Bob").await;
+        a.svc.send_request(&b.code).await.unwrap();
+        b.wait_event(|e| matches!(e, FriendEvent::IncomingRequest(_))).await;
+        assert!(a.svc.cancel_request(&b.hex()));
+        a.svc.send_request(&b.code).await.unwrap();
+        // Laisse la tâche de l'ancienne demande finir (son OutGuard se libère) : la nouvelle reste tenue.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(a.svc.send_request(&b.code).await.unwrap_err().to_string().contains("déjà en cours"));
+        assert!(a.svc.cancel_request(&b.hex()));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn refusal_is_reported_and_frees_the_slot() {
+        let a = Node::new("Alice").await;
+        let b = Node::new("Bob").await;
+        a.svc.send_request(&b.code).await.unwrap();
+        b.wait_event(|e| matches!(e, FriendEvent::IncomingRequest(_))).await;
+        b.svc.refuse(&a.hex()).await.unwrap();
+        a.wait_event(|e| matches!(e, FriendEvent::Refused(k) if *k == b.hex())).await;
+        for _ in 0..40 {
+            if !a.svc.cancel_request(&b.hex()) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        a.svc.send_request(&b.code).await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unanswered_request_expires_on_requester_side() {
+        let a = Node::new("Alice").await;
+        let b = Node::with_config(
+            "Bob",
+            FriendConfig { io_timeout: Duration::from_secs(5), decision_ttl: Duration::from_millis(400), ..FriendConfig::default() },
+        )
+        .await;
+        a.svc.send_request(&b.code).await.unwrap();
+        a.wait_event(|e| matches!(e, FriendEvent::Expired(k) if *k == b.hex())).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn decision_ttl_removes_request_and_emits_event() {
+        let a = Node::new("Alice").await;
+        let b = Node::with_config(
+            "Bob",
+            FriendConfig { io_timeout: Duration::from_secs(5), decision_ttl: Duration::from_millis(400), ..FriendConfig::default() },
+        )
+        .await;
+        a.svc.send_request(&b.code).await.unwrap();
+        b.wait_event(|e| matches!(e, FriendEvent::IncomingRequest(_))).await;
+        b.wait_event(|e| matches!(e, FriendEvent::RequestRemoved(k) if *k == a.hex())).await;
+        assert_eq!(b.db.request_count().unwrap(), 0);
+        b.svc.refuse(&a.hex()).await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn closed_stream_removes_request_and_emits_event() {
+        let b = Node::new("Bob").await;
+        let x = Node::new("Eve").await;
+        let (c, mut s, mut r) = x.raw(&b).await;
+        let nonce = random32();
+        send_raw(&mut s, &x.msg(&b.pk(), now_secs(), Body::Request { name: "Eve".into(), commit: commitment(&x.pk(), &nonce), token: b.svc.code_token() })).await;
+        let m = decode(&try_read(&mut r).await.unwrap()).unwrap();
+        let Body::Commit { commit_b, commit_a } = m.body else { panic!("COMMIT attendu") };
+        let session = session_id(&commit_a, &commit_b);
+        send_raw(&mut s, &x.msg(&b.pk(), now_secs(), Body::Reveal { session, nonce })).await;
+        try_read(&mut r).await.unwrap();
+        b.wait_event(|e| matches!(e, FriendEvent::IncomingRequest(_))).await;
+        // Eve ferme son flux avant toute décision.
+        drop((s, r));
+        c.close(0u32.into(), b"bye");
+        b.wait_event(|e| matches!(e, FriendEvent::RequestRemoved(k) if *k == x.hex())).await;
+        assert_eq!(b.db.request_count().unwrap(), 0);
+        assert!(matches!(b.svc.accept(&x.hex()).await, Err(Error::Other(_))));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn forged_signature_rejected() {
         let b = Node::new("Bob").await;
         let x = Node::new("Eve").await;
-        let mut f = x.msg(&b.pk(), now_secs(), Body::Request { name: "Eve".into(), commit: random32() });
+        let mut f = x.msg(&b.pk(), now_secs(), Body::Request { name: "Eve".into(), commit: random32(), token: b.svc.code_token() });
         let n = f.len();
         f[n - 1] ^= 1;
         let (_c, mut s, mut r) = x.raw(&b).await;
         send_raw(&mut s, &f).await;
         assert!(try_read(&mut r).await.is_none());
         // Corps modifié après signature.
-        let mut g = x.msg(&b.pk(), now_secs(), Body::Request { name: "Eve".into(), commit: random32() });
+        let mut g = x.msg(&b.pk(), now_secs(), Body::Request { name: "Eve".into(), commit: random32(), token: b.svc.code_token() });
         g[HEADER_LEN + 5] ^= 1;
         let (_c2, mut s2, mut r2) = x.raw(&b).await;
         send_raw(&mut s2, &g).await;
@@ -906,7 +1263,7 @@ mod tests {
     async fn replay_and_stale_rejected() {
         let b = Node::new("Bob").await;
         let x = Node::new("Eve").await;
-        let f = x.msg(&b.pk(), now_secs(), Body::Request { name: "Eve".into(), commit: random32() });
+        let f = x.msg(&b.pk(), now_secs(), Body::Request { name: "Eve".into(), commit: random32(), token: b.svc.code_token() });
         let (c1, mut s1, mut r1) = x.raw(&b).await;
         send_raw(&mut s1, &f).await;
         assert!(try_read(&mut r1).await.is_some(), "première fois : COMMIT");
@@ -917,14 +1274,14 @@ mod tests {
         assert!(try_read(&mut r2).await.is_none(), "rejeu rejeté");
         // Horodatage trop ancien ou futur (signé correctement).
         for ts in [now_secs() - MAX_SKEW_SECS - 60, now_secs() + MAX_SKEW_SECS + 60] {
-            let g = x.msg(&b.pk(), ts, Body::Request { name: "Eve".into(), commit: random32() });
+            let g = x.msg(&b.pk(), ts, Body::Request { name: "Eve".into(), commit: random32(), token: b.svc.code_token() });
             let (_c, mut s, mut r) = x.raw(&b).await;
             send_raw(&mut s, &g).await;
             assert!(try_read(&mut r).await.is_none(), "ts {ts}");
         }
         // Message destiné à un tiers.
         let other = [9u8; 32];
-        let h = x.msg(&other, now_secs(), Body::Request { name: "Eve".into(), commit: random32() });
+        let h = x.msg(&other, now_secs(), Body::Request { name: "Eve".into(), commit: random32(), token: b.svc.code_token() });
         let (_c, mut s, mut r) = x.raw(&b).await;
         send_raw(&mut s, &h).await;
         assert!(try_read(&mut r).await.is_none());
@@ -937,7 +1294,7 @@ mod tests {
         let x = Node::new("Eve").await;
         let nonce = random32();
         let (_c, mut s, mut r) = x.raw(&b).await;
-        send_raw(&mut s, &x.msg(&b.pk(), now_secs(), Body::Request { name: "Eve".into(), commit: commitment(&x.pk(), &nonce) })).await;
+        send_raw(&mut s, &x.msg(&b.pk(), now_secs(), Body::Request { name: "Eve".into(), commit: commitment(&x.pk(), &nonce), token: b.svc.code_token() })).await;
         let m = decode(&try_read(&mut r).await.unwrap()).unwrap();
         let Body::Commit { commit_a, commit_b } = m.body else { panic!() };
         let session = session_id(&commit_a, &commit_b);
@@ -991,7 +1348,7 @@ mod tests {
         let _router = Router::builder(ep.clone()).accept(ALPN, EvilResponder { ident: ident.clone() }).spawn();
         let code = friend_code::encode(&friend_code::FriendCodePayload {
             public_key: ident.public_key().to_bytes(),
-            epoch: 0,
+            token: [9; friend_code::TOKEN_LEN],
             relay: None,
             addrs: ep.addr().ip_addrs().map(|a| a.to_string()).take(4).collect(),
         });
@@ -1025,6 +1382,23 @@ mod tests {
         nothing_happened(&a);
     }
 
+    /// Code d'une ancienne version (relais n0 seul, aucune IP) : message français clair, aucun réseau, rien d'enregistré.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn old_code_without_ip_gets_a_clear_message() {
+        let a = Node::new("Alice").await;
+        let old = friend_code::encode(&friend_code::FriendCodePayload {
+            public_key: SecretKey::from_bytes(&[5u8; 32]).public().as_bytes().to_owned(),
+            token: [0; friend_code::TOKEN_LEN],
+            relay: Some("euc1-1.relay.n0.iroh.link".into()),
+            addrs: vec![],
+        });
+        let started = std::time::Instant::now();
+        let e = a.svc.send_request(&old).await.unwrap_err().to_string();
+        assert!(e.contains("ancienne version de Cubelink") && e.contains("nouveau code"), "{e}");
+        assert!(started.elapsed() < Duration::from_secs(1), "aucune tentative réseau");
+        nothing_happened(&a);
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn anti_spam_limits() {
         let cfg = FriendConfig { max_requests_per_peer: 2, max_pending_total: 2, io_timeout: Duration::from_secs(5), ..FriendConfig::default() };
@@ -1032,7 +1406,7 @@ mod tests {
         let x = Node::new("Eve").await;
         // Par pair : 2 tentatives passent, la 3e est ignorée.
         for i in 0..3 {
-            let f = x.msg(&b.pk(), now_secs(), Body::Request { name: "Eve".into(), commit: random32() });
+            let f = x.msg(&b.pk(), now_secs(), Body::Request { name: "Eve".into(), commit: random32(), token: b.svc.code_token() });
             let (c, mut s, mut r) = x.raw(&b).await;
             send_raw(&mut s, &f).await;
             assert_eq!(try_read(&mut r).await.is_some(), i < 2, "tentative {i}");
@@ -1046,15 +1420,124 @@ mod tests {
         for _ in 0..2 {
             let p = Node::new("P").await;
             let (c, mut s, mut r) = p.raw(&b).await;
-            send_raw(&mut s, &p.msg(&b.pk(), now_secs(), Body::Request { name: "P".into(), commit: random32() })).await;
+            send_raw(&mut s, &p.msg(&b.pk(), now_secs(), Body::Request { name: "P".into(), commit: random32(), token: b.svc.code_token() })).await;
             assert!(try_read(&mut r).await.is_some());
             held.push((p, c, s, r));
         }
         let late = Node::new("Late").await;
         let (_c, mut s, mut r) = late.raw(&b).await;
-        send_raw(&mut s, &late.msg(&b.pk(), now_secs(), Body::Request { name: "L".into(), commit: random32() })).await;
+        send_raw(&mut s, &late.msg(&b.pk(), now_secs(), Body::Request { name: "L".into(), commit: random32(), token: b.svc.code_token() })).await;
         assert!(try_read(&mut r).await.is_none());
         nothing_happened(&b);
+    }
+
+    /// Fait l'échange REQUEST/COMMIT/REVEAL/REVEAL complet avec une identité neuve et garde la connexion ouverte
+    /// (demande en attente de décision côté `b`). `None` si `b` ferme ou ignore avant la fin.
+    async fn pending_request(b: &Node, name: &str) -> Option<(Node, Connection, SendStream, RecvStream)> {
+        let p = Node::new(name).await;
+        let nonce = random32();
+        let (c, mut s, mut r) = p.raw(b).await;
+        send_raw(&mut s, &p.msg(&b.pk(), now_secs(), Body::Request { name: name.into(), commit: commitment(&p.pk(), &nonce), token: b.svc.code_token() })).await;
+        let m = decode(&try_read(&mut r).await?).ok()?;
+        let Body::Commit { commit_a, commit_b } = m.body else { return None };
+        let session = session_id(&commit_a, &commit_b);
+        send_raw(&mut s, &p.msg(&b.pk(), now_secs(), Body::Reveal { session, nonce })).await;
+        try_read(&mut r).await?;
+        Some((p, c, s, r))
+    }
+
+    /// Les demandes en attente de décision ne tiennent pas le créneau de poignée de main (2 ici) : une
+    /// 3e poignée de main aboutit, et c'est `max_pending_total` (3) qui borne les demandes en attente.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pending_requests_do_not_hold_handshake_slots() {
+        let cfg = FriendConfig { max_concurrent_handshakes: 2, max_pending_total: 3, io_timeout: Duration::from_secs(5), ..FriendConfig::default() };
+        let b = Node::with_config("Bob", cfg).await;
+        let mut held = Vec::new();
+        for i in 0..3 {
+            let h = pending_request(&b, &format!("P{i}")).await;
+            assert!(h.is_some(), "demande {i} aboutie malgré les précédentes en attente");
+            held.push(h);
+            b.wait_event(|e| matches!(e, FriendEvent::IncomingRequest(_))).await;
+        }
+        assert_eq!(b.db.request_count().unwrap(), 3);
+        // 4e : refusée par `max_pending_total`, pas par le créneau de poignée de main.
+        assert!(pending_request(&b, "P3").await.is_none(), "max_pending_total atteint");
+        assert_eq!(b.db.request_count().unwrap(), 3);
+        // Le créneau est libre : une demande en attente se décide normalement.
+        let first = held[0].as_ref().unwrap().0.hex();
+        b.svc.refuse(&first).await.unwrap();
+    }
+
+    /// Cinq demandes périmées puis une valide : une demande refusée sur le jeton ne consomme pas le quota
+    /// par pair (3 par défaut), ne crée aucune ligne ni événement, et le demandeur reçoit un message clair.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stale_token_refused_with_clear_message_and_no_quota() {
+        let a = Node::new("Alice").await;
+        let b = Node::new("Bob").await;
+        let old_code = b.code.clone();
+        let old_token = b.svc.code_token();
+        let new_token = friend_code::new_token();
+        b.svc.set_code_token(new_token);
+        assert_ne!(old_token, new_token);
+        for i in 0..5 {
+            let e = a.svc.send_request(&old_code).await.unwrap_err();
+            assert!(matches!(&e, Error::Other(m) if m == STALE_CODE_MSG), "essai {i} : {e:?}");
+            assert!(e.to_string().contains("n'est plus valide"), "{e}");
+        }
+        nothing_happened(&b);
+        assert!(lock(&b.svc.shared.state).attempts.is_empty(), "aucun quota consommé");
+        assert!(lock(&b.svc.shared.state).seen.is_empty(), "aucune entrée « vu »");
+        // Le code actuel passe, malgré les 5 refus précédents (le quota par pair est de 3).
+        a.svc.send_request(&b.code_with(new_token)).await.unwrap();
+        b.wait_event(|e| matches!(e, FriendEvent::IncomingRequest(_))).await;
+        b.svc.accept(&a.hex()).await.unwrap();
+        assert!(b.db.is_friend(&a.hex()).unwrap());
+    }
+
+    /// Un code sans jeton valide ne passe pas non plus : REQUEST d'une ancienne version, ou jeton quelconque.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn legacy_request_and_unknown_token_are_closed_with_refusal_code() {
+        let b = Node::new("Bob").await;
+        let x = Node::new("Eve").await;
+        let bad = [
+            x.msg(&b.pk(), now_secs(), Body::LegacyRequest { name: "Eve".into(), commit: random32() }),
+            x.msg(&b.pk(), now_secs(), Body::Request { name: "Eve".into(), commit: random32(), token: [0; 16] }),
+        ];
+        for f in bad {
+            let (c, mut s, mut r) = x.raw(&b).await;
+            send_raw(&mut s, &f).await;
+            assert!(try_read(&mut r).await.is_none(), "aucun COMMIT");
+            assert!(token_refused(&c).await, "fermeture applicative TOKEN_REFUSED");
+        }
+        nothing_happened(&b);
+        assert!(lock(&b.svc.shared.state).attempts.is_empty());
+    }
+
+    /// Un ami déjà accepté n'est pas touché par la régénération : il reste ami des deux côtés, et une
+    /// nouvelle demande de sa part est traitée « déjà ami » AVANT le jeton (pas de fermeture TOKEN_REFUSED).
+    /// Une demande déjà admise et en attente reste décidable après le changement de jeton.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn token_change_does_not_touch_friends_nor_pending_requests() {
+        let a = Node::new("Alice").await;
+        let b = Node::new("Bob").await;
+        let c = Node::new("Carol").await;
+        a.svc.send_request(&b.code).await.unwrap();
+        b.wait_event(|e| matches!(e, FriendEvent::IncomingRequest(_))).await;
+        c.svc.send_request(&b.code).await.unwrap();
+        b.wait_event(|e| matches!(e, FriendEvent::IncomingRequest(r) if r.public_key == c.hex())).await;
+        b.svc.accept(&a.hex()).await.unwrap();
+        a.wait_event(|e| matches!(e, FriendEvent::Accepted(_))).await;
+
+        b.svc.set_code_token(friend_code::new_token());
+        assert!(a.db.is_friend(&b.hex()).unwrap() && b.db.is_friend(&a.hex()).unwrap());
+        // Carol était déjà admise : sa demande reste décidable.
+        b.svc.accept(&c.hex()).await.unwrap();
+        assert!(b.db.is_friend(&c.hex()).unwrap());
+        // Alice (déjà amie) renvoie une demande brute : « déjà ami », pas un refus de jeton.
+        let (conn, mut s, mut r) = a.raw(&b).await;
+        send_raw(&mut s, &a.msg(&b.pk(), now_secs(), Body::Request { name: "Alice".into(), commit: random32(), token: [1; 16] })).await;
+        assert!(try_read(&mut r).await.is_none());
+        assert!(!token_refused(&conn).await);
     }
 
     #[test]
@@ -1069,6 +1552,18 @@ mod tests {
         };
         let f = encode(&m, &id);
         assert_eq!(decode(&f).unwrap(), m);
+        // Le jeton est dans le corps signé : un octet modifié invalide la signature.
+        let req = Msg { from: m.from, to: [3; 32], ts: 42, body: Body::Request { name: "Bob".into(), commit: [2; 32], token: [7; 16] } };
+        let rf = encode(&req, &id);
+        assert_eq!(decode(&rf).unwrap(), req);
+        let token_at = rf.len() - SIG_LEN - 16;
+        for i in token_at..token_at + 16 {
+            let mut g = rf.clone();
+            g[i] ^= 1;
+            assert!(matches!(decode(&g), Err(Error::Auth(_))), "octet de jeton {i}");
+        }
+        let old = Msg { from: m.from, to: [3; 32], ts: 42, body: Body::LegacyRequest { name: "Bob".into(), commit: [2; 32] } };
+        assert_eq!(decode(&encode(&old, &id)).unwrap(), old);
         for i in 0..f.len() {
             let mut g = f.clone();
             g[i] ^= 0x80;

@@ -50,6 +50,15 @@ describe("faux service", () => {
     await expect(s.friendRefuse("zzz")).rejects.toThrow();
   });
 
+  it("retirer un ami le sort de la liste, sans erreur s'il est déjà parti", async () => {
+    const s = svc();
+    const [a, b] = await s.friendList();
+    await s.friendRemove(a.friend.public_key);
+    await s.friendRemove(a.friend.public_key);
+    expect((await s.friendList()).map((f) => f.friend.public_key)).not.toContain(a.friend.public_key);
+    expect((await s.friendList()).map((f) => f.friend.public_key)).toContain(b.friend.public_key);
+  });
+
   it("code ami : régénération et envoi", async () => {
     const s = svc();
     const a = await s.friendMyCode();
@@ -57,6 +66,28 @@ describe("faux service", () => {
     expect(await s.friendRegenerateCode()).not.toBe(a);
     await expect(s.friendSendRequest("nimporte")).rejects.toThrow("Code ami invalide.");
     expect(await s.friendSendRequest(a)).toMatch(/^[0-9A-F]{4}( · [0-9A-F]{4}){3}$/);
+  });
+
+  it("lien ami : mon lien porte mon code, il est accepté comme le code, et un lien ouvert se reprend une fois", async () => {
+    const s = svc();
+    const code = await s.friendMyCode();
+    expect(await s.friendMyLink()).toBe(`cubelink://add/${code}`);
+    expect(await s.friendSendRequest(`cubelink://add/${code}`)).toMatch(/^[0-9A-F]{4}/);
+    // La demande est la même que celle du code nu : la doublonner est refusée, l'annuler par le lien la libère.
+    await expect(s.friendSendRequest(code)).rejects.toThrow("déjà en cours");
+    await s.friendCancelRequest(`cubelink://add/${code}`);
+    await s.friendSendRequest(code);
+    const seen: number[] = [];
+    const off = s.onFriendLink(() => seen.push(1));
+    expect(await s.friendTakePendingLink()).toBeNull();
+    s.openFriendLink("cubelink://add/mcl1-abcdefabcdef");
+    expect(seen).toHaveLength(1);
+    expect(await s.friendTakePendingLink()).toBe("cubelink://add/mcl1-abcdefabcdef");
+    expect(await s.friendTakePendingLink()).toBeNull();
+    s.openFriendLink("cubelink://add/mcl1-xx", { pending: true });
+    expect(seen).toHaveLength(1);
+    expect(await s.friendTakePendingLink()).toBe("cubelink://add/mcl1-xx");
+    off();
   });
 
   it("plan de jonction : 94 fichiers, 3 à recevoir", async () => {
@@ -123,11 +154,20 @@ describe("fake : gestion des instances", () => {
     expect(await s.instancesLogs("inst-aeronautics")).toContain(lines[0]);
     await s.instancesKill("inst-aeronautics");
     expect(states).toEqual(["preparing", "exited"]);
-    const up = await s.instancesUpdate("inst-aeronautics", { name: "Neuf", ram_mb: 2048, java_path: null, jvm_args: "-Xss2m" });
+    const up = await s.instancesUpdate("inst-aeronautics", { name: "Neuf", ram_mb: 2048, java_path: "", jvm_args: "-Xss2m" });
     expect(up).toMatchObject({ name: "Neuf", ram_mb: 2048, jvm_args: "-Xss2m" });
     await s.instancesDelete("inst-aeronautics");
     expect((await s.instancesList()).map((x) => x.id)).not.toContain("inst-aeronautics");
     await expect(s.instancesKill("inst-aeronautics")).rejects.toThrow("Instance introuvable.");
+  });
+
+  it("java_path : absent = inchangé, chaîne vide = effacé (comme le vrai backend)", async () => {
+    const s = createFakeServices({ tickMs: 0 });
+    const java = "/usr/lib/jvm/java-17/bin/java";
+    expect((await s.instancesUpdate("inst-aeronautics", { java_path: java })).java_path).toBe(java);
+    expect((await s.instancesUpdate("inst-aeronautics", { name: "Autre" })).java_path).toBe(java);
+    expect((await s.instancesUpdate("inst-aeronautics", { java_path: "  " })).java_path).toBeNull();
+    expect((await s.instancesList()).find((x) => x.id === "inst-aeronautics")?.java_path).toBeNull();
   });
 
   it("signale les mods manquants à l'import", async () => {
@@ -136,6 +176,18 @@ describe("fake : gestion des instances", () => {
     s.onImportWarning((e) => got.push(e.missing));
     await s.instancesImportMrpack("pack-manquant.mrpack");
     expect(got).toEqual([["sodium", "iris"]]);
+  });
+
+  it("signale l'échec de préparation du jeu sans refuser l'import", async () => {
+    const s = createFakeServices({ tickMs: 0 });
+    const prog: string[] = [];
+    const got: { instance_id: string; message: string }[] = [];
+    s.onImportProgress((e) => prog.push(e.message));
+    s.onImportDeferred((e) => got.push(e));
+    const inst = await s.instancesImportMrpack("pack-differe.mrpack");
+    expect(prog.length).toBeGreaterThan(0);
+    expect(got).toEqual([{ instance_id: inst.id, message: "réseau indisponible" }]);
+    expect((await s.instancesList()).some((i) => i.id === inst.id)).toBe(true);
   });
 
   it("parcourir : pagination, filtre, non téléchargeables, versions", async () => {

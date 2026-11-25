@@ -150,7 +150,7 @@ fn work(rx: &Receiver<Job>, path: &Path) {
             // Une seule fois : un dossier en lecture seule ne doit pas inonder la sortie d'erreur.
             if !warned {
                 warned = true;
-                eprintln!("[Cubelink] journal de la zone de jeu ({}) : {e}", path.display());
+                eprintln!("[Cubelink] journal ({}) : {e}", path.display());
             }
         }
         pending.clear();

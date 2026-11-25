@@ -39,7 +39,19 @@ impl LastSeen {
         if now.saturating_sub(prev) < WRITE_EVERY_SECS {
             return;
         }
-        if let Ok(json) = serde_json::to_vec(&*m) {
+        self.persist(&m);
+    }
+
+    /// Oublie `key` (ami retiré) et réécrit le fichier tout de suite, sans le seuil d'une minute.
+    pub fn forget(&self, key: &str) {
+        let Ok(mut m) = self.map.lock() else { return };
+        if m.remove(key).is_some() {
+            self.persist(&m);
+        }
+    }
+
+    fn persist(&self, m: &HashMap<String, i64>) {
+        if let Ok(json) = serde_json::to_vec(m) {
             let tmp = self.path.with_extension("json.tmp");
             if std::fs::write(&tmp, json).is_ok() {
                 let _ = std::fs::rename(&tmp, &self.path);
@@ -65,5 +77,20 @@ mod tests {
         assert_eq!(LastSeen::open(p.clone()).get("a"), Some(1000));
         ls.touch("a", 1100);
         assert_eq!(LastSeen::open(p).get("a"), Some(1100));
+    }
+
+    #[test]
+    fn oubli_ecrit_aussitot() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("last_seen.json");
+        let ls = LastSeen::open(p.clone());
+        ls.touch("a", 1000);
+        ls.touch("b", 1000);
+        ls.touch("a", 1010); // en mémoire seulement
+        ls.forget("a");
+        ls.forget("inconnu");
+        assert_eq!(ls.get("a"), None);
+        let relu = LastSeen::open(p);
+        assert_eq!((relu.get("a"), relu.get("b")), (None, Some(1000)));
     }
 }

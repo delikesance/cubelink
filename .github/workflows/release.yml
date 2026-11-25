@@ -1,20 +1,32 @@
-# Build + release automatiques : chaque merge dans `main` produit un nouveau tag `vMAJEUR.MINEUR.<run>` et une release GitHub
+# Build + release : chaque merge dans `main` produit un nouveau tag `vMAJEUR.MINEUR.<run>` et une release GitHub
 # avec l'installeur Windows (.msi), l'AppImage Linux, le paquet .rpm (Fedora) et latest.json (lu par l'updater du launcher).
+# Ce workflow n'est PAS déclenché par un push : `ci.yml` l'appelle (job `release`) sur un push vers `main`, une fois toutes
+# les vérifications réussies. Le n° de run du tag est donc celui du run `ci`. Une relance après publication échoue sur
+# « le tag existe déjà » (voulu : pas de double publication).
 # Flux de travail : les PR sont fusionnées dans `canary`, puis `canary` est fusionnée dans `main` (voir docs/release.md).
-# `workflow_dispatch` (depuis n'importe quelle branche) construit tout SANS publier, pour vérifier les builds.
-# Windows : .msi (updater) + paquet .msix à téléverser dans le Microsoft Store (qui le signe).
+# `workflow_dispatch` (depuis n'importe quelle branche) construit tout SANS jamais publier, pour vérifier les builds.
+# Windows : .msi (updater). Le paquet .msix (Microsoft Store) n'est PAS joint à la release GitHub : non signé, il ne s'installe
+# pas d'un double-clic. Il reste un artefact du run (`windows-msix`), à téléverser à la main dans le Partner Center (qui le signe).
 name: release
 
 on:
-  push:
-    branches: [main]
-    paths-ignore: ['docs/**', '**/*.md', 'LICENSE']   # une simple doc ne produit pas de release
-  workflow_dispatch:
+  # Appelé par ci.yml (le filtre paths-ignore d'une simple doc s'y trouve : pas de ci, donc pas de release).
+  # Sans `secrets: inherit`, un workflow appelé ne reçoit que les secrets passés explicitement : on déclare les quatre.
+  workflow_call:
     inputs:
       publish:
         description: 'Publier la release (tag + fichiers) ; sinon build seul'
         type: boolean
         default: false
+    secrets:
+      TAURI_SIGNING_PRIVATE_KEY: { required: false }
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: { required: false }
+      CUBELINK_CF_API_KEY: { required: false }
+      CUBELINK_MS_CLIENT_ID: { required: false }
+  # Pas d'input `publish` sur workflow_dispatch : une publication manuelle contournerait les vérifications de ci et,
+  # avec le n° de run de ce workflow (compteur propre, petit), publierait un patch plus ancien que la dernière release
+  # (l'updater ne proposerait rien). Seul l'appel de ci.yml publie.
+  workflow_dispatch:
 
 concurrency:
   group: release
@@ -28,7 +40,7 @@ env:
   CARGO_TERM_COLOR: always
   # Les secrets ne sont PAS dans l'environnement global : seules les étapes `tauri build` les reçoivent,
   # pour que ni npm ni les autres étapes ne les voient.
-  # - TAURI_SIGNING_PRIVATE_KEY(_PASSWORD) : signature des mises à jour (`tauri signer generate`).
+  # - TAURI_SIGNING_PRIVATE_KEY(_PASSWORD) : signature des mises à jour (`tauri signer generate`). Obligatoire pour publier (vérifié dès le job `version`).
   # - CUBELINK_CF_API_KEY : clé de développeur CurseForge, embarquée à la compilation (`option_env!`).
   #   Extractible de l'installeur : choix assumé, comme les autres launchers.
   # - CUBELINK_MS_CLIENT_ID : identifiant Azure (facultatif, l'app a une valeur par défaut).
@@ -42,9 +54,9 @@ jobs:
       tag: ${{ steps.v.outputs.tag }}
       publish: ${{ steps.v.outputs.publish }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { fetch-tags: true }
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with: { node-version: 22 }
       - id: v
         shell: bash
@@ -52,18 +64,28 @@ jobs:
           version=$(node scripts/release-version.mjs "$GITHUB_RUN_NUMBER")
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=v$version" >> "$GITHUB_OUTPUT"
-          if [ "$GITHUB_EVENT_NAME" = "push" ] || [ "${{ inputs.publish }}" = "true" ]; then publish=true; else publish=false; fi
+          # Dans un workflow appelé, github.event_name est celui de l'appelant (push) : on ne s'y fie pas, seul l'input décide.
+          if [ "$PUBLISH_INPUT" = "true" ]; then publish=true; else publish=false; fi
           echo "publish=$publish" >> "$GITHUB_OUTPUT"
+          # Jamais de release d'une branche non fusionnée dans main.
+          if [ "$publish" = "true" ] && [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::error::publication refusée hors de main (ref : $GITHUB_REF)"; exit 1
+          fi
           if [ "$publish" = "true" ] && git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
             echo "Le tag v$version existe déjà" >&2; exit 1
           fi
-          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then echo "::warning::secret TAURI_SIGNING_PRIVATE_KEY absent : les mises à jour ne seront pas signées"; fi
+          # Sans clé de signature, make-latest-json.mjs et `gh release create` échoueraient (pas de .sig) : on le dit tout de suite, pas après 40 min de build.
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            if [ "$publish" = "true" ]; then echo "::error::secret TAURI_SIGNING_PRIVATE_KEY absent : publication impossible sans signature des mises à jour"; exit 1; fi
+            echo "::warning::secret TAURI_SIGNING_PRIVATE_KEY absent : les mises à jour ne seront pas signées, rien ne sera publié"
+          fi
           # Sans clé CurseForge, l'app publiée retomberait sur Modrinth seul (mods CurseForge « hors catalogue ») : on refuse de publier.
           if [ -z "$CUBELINK_CF_API_KEY" ]; then
             if [ "$publish" = "true" ]; then echo "::error::secret CUBELINK_CF_API_KEY absent : publication refusée (mods CurseForge non reconnus)"; exit 1; fi
             echo "::warning::secret CUBELINK_CF_API_KEY absent : build sans CurseForge"
           fi
         env:
+          PUBLISH_INPUT: ${{ inputs.publish }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           CUBELINK_CF_API_KEY: ${{ secrets.CUBELINK_CF_API_KEY }}
 
@@ -72,8 +94,8 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with: { node-version: 22, cache: npm }
       - name: Rust (rust-toolchain.toml)
         shell: bash
@@ -96,12 +118,13 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           CUBELINK_CF_API_KEY: ${{ secrets.CUBELINK_CF_API_KEY }}
           CUBELINK_MS_CLIENT_ID: ${{ secrets.CUBELINK_MS_CLIENT_ID }}
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: windows-msi
           path: target/release/bundle/msi/*.msi
       # Paquet MSIX pour le Microsoft Store (non signé : le Store le signe). Les valeurs d'identité viennent du Partner Center
-      # (variables de dépôt MSIX_IDENTITY_NAME, MSIX_PUBLISHER, MSIX_PUBLISHER_DISPLAY_NAME) ; sans elles, paquet de test.
+      # (variables de dépôt MSIX_IDENTITY_NAME, MSIX_PUBLISHER, MSIX_PUBLISHER_DISPLAY_NAME) ; sans elles, identité Placeholder :
+      # paquet de test, à ne pas téléverser. Cet artefact n'est volontairement jamais ajouté à `gh release create` (public).
       - name: Paquet MSIX (Microsoft Store)
         shell: pwsh
         run: >
@@ -110,11 +133,11 @@ jobs:
           -IdentityName "${{ vars.MSIX_IDENTITY_NAME || 'Cubelink.Placeholder' }}"
           -Publisher "${{ vars.MSIX_PUBLISHER || 'CN=Placeholder' }}"
           -PublisherDisplayName "${{ vars.MSIX_PUBLISHER_DISPLAY_NAME || 'Cubelink' }}"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: windows-msix
           path: target/release/bundle/msix/*.msix
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: windows-sig
           path: target/release/bundle/msi/*.msi.sig
@@ -125,8 +148,8 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with: { node-version: 22, cache: npm }
       - name: Rust (rust-toolchain.toml)
         shell: bash
@@ -161,13 +184,13 @@ jobs:
           "$GITHUB_WORKSPACE"/target/release/bundle/appimage/*.AppImage --appimage-extract >/dev/null
           test -f squashfs-root/usr/lib/libgpg-error.so.0 || { echo "libgpg-error.so.0 absente de l'AppImage" >&2; exit 1; }
           ldd squashfs-root/usr/lib/libgcrypt.so.20
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: linux-appimage
           path: |
             target/release/bundle/appimage/*.AppImage
             target/release/bundle/appimage/*.AppImage.sig
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: linux-rpm
           path: target/release/bundle/rpm/*.rpm
@@ -179,11 +202,14 @@ jobs:
     if: ${{ always() && needs.version.outputs.publish == 'true' && needs.build-windows.result == 'success' && needs.build-linux.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with: { node-version: 22 }
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with: { path: artifacts }
+      # Seulement les artefacts de build : appelé depuis `ci`, le job verrait aussi ceux des E2E (traces Playwright, volumineuses).
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with: { pattern: 'windows-*', path: artifacts }
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with: { pattern: 'linux-*', path: artifacts }
       - name: Rassembler les signatures de mise à jour
         shell: bash
         # Les .sig doivent se trouver à côté des fichiers pour make-latest-json.
@@ -203,7 +229,6 @@ jobs:
           tag="${{ needs.version.outputs.tag }}"
           gh release create "$tag" --target "$GITHUB_SHA" --title "Cubelink ${{ needs.version.outputs.version }}" --notes-file notes.md \
             artifacts/windows-msi/*.msi artifacts/windows-msi/*.msi.sig \
-            artifacts/windows-msix/*.msix \
             artifacts/linux-appimage/*.AppImage artifacts/linux-appimage/*.AppImage.sig \
             artifacts/linux-rpm/*.rpm \
             artifacts/latest.json

@@ -11,25 +11,27 @@
     "bindings": "CUBELINK_WRITE_BINDINGS=1 cargo test -p cubelink --lib bindings::",
     "test:rust": "cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings",
     "test": "npm run test:rust && npm run lint && npm run test:front",
-    "e2e": "playwright test --config e2e/playwright.config.ts"
+    "e2e": "playwright test --config e2e/playwright.config.ts",
+    "test:e2e-harness": "node --test e2e/harness/build.test.mjs",
+    "test:scripts": "node --test scripts/canary-version.test.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-dialog": "^2.8.4",
     "@tauri-apps/plugin-opener": "^2.7.3",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
   },
   "devDependencies": {
-    "@playwright/test": "^1.49.0",
-    "@tauri-apps/cli": "^2.12.4",
+    "@playwright/test": "^1.65.1",
+    "@tauri-apps/cli": "^2.12.6",
     "@testing-library/react": "^16.0.0",
-    "@types/react": "^18.3.0",
-    "@types/react-dom": "^18.3.0",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.3.0",
-    "jsdom": "^25.0.0",
-    "typescript": "^5.6.0",
+    "jsdom": "^31.0.1",
+    "typescript": "^7.0.2",
     "vite": "^8.3.8",
-    "vitest": "^5.1.0"
+    "vitest": "^5.1.1"
   }
 }

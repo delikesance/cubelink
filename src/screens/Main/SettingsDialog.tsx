@@ -1,5 +1,5 @@
 import { useId, useState, type FormEvent } from "react";
-import { Button, Field, Input, RamPicker, useDefaultRam } from "../../ui";
+import { Button, Field, Input, RamPicker, useDefaultRam, useSystemRam } from "../../ui";
 import { useServices } from "../../app/context";
 import { validateName } from "../Create";
 import type { Instance, InstancePatch } from "../../services";
@@ -26,7 +26,9 @@ export function SettingsDialog({ instance, onSave, onClose, onOpenFolder, onDele
   const uid = useId();
   const [name, setName] = useState(instance.name);
   const [ram, setRam] = useState(instance.ram_mb);
-  const defaultRam = useDefaultRam(useServices());
+  const services = useServices();
+  const defaultRam = useDefaultRam(services);
+  const systemRam = useSystemRam(services);
   const [java, setJava] = useState(instance.java_path ?? "");
   const [jvm, setJvm] = useState(instance.jvm_args ?? "");
   const [linux] = useState(() => isLinuxHost());
@@ -47,7 +49,7 @@ export function SettingsDialog({ instance, onSave, onClose, onOpenFolder, onDele
     setSaved(false);
     setBusy(true);
     try {
-      const patch: InstancePatch = { name: name.trim(), ram_mb: ram, java_path: java.trim() || null, jvm_args: jvm.trim() };
+      const patch: InstancePatch = { name: name.trim(), ram_mb: ram, java_path: java.trim(), jvm_args: jvm.trim() };
       if (linux) patch.wrapper = wrapper.trim();
       await onSave(patch);
       // En tiroir le parent se ferme ; en page on reste là et on le dit.
@@ -66,10 +68,10 @@ export function SettingsDialog({ instance, onSave, onClose, onOpenFolder, onDele
         </Field>
 
         <div className="dr-mem">
-          <RamPicker value={ram} onChange={(mb) => { setRam(mb); setSaved(false); }} defaultMb={defaultRam} disabled={busy} />
+          <RamPicker value={ram} onChange={(mb) => { setRam(mb); setSaved(false); }} defaultMb={defaultRam} systemMb={systemRam} disabled={busy} />
         </div>
 
-        <Field label="Chemin de Java (facultatif)" id={`${uid}-java`} hint="Vide : Cubelink choisit et installe la bonne version.">
+        <Field label="Chemin de Java (facultatif)" id={`${uid}-java`} hint="Vide : le Java des Paramètres s'il convient, sinon Cubelink choisit et installe la bonne version. Rempli : imposé, et le lancement échoue si la version ne convient pas.">
           {(p) => <Input {...p} type="text" value={java} autoComplete="off" placeholder="Automatique" onChange={(e) => setJava(e.target.value)} />}
         </Field>
         <Field label="Arguments JVM" id={`${uid}-jvm`}>

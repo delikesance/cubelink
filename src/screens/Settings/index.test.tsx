@@ -8,7 +8,7 @@ import type { NetTest } from "../../services/types";
 beforeEach(() => { window.location.hash = "#/settings"; });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
-const relay = () => screen.getByLabelText(/Passer toujours par le relais/) as HTMLInputElement;
+const lan = () => screen.getByLabelText(/Ouvrir mon monde au réseau local automatiquement/) as HTMLInputElement;
 const goTab = (name: string) => fireEvent.click(screen.getByRole("tab", { name }));
 
 describe("validation", () => {
@@ -23,36 +23,30 @@ describe("validation", () => {
 });
 
 describe("test de connexion", () => {
-  const base: NetTest = { relay_connected: true, relay: "euc1-1.relay.n0.iroh.link", relay_ms: 28, udp: true, ipv6: false, direct: true, relay_only: false, partial: false };
-  it("verdicts", () => {
+  const base: NetTest = { ipv6: false, ipv4_public: false, port_mapped: true };
+  it("verdicts : port ouvert = joignable ; adresse publique = probablement ; sinon peu joignable (aucun relais)", () => {
     const v = netVerdict(base);
-    expect([v.tone, v.label]).toEqual(["ok", "Excellente"]);
-    expect(v.checks).toEqual([
-      { label: "Connexion directe", ok: true, detail: "possible" },
-      { label: "Relais de secours", ok: true, detail: "joignable · Europe · 28 ms" },
-    ]);
+    expect([v.tone, v.label]).toEqual(["ok", "Joignable"]);
+    expect(v.checks.map((c) => [c.label, c.ok])).toEqual([["Adresse IPv6", false], ["Adresse IPv4 publique", false], ["Port ouvert sur la box", true]]);
     const lbl = (t: Partial<NetTest>) => { const r = netVerdict({ ...base, ...t }); return `${r.tone}:${r.label}`; };
-    expect(lbl({ direct: false })).toBe("warn:Correcte");
-    expect(lbl({ udp: false, direct: false })).toBe("warn:Limitée");
-    expect(lbl({ relay_connected: false, udp: false })).toBe("danger:Hors ligne");
-    expect(lbl({ relay_connected: false })).toBe("warn:Bonne");
-    expect(lbl({ relay_connected: false, direct: false })).toBe("danger:Fragile");
-    expect(lbl({ relay_only: true })).toBe("ok:Relais uniquement");
-    expect(lbl({ relay_only: true, relay_connected: false })).toBe("danger:Hors ligne");
-    expect(lbl({ partial: true })).toBe("neutral:Test incomplet");
+    expect(lbl({ ipv6: true, port_mapped: false })).toBe("ok:Probablement joignable");
+    expect(lbl({ ipv4_public: true, port_mapped: false })).toBe("ok:Probablement joignable");
+    expect(lbl({ ipv6: true })).toBe("ok:Joignable");
+    expect(lbl({ port_mapped: false })).toBe("warn:Peu joignable");
+    const w = netVerdict({ ipv6: false, ipv4_public: false, port_mapped: false });
+    expect(w.summary).toMatch(/même réseau local/);
+    expect(JSON.stringify(w)).not.toMatch(/relais de secours|n0/i);
   });
 
   it("le bouton lance le vrai test et affiche le verdict", async () => {
     const services = createFakeServices({ tickMs: 0 });
-    const spy = vi.spyOn(services, "netTest").mockResolvedValue({ ...base, direct: false });
+    const spy = vi.spyOn(services, "netTest").mockResolvedValue({ ipv6: false, ipv4_public: false, port_mapped: false });
     window.location.hash = "#/settings";
     render(<Shell services={services} />);
     goTab("Réseau");
     fireEvent.click(await screen.findByRole("button", { name: "Tester ma connexion" }));
-    expect(await screen.findByText("Correcte")).toBeTruthy();
-    expect(screen.getByText(/certaines parties passeront par le relais/)).toBeTruthy();
-    expect(screen.getByText("gênée par ton routeur")).toBeTruthy();
-    expect(screen.getByText("joignable · Europe · 28 ms")).toBeTruthy();
+    expect(await screen.findByText("Peu joignable")).toBeTruthy();
+    expect(screen.getByText(/non ouvert/)).toBeTruthy();
     expect(spy).toHaveBeenCalledTimes(1);
   });
 
@@ -105,9 +99,59 @@ describe("écran Paramètres", () => {
     await waitFor(() => expect(window.location.hash).toBe("#/login"));
   });
 
+  it("Java : mémoire Automatique par défaut, champ Mo grisé, PC lu et affiché", async () => {
+    const svc = createFakeServices({ tickMs: 0 });
+    render(<Shell services={svc} />);
+    goTab("Java");
+    const auto = screen.getByRole("checkbox", { name: /Mémoire automatique/ }) as HTMLInputElement;
+    await waitFor(() => expect(auto.checked).toBe(true));
+    expect((screen.getByLabelText("Mémoire par défaut (Mo)") as HTMLInputElement).disabled).toBe(true);
+    expect(await screen.findByText(/≈\s16 Go sur ce PC/)).toBeTruthy();
+  });
+
+  it("Java : décocher Automatique enregistre une valeur manuelle, recocher revient à 0", async () => {
+    const svc = createFakeServices({ tickMs: 0 });
+    const set = vi.spyOn(svc, "settingsSet");
+    render(<Shell services={svc} />);
+    goTab("Java");
+    const auto = screen.getByRole("checkbox", { name: /Mémoire automatique/ }) as HTMLInputElement;
+    await waitFor(() => expect(auto.disabled).toBe(false));
+    fireEvent.click(auto);
+    await waitFor(() => expect(set).toHaveBeenCalledTimes(1));
+    expect(set.mock.calls[0]![0].default_ram_mb).toBe(4096);
+    const ram = screen.getByLabelText("Mémoire par défaut (Mo)") as HTMLInputElement;
+    await waitFor(() => expect(ram.disabled).toBe(false));
+    expect(ram.value).toBe("4096");
+    fireEvent.click(screen.getByRole("checkbox", { name: /Mémoire automatique/ }));
+    await waitFor(() => expect(set).toHaveBeenCalledTimes(2));
+    expect(set.mock.calls[1]![0].default_ram_mb).toBe(0);
+  });
+
+  it("Java : avertissement non bloquant au-delà de 75 % de la RAM du PC", async () => {
+    const svc = createFakeServices({ tickMs: 0 });
+    const set = vi.spyOn(svc, "settingsSet");
+    await svc.settingsSet({ ...(await svc.settingsGet()), default_ram_mb: 4096 });
+    set.mockClear();
+    render(<Shell services={svc} />);
+    goTab("Java");
+    const ram = screen.getByLabelText("Mémoire par défaut (Mo)") as HTMLInputElement;
+    await waitFor(() => expect(ram.value).toBe("4096"));
+    await waitFor(() => expect(ram.disabled).toBe(false));
+    expect(screen.queryByText(/dépassent 75/)).toBeNull();
+    fireEvent.change(ram, { target: { value: "12288" } }); // PC simulé : 16 Go, 75 % = 12 Go : pas au-dessus
+    expect(screen.queryByText(/dépassent 75/)).toBeNull();
+    fireEvent.change(ram, { target: { value: "12544" } });
+    expect((await screen.findByText(/dépassent 75/)).textContent).toMatch(/12,3 Go.*16 Go/);
+    fireEvent.blur(ram);
+    await waitFor(() => expect(set).toHaveBeenCalledTimes(1)); // jamais bloquant : la valeur est enregistrée
+    expect(set.mock.calls[0]![0].default_ram_mb).toBe(12544);
+  });
+
   it("Java : mémoire par défaut validée puis enregistrée à la sortie du champ", async () => {
     const svc = createFakeServices({ tickMs: 0 });
     const set = vi.spyOn(svc, "settingsSet");
+    await svc.settingsSet({ ...(await svc.settingsGet()), default_ram_mb: 4096 });
+    set.mockClear();
     render(<Shell services={svc} />);
     goTab("Java");
     const ram = screen.getByLabelText("Mémoire par défaut (Mo)") as HTMLInputElement;
@@ -126,22 +170,22 @@ describe("écran Paramètres", () => {
     const svc = createFakeServices({ tickMs: 0 });
     const first = render(<Shell services={svc} />);
     goTab("Réseau");
-    await waitFor(() => expect(relay().disabled).toBe(false));
-    expect(relay().checked).toBe(false);
-    fireEvent.click(relay());
+    await waitFor(() => expect(lan().disabled).toBe(false));
+    expect(lan().checked).toBe(true);
+    fireEvent.click(lan());
     await waitFor(() => expect(screen.getAllByRole("status").some((s) => s.textContent === "Enregistré")).toBe(true));
     first.unmount();
     render(<Shell services={svc} />);
     goTab("Réseau");
-    await waitFor(() => expect(relay().checked).toBe(true));
+    await waitFor(() => expect(lan().checked).toBe(false));
   });
 
   it("échec d'enregistrement : message d'erreur", async () => {
     const base = createFakeServices({ tickMs: 0 });
     render(<Shell services={{ ...base, settingsSet: () => Promise.reject(new Error("Disque plein.")) }} />);
     goTab("Réseau");
-    await waitFor(() => expect(relay().disabled).toBe(false));
-    fireEvent.click(relay());
+    await waitFor(() => expect(lan().disabled).toBe(false));
+    fireEvent.click(lan());
     expect((await screen.findByRole("alert")).textContent).toBe("Disque plein.");
   });
 
@@ -153,6 +197,55 @@ describe("écran Paramètres", () => {
     fireEvent.click(screen.getByRole("button", { name: "Annuler" }));
     expect(screen.queryByRole("alertdialog")).toBeNull();
   });
+
+describe("cache de mods", () => {
+  const openStorage = () => { goTab("Stockage"); };
+
+  it("affiche la taille, confirme avec le chiffre puis vide pour de bon", async () => {
+    const services = createFakeServices({ tickMs: 0, cacheBytes: 12_400_000_000 });
+    const clear = vi.spyOn(services, "cacheClear");
+    render(<Shell services={services} />);
+    openStorage();
+    expect(await screen.findByText(/Libère 12,4 Go/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /Vider le cache…/ }));
+    expect(within(screen.getByRole("alertdialog")).getByText(/Libère 12,4 Go/)).toBeTruthy();
+    fireEvent.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Vider le cache" }));
+    expect(await screen.findByText("Cache vidé : 12,4 Go libérés.")).toBeTruthy();
+    expect(clear).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText(/pas encore disponible/)).toBeNull();
+    // La taille retombe à zéro : plus rien à libérer, le bouton est désactivé.
+    await waitFor(() => expect((screen.getByRole("button", { name: /Vider le cache…/ }) as HTMLButtonElement).disabled).toBe(true));
+    expect(screen.getByText(/Rien à libérer/)).toBeTruthy();
+  });
+
+  it("cache vide à l'ouverture : rien à libérer, bouton désactivé", async () => {
+    render(<Shell services={createFakeServices({ tickMs: 0, cacheBytes: 0 })} />);
+    openStorage();
+    expect(await screen.findByText(/Rien à libérer/)).toBeTruthy();
+    expect((screen.getByRole("button", { name: /Vider le cache…/ }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("l'échec du vidage est lu tel quel et le cache reste proposé", async () => {
+    const base = createFakeServices({ tickMs: 0 });
+    render(<Shell services={{ ...base, cacheClear: () => Promise.reject("Une partie est en cours.") }} />);
+    openStorage();
+    await screen.findByText(/Libère 12,4 Go/);
+    fireEvent.click(screen.getByRole("button", { name: /Vider le cache…/ }));
+    fireEvent.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Vider le cache" }));
+    expect(await screen.findByText("Une partie est en cours.")).toBeTruthy();
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect((screen.getByRole("button", { name: /Vider le cache…/ }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("taille illisible : le bouton reste utilisable, sans chiffre", async () => {
+    const base = createFakeServices({ tickMs: 0 });
+    render(<Shell services={{ ...base, cacheSize: () => Promise.reject(new Error("boom")) }} />);
+    openStorage();
+    await waitFor(() => expect(screen.getByText(/Fichiers partagés entre tes instances\./)).toBeTruthy());
+    expect((screen.getByRole("button", { name: /Vider le cache…/ }) as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.queryByText(/Libère/)).toBeNull();
+  });
+});
 
 describe("Échap", () => {
   it("ferme le dialogue", () => {
@@ -172,23 +265,98 @@ describe("Échap", () => {
     expect(screen.queryByRole("alertdialog")).toBeNull();
     expect(window.location.hash).toBe("#/settings");
   });
+
+  it("Tout refuser : Échap annule la confirmation sans quitter Paramètres ni refuser", async () => {
+    const svc = createFakeServices({ tickMs: 0, requestCount: 3 });
+    const refuse = vi.spyOn(svc, "friendRefuseAll");
+    render(<Shell services={svc} />);
+    goTab("Amis");
+    fireEvent.click(await screen.findByRole("button", { name: "Tout refuser" }));
+    const group = screen.getByRole("group", { name: /refus de toutes les demandes/ });
+    expect(group.contains(document.activeElement)).toBe(true);
+    fireEvent.keyDown(document.activeElement as HTMLElement, { key: "Escape" });
+    expect(screen.queryByRole("group", { name: /refus de toutes les demandes/ })).toBeNull();
+    expect(window.location.hash).toBe("#/settings");
+    expect(refuse).not.toHaveBeenCalled();
+    // Sans confirmation ouverte, Échap revient en arrière comme avant.
+    fireEvent.keyDown(document.body, { key: "Escape" });
+    expect(window.location.hash).toBe("#/main");
+  });
+
+  it("Générer un nouveau code : Échap annule la confirmation sans quitter Paramètres", async () => {
+    const svc = createFakeServices({ tickMs: 0 });
+    const regen = vi.spyOn(svc, "friendRegenerateCode");
+    render(<Shell services={svc} />);
+    goTab("Amis");
+    const open = await screen.findByRole("button", { name: "Générer un nouveau code" });
+    await waitFor(() => expect((open as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(open);
+    expect(screen.getByRole("group", { name: "Confirmer le nouveau code" })).toBeTruthy();
+    fireEvent.keyDown(document.body, { key: "Escape" });
+    expect(screen.queryByRole("group", { name: "Confirmer le nouveau code" })).toBeNull();
+    expect(window.location.hash).toBe("#/settings");
+    expect(regen).not.toHaveBeenCalled();
+  });
+
+  it("Retirer un compte : Échap annule la confirmation sans quitter Paramètres", async () => {
+    const svc = createFakeServices({ tickMs: 0 });
+    await svc.authOfflineLogin("Alex");
+    const out = vi.spyOn(svc, "authRemove");
+    render(<Shell services={svc} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Retirer Alex" }));
+    expect(screen.getByRole("group", { name: "Retirer Alex" })).toBeTruthy();
+    fireEvent.keyDown(document.activeElement as HTMLElement, { key: "Escape" });
+    expect(screen.queryByRole("group", { name: "Retirer Alex" })).toBeNull();
+    expect(window.location.hash).toBe("#/settings");
+    expect(out).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Retirer Alex" })).toBeTruthy();
+  });
+
+  it("Retirer un ami : Échap annule la boîte sans quitter Paramètres ni retirer", async () => {
+    const svc = createFakeServices({ tickMs: 0, requestCount: 0 });
+    const remove = vi.spyOn(svc, "friendRemove");
+    const [first] = await svc.friendList();
+    render(<Shell services={svc} />);
+    goTab("Amis");
+    fireEvent.click(await screen.findByRole("button", { name: `Retirer ${first.friend.name} de mes amis` }));
+    expect(screen.getByRole("alertdialog", { name: "Retirer cet ami ?" })).toBeTruthy();
+    fireEvent.keyDown(document.activeElement as HTMLElement, { key: "Escape" });
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(window.location.hash).toBe("#/settings");
+    expect(remove).not.toHaveBeenCalled();
+  });
+
+  it("Mes amis : un ami accepté dans les demandes apparaît sans changer d'onglet", async () => {
+    const svc = createFakeServices({ tickMs: 0, requestCount: 2 });
+    const before = (await svc.friendList()).length;
+    render(<Shell services={svc} />);
+    goTab("Amis");
+    await screen.findByText(`Mes amis (${before})`);
+    fireEvent.click(await screen.findByRole("checkbox", { name: /J'ai comparé ce code/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /^Accepter / }));
+    await screen.findByText(`Mes amis (${before + 1})`);
+  });
 });
 });
 
-describe("découverte des amis", () => {
-  it("case cochée par défaut, décochable, aide mentionnant le redémarrage", async () => {
-    render(<Shell services={createFakeServices({ tickMs: 0 })} />);
+describe("n0 retiré", () => {
+  it("plus de réglage de relais ni de découverte publique, et l'envoi ne transmet aucun ancien champ", async () => {
+    const set = vi.fn(async (x) => x);
+    const services = { ...createFakeServices({ tickMs: 0 }), settingsSet: set };
+    render(<Shell services={services} />);
     goTab("Réseau");
-    const box = (await screen.findByLabelText(/Retrouver mes amis même si leur adresse change/)) as HTMLInputElement;
-    expect(box.checked).toBe(true);
-    expect(screen.getByText(/Appliqué au prochain démarrage/)).toBeTruthy();
-    fireEvent.click(box);
-    await waitFor(() => expect(box.checked).toBe(false));
+    await screen.findByLabelText(/Ouvrir mon monde au réseau local automatiquement/);
+    expect(screen.queryByLabelText(/Retrouver mes amis même si leur adresse change/)).toBeNull();
+    expect(screen.queryByText(/serveurs n0/)).toBeNull();
+    expect(screen.queryByLabelText(/Passer toujours par le relais/)).toBeNull();
+    fireEvent.click(screen.getByLabelText(/Ouvrir mon monde au réseau local automatiquement/));
+    await waitFor(() => expect(set).toHaveBeenCalled());
+    for (const k of ["discovery", "allow_relay", "relay_only"]) expect(set.mock.calls[0][0]).not.toHaveProperty(k);
   });
 });
 
 describe("ouverture automatique au réseau local", () => {
-  it("case cochée par défaut, envoie tous les champs sans écraser discovery", async () => {
+  it("case cochée par défaut, envoie tous les champs", async () => {
     const set = vi.fn(async (x) => x);
     const services = { ...createFakeServices({ tickMs: 0 }), settingsSet: set };
     render(<Shell services={services} />);
@@ -197,6 +365,6 @@ describe("ouverture automatique au réseau local", () => {
     expect(box.checked).toBe(true);
     fireEvent.click(box);
     await waitFor(() => expect(set).toHaveBeenCalled());
-    expect(set.mock.calls[0][0]).toMatchObject({ lan_auto: false, discovery: true, share_mods: true });
+    expect(set.mock.calls[0][0]).toMatchObject({ lan_auto: false, share_mods: true });
   });
 });

@@ -43,6 +43,14 @@ tempfile = "3"
 wiremock = "0.6"
 proptest = "1"
 
+# Dev/test : tables de lignes seulement sur le workspace et aucun DWARF sur les dépendances
+# (divise la taille des binaires et la RAM au link ; la CI surcharge via CARGO_PROFILE_DEV_DEBUG=0).
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = 0
+
 # Le rideau de chargement dessine ~30 images/s : ses dependances de rendu restent optimisees meme en debug.
 [profile.dev.package.tiny-skia]
 opt-level = 3

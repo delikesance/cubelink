@@ -817,6 +817,11 @@ impl IrohBackend {
         self.tunnel.set_world_port(0);
     }
 
+    /// Instance dont le monde et le modpack sont partagés en ce moment (aucune une fois `host_stop_sharing` passé).
+    pub fn shared_instance(&self) -> Option<String> {
+        lock(&self.current_share).clone()
+    }
+
     /// Invité : tunnel local vers le monde de l'ami (port `local_port` à donner à Minecraft).
     pub async fn join_tunnel(&self, friend_public_key: &str) -> std::result::Result<GuestTunnel, String> {
         let addr = self.addr_for(friend_public_key)?;

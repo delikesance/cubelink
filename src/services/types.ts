@@ -26,15 +26,17 @@ export class HearthLeaveError extends Error {
 // Le front reçoit la première et envoie la seconde.
 export type {
   AccountInfo, AccountKind, BrowseKind, BrowseSource, BrowseVersion, FixFailure, Friend, FriendCode, FriendRequest,
-  LaunchPhase, Loader, LoaderSpec, ModEntry, Presence, Profile, StageState, TransferPhase, TrustLevel, UpdatePhase,
+  Launcher, LaunchPhase, Loader, LoaderSpec, ModEntry, Presence, Profile, StageState, TransferPhase, TrustLevel, UpdatePhase,
   VerifyCode, VersionVerdict,
 } from "./bindings";
 import type {
-  BrowseKind, BrowseSource, BrowseVersion, FriendCode, FriendRequest, LoaderSpec, ModEntry, Presence, Profile, StageState,
-  VerifyCode,
+  BrowseKind, BrowseSource, BrowseVersion, FriendCode, FriendRequest, Launcher, LoaderSpec, ModEntry, Presence, Profile, StageState,
+  TrustLevel, VerifyCode,
 } from "./bindings";
 
 export type AccountsState = B.AccountsState_Serialize;
+/** Instance trouvée chez Prism, la CurseForge App ou la Modrinth App. `unsupported` : raison du refus (loader inconnu). */
+export type DetectedInstance = B.DetectedInstance_Serialize;
 export type BrowseHit = B.BrowseHit_Serialize;
 export type BrowseInstallResult = B.BrowseInstallResult_Serialize;
 export type BrowsePage = B.BrowsePage_Serialize;
@@ -50,6 +52,10 @@ export type Instance = B.Instance_Serialize;
 /** Illustration d'une instance. `source` : "curseforge", "modrinth" ou "custom". */
 export type InstanceArt = B.InstanceArt_Serialize;
 export type PackOrigin = B.PackOrigin;
+/** Mise à jour proposée pour un modpack installé depuis Modrinth. */
+export type ModpackUpdate = B.ModpackUpdate;
+/** Résumé d'une mise à jour appliquée : `kept` = fichiers du joueur gardés, `backup_id` pour l'annuler. */
+export type ModpackUpdateResult = B.ModpackUpdateResult;
 export type Invite = B.Invite_Serialize;
 export type JoinPlan = B.JoinPlan_Serialize;
 export type JoinWarning = B.JoinWarning;
@@ -127,6 +133,8 @@ export interface StageFallback {
 /** Rectangle de la zone de jeu et largeur du panneau, en pixels physiques (origine : coin haut-gauche de la zone cliente). */
 export interface StageLayout { x: number; y: number; w: number; h: number; panel_w: number }
 
+/** Réglages facultatifs de `launcherImportRun`. */
+export interface LauncherImportOptions { name?: string; ram_mb?: number }
 export interface PickFilesOptions { extensions: string[]; multiple?: boolean }
 export interface PickSavePathOptions { defaultName: string; extension: string }
 
@@ -151,6 +159,7 @@ export type HearthProposal = Omit<B.HearthProposal_Serialize, "kind"> & {
   kind: "continue_without" | "add_member" | "remove_member" | "pack_update" | "set_governance" | "leave";
 };
 export type HearthBlocker = B.HearthBlocker;
+export type HearthExport = B.HearthExport;
 export type HearthBranch = B.HearthBranch;
 export type HearthSettings = B.HearthSettings_Serialize;
 export type HearthDetail = Omit<B.HearthDetail_Serialize, "members" | "versions" | "proposals"> & {
@@ -163,6 +172,7 @@ export type HearthEula = B.HearthEula;
 // Charges d'événements (typées à la main).
 export interface HearthHandover { group_id: string; name: string; from_name: string }
 export interface HearthHostPrompt { group_id: string; name: string; players: number }
+export interface HearthRamWarning { group_id: string; name: string; message: string }
 
 export interface HearthCreateInput {
   name: string;
@@ -184,6 +194,13 @@ export const HEARTH_EULA_REQUIRED = "eula_required";
  * Format : `head_unavailable|<n° de la tête>|<n° de la dernière version complète, ou vide>|<nom de l'auteur>`.
  */
 export const HEARTH_HEAD_UNAVAILABLE = "head_unavailable";
+
+/**
+ * Préfixe de l'erreur de `hearthPlay` (et de `hearthUncleanChoice` / `hearthPlayFromPrevious`) quand héberger sans la majorité du
+ * groupe demande une confirmation explicite. Formats : `confirm_host|alone|<noms hors ligne séparés par ;>` et
+ * `confirm_host|best_effort|<accusés>|<membres>|<nécessaires>`. « Héberger quand même » appelle `hearthConfirmHost`, puis relance l'action.
+ */
+export const HEARTH_CONFIRM_HOST = "confirm_host";
 
 export interface Services {
   authStatus(): Promise<Profile | null>;
@@ -210,6 +227,10 @@ export interface Services {
   instancesCreate(input: CreateInstanceInput): Promise<Instance>;
   /** Importe un .mrpack, un zip CurseForge ou un zip brut. `target` ne sert que pour un zip sans métadonnées. */
   instancesImportMrpack(path: string, target?: ImportTarget): Promise<Instance>;
+  /** Instances des autres lanceurs (Prism, CurseForge, Modrinth) : dossiers habituels, ou `path` choisi à la main. Lecture seule. */
+  launcherImportScan(path?: string | null): Promise<DetectedInstance[]>;
+  /** Importe l'instance du dossier `path` ; progression par `onBrowseProgress`. La source n'est jamais modifiée. */
+  launcherImportRun(path: string, launcher: Launcher, opts?: LauncherImportOptions): Promise<Instance>;
   instancesLaunch(id: string): Promise<void>;
   instancesKill(id: string): Promise<void>;
   instancesDelete(id: string): Promise<void>;
@@ -248,6 +269,8 @@ export interface Services {
   friendRefuseAll(): Promise<number>;
   /** Retire un ami : accès en cours révoqués, invitations et demandes de cet ami oubliées. Réussit s'il n'est déjà plus ami. */
   friendRemove(publicKey: string): Promise<void>;
+  /** Règle la confiance envers un ami : `"always"` = installer ses mods inconnus sans demander (les scripts KubeJS demandent toujours l'accord). */
+  friendSetTrust(publicKey: string, trust: TrustLevel): Promise<void>;
   /** Invite un ami dans mon monde ouvert (rejette en français si aucun monde n'est ouvert). */
   friendInvite(publicKey: string): Promise<void>;
   /** Invitations reçues en attente. */
@@ -308,12 +331,20 @@ export interface Services {
   /** Applique les actions choisies du plan ; sauvegarde les fichiers remplacés (annulable). */
   modsFixApply(instanceId: string, planId: string, actionIds: string[]): Promise<FixResult>;
   modsFixUndo(instanceId: string, backupId: string): Promise<ModCheck>;
+  /** Mise à jour disponible pour le modpack installé (Modrinth) ; null si à jour ou origine inconnue. Échoue hors ligne : l'appelant l'ignore. */
+  modpackUpdateCheck(instanceId: string): Promise<ModpackUpdate | null>;
+  /** Passe le modpack à `versionId` en gardant ce qui est au joueur ; l'ancien état est sauvegardé. */
+  modpackUpdateApply(instanceId: string, versionId: string): Promise<ModpackUpdateResult>;
+  /** Annule la mise à jour de `backupId` ; renvoie l'instance. */
+  modpackUpdateUndo(instanceId: string, backupId: string): Promise<Instance>;
   modsRemove(instanceId: string, file: string): Promise<void>;
   modsAdd(instanceId: string, path: string): Promise<ModEntry>;
   /** Sélecteur de fichiers natif ; renvoie les chemins choisis ([] si annulé). */
   pickFiles(opts: PickFilesOptions): Promise<string[]>;
   /** Sélecteur « Enregistrer sous » natif ; renvoie le chemin choisi (null si annulé). */
   pickSavePath(opts: PickSavePathOptions): Promise<string | null>;
+  /** Sélecteur de dossier natif ; renvoie null si annulé. */
+  pickFolder(): Promise<string | null>;
 
   onAuthState(cb: (p: Profile | null) => void): Unsubscribe;
   /** Changements de la liste des comptes ou du compte actif. */
@@ -360,8 +391,14 @@ export interface Services {
   hearthInviteDismiss(groupId: string): Promise<void>;
   /** Le bouton unique de la carte : jouer ou rejoindre selon l'état. Rejette avec `eula_required` au premier hébergement. */
   hearthPlay(id: string): Promise<void>;
+  /** Confirme « Héberger quand même » après une erreur `confirm_host|…` : valable 2 minutes pour une seule prise du serveur ; relancer ensuite l'action refusée. */
+  hearthConfirmHost(id: string): Promise<void>;
   /** Repart de la dernière version complète quand `hearthPlay` a rejeté avec `head_unavailable` : crée une fourche quand l'auteur revient. */
   hearthPlayFromPrevious(id: string): Promise<void>;
+  /** « Jouer depuis cette version » : démarre le serveur ici depuis une version complète de l'historique (pas la dernière) ; la partie en fait une branche, et le groupe a deux versions à départager. Rejette avec `eula_required` ou `confirm_host|…` comme `hearthPlay`. */
+  hearthPlayFromVersion(id: string, versionId: string): Promise<void>;
+  /** « Exporter en monde solo » : copie une version complète (`versionId`, sinon la version actuelle, ou la dernière complète sur ce PC) dans les mondes de l'instance liée, sous « <groupe> (export du groupe) », avec mon joueur remis dedans. Ne remplace jamais un monde existant. */
+  hearthExportSolo(id: string, versionId?: string): Promise<HearthExport>;
   hearthStop(id: string): Promise<void>;
   hearthUncleanChoice(id: string, choice: HearthUncleanChoice): Promise<void>;
   /** Associe le modpack du groupe à une instance locale. */
@@ -394,6 +431,7 @@ export interface Services {
   onHearthInvites(cb: (l: HearthInvite[]) => void): Unsubscribe;
   onHearthHandover(cb: (e: HearthHandover) => void): Unsubscribe;
   onHearthHostPrompt(cb: (e: HearthHostPrompt) => void): Unsubscribe;
+  onHearthRamWarning(cb: (e: HearthRamWarning) => void): Unsubscribe;
   onUnknownMods(cb: (e: UnknownModsEvent) => void): Unsubscribe;
   onTransferErrorDetails(cb: (e: TransferErrorDetails) => void): Unsubscribe;
   onBrowseProgress(cb: (e: BrowseProgressEvent) => void): Unsubscribe;

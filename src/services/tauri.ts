@@ -53,6 +53,8 @@ export function createTauriServices(): Services {
     instancesCreate: (i) => commands.instancesCreate(i.name, i.minecraft, i.loader, i.ram_mb),
     instancesImportMrpack: (path, t) =>
       commands.instancesImportMrpack(path, t?.name ?? null, t?.minecraft ?? null, t?.loader ?? null, t?.ram_mb ?? null),
+    launcherImportScan: (path) => commands.launcherImportScan(path ?? null),
+    launcherImportRun: (path, launcher, o) => commands.launcherImportRun(path, launcher, o?.name ?? null, o?.ram_mb ?? null),
     instancesLaunch: (id) => done(commands.instancesLaunch(id)),
     instancesKill: (id) => done(commands.instancesKill(id)),
     instancesDelete: (id) => done(commands.instancesDelete(id)),
@@ -80,6 +82,7 @@ export function createTauriServices(): Services {
     friendRefuse: (publicKey) => done(commands.friendRefuse(publicKey)),
     friendRefuseAll: () => commands.friendRefuseAll(),
     friendRemove: (publicKey) => done(commands.friendRemove(publicKey)),
+    friendSetTrust: (publicKey, trust) => done(commands.friendSetTrust(publicKey, trust)),
     friendInvite: (publicKey) => done(commands.friendInvite(publicKey)),
     friendInvites: () => commands.friendInvites(),
     friendInviteDismiss: (id) => done(commands.friendInviteDismiss(id)),
@@ -120,6 +123,9 @@ export function createTauriServices(): Services {
     modsFixPlan: (instanceId) => commands.modsFixPlan(instanceId),
     modsFixApply: (instanceId, planId, actionIds) => commands.modsFixApply(instanceId, planId, actionIds),
     modsFixUndo: (instanceId, backupId) => commands.modsFixUndo(instanceId, backupId),
+    modpackUpdateCheck: (instanceId) => commands.modpackUpdateCheck(instanceId),
+    modpackUpdateApply: (instanceId, versionId) => commands.modpackUpdateApply(instanceId, versionId),
+    modpackUpdateUndo: (instanceId, backupId) => commands.modpackUpdateUndo(instanceId, backupId),
     modsRemove: (instanceId, file) => done(commands.modsRemove(instanceId, file)),
     modsAdd: (instanceId, path) => commands.modsAdd(instanceId, path),
     pickFiles: async ({ extensions, multiple }) => {
@@ -131,6 +137,12 @@ export function createTauriServices(): Services {
     pickSavePath: async ({ defaultName, extension }) => {
       const { save } = await import("@tauri-apps/plugin-dialog");
       return save({ defaultPath: defaultName, filters: [{ name: "Sauvegarde d'identité", extensions: [extension] }] });
+    },
+
+    pickFolder: async () => {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const r = await open({ multiple: false, directory: true });
+      return typeof r === "string" ? r : null;
     },
 
     onAuthState: (cb) => on("auth://state", cb),
@@ -164,8 +176,11 @@ export function createTauriServices(): Services {
     hearthInviteAccept: (id) => done(commands.hearthInviteAccept(id)),
     hearthInviteDismiss: (id) => done(commands.hearthInviteDismiss(id)),
     hearthPlay: (id) => done(commands.hearthPlay(id)),
+    hearthConfirmHost: (id) => done(commands.hearthConfirmHost(id)),
     hearthStop: (id) => done(commands.hearthStop(id)),
     hearthPlayFromPrevious: (id) => done(commands.hearthPlayFromPrevious(id)),
+    hearthPlayFromVersion: (id, versionId) => done(commands.hearthPlayFromVersion(id, versionId)),
+    hearthExportSolo: (id, versionId) => commands.hearthExportSolo(id, versionId ?? null),
     hearthUncleanChoice: (id, choice) => done(commands.hearthUncleanChoice(id, choice)),
     hearthSetInstance: (id, instanceId) => done(commands.hearthSetInstance(id, instanceId)),
     hearthAddMember: (id, publicKey) => done(commands.hearthAddMember(id, publicKey)),
@@ -188,6 +203,7 @@ export function createTauriServices(): Services {
     onHearthInvites: (cb) => on("hearth://invites", cb),
     onHearthHandover: (cb) => on("hearth://handover", cb),
     onHearthHostPrompt: (cb) => on("hearth://host_prompt", cb),
+    onHearthRamWarning: (cb) => on("hearth://ram_warning", cb),
     onUnknownMods: (cb) => on("transfer://unknown_mods", cb),
     onTransferErrorDetails: (cb) => on("transfer://error_details", cb),
     updateState: () => commands.updateState(),

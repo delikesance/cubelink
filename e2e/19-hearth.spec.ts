@@ -95,4 +95,20 @@ test('serveur de groupe : A le cree depuis un monde, B recoit l\'invitation et l
   expect(await invokeErr(appA.page, 'hearth_play', { id: card.id })).toContain('eula_required');
   expect((await invoke<{ accepted: boolean }>(appA.page, 'hearth_eula')).accepted).toBe(false);
   expect((await invoke<Card[]>(appA.page, 'hearth_list'))[0]!.state).toBe('idle');
+
+  // #93 : B s'eteint, plus personne d'autre n'est joignable. Jouer ne demarre rien et demande une confirmation explicite
+  // (`confirm_host|alone|<noms>`), jamais le simple clic ; la confirmation elle-meme est verifiee en integration
+  // (hearth_flow.rs : un seul demarrage apres `hearth_confirm_host`), car l'accepter ici lancerait le vrai serveur Minecraft.
+  await invoke(appA.page, 'hearth_eula_accept');
+  appB.proc.kill();
+  const refus = await until('refus de Jouer avec confirmation', async () => {
+    const e = await invokeErr(appA.page, 'hearth_play', { id: card.id });
+    return e?.startsWith('confirm_host|alone|') ? e : false;
+  }, 60_000, 1000);
+  expect(refus).toMatch(/^confirm_host\|alone\|.+/);
+  const after = (await invoke<Card[]>(appA.page, 'hearth_list'))[0]!;
+  expect(['hosting', 'launching']).not.toContain(after.state);
+  // Un second clic ne vaut pas confirmation.
+  expect(await invokeErr(appA.page, 'hearth_play', { id: card.id })).toMatch(/^confirm_host\|alone\|/);
+  expect(await invokeErr(appA.page, 'hearth_confirm_host', { id: 'inconnu' })).toBeTruthy();
 });

@@ -1,6 +1,6 @@
 //! Mémoire vive physique de l'ordinateur, sans dépendance de plus : `/proc/meminfo` sous Linux,
-//! `GlobalMemoryStatusEx` sous Windows. Sert à choisir la mémoire « Automatique » du jeu (voir
-//! `instance::auto_ram_mb`) et à avertir quand un réglage manuel en demande trop.
+//! `GlobalMemoryStatusEx` sous Windows. Sert à choisir la mémoire « Automatique » du jeu (`instance::auto_ram_mb`),
+//! à dimensionner le serveur de groupe (`hearth::server::server_ram_mb`) et à avertir quand un réglage manuel en demande trop.
 
 /// RAM physique totale en Mo, ou `None` si le système ne la donne pas (plateforme non gérée, lecture refusée).
 pub fn physical_ram_mb() -> Option<u64> {
@@ -18,13 +18,19 @@ pub fn physical_ram_mb() -> Option<u64> {
     }
 }
 
+/// Alias de `physical_ram_mb` pour le dimensionnement du serveur de groupe (`hearth::server::server_ram_mb`).
+pub fn physical_memory_mb() -> Option<u64> {
+    physical_ram_mb()
+}
+
 /// Lit `MemTotal` (en kio) dans le texte de `/proc/meminfo` et le rend en Mo. `None` si absent, mal formé ou nul.
 pub fn parse_meminfo(text: &str) -> Option<u64> {
     let line = text.lines().find(|l| l.starts_with("MemTotal:"))?;
     let mut parts = line["MemTotal:".len()..].split_whitespace();
     let kib: u64 = parts.next()?.parse().ok()?;
     match parts.next() {
-        Some("kB") | None => {}
+        Some(u) if u.eq_ignore_ascii_case("kb") => {}
+        None => {}
         Some(_) => return None,
     }
     (kib >= 1024).then_some(kib / 1024)
@@ -45,6 +51,7 @@ fn windows_total_mb() -> Option<u64> {
         (mb > 0).then_some(mb)
     }
 }
+
 
 #[cfg(test)]
 mod tests {

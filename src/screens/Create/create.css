@@ -6,7 +6,7 @@
 .create-head{text-align:center}
 .create-head h1,.create-form h1{margin:0;font:700 32px/1.1 var(--font-display);letter-spacing:-.01em}
 .create-head p{margin:var(--sp-2) 0 0;color:var(--muted);font-size:15px}
-.create-choices{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:var(--sp-4)}
+.create-choices{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:var(--sp-4)}
 .create-choice{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:var(--sp-3);text-align:center;color:var(--text);font:inherit;min-height:280px;padding:var(--sp-6) var(--sp-5);cursor:pointer;transition:border-color var(--dur-feedback) var(--ease),background var(--dur-feedback) var(--ease),transform var(--dur-feedback) var(--ease)}
 .create-choice:not(:disabled):hover{border-color:var(--accent);transform:translateY(-2px)}
 .create-choice:disabled{opacity:.6;cursor:not-allowed}
@@ -17,6 +17,16 @@
 .create-wrap>.create-actions{justify-content:center}
 .create-cancel{min-width:220px}
 @media (prefers-reduced-motion:reduce){.create-choice:not(:disabled):hover{transform:none}}
+.create-launchers{max-width:760px}
+.create-found{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:var(--sp-3);max-height:min(46vh,420px);overflow-y:auto}
+.create-found-item{display:flex;align-items:center;justify-content:space-between;gap:var(--sp-4);padding:var(--sp-4) var(--sp-5)}
+.create-found-main{display:flex;flex-wrap:wrap;align-items:center;gap:var(--sp-1) var(--sp-3);min-width:0}
+.create-found-name{font:600 17px/1.2 var(--font-display);overflow-wrap:anywhere}
+.create-found-tx{flex-basis:100%;color:var(--muted);font-size:14px}
+.create-found-why{flex-basis:100%;color:var(--danger);font-size:14px}
+.create-found-bar{flex-basis:100%}
+.create-found-item .cl-btn{min-width:112px;justify-content:center}
+.create-path{display:flex;flex-direction:column;gap:var(--sp-3)}
 .create-path-row{display:flex;gap:var(--sp-3);align-items:flex-start}
 .create-path-row .cl-input{flex:1}
 .create-actions{display:flex;justify-content:flex-end;gap:var(--sp-3)}
@@ -48,5 +58,6 @@
 
 @media (max-width:860px){
   .create-choices{grid-template-columns:1fr}
+  .create-found-item{flex-direction:column;align-items:stretch}
   .create-choice{min-height:0}
 }

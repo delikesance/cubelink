@@ -278,6 +278,11 @@ impl Index {
     fn contains(&self, group: &GroupId, root: &Hash) -> bool {
         lock(&self.roots).get(root).is_some_and(|s| s.contains(group))
     }
+
+    /// Les collections servies pour ce groupe.
+    fn roots_of(&self, group: &GroupId) -> Vec<Hash> {
+        lock(&self.roots).iter().filter(|(_, g)| g.contains(group)).map(|(r, _)| *r).collect()
+    }
 }
 
 /// Tâche qui répond aux événements d'iroh-blobs (connexion, requête) selon la table et l'appartenance.
@@ -606,6 +611,31 @@ impl WorldStore {
         self.inner.index.unregister(group, &root);
         self.store().tags().delete(tag_name(group, &root)).await.map_err(store_err)?;
         Ok(())
+    }
+
+    /// Octets que les mondes de ce groupe occupent dans le magasin : les blobs des collections qu'il garde, chacun
+    /// compté une fois même s'il sert à plusieurs versions (un fichier inchangé d'une version à l'autre n'est qu'un blob).
+    /// Un blob partagé avec un autre groupe compte pour chacun : c'est la part que ce groupe référence, pas l'espace
+    /// qu'on récupérerait en l'oubliant. Les parties absentes ou incomplètes ne comptent pas.
+    pub async fn group_bytes(&self, group: &GroupId) -> u64 {
+        let mut seen: HashSet<Hash> = HashSet::new();
+        let mut total = 0u64;
+        for root in self.inner.index.roots_of(group) {
+            if seen.insert(root) {
+                if let Ok(BlobStatus::Complete { size }) = self.store().blobs().status(root).await {
+                    total += size;
+                }
+            }
+            let Ok(coll) = Collection::load(root, self.store()).await else { continue };
+            for (_, hash) in coll.iter() {
+                if seen.insert(*hash) {
+                    if let Ok(BlobStatus::Complete { size }) = self.store().blobs().status(*hash).await {
+                        total += size;
+                    }
+                }
+            }
+        }
+        total
     }
 
     /// Cette collection est-elle présente en entier (liste, noms et fichiers) ?
@@ -1054,6 +1084,10 @@ mod tests {
         assert!(is_excluded("level.dat.TMP"));
         assert!(!is_excluded("level.dat"));
         assert!(!is_excluded("tmp.dat"));
+        assert!(is_excluded("level42.dat"));
+        assert!(is_excluded("data/map_1.dat_new"));
+        assert!(is_excluded("playerdata/123e4567-e89b-12d3-a456-426614174000-77.dat"));
+        assert!(!is_excluded("playerdata/123e4567-e89b-12d3-a456-426614174000.dat"));
     }
 
     #[test]
@@ -1075,6 +1109,23 @@ mod tests {
         let names: Vec<&str> = s.files.iter().map(|f| f.rel.as_str()).collect();
         assert_eq!(names, vec!["level.dat", "region/r.0.0.mca"]);
         assert_eq!(s.skipped_unsafe, vec!["evil.exe".to_string()]);
+    }
+
+    #[test]
+    fn scan_ecarte_les_temporaires_de_minecraft() {
+        let d = tempfile::tempdir().unwrap();
+        let w = d.path();
+        let u = "123e4567-e89b-12d3-a456-426614174000";
+        std::fs::create_dir_all(w.join("playerdata")).unwrap();
+        std::fs::write(w.join("level.dat"), b"x").unwrap();
+        std::fs::write(w.join("level42.dat"), b"x").unwrap();
+        std::fs::write(w.join("map_1.dat_new"), b"x").unwrap();
+        std::fs::write(w.join(format!("playerdata/{u}.dat")), b"x").unwrap();
+        std::fs::write(w.join(format!("playerdata/{u}-1234.dat")), b"x").unwrap();
+        let s = scan_world(w).unwrap();
+        let mut names: Vec<String> = s.files.iter().map(|f| f.rel.clone()).collect();
+        names.sort();
+        assert_eq!(names, vec!["level.dat".to_string(), format!("playerdata/{u}.dat")]);
     }
 
     #[test]

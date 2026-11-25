@@ -25,7 +25,7 @@
 //! | `GroupInvite { ops, total_ops, group_key }` | `Ack` | invitation (d'un ami) |
 //! | `Propose { group_id, proposal }` / `Vote { group_id, proposal_id, sig }` | `Ack` | gouvernance asynchrone |
 //! | `OfferVersion { version }` | `Ack` | « une nouvelle version existe » (file d'envoi) |
-//! | `HaveVersion { group_id, version }` | `Have { complete }` | le membre a-t-il l'en-tête **et** tous les blobs ? |
+//! | `HaveVersion { group_id, version }` | `Have { complete }` ou `Rejected { reason: "refused:<code>" }` | le membre a-t-il l'en-tête **et** tous les blobs ? Un refus définitif (`refused:oversize`) arrête l'attente de l'émetteur |
 //!
 //! Écarts par rapport au tableau de la spec : `Propose` porte le `group_id` (une proposition n'en contient pas) ;
 //! `Ops` et `Versions` portent `more` (une page tient dans 64 Kio) ; `GroupInvite` porte `total_ops` (voir
@@ -210,6 +210,11 @@ pub trait HearthDelegate: Send + Sync + 'static {
     fn lease(&self, group: &GroupId) -> Option<Lease>;
     /// Ce nœud a-t-il l'en-tête de cette version **et** tout son contenu ?
     fn have_version(&self, group: &GroupId, version: &VersionId) -> bool;
+    /// Cette version offerte, ce membre l'a **refusée** et ne la tirera pas tout seul (par exemple parce qu'elle
+    /// dépasse le seuil de croissance) ? Rend un code court (`oversize`) : l'émetteur cesse alors de l'attendre.
+    fn refused_version(&self, _group: &GroupId, _version: &VersionId) -> Option<String> {
+        None
+    }
 
     /// Un membre a répondu à notre sonde ou nous a sondés (état annoncé). Sans effet par défaut.
     /// `heads` : têtes du graphe de l'émetteur ; `complete_heads` : ses versions complètes (`None` : nœud ancien).
@@ -386,7 +391,15 @@ impl HearthHandler {
                 if self.member_state(&group_id, &from).is_none() {
                     return Served::Deny;
                 }
-                Served::Reply(Response::Have { complete: d.have_version(&group_id, &version) })
+                if d.have_version(&group_id, &version) {
+                    return Served::Reply(Response::Have { complete: true });
+                }
+                // Pas complète et refusée : réponse explicite (ajout sans nouveau message, un ancien émetteur y voit
+                // un rejet ordinaire et réessaie comme avant).
+                if let Some(code) = d.refused_version(&group_id, &version) {
+                    return rejected(format!("{}{code}", super::outbox::REFUSED_PREFIX));
+                }
+                Served::Reply(Response::Have { complete: false })
             }
         }
     }

@@ -234,6 +234,16 @@ pub struct HearthUnclean {
     pub checkpoint_at: Option<i64>,
 }
 
+/// Dernier plantage du serveur d'un groupe : qui l'hébergeait et le mod probablement en cause.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+pub struct HearthCrash {
+    pub host: HearthMemberLite,
+    /// Le serveur qui a planté était le mien (sur ce PC).
+    pub mine: bool,
+    /// Mod probable d'après la fin de la sortie du serveur ; `None` : cause inconnue.
+    pub mod_hint: Option<String>,
+}
+
 /// Carte d'un serveur de groupe sur l'accueil (événement `hearth://state`, commande `hearth_list`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct HearthCard {
@@ -266,6 +276,12 @@ pub struct HearthCard {
     pub version: Option<u64>,
     /// Fins de partie non publiées, mises de côté sur ce PC (`HearthDetail::orphans`) : l'hôte n'a pas encore choisi.
     pub orphans: u32,
+    /// Le serveur a planté à la fin de la dernière partie (`None` tant qu'un nouveau serveur n'a pas été lancé).
+    pub crash: Option<HearthCrash>,
+    /// Le modpack de l'instance liée contient Simple Voice Chat : le serveur ne le charge pas (le tunnel ne transporte
+    /// pas l'UDP), la voix ne fonctionnera pas. Repéré sur les noms de jars de l'instance, sans les ouvrir.
+    #[serde(default)]
+    pub voice_unsupported: bool,
 }
 
 /// Invitation à un groupe reçue d'un ami (événement `hearth://invites`).
@@ -318,6 +334,22 @@ pub struct HearthVersion {
     pub is_head: bool,
     /// Branche mise de côté (époque révolue) : restaurable, jamais tête.
     pub side_branch: bool,
+    /// Le monde de cette version est en entier sur ce PC : « Restaurer » marche sans réseau. `false` : son contenu a été
+    /// libéré (vieille version) ou n'a jamais été reçu, l'historique ne garde alors que l'en-tête.
+    pub available: bool,
+}
+
+/// Résultat de « Exporter en monde solo » (`hearth_export_solo`, docs/hearth.md § 8).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+pub struct HearthExport {
+    /// Nom du dossier créé dans `saves/` de l'instance (aussi le nom du monde dans la liste du jeu).
+    pub world_name: String,
+    /// Numéro de la version exportée.
+    pub version_number: u64,
+    /// La dernière version n'était pas complète sur ce PC : c'est la dernière version complète qui a été exportée.
+    pub fallback: bool,
+    /// Ton joueur (position, inventaire) a été remis dans le monde ; sinon tu apparais au point de départ.
+    pub has_player: bool,
 }
 
 /// Décision du groupe en attente de votes.
@@ -374,6 +406,9 @@ pub struct HearthSettings {
     pub disk_bytes: u64,
     /// Versions en attente d'envoi chez les autres membres.
     pub outbox_pending: u32,
+    /// Phrase prête à afficher quand ma dernière partie a été refusée pour de bon par les amis (trop grosse d'un coup,
+    /// #99) ; elle reste chez moi et sera tirée quand un ami clique sur Jouer. `None` sinon.
+    pub outbox_failed: Option<String>,
     /// Nom de l'instance locale du modpack.
     pub instance_name: Option<String>,
 }
@@ -398,6 +433,15 @@ pub struct HearthHandover {
     pub group_id: String,
     pub name: String,
     pub from_name: String,
+}
+
+/// Événement `hearth://ram_warning` : même après réduction de la mémoire du serveur, jeu et serveur occupent plus de 85 % de la mémoire du PC.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+pub struct HearthRamWarning {
+    pub group_id: String,
+    pub name: String,
+    /// Phrase en langage courant, prête à afficher.
+    pub message: String,
 }
 
 /// Événement `hearth://host_prompt` : notre jeu s'est fermé alors que d'autres joueurs sont encore sur notre serveur.

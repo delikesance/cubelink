@@ -156,38 +156,20 @@ pub fn eula_accepted(dir: &Path) -> bool {
 }
 
 /// Réglages imposés à `server.properties` : en ligne (comptes Mojang vérifiés), local seulement (les amis passent par
-/// le tunnel), port choisi, monde `world`.
+/// le tunnel), port choisi, monde `world`, et ni RCON ni `query` (deux ports que le pilotage par l'entrée standard rend
+/// inutiles, et qui écoutent sur toutes les interfaces quand ils sont activés).
 pub fn render_server_properties(existing: &str, port: u16) -> String {
-    let forced: [(&str, String); 4] = [
+    // `white-list` et `enforce-whitelist` sont volontairement absents (#97) : sans `whitelist.json` alimenté depuis des
+    // profils Minecraft réclamés par les membres (non codé, docs/hearth.md § 10.1), les forcer refuserait tout le monde.
+    let forced: [(&str, String); 6] = [
         ("online-mode", "true".into()),
         ("server-ip", "127.0.0.1".into()),
         ("server-port", port.to_string()),
         ("level-name", "world".into()),
+        ("enable-rcon", "false".into()),
+        ("enable-query", "false".into()),
     ];
-    let mut done = [false; 4];
-    let mut out = String::new();
-    for line in existing.lines() {
-        let key = line.trim_start().split(['=', ':']).next().unwrap_or("").trim();
-        let idx = forced.iter().position(|(k, _)| !line.trim_start().starts_with(['#', '!']) && *k == key);
-        match idx {
-            Some(i) if !done[i] => {
-                done[i] = true;
-                out.push_str(&format!("{}={}\n", forced[i].0, forced[i].1));
-            }
-            // Doublon d'une clé déjà réécrite : supprimé.
-            Some(_) => {}
-            None => {
-                out.push_str(line);
-                out.push('\n');
-            }
-        }
-    }
-    for (i, (k, v)) in forced.iter().enumerate() {
-        if !done[i] {
-            out.push_str(&format!("{k}={v}\n"));
-        }
-    }
-    out
+    super::netguard::rewrite_properties(existing, &forced)
 }
 
 /// Un port TCP libre sur 127.0.0.1 (fenêtre de course minime entre ce choix et l'ouverture par le serveur).
@@ -196,18 +178,31 @@ pub fn free_port() -> Result<u16> {
     Ok(l.local_addr()?.port())
 }
 
-/// Mémoire du serveur selon la RAM disponible (Mo) : le quart, entre 2 Go et 8 Go, jamais plus que la moitié.
-pub fn suggest_ram_mb(available_mb: u64) -> u32 {
-    let quarter = (available_mb / 4).clamp(2048, 8192);
-    quarter.min((available_mb / 2).max(1024)) as u32
+/// Mémoire minimale et maximale du serveur de groupe (Mo).
+pub const SERVER_RAM_MIN_MB: u32 = 1024;
+pub const SERVER_RAM_MAX_MB: u32 = 8192;
+/// Marge laissée au système, au lanceur et à sa fenêtre web en plus du jeu et du serveur (Mo).
+const RESERVED_MB: u64 = 3072;
+
+/// Mémoire du serveur de groupe (Mo), pour un client réglé à `client_mb`. Le serveur et le jeu tournent sur le même PC :
+/// la moitié de la mémoire du jeu (entre 1 et 8 Go), sans dépasser ce qui reste une fois le jeu et 3 Go de marge retirés de la
+/// mémoire physique (jamais moins de 1 Go). Mémoire physique inconnue : la moitié du jeu, sans autre borne.
+pub fn server_ram_mb(client_mb: u32, physical_mb: Option<u64>) -> u32 {
+    let base = (client_mb / 2).clamp(SERVER_RAM_MIN_MB, SERVER_RAM_MAX_MB);
+    let Some(phys) = physical_mb else { return base };
+    let room = phys.saturating_sub(client_mb as u64).saturating_sub(RESERVED_MB);
+    base.min(u32::try_from(room).unwrap_or(u32::MAX)).max(SERVER_RAM_MIN_MB)
 }
 
-/// Avertissement à afficher quand la machine a moins de 12 Go de RAM au total.
-pub fn ram_warning(total_mb: u64) -> Option<String> {
-    (total_mb < 12 * 1024).then(|| {
+/// Avertissement (langage courant) quand, serveur et jeu additionnés, on dépasse 85 % de la mémoire physique malgré la
+/// réduction de `server_ram_mb`. `None` : tout tient, ou mémoire physique inconnue.
+pub fn ram_pressure_warning(client_mb: u32, server_mb: u32, physical_mb: Option<u64>) -> Option<String> {
+    let phys = physical_mb.filter(|p| *p > 0)?;
+    let used = client_mb as u64 + server_mb as u64;
+    (used * 100 > phys * 85).then(|| {
         format!(
-            "Cet ordinateur a {} Go de mémoire : héberger un serveur moddé en jouant peut être lent. Un ami mieux équipé gagnerait à lancer la partie.",
-            total_mb / 1024
+            "Ton PC a {} Go de mémoire : le serveur et le jeu risquent d'en manquer. Baisse la mémoire du jeu dans les réglages de l'instance, ou ferme d'autres applications avant de jouer.",
+            (phys + 512) / 1024
         )
     })
 }
@@ -257,6 +252,8 @@ pub struct ModSideInfo {
     pub server_side: Option<Side>,
     /// Le jar se déclare lui-même client seulement (`environment` de Fabric/Quilt, dépendance `side = "CLIENT"`).
     pub declares_client_only: bool,
+    /// Identifiants dont le jar dépend obligatoirement (pour retirer les addons d'un mod qu'on ne charge pas).
+    pub requires: Vec<String>,
 }
 
 /// Décision pour un mod : `Some(raison)` s'il faut l'écarter du serveur.
@@ -264,6 +261,9 @@ pub struct ModSideInfo {
 /// Ordre : la donnée explicite de Modrinth l'emporte (`unsupported` écarte, `required`/`optional` garde) ; sinon la
 /// déclaration du jar ; sinon la liste [`KNOWN_CLIENT_ONLY`].
 pub fn client_only_reason(info: &ModSideInfo) -> Option<String> {
+    if let Some(reason) = voice_chat_reason(info) {
+        return Some(reason);
+    }
     match info.server_side {
         Some(Side::Unsupported) => return Some("Modrinth : ne fonctionne pas côté serveur".into()),
         Some(Side::Required | Side::Optional) => return None,
@@ -276,6 +276,17 @@ pub fn client_only_reason(info: &ModSideInfo) -> Option<String> {
         .iter()
         .find(|id| KNOWN_CLIENT_ONLY.iter().any(|k| k.eq_ignore_ascii_case(id)))
         .map(|id| format!("mod client connu : {id}"))
+}
+
+/// Le chat vocal n'est pas chargé côté serveur : le tunnel ne transporte pas l'UDP, et Simple Voice Chat ouvre un port
+/// UDP sur toutes les interfaces. Écarte aussi ses addons (sans lui, le serveur refuserait de démarrer). Prime sur la
+/// donnée de Modrinth : même « requis » côté serveur, il n'a pas sa place ici.
+fn voice_chat_reason(info: &ModSideInfo) -> Option<String> {
+    use super::netguard::{is_voice_chat_id, VOICE_UNSUPPORTED};
+    if info.mod_ids.iter().any(|id| is_voice_chat_id(id)) {
+        return Some(VOICE_UNSUPPORTED.into());
+    }
+    info.requires.iter().any(|id| is_voice_chat_id(id)).then(|| format!("{VOICE_UNSUPPORTED} (addon du chat vocal)"))
 }
 
 /// Mod écarté, avec la raison.
@@ -319,6 +330,13 @@ pub fn jar_side_info(path: &Path) -> ModSideInfo {
                 .iter()
                 .all(|m| m.deps.iter().any(|d| d.id == "minecraft" && d.side.eq_ignore_ascii_case("CLIENT")));
         info.declares_client_only = forge_client;
+        info.requires = meta
+            .mods
+            .iter()
+            .flat_map(|m| m.deps.iter())
+            .filter(|d| d.kind == crate::mod_meta::DepKind::Required)
+            .map(|d| d.id.clone())
+            .collect();
     }
     if !info.declares_client_only {
         info.declares_client_only = jar_environment_is_client(path);
@@ -934,7 +952,7 @@ async fn get_limited(http: &reqwest::Client, url: &str, limit: u64) -> Result<Ve
     Ok(out)
 }
 
-async fn write_atomic(dest: &Path, data: &[u8]) -> Result<()> {
+pub(super) async fn write_atomic(dest: &Path, data: &[u8]) -> Result<()> {
     let mut tmp = dest.as_os_str().to_owned();
     tmp.push(".tmp");
     let tmp = PathBuf::from(tmp);
@@ -1073,7 +1091,29 @@ impl DedicatedServer {
             server.kill().await;
             return Err(e);
         }
+        if let Err(e) = server.check_exposure().await {
+            // Arrêt propre : le monde vient d'être chargé, rien à perdre, mais autant le laisser se refermer.
+            server.stop(Duration::from_secs(15)).await;
+            return Err(e);
+        }
         Ok(server)
+    }
+
+    /// Contrôle des sockets du processus Java (§ 6.7) : toute écoute hors boucle locale est une erreur qui nomme le mod
+    /// probable et le port. À appeler une fois `Done (` vu ; [`DedicatedServer::start`] le fait. Ne s'applique qu'au
+    /// processus lancé directement, pas à ses éventuels enfants.
+    pub async fn check_exposure(&self) -> Result<()> {
+        if self.pid == 0 || !self.is_running() {
+            return Ok(());
+        }
+        let found = super::netguard::audit(self.pid).await;
+        let Some(first) = found.first() else { return Ok(()) };
+        let lines = self.shared.tail(KEEP_LINES);
+        let dir = self.dir.clone();
+        let port = first.port;
+        let hint = tokio::task::spawn_blocking(move || super::netguard::probable_mod(port, &dir, &lines)).await.ok().flatten();
+        tracing::warn!("le serveur écoute hors de la boucle locale : {found:?}");
+        Err(Error::Other(super::netguard::exposure_message(first, hint.as_deref())))
     }
 
     /// Comme [`DedicatedServer::start`], sans attendre que le serveur soit prêt.
@@ -1098,6 +1138,10 @@ impl DedicatedServer {
         let props_path = dir.join("server.properties");
         let existing = tokio::fs::read_to_string(&props_path).await.unwrap_or_default();
         tokio::fs::write(&props_path, render_server_properties(&existing, port)).await?;
+        // Configs des mods qui ouvrent un port : liées à la boucle locale avant le démarrage (§ 6.7).
+        for rel in super::netguard::harden_configs(&dir).await? {
+            tracing::info!("config du serveur liée à 127.0.0.1 : {rel}");
+        }
 
         let mut args: Vec<String> = vec![format!("-Xmx{}M", cfg.ram_mb), format!("-Xms{}M", cfg.ram_mb.min(1024))];
         args.extend(cfg.extra_jvm_args.iter().cloned());
@@ -1317,6 +1361,13 @@ impl DedicatedServer {
         }
     }
 
+    /// Annonce `text` à tous les joueurs (`tellraw @a`). Le texte passe par du JSON : aucun caractère ne peut sortir de la
+    /// commande (guillemets, retours à la ligne).
+    pub async fn say(&self, text: &str) -> Result<()> {
+        let json = serde_json::json!({ "text": text, "color": "yellow" });
+        self.send(&format!("tellraw @a {json}")).await
+    }
+
     /// Arrêt propre : `stop`, puis, si le serveur n'est pas parti après `grace`, arrêt forcé.
     pub async fn stop(&self, grace: Duration) -> StopOutcome {
         if let Some(code) = self.exit_code() {
@@ -1464,7 +1515,10 @@ mod tests {
         assert!(eula_accepted(t.path()));
 
         let out = render_server_properties("", 25599);
-        assert_eq!(out, "online-mode=true\nserver-ip=127.0.0.1\nserver-port=25599\nlevel-name=world\n");
+        assert_eq!(
+            out,
+            "online-mode=true\nserver-ip=127.0.0.1\nserver-port=25599\nlevel-name=world\nenable-rcon=false\nenable-query=false\n"
+        );
         let existing = "#Minecraft server properties\nmotd=Chez nous\nonline-mode=false\nserver-port : 25565\nserver-ip=\nonline-mode=false\n#level-name=autre\nmax-players=5\n";
         let out = render_server_properties(existing, 4242);
         assert!(out.contains("motd=Chez nous\n"));
@@ -1476,20 +1530,83 @@ mod tests {
         assert!(out.contains("server-port=4242\n"));
         assert!(!out.contains("25565"));
         assert!(out.contains("level-name=world\n"));
+        // RCON et `query` ouvrent des ports sur toutes les interfaces : forcés éteints, même si le pack les active.
+        let out = render_server_properties("enable-rcon=true\nrcon.port=25575\nenable-query=true\n", 4242);
+        assert!(out.contains("enable-rcon=false\n") && out.contains("enable-query=false\n") && out.contains("rcon.port=25575\n"));
+        assert!(!out.contains("=true\nrcon") && !out.contains("enable-rcon=true"));
+        // La liste blanche n'est pas imposée (pas de correspondance membre vers UUID, #97) : un pack qui l'active à la main
+        // garde sa valeur, et rien n'est ajouté d'office.
+        let out = render_server_properties("white-list=true\nenforce-whitelist=true\n", 4242);
+        assert!(out.contains("white-list=true\n") && out.contains("enforce-whitelist=true\n"));
+        assert!(!render_server_properties("", 4242).contains("white-list"));
         // Idempotent.
         assert_eq!(render_server_properties(&out, 4242), out);
     }
 
     #[test]
-    fn ports_and_ram() {
+    fn ports() {
         let p = free_port().unwrap();
         assert!(p > 0);
-        assert_eq!(suggest_ram_mb(4 * 1024), 2048);
-        assert_eq!(suggest_ram_mb(16 * 1024), 4096);
-        assert_eq!(suggest_ram_mb(64 * 1024), 8192);
-        assert_eq!(suggest_ram_mb(2 * 1024), 1024);
-        assert!(ram_warning(8 * 1024).is_some());
-        assert!(ram_warning(16 * 1024).is_none());
+    }
+
+    const GO: u64 = 1024;
+
+    #[test]
+    fn server_ram_follows_client_and_physical_memory() {
+        // Le cas du ticket : 16 Go, jeu à 8 Go -> la moitié (4 Go), qui tient dans 16 - 8 - 3 = 5 Go.
+        assert_eq!(server_ram_mb(8192, Some(16 * GO)), 4096);
+        // 16 Go, jeu à 12 Go : il ne reste que 1 Go.
+        assert_eq!(server_ram_mb(12 * 1024, Some(16 * GO)), 1024);
+        // PC de 8 Go, jeu à 4 Go : 8 - 4 - 3 = 1 Go.
+        assert_eq!(server_ram_mb(4096, Some(8 * GO)), 1024);
+        // Gros PC : la moitié du jeu, plafonnée à 8 Go.
+        assert_eq!(server_ram_mb(8192, Some(32 * GO)), 4096);
+        assert_eq!(server_ram_mb(16 * 1024, Some(64 * GO)), 8192);
+        assert_eq!(server_ram_mb(40 * 1024, Some(128 * GO)), 8192);
+        // Petit jeu : plancher d'1 Go.
+        assert_eq!(server_ram_mb(1024, Some(32 * GO)), 1024);
+        assert_eq!(server_ram_mb(0, Some(32 * GO)), 1024);
+        // Mémoire inconnue : la moitié du jeu, bornée.
+        assert_eq!(server_ram_mb(8192, None), 4096);
+        assert_eq!(server_ram_mb(65536, None), 8192);
+        assert_eq!(server_ram_mb(1024, None), 1024);
+        // Mémoire physique inférieure au jeu : pas de dépassement arithmétique, plancher d'1 Go.
+        assert_eq!(server_ram_mb(8192, Some(2 * GO)), 1024);
+        assert_eq!(server_ram_mb(u32::MAX, Some(u64::MAX)), 8192);
+    }
+
+    #[test]
+    fn server_ram_stays_in_bounds_and_never_exceeds_the_old_value() {
+        for client in (0..=65536u32).step_by(512) {
+            for phys in [None, Some(0), Some(2 * GO), Some(4 * GO), Some(8 * GO), Some(16 * GO), Some(32 * GO), Some(128 * GO)] {
+                let s = server_ram_mb(client, phys);
+                assert!((SERVER_RAM_MIN_MB..=SERVER_RAM_MAX_MB).contains(&s), "client {client}, phys {phys:?} -> {s}");
+                // Avant le correctif, le serveur recevait la mémoire du client (bornée 1..8 Go) : jamais plus qu'avant.
+                assert!(s <= client.clamp(SERVER_RAM_MIN_MB, SERVER_RAM_MAX_MB));
+                if let Some(p) = phys.filter(|p| *p >= client as u64 + RESERVED_MB + SERVER_RAM_MIN_MB as u64) {
+                    assert!(client as u64 + s as u64 + RESERVED_MB <= p, "client {client}, phys {p} -> {s}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pressure_warning_only_when_still_above_85_percent() {
+        let w = |c, p| { let s = server_ram_mb(c, Some(p)); ram_pressure_warning(c, s, Some(p)) };
+        // 16 Go / jeu 8 Go : le serveur est réduit à 4 Go (75 %), pas de message.
+        assert_eq!(w(8192, 16 * GO), None);
+        // 16 Go / jeu 12 Go : 12 + 1 = 13 Go = 81 %.
+        assert_eq!(w(12 * 1024, 16 * GO), None);
+        // 16 Go / jeu 14 Go : 15 Go = 94 %.
+        let m = w(14 * 1024, 16 * GO).expect("message attendu");
+        assert!(m.contains("16 Go") && m.contains("Baisse la mémoire du jeu"), "{m}");
+        // 8 Go / jeu 4 Go : 4 + 1 = 5 Go = 62 %.
+        assert_eq!(w(4096, 8 * GO), None);
+        // 4 Go / jeu 4 Go : 5 Go sur 4.
+        assert!(w(4096, 4 * GO).unwrap().contains("4 Go"));
+        // Mémoire inconnue : pas de message.
+        assert_eq!(ram_pressure_warning(8192, 4096, None), None);
+        assert_eq!(ram_pressure_warning(8192, 4096, Some(0)), None);
     }
 
     #[test]
@@ -1502,6 +1619,7 @@ mod tests {
             mod_ids: ids.iter().map(|s| s.to_string()).collect(),
             server_side: side,
             declares_client_only: client,
+            ..ModSideInfo::default()
         };
         let mods = vec![
             info("a.jar", &["lithium"], None, false),
@@ -1564,6 +1682,38 @@ mod tests {
         // Dossier du pack absent : serveur sans mods.
         assert_eq!(sync_server_mods(&t.path().join("absent"), &srv, &side).unwrap(), ModFilter::default());
         assert!(std::fs::read_dir(&srv).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn voice_chat_and_its_addons_stay_off_the_server() {
+        let t = tempfile::tempdir().unwrap();
+        let pack = t.path().join("pack");
+        let srv = t.path().join("srv").join("mods");
+        std::fs::create_dir_all(&pack).unwrap();
+        std::fs::create_dir_all(&srv).unwrap();
+        make_jar(&pack.join("lithium.jar"), &[("fabric.mod.json", r#"{"schemaVersion":1,"id":"lithium","version":"1"}"#)]);
+        make_jar(&pack.join("voicechat-fabric.jar"), &[("fabric.mod.json", r#"{"schemaVersion":1,"id":"voicechat","version":"2.5","environment":"*"}"#)]);
+        make_jar(
+            &pack.join("addon.jar"),
+            &[("fabric.mod.json", r#"{"schemaVersion":1,"id":"svc_addon","version":"1","depends":{"voicechat":"*"}}"#)],
+        );
+        make_jar(
+            &pack.join("forge-voice.jar"),
+            &[("META-INF/mods.toml", "modLoader=\"javafml\"\nloaderVersion=\"[1,)\"\n[[mods]]\nmodId=\"voicechat\"\nversion=\"2.5\"\n")],
+        );
+        // Déjà copié lors d'un démarrage précédent : retiré aussi.
+        std::fs::copy(pack.join("voicechat-fabric.jar"), srv.join("voicechat-fabric.jar")).unwrap();
+        // Modrinth le dit « requis » côté serveur : la donnée explicite ne le garde pas.
+        let mut side = HashMap::new();
+        side.insert("voicechat-fabric.jar".to_string(), Side::Required);
+        let f = sync_server_mods(&pack, &srv, &side).unwrap();
+        assert_eq!(f.kept, vec!["lithium.jar"]);
+        let mut skipped: Vec<(&str, &str)> = f.skipped.iter().map(|s| (s.file_name.as_str(), s.reason.as_str())).collect();
+        skipped.sort();
+        assert_eq!(skipped.iter().map(|s| s.0).collect::<Vec<_>>(), vec!["addon.jar", "forge-voice.jar", "voicechat-fabric.jar"]);
+        assert!(skipped.iter().all(|s| s.1.starts_with("Chat vocal non pris en charge")), "{skipped:?}");
+        let present: Vec<String> = std::fs::read_dir(&srv).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        assert_eq!(present, vec!["lithium.jar"]);
     }
 
     #[test]
@@ -1786,6 +1936,26 @@ done
             c
         }
 
+        /// Chaîne réelle : mémoire physique de cette machine -> `server_ram_mb` -> ligne de commande du processus serveur (`-Xmx`).
+        #[tokio::test]
+        async fn xmx_on_the_command_line_follows_the_machine_memory() {
+            let phys = crate::sysmem::physical_memory_mb();
+            assert!(phys.is_some_and(|p| p > 0), "mémoire physique illisible");
+            for client in [2048u32, 8192, 16384] {
+                let t = tempfile::tempdir().unwrap();
+                let dir = t.path().join("srv");
+                let argv = t.path().join("argv.txt");
+                let java = fake_java(t.path(), &format!("echo \"$@\" > '{}'\n{WORKING}", argv.display()));
+                let mb = server_ram_mb(client, phys);
+                let mut c = cfg(&dir, &java);
+                c.ram_mb = mb;
+                let server = DedicatedServer::start(&c, &installed(&dir)).await.unwrap();
+                let line = std::fs::read_to_string(&argv).unwrap();
+                assert!(line.starts_with(&format!("-Xmx{mb}M ")), "{line}");
+                server.stop(Duration::from_secs(10)).await;
+            }
+        }
+
         #[tokio::test]
         async fn checkpoint_sequence_and_clean_stop() {
             let t = tempfile::tempdir().unwrap();
@@ -1855,6 +2025,82 @@ done
             let msg = err.to_string();
             assert!(msg.contains("badmod"), "{msg}");
             assert!(msg.contains("code 1"), "{msg}");
+        }
+
+        /// Faux serveur qui ouvre un vrai socket TCP sur `bind:port` puis annonce `Done (` ; c'est le processus lancé par
+        /// `DedicatedServer` lui-même (`exec`), comme le Java réel : le contrôle voit donc ses sockets.
+        fn listening_java(dir: &Path, bind: &str, port: u16) -> PathBuf {
+            let py = format!(
+                "import socket,sys\ns=socket.socket()\ns.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)\ns.bind(('{bind}',{port}))\ns.listen(5)\nprint('[12:00:01] [Server thread/INFO]: Done (1s)!',flush=True)\nfor l in sys.stdin:\n    if l.strip()=='stop': sys.exit(0)\n"
+            );
+            std::fs::write(dir.join("listen.py"), py).unwrap();
+            fake_java(dir, &format!("exec python3 {}", dir.join("listen.py").display()))
+        }
+
+        fn connectable(port: u16) -> bool {
+            std::net::TcpStream::connect_timeout(&std::net::SocketAddr::from(([127, 0, 0, 1], port)), Duration::from_millis(500)).is_ok()
+        }
+
+        #[tokio::test]
+        async fn exposed_listener_stops_the_server_and_names_the_mod() {
+            let t = tempfile::tempdir().unwrap();
+            let dir = t.path().join("srv");
+            let port = free_port().unwrap();
+            // BlueMap est installé, mais sa config n'existait pas au premier démarrage : la garde est le filet.
+            std::fs::create_dir_all(dir.join("config/bluemap")).unwrap();
+            std::fs::write(dir.join("config/bluemap/other.conf"), format!("port: {port}\n")).unwrap();
+            let java = listening_java(t.path(), "0.0.0.0", port);
+            let err = DedicatedServer::start(&cfg(&dir, &java), &installed(&dir)).await.err().expect("doit être refusé");
+            let msg = err.to_string();
+            assert!(msg.starts_with(&format!("BlueMap ouvre le port {port} sur ton réseau : le serveur a été arrêté.")), "{msg}");
+            // Rien n'écoute plus.
+            assert!(!connectable(port), "le serveur est encore joignable");
+        }
+
+        #[tokio::test]
+        async fn exposed_listener_without_known_mod_is_still_refused() {
+            let t = tempfile::tempdir().unwrap();
+            let dir = t.path().join("srv");
+            let port = free_port().unwrap();
+            let java = listening_java(t.path(), "0.0.0.0", port);
+            let err = DedicatedServer::start(&cfg(&dir, &java), &installed(&dir)).await.err().expect("doit être refusé");
+            assert!(err.to_string().starts_with(&format!("Un mod du serveur ouvre le port {port}")), "{err}");
+            assert!(!connectable(port));
+        }
+
+        #[tokio::test]
+        async fn loopback_only_listener_is_accepted() {
+            let t = tempfile::tempdir().unwrap();
+            let dir = t.path().join("srv");
+            let port = free_port().unwrap();
+            let java = listening_java(t.path(), "127.0.0.1", port);
+            let server = DedicatedServer::start(&cfg(&dir, &java), &installed(&dir)).await.unwrap();
+            assert!(connectable(port));
+            // Le contrôle voit bien le socket (sinon le test précédent passerait pour de mauvaises raisons).
+            let all = crate::hearth::netguard::listeners_of(server.pid()).unwrap();
+            assert!(all.iter().any(|l| l.port == port && crate::hearth::netguard::is_loopback(&l.addr)), "{all:?}");
+            assert!(crate::hearth::netguard::audit(server.pid()).await.is_empty());
+            server.stop(Duration::from_secs(10)).await;
+        }
+
+        #[tokio::test]
+        async fn known_web_configs_are_bound_to_loopback_before_start() {
+            let t = tempfile::tempdir().unwrap();
+            let dir = t.path().join("srv");
+            std::fs::create_dir_all(dir.join("config/bluemap")).unwrap();
+            std::fs::create_dir_all(dir.join("config/dynmap")).unwrap();
+            std::fs::write(dir.join("config/bluemap/webserver.conf"), "ip: \"0.0.0.0\"\nport: 8100\n").unwrap();
+            std::fs::write(dir.join("config/dynmap/configuration.txt"), "webserver-bindaddress: 0.0.0.0\nwebserver-port: 8123\n").unwrap();
+            let java = fake_java(t.path(), WORKING);
+            let server = DedicatedServer::start(&cfg(&dir, &java), &installed(&dir)).await.unwrap();
+            assert_eq!(std::fs::read_to_string(dir.join("config/bluemap/webserver.conf")).unwrap(), "ip: \"127.0.0.1\"\nport: 8100\n");
+            assert_eq!(
+                std::fs::read_to_string(dir.join("config/dynmap/configuration.txt")).unwrap(),
+                "webserver-bindaddress: 127.0.0.1\nwebserver-port: 8123\n"
+            );
+            // Squaremap et Simple Voice Chat ne sont pas installés : rien n'est créé.
+            assert!(!dir.join("config/squaremap").exists() && !dir.join("config/voicechat").exists());
+            server.stop(Duration::from_secs(10)).await;
         }
 
         #[tokio::test]

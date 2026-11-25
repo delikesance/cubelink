@@ -10,6 +10,7 @@ import { UpdateBanner } from "./UpdateBanner";
 import { StageNotice } from "./StageNotice";
 import { TunnelNotice } from "./TunnelNotice";
 import { JoinRequestBanner } from "./JoinRequestBanner";
+import { HearthMoments } from "../screens/Hearth/Moments";
 import { useContextMenu, useSuppressNativeMenu } from "./useContextMenu";
 import { openExternal } from "./externalLinks";
 import { useStage, useStageFullscreen, useStageLayout } from "./stage";
@@ -212,6 +213,8 @@ export function Shell({ services }: { services?: Services } = {}) {
         </main>
         {linkMenu.menu}
         <UpdateBanner services={svc} />
+        {/* Moments du groupe (invitation, passage de relais, serveur resté ouvert, mémoire) : écoutés sur toutes les routes, car ces événements ne sont pas rejoués. */}
+        <HearthMoments services={svc} />
         <StageNotice services={svc} />
         <TunnelNotice services={svc} />
         {route !== "login" && <JoinRequestBanner services={svc} stage={stage} />}

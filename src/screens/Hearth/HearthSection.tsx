@@ -4,7 +4,7 @@ import { Badge, Button, Card, Icon, ICONS, ProgressBar } from "../../ui";
 import { Avatar } from "../Friends/Avatar";
 import { useHearthCards } from "../../app/useHearth";
 import type { navigate as Navigate } from "../../app/router";
-import { mainAction, plural, resumeLabel, stateHint, stateText } from "./format";
+import { crashText, mainAction, plural, resumeLabel, stateHint, stateText, voiceText } from "./format";
 import { useHearthRun } from "./usePlay";
 import { useHearthEnabled } from "./useEnabled";
 
@@ -34,6 +34,8 @@ function GroupCard({ card, services, navigate }: { card: HearthCard; services: S
         </div>
       )}
       {hint && <p className="hearth-hint">{hint}</p>}
+      {crashText(card) && <p className="hearth-hint" role="status">{crashText(card)}</p>}
+      {voiceText(card) && <p className="hearth-hint" role="status">{voiceText(card)}</p>}
       {card.orphans > 0 && (
         <p className="hearth-hint" role="status">
           Une fin de partie n'a pas été publiée : elle est gardée de côté sur ce PC.{" "}

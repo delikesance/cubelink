@@ -75,4 +75,42 @@ describe("Mes amis", () => {
     mount(services);
     expect((await screen.findByText(/pas encore d'ami/)).textContent).toContain("Ajoute-en un");
   });
+
+  it("affiche l'état initial de confiance pour chaque ami (Alex non coché, Noor coché)", async () => {
+    const services = fake();
+    mount(services);
+    const alexBox = (await screen.findByRole("checkbox", { name: "Installer les mods de Alex sans me demander" })) as HTMLInputElement;
+    const noorBox = screen.getByRole("checkbox", { name: "Installer les mods de Noor sans me demander" }) as HTMLInputElement;
+    expect(alexBox.checked).toBe(false);
+    expect(noorBox.checked).toBe(true);
+  });
+
+  it("cocher/décocher la confiance appelle friendSetTrust, met à jour la case, annonce et persiste", async () => {
+    const services = fake();
+    const spy = vi.spyOn(services, "friendSetTrust");
+    const [alex] = await services.friendList();
+    mount(services);
+    const alexBox = (await screen.findByRole("checkbox", { name: `Installer les mods de ${alex.friend.name} sans me demander` })) as HTMLInputElement;
+    fireEvent.click(alexBox);
+    await waitFor(() => expect(alexBox.checked).toBe(true));
+    expect(spy).toHaveBeenCalledWith(alex.friend.public_key, "always");
+    expect(screen.getByRole("status").textContent).toContain("sans te demander");
+    expect((await services.friendList())[0].friend.trust).toBe("always");
+
+    fireEvent.click(alexBox);
+    await waitFor(() => expect(alexBox.checked).toBe(false));
+    expect(spy).toHaveBeenCalledWith(alex.friend.public_key, "ask");
+    expect(screen.getByRole("status").textContent).toContain("demandera à nouveau");
+    expect((await services.friendList())[0].friend.trust).toBe("ask");
+  });
+
+  it("erreur de friendSetTrust : alerte affichée et état précédent conservé", async () => {
+    const services = { ...fake(), friendSetTrust: async () => { throw new Error("Impossible d'enregistrer la confiance."); } };
+    mount(services);
+    const alexBox = (await screen.findByRole("checkbox", { name: "Installer les mods de Alex sans me demander" })) as HTMLInputElement;
+    expect(alexBox.checked).toBe(false);
+    fireEvent.click(alexBox);
+    expect((await screen.findByRole("alert")).textContent).toContain("Impossible d'enregistrer la confiance.");
+    expect(alexBox.checked).toBe(false);
+  });
 });

@@ -25,9 +25,10 @@ const jar = (id) => buildZip([
   { name: 'fabric.mod.json', data: JSON.stringify({ schemaVersion: 1, id, version: '1.0.0', name: id }) },
   { name: 'META-INF/MANIFEST.MF', data: 'Manifest-Version: 1.0\n' },
 ]);
-const mrpack = (name) => buildZip([
-  { name: 'modrinth.index.json', data: JSON.stringify({ formatVersion: 1, game: 'minecraft', versionId: '1.0.0', name, files: [], dependencies: { minecraft: '1.21.1-test', 'fabric-loader': '0.16.5' } }) },
-  { name: 'overrides/config/hello.txt', data: 'hello' },
+const mrpack = (name, versionId = '1.0.0', extra = []) => buildZip([
+  { name: 'modrinth.index.json', data: JSON.stringify({ formatVersion: 1, game: 'minecraft', versionId, name, files: [], dependencies: { minecraft: '1.21.1-test', 'fabric-loader': '0.16.5' } }) },
+  { name: 'overrides/config/hello.txt', data: versionId === '1.0.0' ? 'hello' : 'hello v2' },
+  ...extra,
 ]);
 
 // ---- PNG minimal (sans dependance) ----
@@ -75,6 +76,11 @@ for (const kind of ['mod', 'modpack', 'resourcepack', 'shader']) {
     projects.push({ id, kind, name, fname, ext, buf, downloads: 1_000_000 - n * 31_337, restricted: n % 6 === 5, n });
   }
 }
+// Modpack à deux versions (mise à jour d'un modpack installé) : la 1.1.0 change hello.txt et ajoute added.txt.
+// Même Minecraft que le pack de base ('1.21.1-test'), pour que l'instance importée soit compatible avec la détection.
+const UPD = projects.find((x) => x.id === 'modpack-7');
+UPD.fname2 = 'modpack-7-1.1.0.mrpack';
+UPD.buf2 = mkFile(UPD.fname2, mrpack(UPD.name, '1.1.0', [{ name: 'overrides/config/added.txt', data: 'ajoute en 1.1.0' }]));
 // dépendance obligatoire : le mod 0 dépend du mod 1
 const DEP = { from: 'mod-0', to: 'mod-1' };
 const cfId = (p) => 1000 + projects.indexOf(p);
@@ -86,12 +92,17 @@ const page = (list, q) => {
   const lim = Math.min(50, Number(q.get('limit') ?? q.get('pageSize') ?? 20));
   return [list.slice(off, off + lim), list.length];
 };
-const mrVersion = (p) => ({
-  id: `${p.id}-v1`, project_id: p.id, name: `${p.name} 1.0.0`, version_number: '1.0.0', date_published: '2025-01-01T00:00:00Z',
-  game_versions: ['1.21.1'], loaders: p.kind === 'mod' || p.kind === 'modpack' ? ['fabric'] : ['minecraft'],
-  files: [{ url: `${BASE}/files/${p.fname}`, filename: p.fname, primary: true, size: p.buf.length, hashes: { sha1: sha1(p.buf), sha512: sha512(p.buf) } }],
-  dependencies: p.id === DEP.from ? [{ project_id: DEP.to, version_id: null, dependency_type: 'required' }] : [],
-});
+const mrVersion = (p, v = 'v1') => {
+  const two = v === 'v2';
+  const [fname, buf] = two ? [p.fname2, p.buf2] : [p.fname, p.buf];
+  return {
+    id: `${p.id}-${v}`, project_id: p.id, name: `${p.name} ${two ? '1.1.0' : '1.0.0'}`, version_number: two ? '1.1.0' : '1.0.0',
+    date_published: two ? '2025-06-01T00:00:00Z' : '2025-01-01T00:00:00Z', version_type: 'release',
+    game_versions: [p === UPD ? '1.21.1-test' : '1.21.1'], loaders: p.kind === 'mod' || p.kind === 'modpack' ? ['fabric'] : ['minecraft'],
+    files: [{ url: `${BASE}/files/${fname}`, filename: fname, primary: true, size: buf.length, hashes: { sha1: sha1(buf), sha512: sha512(buf) } }],
+    dependencies: p.id === DEP.from ? [{ project_id: DEP.to, version_id: null, dependency_type: 'required' }] : [],
+  };
+};
 const cfFile = (p) => ({
   id: cfId(p) * 10, modId: cfId(p), displayName: `${p.name} 1.0.0`, fileName: p.fname, fileDate: '2025-01-01T00:00:00Z',
   fileLength: p.buf.length, downloadUrl: p.restricted ? null : `${BASE}/files/${p.fname}`, hashes: [{ value: sha1(p.buf), algo: 1 }],
@@ -140,11 +151,13 @@ const server = http.createServer((req, res) => {
   }
   if ((m = p.match(/^\/v2\/project\/([^/]+)\/version$/))) {
     const x = projects.find((y) => y.id === m[1]);
-    return x ? json(res, 200, [mrVersion(x)]) : json(res, 404, {});
+    return x ? json(res, 200, x === UPD ? [mrVersion(x, 'v2'), mrVersion(x)] : [mrVersion(x)]) : json(res, 404, {});
   }
   if ((m = p.match(/^\/v2\/version\/(.+)$/))) {
     const x = projects.find((y) => `${y.id}-v1` === m[1]);
-    return x ? json(res, 200, mrVersion(x)) : json(res, 404, {});
+    if (x) return json(res, 200, mrVersion(x));
+    const y = projects.find((z) => z === UPD && `${z.id}-v2` === m[1]);
+    return y ? json(res, 200, mrVersion(y, 'v2')) : json(res, 404, {});
   }
   if ((m = p.match(/^\/v2\/version_file\/([0-9a-f]{40})$/)) && q.get('algorithm') === 'sha1') {
     const x = projects.find((y) => sha1(y.buf) === m[1]);

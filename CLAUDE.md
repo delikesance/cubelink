@@ -22,6 +22,20 @@ Claude mène le chantier de bout en bout sans demander la permission : comprendr
 - Docs utiles : `docs/architecture.md`, `docs/contrats.md` (commandes et événements Tauri), `docs/ux-guidelines.md`, `docs/release.md`, `docs/taches-agents.md`.
 - Une commande ou un événement Tauri qui change : mettre à jour `docs/contrats.md` dans le même commit.
 
+## Commandes courantes
+- App complète : `npx tauri dev` (le CLI Tauri est en devDependency, pas de script npm). Front seul : `npm run dev` (Vite). `npm run build` = `tsc --noEmit` + `vite build`.
+- Un test Rust : `cargo test -p <crate> --lib <nom_du_test>`. Un test front : `npx vitest run src/chemin/fichier.test.tsx -t "<nom>"`.
+- Tout d'un coup : `npm test` (Rust + clippy + tsc + vitest).
+- **Bindings Tauri** : après tout changement de commande ou de type échangé, `npm run bindings`, puis committer `src/services/bindings.ts` et `docs/contrats.md` (générés, non éditables à la main). Le test `bindings::tests::liaisons_a_jour` échoue sinon, y compris en CI.
+- E2E (pilotent l'app Tauri réelle par CDP, `e2e/harness/fixtures.ts`) : `npm run e2e`, ou un seul fichier : `npx playwright test --config e2e/playwright.config.ts e2e/01-add-friend.spec.ts`. Le binaire n'est construit qu'une fois (`CUBELINK_E2E_BUILD=1` pour forcer). `E2E_WORKERS=1` pour diagnostiquer en séquentiel. Les specs `E2E_MC`, `E2E_REAL`, `E2E_REAL_ACCOUNT` lancent le vrai jeu ou un vrai compte (lents, voir « Test en réel »).
+
+## Architecture (vue d'ensemble)
+- Dépendances : `core` (pur, sans réseau P2P : manifestes, instances, loaders, Java, lancement, fournisseurs Modrinth/CurseForge, auth Microsoft, store adressé par hash) ← `p2p` (Iroh/QUIC : code ami, présence, protocole ami signé, transfert par chunks vérifiés SHA-256, tunnel QUIC ↔ localhost) ← `src-tauri` (colle tout, expose les commandes). `host` (la Scène : intégrer la fenêtre du jeu dans celle du lanceur, Win32 ou X11) est utilisé par `src-tauri` sous Windows/Linux seulement.
+- `src-tauri/src/commands_*.rs` : une famille de commandes Tauri par domaine, enregistrées via tauri-specta (`bindings.rs`). Le front ne les appelle que par `src/services/bindings.ts` (généré) ; `src/services/types.ts` nomme les variantes `X_Serialize`/`X_Deserialize`. Les arguments sont en snake_case (`rename_all`).
+- Principe central du « join » : la source de vérité est l'hôte, pas les catalogues. L'invité compare le manifeste de l'hôte à son cache local, ne demande que les fichiers manquants, et construit un profil invité isolé (hardlinks depuis le cache). Rejoindre = exécuter le code de l'hôte, d'où l'écran de confirmation et le marquage des mods inconnus.
+- Pas de serveur central : identité = clé ed25519, amis en SQLite local, seul un relais Iroh sans état sert de repli. La découverte publique (pkarr/DNS) est désactivée en dur.
+- Détail et décisions : `docs/architecture.md` ; flux de release et canaux `canary`/`main` : `docs/release.md`.
+
 ## Git : une branche par chantier, une PR vers `canary`
 1. Au début : `git fetch`, puis `git switch -c <type>/<sujet-court> origin/canary` (types : `feat`, `fix`, `chore`, `docs`, `refactor`). Si l'arbre est propre et que la branche courante porte déjà le chantier demandé, continuer dessus sans demander.
 2. Ne jamais committer sur `canary` ni sur `main`. `canary` reçoit les PR (chaque fusion publie une pré-version si `ci` passe) ; seul l'utilisateur fusionne `canary` dans `main` pour une release.

@@ -592,10 +592,11 @@ async fn carte_signale_le_chat_vocal_non_pris_en_charge() {
     std::fs::create_dir_all(&mods).unwrap();
     std::fs::write(mods.join("lithium-fabric-0.13.jar"), b"x").unwrap();
     assert!(!a.rt().card(&g).unwrap().voice_unsupported, "un autre mod ne déclenche rien");
+    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     std::fs::write(mods.join("voicechat-fabric-1.21.1-2.5.26.jar"), b"x").unwrap();
     // La date du dossier change à chaque ajout : le cache ne masque pas le nouveau jar.
     assert!(a.rt().card(&g).unwrap().voice_unsupported);
-    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     std::fs::remove_file(mods.join("voicechat-fabric-1.21.1-2.5.26.jar")).unwrap();
     assert!(!a.rt().card(&g).unwrap().voice_unsupported);
     a.stop().await;

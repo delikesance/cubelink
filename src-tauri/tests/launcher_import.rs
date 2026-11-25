@@ -83,13 +83,14 @@ async fn import_depuis_prism_curseforge_et_modrinth_jusqu_au_lancement() {
     // Faux java exécutable (copie : le dépôt ne garde pas le bit d'exécution).
     let fj = tmp.path().join("fj");
     fs::create_dir_all(&fj).unwrap();
-    for f in ["fake-java.sh", "fake-java.mjs"] {
+    let fake_java = if cfg!(windows) { "fake-java.cmd" } else { "fake-java.sh" };
+    for f in [fake_java, "fake-java.mjs"] {
         fs::copy(root().join("tests-fixtures/mojang").join(f), fj.join(f)).unwrap();
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(fj.join("fake-java.sh"), fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(fj.join(fake_java), fs::Permissions::from_mode(0o755)).unwrap();
     }
     let home = tmp.path().join("home");
     for (k, v) in [
@@ -101,7 +102,7 @@ async fn import_depuis_prism_curseforge_et_modrinth_jusqu_au_lancement() {
         ("CUBELINK_TEST_MODRINTH_API", "http://127.0.0.1:1"),
         ("CUBELINK_TEST_CF_API", "http://127.0.0.1:1"),
         ("CUBELINK_SKIP_JAVA_PROBE", "1"),
-        ("CUBELINK_JAVA_PATH", fj.join("fake-java.sh").to_str().unwrap()),
+        ("CUBELINK_JAVA_PATH", fj.join(fake_java).to_str().unwrap()),
         ("CUBELINK_TEST_LAUNCHER_HOME", home.to_str().unwrap()),
     ] {
         std::env::set_var(k, v);

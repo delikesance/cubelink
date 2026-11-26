@@ -67,6 +67,8 @@ pub(super) struct Prepared {
     pub(super) new_idx: MrpackIndex,
     pub(super) new_zip: ZipArchive<std::fs::File>,
     pub(super) new_over: Vec<OverrideEntry>,
+    /// Options propres au format du nouveau pack (CurseForge : CDN autorisés), à la place de celles de l'appelant.
+    pub(super) opts: Option<ImportOptions>,
 }
 
 /// Nouveau pack lu et validé (index, archive, overrides et contenu effectif), sans rien avoir téléchargé.
@@ -111,7 +113,7 @@ pub(super) fn check_compatible(inst: &Instance, new_idx: &MrpackIndex, new_origi
 /// Assemble l'ancien état et le nouveau pack, après les contrôles de compatibilité.
 pub(super) fn assemble(inst: &Instance, old_state: State, new: NewPack, new_origin: &PackOrigin) -> Result<Prepared> {
     check_compatible(inst, &new.idx, new_origin)?;
-    Ok(Prepared { old_state, new_state: new.state, new_idx: new.idx, new_zip: new.zip, new_over: new.over })
+    Ok(Prepared { old_state, new_state: new.state, new_idx: new.idx, new_zip: new.zip, new_over: new.over, opts: None })
 }
 
 /// Modrinth : ancien état = `recorded` (relevé de l'instance) s'il est fourni, sinon lu dans `old_pack`.
@@ -187,7 +189,9 @@ pub(super) async fn apply_prepared(
         new_idx,
         mut new_zip,
         new_over,
+        opts: own_opts,
     } = prepared;
+    let opts = own_opts.as_ref().unwrap_or(opts);
     let (old_state, new_state, new_idx, new_zip, new_over) = (
         &old_state,
         &new_state,

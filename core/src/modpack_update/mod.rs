@@ -95,3 +95,7 @@ pub struct ModpackUpdateResult {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_cf;
+#[cfg(test)]
+mod tests_record;

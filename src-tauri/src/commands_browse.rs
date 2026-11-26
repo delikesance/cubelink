@@ -398,7 +398,7 @@ impl AppState {
         // Les futurs d'import ne sont pas prouvés `Send` par rustc : on les exécute sur un thread dédié.
         let handle = tokio::runtime::Handle::current();
         tokio::task::spawn_blocking(move || {
-            handle.block_on(modpack_update::apply(&instances, &id, &old_file, &new_file, new_origin, &store_root, &store, &opts, Some(progress), Arc::new(std::sync::atomic::AtomicBool::new(false))))
+            handle.block_on(modpack_update::apply(&instances, &id, Some(&old_file), &new_file, new_origin, &core_lib::providers::curseforge::CfResolver::new(), &store_root, &store, &opts, Some(progress), Arc::new(std::sync::atomic::AtomicBool::new(false))))
         })
         .await
         .map_err(|_| "mise à jour interrompue".to_string())?

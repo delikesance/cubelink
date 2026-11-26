@@ -1391,6 +1391,8 @@ export type ModpackUpdateResult = {
 	replaced: number,
 	/**  Chemins (relatifs à l'instance) que le joueur a modifiés ou ajoutés lui-même et que la mise à jour n'a pas touchés. */
 	kept: string[],
+	/**  Fichiers du nouveau pack introuvables (mods CurseForge non redistribuables) : à poser par le joueur. */
+	missing: string[],
 	/**  Sauvegarde à passer à `modpack_update_undo`. */
 	backup_id: string,
 };

@@ -20,9 +20,9 @@ function setup(opts: { update?: ModpackUpdate | null | "offline"; locked?: boole
 
 describe("PackUpdate", () => {
   it("summaryOf omet les compteurs à zéro", () => {
-    expect(summaryOf({ added: 3, removed: 1, replaced: 12, kept: [], backup_id: "b" })).toBe("3 fichiers ajoutés · 1 retiré · 12 remplacés");
-    expect(summaryOf({ added: 0, removed: 0, replaced: 1, kept: [], backup_id: "b" })).toBe("1 remplacé");
-    expect(summaryOf({ added: 0, removed: 0, replaced: 0, kept: [], backup_id: "b" })).toBe("Aucun fichier à changer");
+    expect(summaryOf({ added: 3, removed: 1, replaced: 12, kept: [], missing: [], backup_id: "b" })).toBe("3 fichiers ajoutés · 1 retiré · 12 remplacés");
+    expect(summaryOf({ added: 0, removed: 0, replaced: 1, kept: [], missing: [], backup_id: "b" })).toBe("1 remplacé");
+    expect(summaryOf({ added: 0, removed: 0, replaced: 0, kept: [], missing: [], backup_id: "b" })).toBe("Aucun fichier à changer");
   });
 
   it("affiche le badge quand une mise à jour est disponible", async () => {

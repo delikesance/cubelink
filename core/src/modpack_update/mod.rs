@@ -1,4 +1,4 @@
-//! Mise à jour d'un modpack Modrinth déjà installé (ticket #137) : détection, application, annulation.
+//! Mise à jour d'un modpack (Modrinth, CurseForge) déjà installé (ticket #137) : détection, application, annulation.
 //!
 //! - [`check`] compare la version installée (`Instance.pack`) aux versions publiées compatibles avec l'instance
 //!   (même Minecraft, même loader) et renvoie la plus récente si elle est plus récente que l'installée.
@@ -12,8 +12,7 @@
 //! - [`undo`] relit le manifeste : retire les fichiers ajoutés (sauf ceux que le joueur a modifiés depuis),
 //!   remet les fichiers déplacés, la provenance des mods, l'ancienne origine du pack et l'ancien loader.
 //!
-//! Hors périmètre (v1) : CurseForge (pas de hash dans `manifest.json`) et les mises à jour qui changent la version
-//! de Minecraft ou le loader (une nouvelle instance est plus sûre : mondes et mods ne suivraient pas).
+//! Hors périmètre : les mises à jour qui changent la version de Minecraft ou le loader (une nouvelle instance est plus sûre : mondes et mods ne suivraient pas).
 
 use std::collections::{BTreeMap, HashSet};
 use std::io::Read;
@@ -32,6 +31,7 @@ use crate::mods::{self, Provenance};
 use crate::mrpack::{
     self, FilesProgress, ImportOptions, Layout, MrpackFile, MrpackIndex, OverrideEntry,
 };
+use crate::providers::curseforge::CfResolver;
 use crate::providers::modrinth_dl::{DlOptions, StoredObject};
 use crate::store::index::StoreIndex;
 use crate::store::link::link_into;
@@ -49,6 +49,8 @@ fn invalid(m: impl Into<String>) -> Error {
 mod apply;
 mod backup;
 mod check;
+mod curseforge;
+mod record;
 mod digest;
 mod plan;
 mod state;
@@ -56,6 +58,7 @@ mod undo;
 pub use apply::*;
 use backup::*;
 pub use check::*;
+pub use record::needs_old_pack;
 use digest::*;
 use plan::*;
 use state::*;
@@ -84,6 +87,8 @@ pub struct ModpackUpdateResult {
     pub replaced: u32,
     /// Chemins (relatifs à l'instance) que le joueur a modifiés ou ajoutés lui-même et que la mise à jour n'a pas touchés.
     pub kept: Vec<String>,
+    /// Fichiers du nouveau pack introuvables (mods CurseForge non redistribuables) : à poser par le joueur.
+    pub missing: Vec<String>,
     /// Sauvegarde à passer à `modpack_update_undo`.
     pub backup_id: String,
 }

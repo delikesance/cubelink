@@ -88,7 +88,7 @@ async fn install(e: &Env, v1: &Path) -> (Instance, PathBuf) {
 }
 
 async fn update(e: &Env, id: &str, v1: &Path, v2: &Path) -> Result<ModpackUpdateResult> {
-    apply(&e.instances, id, v1, v2, origin("v2"), &e.store, &e.idx, &opts(), None, Arc::new(AtomicBool::new(false))).await
+    apply(&e.instances, id, Some(v1), v2, origin("v2"), &CfResolver::new(), &e.store, &e.idx, &opts(), None, Arc::new(AtomicBool::new(false))).await
 }
 
 /// Photographie du dossier de jeu : chemin -> contenu, sans le dossier de sauvegarde.
@@ -298,7 +298,7 @@ async fn refuses_minecraft_or_loader_kind_change_and_foreign_project() {
     let before = snapshot(&g);
     // Autre projet.
     let other = PackOrigin { source: "modrinth".into(), project_id: "AUTRE".into(), version_id: "v2".into() };
-    let r = apply(&e.instances, &inst.id, &v1, &v2, other, &e.store, &e.idx, &opts(), None, Arc::new(AtomicBool::new(false))).await;
+    let r = apply(&e.instances, &inst.id, Some(&v1), &v2, other, &CfResolver::new(), &e.store, &e.idx, &opts(), None, Arc::new(AtomicBool::new(false))).await;
     assert!(matches!(r, Err(Error::Invalid(_))));
     // Autre loader (neoforge) : refus.
     let neo = {
@@ -580,4 +580,22 @@ async fn revert_never_deletes_an_original_that_was_not_moved_yet() {
     assert!(errors.is_empty(), "{errors:?}");
     assert_eq!(std::fs::read(g.join("mods/a.jar")).unwrap(), A1, "l'original ne doit pas être supprimé");
     assert_eq!(std::fs::read(g.join("mods/d.jar")).unwrap(), D1);
+}
+
+#[tokio::test]
+async fn unreachable_tolerant_file_is_reported_missing_and_the_rest_is_applied() {
+    let e = env().await;
+    let (v1, _) = v1v2(&e);
+    // Mod CurseForge non redistribuable : introuvable (404), marqué « tolérant » comme à l'import CurseForge.
+    let v2 = pack(&e, "v2cf", "v2", "0.16.5", &[("mods/a.jar", A2), ("mods/b.jar", B1), ("mods/restreint.jar", b"introuvable")], &[]);
+    let (inst, g) = install(&e, &v1).await;
+    let mut p = prepare(&e.instances.get(&inst.id).unwrap(), &v1, &v2, &origin("v2"), &opts()).unwrap();
+    let i = p.new_idx.files.iter().position(|f| f.path == "mods/restreint.jar").unwrap();
+    p.new_idx.files[i].tolerant = true;
+    let inst = e.instances.get(&inst.id).unwrap();
+    let r = apply_prepared(&e.instances, &inst, p, origin("v2"), &e.store, &e.idx, &opts(), &None, &Arc::new(AtomicBool::new(false))).await.unwrap();
+    assert_eq!(r.missing, vec!["mods/restreint.jar".to_string()]);
+    assert_eq!(std::fs::read(g.join("mods/a.jar")).unwrap(), A2);
+    assert!(!g.join("mods/restreint.jar").exists());
+    assert_eq!(e.instances.get(&inst.id).unwrap().pack, Some(origin("v2")));
 }

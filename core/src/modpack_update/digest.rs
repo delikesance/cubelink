@@ -7,6 +7,8 @@ use super::*;
 pub(super) enum Alg {
     Sha1,
     Sha512,
+    /// Empreinte du magasin : fichiers sans empreinte de référence (CurseForge sans clé).
+    Sha256,
 }
 
 /// Empreinte d'un fichier du pack. Deux empreintes ne se comparent que si elles ont le même algorithme.
@@ -40,20 +42,24 @@ impl Digest {
 pub(super) fn hash_file(path: &Path, alg: Alg) -> Result<String> {
     match alg {
         Alg::Sha1 => Ok(crate::unknown_mods::sha1_file(path)?),
-        Alg::Sha512 => {
-            let mut f = std::fs::File::open(path)?;
-            let mut h = Sha512::new();
-            let mut buf = vec![0u8; 64 * 1024];
-            loop {
-                let n = f.read(&mut buf)?;
-                if n == 0 {
-                    break;
-                }
-                h.update(&buf[..n]);
-            }
-            Ok(hex::encode(h.finalize()))
-        }
+        Alg::Sha256 => stream_hash::<sha2::Sha256>(path),
+        Alg::Sha512 => stream_hash::<Sha512>(path),
     }
+}
+
+/// Empreinte d'un fichier lu en flux (pas de lecture complète en mémoire).
+fn stream_hash<H: sha2::Digest>(path: &Path) -> Result<String> {
+    let mut f = std::fs::File::open(path)?;
+    let mut h = H::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = f.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        h.update(&buf[..n]);
+    }
+    Ok(hex::encode(h.finalize()))
 }
 
 /// SHA-512 de chaque override (même ordre que `entries`), lu en flux, taille bornée par celle déclarée.

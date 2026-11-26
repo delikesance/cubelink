@@ -11,7 +11,7 @@ pub(super) async fn download_all(
     opts: &ImportOptions,
     progress: &Option<FilesProgress>,
     cancel: &Arc<AtomicBool>,
-) -> Result<BTreeMap<String, StoredObject>> {
+) -> Result<(BTreeMap<String, StoredObject>, Vec<String>)> {
     let files: Vec<(&str, &MrpackFile)> = wanted
         .iter()
         .filter_map(|it| match it.source {
@@ -27,6 +27,8 @@ pub(super) async fn download_all(
     };
     let mut done = 0u32;
     let mut got = BTreeMap::new();
+    // Fichiers « tolérants » (CurseForge) introuvables : la mise à jour continue, le joueur les pose lui-même.
+    let mut missing = Vec::new();
     let mut results = stream::iter(files.iter().copied())
         .map(|(path, f)| {
             let dl = &dl;
@@ -34,7 +36,17 @@ pub(super) async fn download_all(
         })
         .buffer_unordered(opts.concurrency.max(1));
     while let Some((path, res)) = results.next().await {
-        got.insert(path.to_string(), res?);
+        match res {
+            Ok(obj) => {
+                got.insert(path.to_string(), obj);
+            }
+            Err(Error::Cancelled) => return Err(Error::Cancelled),
+            Err(e) if pack.files.iter().any(|f| f.path == path && f.tolerant) => {
+                tracing::warn!("mise à jour du modpack : fichier non récupéré ({path}) : {e}");
+                missing.push(path.to_string());
+            }
+            Err(e) => return Err(e),
+        }
         done += 1;
         if let Some(p) = progress {
             p(done, total);
@@ -44,7 +56,8 @@ pub(super) async fn download_all(
     if cancel.load(Ordering::SeqCst) {
         return Err(Error::Cancelled);
     }
-    Ok(got)
+    missing.sort();
+    Ok((got, missing))
 }
 
 /// Les deux packs lus et validés : tout ce qu'il faut pour planifier, sans avoir rien téléchargé ni modifié.
@@ -56,63 +69,89 @@ pub(super) struct Prepared {
     pub(super) new_over: Vec<OverrideEntry>,
 }
 
-pub(super) fn prepare(
-    inst: &Instance,
-    old_pack: &Path,
-    new_pack: &Path,
-    new_origin: &PackOrigin,
-    opts: &ImportOptions,
-) -> Result<Prepared> {
-    let Some(current) = inst.pack.as_ref().filter(|o| o.source == "modrinth") else {
-        return Err(invalid(
-            "cette instance n'a pas d'origine Modrinth connue : la mise à jour n'est pas possible",
-        ));
-    };
-    if new_origin.source != "modrinth" || new_origin.project_id != current.project_id {
-        return Err(invalid(
-            "cette version n'appartient pas au modpack installé",
-        ));
-    }
-    let mut old_zip = mrpack::open_zip(old_pack)?;
-    let mut new_zip = mrpack::open_zip(new_pack)?;
-    let old_idx = mrpack::parse_index(old_pack)?;
-    let new_idx = mrpack::parse_index(new_pack)?;
-    for f in &new_idx.files {
+/// Nouveau pack lu et validé (index, archive, overrides et contenu effectif), sans rien avoir téléchargé.
+pub(super) struct NewPack {
+    pub(super) idx: MrpackIndex,
+    pub(super) zip: ZipArchive<std::fs::File>,
+    pub(super) over: Vec<OverrideEntry>,
+    pub(super) state: State,
+}
+
+/// Lit un `.mrpack` : index (URL vérifiées), overrides et leurs empreintes.
+pub(super) fn read_mrpack(path: &Path, opts: &ImportOptions) -> Result<NewPack> {
+    let mut zip = mrpack::open_zip(path)?;
+    let idx = mrpack::parse_index(path)?;
+    for f in &idx.files {
         for u in &f.downloads {
             mrpack::check_url(u, opts)?;
         }
+    }
+    let over = mrpack::plan_overrides(&mut zip, opts, &Layout::mrpack())?;
+    let hashes = hash_overrides(&mut zip, &over)?;
+    let state = state_of(&idx, &over, &hashes);
+    Ok(NewPack { idx, zip, over, state })
+}
+
+/// Refuse une version d'un autre projet, ou qui change la version de Minecraft ou le loader.
+pub(super) fn check_compatible(inst: &Instance, new_idx: &MrpackIndex, new_origin: &PackOrigin) -> Result<()> {
+    let Some(current) = inst.pack.as_ref() else {
+        return Err(invalid("cette instance n'a pas d'origine de modpack connue : la mise à jour n'est pas possible"));
+    };
+    if new_origin.source != current.source || new_origin.project_id != current.project_id {
+        return Err(invalid("cette version n'appartient pas au modpack installé"));
     }
     if new_idx.minecraft != inst.minecraft || new_idx.loader.loader != inst.loader.loader {
         return Err(invalid(
             "cette version change la version de Minecraft ou le loader : installe-la comme nouvelle instance pour garder tes mondes et tes mods",
         ));
     }
-    let layout = Layout::mrpack();
-    let old_over = mrpack::plan_overrides(&mut old_zip, opts, &layout)?;
-    let new_over = mrpack::plan_overrides(&mut new_zip, opts, &layout)?;
-    let old_hashes = hash_overrides(&mut old_zip, &old_over)?;
-    let new_hashes = hash_overrides(&mut new_zip, &new_over)?;
-    Ok(Prepared {
-        old_state: state_of(&old_idx, &old_over, &old_hashes),
-        new_state: state_of(&new_idx, &new_over, &new_hashes),
-        new_idx,
-        new_zip,
-        new_over,
-    })
+    Ok(())
 }
 
-/// Applique la mise à jour de `old_pack` vers `new_pack` sur l'instance `instance_id`.
+/// Assemble l'ancien état et le nouveau pack, après les contrôles de compatibilité.
+pub(super) fn assemble(inst: &Instance, old_state: State, new: NewPack, new_origin: &PackOrigin) -> Result<Prepared> {
+    check_compatible(inst, &new.idx, new_origin)?;
+    Ok(Prepared { old_state, new_state: new.state, new_idx: new.idx, new_zip: new.zip, new_over: new.over })
+}
+
+/// Modrinth : ancien état = `recorded` (relevé de l'instance) s'il est fourni, sinon lu dans `old_pack`.
+pub(super) fn prepare_modrinth(
+    inst: &Instance,
+    recorded: Option<State>,
+    old_pack: Option<&Path>,
+    new_pack: &Path,
+    new_origin: &PackOrigin,
+    opts: &ImportOptions,
+) -> Result<Prepared> {
+    let old_state = match (recorded, old_pack) {
+        (Some(s), _) => s,
+        (None, Some(old)) => read_mrpack(old, opts)?.state,
+        (None, None) => return Err(invalid("version installée du modpack nécessaire pour comparer")),
+    };
+    assemble(inst, old_state, read_mrpack(new_pack, opts)?, new_origin)
+}
+
+/// Modrinth, ancien pack lu sur le disque (forme historique, utilisée par les tests).
+#[cfg(test)]
+pub(super) fn prepare(inst: &Instance, old_pack: &Path, new_pack: &Path, new_origin: &PackOrigin, opts: &ImportOptions) -> Result<Prepared> {
+    prepare_modrinth(inst, None, Some(old_pack), new_pack, new_origin, opts)
+}
+
+/// Applique la mise à jour vers `new_pack` (`.mrpack` ou zip CurseForge) sur l'instance `instance_id`.
 ///
-/// `new_origin` : projet et version Modrinth de `new_pack` (enregistrés dans `Instance.pack` en dernier).
+/// Ancien état : le relevé de l'instance s'il est valable ([`needs_old_pack`] vaut alors `false`), sinon `old_pack`
+/// (la version installée, retéléchargée par l'appelant). `new_origin` : projet et version de `new_pack` (enregistrés
+/// dans `Instance.pack` en dernier). `cf` : résolution des fichiers CurseForge.
 /// Les futurs de ce module lisent et écrivent le disque de façon synchrone : l'appelant l'exécute hors du fil
 /// principal de l'interface (`spawn_blocking`).
 #[allow(clippy::too_many_arguments)]
 pub async fn apply(
     instances: &InstanceStore,
     instance_id: &str,
-    old_pack: &Path,
+    old_pack: Option<&Path>,
     new_pack: &Path,
     new_origin: PackOrigin,
+    cf: &CfResolver,
     store_root: &Path,
     index: &StoreIndex,
     opts: &ImportOptions,
@@ -120,11 +159,14 @@ pub async fn apply(
     cancel: Arc<AtomicBool>,
 ) -> Result<ModpackUpdateResult> {
     let inst = instances.get(instance_id)?;
-    let prepared = prepare(&inst, old_pack, new_pack, &new_origin, opts)?;
-    apply_prepared(
-        instances, &inst, prepared, new_origin, store_root, index, opts, &progress, &cancel,
-    )
-    .await
+    let game_dir = instances.game_dir(instance_id)?;
+    let recorded = record::old_state(&game_dir, &inst);
+    let prepared = match mrpack::detect(new_pack)? {
+        mrpack::PackKind::Modrinth => prepare_modrinth(&inst, recorded, old_pack, new_pack, &new_origin, opts)?,
+        mrpack::PackKind::CurseForge => curseforge::prepare(&inst, recorded, old_pack, new_pack, &new_origin, cf, opts).await?,
+        mrpack::PackKind::Plain => return Err(invalid("format de modpack inconnu")),
+    };
+    apply_prepared(instances, &inst, prepared, new_origin, store_root, index, opts, &progress, &cancel).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -155,8 +197,7 @@ pub(super) async fn apply_prepared(
     );
     let game_dir = instances.game_dir(&inst.id)?;
     let disk_prov = mods::read_provenance(&game_dir);
-    let plan = plan(old_state, new_state, &game_dir)?;
-    let (added, removed, replaced) = plan.counts();
+    let mut plan = plan(old_state, new_state, &game_dir)?;
 
     let id = new_backup_id();
     let bdir = backup_root(&game_dir).join(&id);
@@ -189,13 +230,20 @@ pub(super) async fn apply_prepared(
         Ok(()) => download_all(new_idx, &wanted, store_root, index, opts, progress, cancel).await,
         Err(e) => Err(e),
     };
-    let objects = match objects {
+    let (objects, missing) = match objects {
         Ok(o) => o,
         Err(e) => {
             let _ = std::fs::remove_dir_all(&bdir);
             return Err(e);
         }
     };
+
+    // Un fichier introuvable n'est ni ajouté ni remplacé : l'ancien reste en place, le joueur pose le nouveau.
+    plan.actions.retain(|a| match a {
+        Action::Add { item, .. } | Action::Replace { item, .. } => !missing.contains(&item.path),
+        Action::Remove { .. } => true,
+    });
+    let (added, removed, replaced) = plan.counts();
 
     // Phase B : modification de l'instance, manifeste écrit avant le premier déplacement.
     let new_loader = LoaderSpec {
@@ -304,6 +352,7 @@ pub(super) async fn apply_prepared(
         removed,
         replaced,
         kept: plan.kept,
+        missing,
         backup_id: id,
     })
 }

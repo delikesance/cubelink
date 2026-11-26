@@ -101,14 +101,17 @@ test('serveur de groupe : A le cree depuis un monde, B recoit l\'invitation et l
   // (hearth_flow.rs : un seul demarrage apres `hearth_confirm_host`), car l'accepter ici lancerait le vrai serveur Minecraft.
   await invoke(appA.page, 'hearth_eula_accept');
   appB.proc.kill();
+  // Playwright peut préfixer le message d'une erreur levée par la page : on cherche le jeton, sans l'ancrer en début de chaîne.
+  const CONFIRM_ALONE = /confirm_host\|alone\|[^\n]*/;
+  let lastErr: string | null = null;
   const refus = await until('refus de Jouer avec confirmation', async () => {
-    const e = await invokeErr(appA.page, 'hearth_play', { id: card.id });
-    return e?.startsWith('confirm_host|alone|') ? e : false;
-  }, 60_000, 1000);
-  expect(refus).toMatch(/^confirm_host\|alone\|.+/);
+    lastErr = await invokeErr(appA.page, 'hearth_play', { id: card.id });
+    return lastErr?.match(CONFIRM_ALONE)?.[0] ?? false;
+  }, 60_000, 1000).catch((e: Error) => { throw new Error(`${e.message} (derniere reponse de hearth_play : ${String(lastErr)})`); });
+  expect(refus).toMatch(/^confirm_host\|alone\|/);
   const after = (await invoke<Card[]>(appA.page, 'hearth_list'))[0]!;
   expect(['hosting', 'launching']).not.toContain(after.state);
   // Un second clic ne vaut pas confirmation.
-  expect(await invokeErr(appA.page, 'hearth_play', { id: card.id })).toMatch(/^confirm_host\|alone\|/);
+  expect(await invokeErr(appA.page, 'hearth_play', { id: card.id })).toMatch(CONFIRM_ALONE);
   expect(await invokeErr(appA.page, 'hearth_confirm_host', { id: 'inconnu' })).toBeTruthy();
 });

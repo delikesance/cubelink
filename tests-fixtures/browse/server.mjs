@@ -13,6 +13,8 @@
 //   GET  /v1/mods/search                   recherche CurseForge (header x-api-key: test-key, sinon 403)
 //   GET  /v1/mods/{cfId}                   detail CurseForge (x-api-key requis) : logo, screenshots, authors
 //   GET  /v1/mods/{cfId}/files[/{fileId}], POST /v1/mods/files
+//   Modpack CurseForge a deux versions (projet 5000, fichiers 5001 = 1.0.0 et 5002 = 1.1.0, plus un pack serveur 5003
+//   a ignorer) avec un mod non redistribuable (6004, sans downloadUrl) : e2e/21-modpack-update-cf.spec.ts.
 import http from 'node:http';
 import zlib from 'node:zlib';
 import { buildZip, sha1, sha512 } from '../modrinth/lib.mjs';
@@ -81,6 +83,34 @@ for (const kind of ['mod', 'modpack', 'resourcepack', 'shader']) {
 const UPD = projects.find((x) => x.id === 'modpack-7');
 UPD.fname2 = 'modpack-7-1.1.0.mrpack';
 UPD.buf2 = mkFile(UPD.fname2, mrpack(UPD.name, '1.1.0', [{ name: 'overrides/config/added.txt', data: 'ajoute en 1.1.0' }]));
+
+// Modpack CurseForge a deux versions, hors du catalogue de recherche (id de projet 5000). La 1.1.0 remplace un mod
+// (a-1 -> a-2), ajoute un mod non redistribuable (sans downloadUrl) et change deux configs. Le fichier 5003 est un
+// pack serveur plus recent, que la detection doit ignorer.
+const CF_PACK_ID = 5000;
+const cfMod = (fileId, name, restricted = false) => ({ fileId, name, restricted, buf: mkFile(name, jar(name.replace(/\W/g, '_'))) });
+const CFM = { a1: cfMod(6001, 'cf-mod-a-1.jar'), a2: cfMod(6002, 'cf-mod-a-2.jar'), b: cfMod(6003, 'cf-mod-b.jar'), r: cfMod(6004, 'cf-restreint.jar', true) };
+const cfZip = (mods, overrides) => buildZip([
+  { name: 'manifest.json', data: JSON.stringify({ minecraft: { version: '1.21.1-test', modLoaders: [{ id: 'fabric-0.16.5', primary: true }] }, manifestType: 'minecraftModpack', name: 'CF Pack', overrides: 'overrides', files: mods.map((m) => ({ projectID: 7000 + m.fileId, fileID: m.fileId, required: true })) }) },
+  ...overrides.map(([name, data]) => ({ name: `overrides/${name}`, data })),
+]);
+const CFP = [
+  { id: 5001, name: 'cfpack-1.0.0.zip', display: 'CF Pack 1.0.0', date: '2025-01-01T00:00:00Z', server: false,
+    buf: cfZip([CFM.a1, CFM.b], [['config/cf-keep.txt', 'keep v1'], ['config/cf-upd.txt', 'upd v1']]) },
+  { id: 5002, name: 'cfpack-1.1.0.zip', display: 'CF Pack 1.1.0', date: '2025-06-01T00:00:00Z', server: false,
+    buf: cfZip([CFM.a2, CFM.b, CFM.r], [['config/cf-keep.txt', 'keep v2'], ['config/cf-upd.txt', 'upd v2'], ['config/added-cf.txt', 'ajoute en 1.1.0']]) },
+  { id: 5003, name: 'cfpack-server-1.2.0.zip', display: 'CF Pack Server 1.2.0', date: '2025-09-01T00:00:00Z', server: true,
+    buf: cfZip([CFM.a2], [['config/server.txt', 'serveur']]) },
+];
+for (const f of CFP) mkFile(f.name, f.buf);
+const cfPackFile = (f) => ({
+  id: f.id, modId: CF_PACK_ID, displayName: f.display, fileName: f.name, fileDate: f.date, fileLength: f.buf.length, releaseType: 1,
+  isServerPack: f.server, downloadUrl: `${BASE}/files/${f.name}`, hashes: [{ value: sha1(f.buf), algo: 1 }], gameVersions: ['1.21.1-test', 'Fabric'], dependencies: [],
+});
+const cfModFile = (m) => ({
+  id: m.fileId, modId: 7000 + m.fileId, displayName: m.name, fileName: m.name, fileDate: '2025-01-01T00:00:00Z', fileLength: m.buf.length,
+  downloadUrl: m.restricted ? null : `${BASE}/files/${m.name}`, hashes: [{ value: sha1(m.buf), algo: 1 }], gameVersions: ['1.21.1-test', 'Fabric'], dependencies: [],
+});
 // dépendance obligatoire : le mod 0 dépend du mod 1
 const DEP = { from: 'mod-0', to: 'mod-1' };
 const cfId = (p) => 1000 + projects.indexOf(p);
@@ -177,6 +207,12 @@ const server = http.createServer((req, res) => {
     if (!x) return json(res, 404, {});
     return json(res, 200, { data: { id: cfId(x), name: x.name, summary: `Résumé CurseForge de ${x.name}.`, slug: x.id, links: { websiteUrl: `https://www.curseforge.com/minecraft/x/${x.id}` }, authors: [{ name: 'cfauteur' }], logo: { url: `${BASE}/img/${x.id}-icon.png`, thumbnailUrl: `${BASE}/img/${x.id}-icon.png` }, screenshots: [1, 2, 3, 4].map((k) => ({ url: `${BASE}/img/${x.id}-${k}.png` })), downloadCount: x.downloads, allowModDistribution: !x.restricted } });
   }
+  if ((m = p.match(/^\/v1\/mods\/(\d+)\/files(?:\/(\d+))?$/)) && Number(m[1]) === CF_PACK_ID) {
+    if (req.headers['x-api-key'] !== 'test-key') return json(res, 403, {});
+    const f = m[2] && CFP.find((x) => x.id === Number(m[2]));
+    if (m[2]) return f ? json(res, 200, { data: cfPackFile(f) }) : json(res, 404, {});
+    return json(res, 200, { data: [...CFP].reverse().map(cfPackFile) });
+  }
   if ((m = p.match(/^\/v1\/mods\/(\d+)\/files(?:\/(\d+))?$/))) {
     const x = projects[Number(m[1]) - 1000];
     if (!x) return json(res, 404, {});
@@ -185,7 +221,8 @@ const server = http.createServer((req, res) => {
   if (p === '/v1/mods/files' && req.method === 'POST') {
     let body = ''; req.on('data', (d) => (body += d)); req.on('end', () => {
       const ids = JSON.parse(body).fileIds || [];
-      json(res, 200, { data: ids.map((id) => projects[Math.floor(id / 10) - 1000]).filter(Boolean).map(cfFile) });
+      const mods = Object.values(CFM).filter((x) => ids.includes(x.fileId)).map(cfModFile);
+      json(res, 200, { data: [...mods, ...ids.map((id) => projects[Math.floor(id / 10) - 1000]).filter(Boolean).map(cfFile)] });
     });
     return;
   }

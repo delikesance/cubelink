@@ -143,6 +143,21 @@ pub struct CfFile {
     /// Empreinte CurseForge (murmur2) du fichier ; 0 si absente.
     #[serde(default)]
     pub file_fingerprint: u64,
+    /// 1 = release, 2 = beta, 3 = alpha (0 : absent ou `null`).
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub release_type: u32,
+    /// Fichier de serveur d'un modpack (à ne jamais proposer à un joueur). `null` dans l'API : `false`.
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub is_server_pack: bool,
+}
+
+/// L'API CurseForge renvoie parfois `null` pour un champ simple : valeur par défaut au lieu d'un échec de lecture.
+fn null_as_default<'de, D, T>(d: D) -> std::result::Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Default + serde::Deserialize<'de>,
+{
+    Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
 }
 
 /// Correspondance exacte d'une empreinte (`POST /v1/fingerprints/432`).
@@ -371,6 +386,17 @@ impl CfApi {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn file_with_null_server_pack_and_release_type_is_read() {
+        let f: CfFile = serde_json::from_value(serde_json::json!({
+            "id": 7, "fileName": "a.jar", "isServerPack": null, "releaseType": null
+        }))
+        .unwrap();
+        assert!(!f.is_server_pack);
+        assert_eq!(f.release_type, 0);
+    }
+
     use super::*;
     use serde_json::json;
     use wiremock::matchers::{header, method, path, query_param};

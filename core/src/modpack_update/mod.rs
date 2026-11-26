@@ -69,7 +69,7 @@ pub use undo::*;
 /// Mise à jour proposée pour un modpack installé.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, specta::Type)]
 pub struct ModpackUpdate {
-    /// Identifiant de la version Modrinth à installer.
+    /// Identifiant de la version à installer (Modrinth : id de version ; CurseForge : id de fichier).
     pub version_id: String,
     /// Nom affiché de la version (« Mon pack 1.4.2 »).
     pub name: String,

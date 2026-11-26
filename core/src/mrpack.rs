@@ -579,6 +579,8 @@ async fn run_import(
     let mut provenance: Vec<(String, Provenance)> = Vec::new();
     // Fichiers d'index effectivement posés (pas les manquants), avec leur objet du magasin : relevé de l'installation.
     let mut placed: Vec<(&MrpackFile, String)> = Vec::new();
+    // Fichiers tolérants non récupérés : le relevé garde leur empreinte attendue (le joueur les posera).
+    let mut expected_missing: Vec<&MrpackFile> = Vec::new();
     let mut results = stream::iter(files.iter().copied())
         .map(|f| {
             let dl = &dl;
@@ -590,6 +592,7 @@ async fn run_import(
             Ok(o) => o,
             Err(Error::Cancelled) => return Err(Error::Cancelled),
             Err(e) if f.tolerant => {
+                expected_missing.push(f);
                 tracing::warn!("mod CurseForge non récupéré ({}) : {e}", f.path);
                 missing.push(f.path.rsplit('/').next().unwrap_or(&f.path).to_string());
                 done += 1;
@@ -625,7 +628,7 @@ async fn run_import(
     // Sans relevé, une mise à jour retélécharge l'ancien pack : ce n'est donc pas fatal pour l'import.
     let placed: Vec<crate::modpack_update::PlacedFile<'_>> =
         placed.iter().map(|(file, sha256)| crate::modpack_update::PlacedFile { file, sha256 }).collect();
-    if let Err(e) = crate::modpack_update::write_install_record(&game_dir, &placed, archive, plan) {
+    if let Err(e) = crate::modpack_update::write_install_record(&game_dir, &placed, &expected_missing, archive, plan) {
         tracing::warn!("relevé du modpack non écrit : {e}");
     }
     Ok(())

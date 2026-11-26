@@ -12,7 +12,10 @@ use serde::Deserialize;
 use zip::ZipArchive;
 
 use crate::mods::Provenance;
-use crate::mrpack::{check_url, validate_file_path, validate_rel, ImportOptions, Layout, MrpackFile, MrpackIndex, MAX_INDEX_BYTES};
+use crate::mrpack::{
+    check_url, validate_file_path, validate_rel, ImportOptions, Layout, MrpackFile, MrpackIndex,
+    MAX_INDEX_BYTES,
+};
 use crate::providers::curseforge::{CfDownload, CfResolver, CDN_HOSTS};
 use crate::types::{Error, Loader, LoaderSpec, Result};
 
@@ -66,10 +69,20 @@ pub(crate) fn read_cf_manifest(archive: &mut ZipArchive<File>) -> Option<CfManif
 }
 
 fn cf_loader(m: &CfMinecraft) -> Result<LoaderSpec> {
-    let Some(l) = m.mod_loaders.iter().find(|l| l.primary).or(m.mod_loaders.first()) else {
-        return Ok(LoaderSpec { loader: Loader::Vanilla, version: String::new() });
+    let Some(l) = m
+        .mod_loaders
+        .iter()
+        .find(|l| l.primary)
+        .or(m.mod_loaders.first())
+    else {
+        return Ok(LoaderSpec {
+            loader: Loader::Vanilla,
+            version: String::new(),
+        });
     };
-    let (name, version) = l.id.split_once('-').ok_or_else(|| invalid(format!("loader CurseForge invalide : {:?}", l.id)))?;
+    let (name, version) =
+        l.id.split_once('-')
+            .ok_or_else(|| invalid(format!("loader CurseForge invalide : {:?}", l.id)))?;
     let loader = match name.to_ascii_lowercase().as_str() {
         "forge" => Loader::Forge,
         "neoforge" => Loader::NeoForge,
@@ -80,7 +93,18 @@ fn cf_loader(m: &CfMinecraft) -> Result<LoaderSpec> {
     if version.is_empty() {
         return Err(invalid("version du loader vide"));
     }
-    Ok(LoaderSpec { loader, version: version.to_string() })
+    Ok(LoaderSpec {
+        loader,
+        version: version.to_string(),
+    })
+}
+
+/// Loader déclaré par le `manifest.json` d'un zip CurseForge (sans rien résoudre ni télécharger).
+pub fn manifest_loader(zip_path: &std::path::Path) -> Result<LoaderSpec> {
+    let mut archive = crate::mrpack::open_zip(zip_path)?;
+    let m = read_cf_manifest(&mut archive)
+        .ok_or_else(|| invalid("manifest.json CurseForge invalide"))?;
+    cf_loader(&m.minecraft)
 }
 
 /// Pack CurseForge résolu : index au format commun, emplacement des overrides, mods introuvables et options
@@ -90,15 +114,27 @@ pub(crate) struct CfPack {
     pub layout: Layout,
     /// Descriptions lisibles des mods non résolus (`projet X / fichier Y`).
     pub missing: Vec<String>,
+    /// Les mêmes, avec leur projet : une mise à jour garde alors l'ancienne version de ces mods.
+    pub unresolved: Vec<(String, Provenance)>,
     pub opts: ImportOptions,
 }
 
 /// Lit le `manifest.json` de `archive` et résout ses mods avec `cf`. Un mod introuvable n'échoue pas : il est listé
 /// dans `missing` ; un mod résolu sans SHA-1 (sans clé) est `unverified`, et tous sont `tolerant`.
-pub(crate) async fn read(archive: &mut ZipArchive<File>, cf: &CfResolver, opts: &ImportOptions, cancel: &Arc<AtomicBool>) -> Result<CfPack> {
-    let m = read_cf_manifest(archive).ok_or_else(|| invalid("manifest.json CurseForge invalide"))?;
+pub(crate) async fn read(
+    archive: &mut ZipArchive<File>,
+    cf: &CfResolver,
+    opts: &ImportOptions,
+    cancel: &Arc<AtomicBool>,
+) -> Result<CfPack> {
+    let m =
+        read_cf_manifest(archive).ok_or_else(|| invalid("manifest.json CurseForge invalide"))?;
     let loader = cf_loader(&m.minecraft)?;
-    let overrides = if m.overrides.is_empty() { "overrides".to_string() } else { m.overrides.clone() };
+    let overrides = if m.overrides.is_empty() {
+        "overrides".to_string()
+    } else {
+        m.overrides.clone()
+    };
     validate_rel(&overrides)?;
 
     let mut entries: Vec<(u64, u64)> = Vec::new();
@@ -110,10 +146,12 @@ pub(crate) async fn read(archive: &mut ZipArchive<File>, cf: &CfResolver, opts: 
     }
 
     let mut opts = opts.clone();
-    opts.allowed_hosts.extend(CDN_HOSTS.iter().map(|h| h.to_string()));
+    opts.allowed_hosts
+        .extend(CDN_HOSTS.iter().map(|h| h.to_string()));
     // Beaucoup de petits fichiers : la latence domine, on parallélise davantage (résolution et téléchargement).
     opts.concurrency = opts.concurrency.max(16);
     let mut missing: Vec<String> = Vec::new();
+    let mut unresolved: Vec<(String, Provenance)> = Vec::new();
     let mut files = Vec::with_capacity(entries.len());
     let mut seen_paths = HashSet::new();
     // Avec une clé de développeur : une seule requête résout tous les mods (URL + SHA-1). Sinon, ou pour
@@ -139,15 +177,38 @@ pub(crate) async fn read(archive: &mut ZipArchive<File>, cf: &CfResolver, opts: 
                 return ((p, f), Err(Error::Cancelled));
             }
             let r = async {
-                let (d, sha1, size) = match batch_ref.get(&f) {
-                    Some(b) => (CfDownload { url: b.url.clone(), file_name: b.file_name.clone() }, b.sha1.clone(), b.size),
-                    None => (cf.resolve(p, f).await?, String::new(), 0),
+                let (downloads, file_name, sha1, size) = match batch_ref.get(&f) {
+                    Some(b) => {
+                        let direct = match &b.url {
+                            Some(url) => Some(CfDownload {
+                                url: url.clone(),
+                                file_name: b.file_name.clone(),
+                            }),
+                            // Distribution tierce interdite : la redirection web peut encore répondre, sinon le fichier
+                            // reste dans l'index sans URL (nom et SHA-1 connus) et sera « introuvable » au téléchargement.
+                            None => cf.resolve(p, f).await.ok(),
+                        };
+                        match direct {
+                            Some(d) => (vec![d.url], d.file_name, b.sha1.clone(), b.size),
+                            None => (Vec::new(), b.file_name.clone(), b.sha1.clone(), b.size),
+                        }
+                    }
+                    None => {
+                        let d = cf.resolve(p, f).await?;
+                        (vec![d.url], d.file_name, String::new(), 0)
+                    }
                 };
-                check_url(&d.url, opts_ref)?;
-                let dir = if d.file_name.to_ascii_lowercase().ends_with(".zip") { "resourcepacks" } else { "mods" };
-                let path = format!("{dir}/{}", d.file_name);
+                for url in &downloads {
+                    check_url(url, opts_ref)?;
+                }
+                let dir = if file_name.to_ascii_lowercase().ends_with(".zip") {
+                    "resourcepacks"
+                } else {
+                    "mods"
+                };
+                let path = format!("{dir}/{file_name}");
                 validate_file_path(&path)?;
-                Ok::<_, Error>((path, d.url, sha1, size))
+                Ok::<_, Error>((path, downloads, sha1, size))
             }
             .await;
             ((p, f), r)
@@ -158,13 +219,34 @@ pub(crate) async fn read(archive: &mut ZipArchive<File>, cf: &CfResolver, opts: 
             Err(Error::Cancelled) => return Err(Error::Cancelled),
             Err(e) => {
                 tracing::warn!("mod CurseForge {p}/{f} non résolu : {e}");
-                missing.push(format!("projet {p} / fichier {f}"));
+                let label = format!("projet {p} / fichier {f}");
+                unresolved.push((
+                    label.clone(),
+                    Provenance {
+                        source: "curseforge".into(),
+                        id: p.to_string(),
+                    },
+                ));
+                missing.push(label);
             }
-            Ok((path, url, sha1, size)) => {
+            Ok((path, downloads, sha1, size)) => {
                 if seen_paths.insert(path.to_ascii_lowercase()) {
                     let unverified = sha1.is_empty();
-                    let provenance = Some(Provenance { source: "curseforge".into(), id: p.to_string() });
-                    files.push(MrpackFile { path, sha1, sha512: String::new(), downloads: vec![url], file_size: size, env: None, unverified, tolerant: true, provenance });
+                    let provenance = Some(Provenance {
+                        source: "curseforge".into(),
+                        id: p.to_string(),
+                    });
+                    files.push(MrpackFile {
+                        path,
+                        sha1,
+                        sha512: String::new(),
+                        downloads,
+                        file_size: size,
+                        env: None,
+                        unverified,
+                        tolerant: true,
+                        provenance,
+                    });
                 }
             }
         }
@@ -173,7 +255,22 @@ pub(crate) async fn read(archive: &mut ZipArchive<File>, cf: &CfResolver, opts: 
     if cancel.load(Ordering::SeqCst) {
         return Err(Error::Cancelled);
     }
-    let pack = MrpackIndex { name: m.name, version_id: String::new(), minecraft: m.minecraft.version.trim().to_string(), loader, files };
-    let layout = Layout { common: format!("{overrides}/"), client: None };
-    Ok(CfPack { index: pack, layout, missing, opts })
+    let pack = MrpackIndex {
+        name: m.name,
+        version_id: String::new(),
+        minecraft: m.minecraft.version.trim().to_string(),
+        loader,
+        files,
+    };
+    let layout = Layout {
+        common: format!("{overrides}/"),
+        client: None,
+    };
+    Ok(CfPack {
+        index: pack,
+        layout,
+        missing,
+        unresolved,
+        opts,
+    })
 }

@@ -31,14 +31,30 @@ describe("PackUpdate", () => {
     expect(screen.getByRole("button", { name: "Mettre à jour" })).toBeTruthy();
   });
 
-  it("rien à afficher si à jour, hors ligne ou si le pack ne vient pas de Modrinth", async () => {
-    for (const o of [{ update: null }, { update: "offline" as const }, { source: "curseforge" }]) {
+  it("rien à afficher si à jour, hors ligne ou si le pack ne vient ni de Modrinth ni de CurseForge", async () => {
+    for (const o of [{ update: null }, { update: "offline" as const }, { source: "manuel" }]) {
       const { services } = setup(o);
       await Promise.resolve();
       await waitFor(() => expect(screen.queryByRole("region", { name: "Mise à jour du modpack" })).toBeNull());
       expect(services.packUpdateCalls).toEqual([]);
       cleanup();
     }
+  });
+
+  it("modpack CurseForge : badge, puis les mods à télécharger soi-même sont listés", async () => {
+    const { services } = setup({ source: "curseforge", update: { ...UPDATE, version_id: "4455" } });
+    expect(await screen.findByText("Mise à jour 1.4.2 disponible")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Mettre à jour" }));
+    expect(await screen.findByText("Modpack mis à jour")).toBeTruthy();
+    expect(services.packUpdateCalls[0]).toEqual({ kind: "apply", args: ["inst-aeronautics", "4455"] });
+    expect(screen.getByText(/1 mod à télécharger toi-même : mods\/mod-exclusif\.jar/)).toBeTruthy();
+  });
+
+  it("modpack Modrinth : rien à télécharger soi-même", async () => {
+    setup();
+    fireEvent.click(await screen.findByRole("button", { name: "Mettre à jour" }));
+    await screen.findByText("Modpack mis à jour");
+    expect(screen.queryByText(/à télécharger toi-même/)).toBeNull();
   });
 
   it("jeu en cours : bouton désactivé avec explication", async () => {

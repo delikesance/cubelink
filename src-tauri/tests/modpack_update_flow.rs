@@ -1,8 +1,8 @@
 //! Mise à jour d'un modpack sur l'AppState réel (vraies commandes, vrai disque, vrai magasin) contre le faux catalogue
-//! `tests-fixtures/browse/server.mjs` (node) : installation depuis le catalogue, relevé daté, détection, mise à jour sans
-//! retélécharger l'ancien pack, fichiers du joueur gardés, annulation.
+//! `tests-fixtures/browse/server.mjs` (node), Modrinth puis CurseForge : installation depuis le catalogue, relevé daté,
+//! détection, mise à jour sans retélécharger l'ancien pack, fichiers du joueur gardés, mod à poser, annulation.
 //!
-//! Remplace sous Linux l'E2E `e2e/20-modpack-update.spec.ts` (CDP = WebView2, Windows seulement). Ignoré (avec un
+//! Remplace sous Linux l'E2E `e2e/20-modpack-update.spec.ts` et `21-modpack-update-cf` (CDP = WebView2, Windows seulement). Ignoré (avec un
 //! message) quand `node` est absent. Une seule fonction de test : les surcharges de test sont lues une fois par processus.
 
 use std::fs;
@@ -115,4 +115,46 @@ async fn modpack_installe_mis_a_jour_avec_le_releve_puis_annule() {
     assert!(!read(&game.join(RECORD_FILE)).contains("config/added.txt"));
     let again = st.modpack_update_check(&inst.id).await.unwrap();
     assert_eq!(again.map(|u| u.version_id), Some("modpack-7-v2".to_string()));
+
+    curseforge(st).await;
+}
+
+/// CurseForge (projet 5000 du faux catalogue) : le pack serveur plus récent est ignoré, le mod non redistribuable est
+/// signalé sans bloquer, le relevé évite l'ancien zip.
+async fn curseforge(st: &cubelink_app::state::AppState) {
+    let input = BrowseInstallInput {
+        source: BrowseSource::Curseforge,
+        id: "5000".into(),
+        kind: BrowseKind::Modpack,
+        version_id: Some("5001".into()),
+        instance_id: None,
+        ram_mb: None,
+    };
+    let inst = st.browse_install(input).await.unwrap().instance;
+    let game = st.instances.game_dir(&inst.id).unwrap();
+    assert!(!needs_old_pack(&st.instances, &inst.id).unwrap(), "relevé CurseForge non utilisable");
+    assert!(game.join("mods/cf-mod-a-1.jar").is_file());
+    put(&game.join("config/cf-keep.txt"), "keep du joueur");
+    put(&game.join("mods/perso.jar"), "perso");
+
+    let up = st.modpack_update_check(&inst.id).await.unwrap().expect("la 1.1.0 doit être proposée");
+    assert_eq!(up.version_id, "5002", "le pack serveur 5003 ne doit pas être proposé");
+
+    let r = st.modpack_update_apply(&inst.id, &up.version_id).await.unwrap();
+    assert!(!game.join("mods/cf-mod-a-1.jar").exists());
+    assert!(game.join("mods/cf-mod-a-2.jar").is_file());
+    assert!(game.join("mods/cf-mod-b.jar").is_file());
+    assert_eq!(r.missing, vec!["mods/cf-restreint.jar".to_string()]);
+    assert_eq!(read(&game.join("config/cf-upd.txt")), "upd v2");
+    assert_eq!(read(&game.join("config/added-cf.txt")), "ajoute en 1.1.0");
+    assert_eq!(read(&game.join("config/cf-keep.txt")), "keep du joueur");
+    assert_eq!(read(&game.join("mods/perso.jar")), "perso");
+    assert_eq!(st.instances.get(&inst.id).unwrap().pack.unwrap().version_id, "5002");
+
+    st.modpack_update_undo(&inst.id, &r.backup_id).await.unwrap();
+    assert!(game.join("mods/cf-mod-a-1.jar").is_file());
+    assert!(!game.join("mods/cf-mod-a-2.jar").exists());
+    assert_eq!(read(&game.join("config/cf-upd.txt")), "upd v1");
+    assert_eq!(read(&game.join("config/cf-keep.txt")), "keep du joueur");
+    assert_eq!(st.instances.get(&inst.id).unwrap().pack.unwrap().version_id, "5001");
 }

@@ -51,7 +51,7 @@ pub(super) struct Old {
     pub(super) actual: String,
     pub(super) disabled: bool,
     /// Projet du jar de l'ancien pack (pour recréer un jar désactivé sous sa nouvelle version).
-    pub(super) project: Option<String>,
+    pub(super) project: Option<Provenance>,
 }
 
 #[derive(Debug, Clone)]
@@ -112,7 +112,7 @@ pub(super) fn plan(old: &State, new: &State, game_dir: &Path) -> Result<Plan> {
                             old: Old {
                                 actual,
                                 disabled,
-                                project: o.provenance.as_ref().map(|p| p.id.clone()),
+                                project: o.provenance.clone(),
                             },
                         })
                     }
@@ -135,7 +135,7 @@ pub(super) fn plan(old: &State, new: &State, game_dir: &Path) -> Result<Plan> {
                         old: Old {
                             actual,
                             disabled,
-                            project: o.provenance.as_ref().map(|p| p.id.clone()),
+                            project: o.provenance.clone(),
                         },
                     });
                 } else {
@@ -146,7 +146,7 @@ pub(super) fn plan(old: &State, new: &State, game_dir: &Path) -> Result<Plan> {
     }
 
     // Un mod désactivé par le joueur reste désactivé dans sa nouvelle version (même projet, autre nom de fichier).
-    let disabled_projects: HashSet<String> = out
+    let disabled_projects: HashSet<Provenance> = out
         .actions
         .iter()
         .filter_map(|a| match a {
@@ -186,7 +186,7 @@ pub(super) fn plan(old: &State, new: &State, game_dir: &Path) -> Result<Plan> {
                         kept.push(format!("mods/{other}"));
                         continue;
                     }
-                    if p.source == "modrinth" && disabled_projects.contains(&p.id) {
+                    if disabled_projects.contains(p) {
                         actions.push(Action::Add {
                             item: item.clone(),
                             dest: format!("{dest}.disabled"),

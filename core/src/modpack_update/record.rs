@@ -126,6 +126,13 @@ pub(super) fn write_state(
         }
         add(&mut files, &src.path, digest, src.provenance.clone());
     }
+    // Ancienne version d'un mod dont la nouvelle est introuvable : elle reste sur le disque, donc dans le relevé.
+    let missing_projects = missing_projects(new_state, missing);
+    for (key, old) in &old_state.items {
+        if !new_state.items.contains_key(key) && old.provenance.as_ref().is_some_and(|p| missing_projects.contains(p)) {
+            add(&mut files, &old.path, old.digest.clone(), old.provenance.clone());
+        }
+    }
     save(game_dir, &Record { format: RECORD_FORMAT, origin: Some(origin.clone()), files })
 }
 

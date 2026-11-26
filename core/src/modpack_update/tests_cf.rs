@@ -61,10 +61,12 @@ struct CfMod {
     has_url: bool,
     /// `false` : l'API ne donne pas de SHA-1.
     has_sha1: bool,
+    /// Projet CurseForge (deux fichiers du même projet = deux versions du même mod).
+    project: u64,
 }
 
 fn cf_mod(id: u64, name: &'static str, content: &'static [u8]) -> CfMod {
-    CfMod { id, name, content, has_url: true, has_sha1: true }
+    CfMod { id, name, content, has_url: true, has_sha1: true, project: 500 + id }
 }
 
 /// Sert l'API de résolution groupée et le CDN pour `mods`.
@@ -85,7 +87,7 @@ async fn mount_mods(e: &Env, mods: &[&CfMod]) {
 
 /// Zip CurseForge : `manifest.json` (Minecraft `mc`, Fabric 0.16.5) et overrides.
 fn cf_zip(e: &Env, name: &str, mc: &str, mods: &[&CfMod], overrides: &[(&str, &[u8])]) -> PathBuf {
-    let files: Vec<serde_json::Value> = mods.iter().map(|m| serde_json::json!({"projectID": 500 + m.id, "fileID": m.id, "required": true})).collect();
+    let files: Vec<serde_json::Value> = mods.iter().map(|m| serde_json::json!({"projectID": m.project, "fileID": m.id, "required": true})).collect();
     let manifest = serde_json::to_vec(&serde_json::json!({
         "minecraft": {"version": mc, "modLoaders": [{"id": "fabric-0.16.5", "primary": true}]},
         "manifestType": "minecraftModpack", "name": "CF Pack", "overrides": "overrides", "files": files
@@ -368,4 +370,60 @@ async fn check_is_none_without_api_key_and_never_calls_the_api() {
 
     assert_eq!(check(&cf_providers(&s, ""), &installed("1")).await.unwrap(), None);
     assert!(s.received_requests().await.unwrap().is_empty());
+}
+
+// ---------- Relecture : renommage d'un mod non redistribuable, annulation sans empreinte, mod désactivé ----------
+
+#[tokio::test]
+async fn renamed_non_redistributable_mod_keeps_the_old_version_in_place() {
+    let e = env().await;
+    let a1 = cf_mod(1, "a-1.jar", A1);
+    let r1 = CfMod { project: 900, ..cf_mod(7, "r-1.jar", b"r version 1") };
+    let r2 = CfMod { project: 900, has_url: false, ..cf_mod(8, "r-2.jar", b"r version 2") };
+    mount_mods(&e, &[&a1, &r1, &r2]).await;
+    let v1 = cf_zip(&e, "v1", "1.21.1", &[&a1, &r1], &[]);
+    let v2 = cf_zip(&e, "v2", "1.21.1", &[&a1, &r2], &[("overrides/config/x.toml", CFG2)]);
+    let (inst, g) = install(&e, &v1).await;
+
+    let r = update(&e, &inst.id, &v1, &v2).await.unwrap();
+
+    assert_eq!(r.missing, vec!["mods/r-2.jar".to_string()]);
+    // Le joueur garde l'ancienne version tant qu'il n'a pas posé la nouvelle.
+    assert_eq!(std::fs::read(g.join("mods/r-1.jar")).unwrap(), b"r version 1");
+    assert_eq!(r.removed, 0);
+}
+
+#[tokio::test]
+async fn undo_removes_a_mod_that_came_without_a_fingerprint() {
+    let e = env().await;
+    let a1 = CfMod { project: 900, ..cf_mod(1, "a-1.jar", A1) };
+    let a2 = CfMod { project: 900, has_sha1: false, ..cf_mod(2, "a-2.jar", A2) };
+    mount_mods(&e, &[&a1, &a2]).await;
+    let v1 = cf_zip(&e, "v1", "1.21.1", &[&a1], &[]);
+    let v2 = cf_zip(&e, "v2", "1.21.1", &[&a2], &[]);
+    let (inst, g) = install(&e, &v1).await;
+    let r = update(&e, &inst.id, &v1, &v2).await.unwrap();
+    assert!(g.join("mods/a-2.jar").is_file());
+
+    undo(&e.instances, &inst.id, &r.backup_id, &e.idx).unwrap();
+
+    assert!(!g.join("mods/a-2.jar").exists(), "deux versions du même mod après l'annulation");
+    assert_eq!(std::fs::read(g.join("mods/a-1.jar")).unwrap(), A1);
+}
+
+#[tokio::test]
+async fn disabled_curseforge_mod_stays_disabled_in_its_new_version() {
+    let e = env().await;
+    let a1 = CfMod { project: 900, ..cf_mod(1, "a-1.jar", A1) };
+    let a2 = CfMod { project: 900, ..cf_mod(2, "a-2.jar", A2) };
+    mount_mods(&e, &[&a1, &a2]).await;
+    let v1 = cf_zip(&e, "v1", "1.21.1", &[&a1], &[]);
+    let v2 = cf_zip(&e, "v2", "1.21.1", &[&a2], &[]);
+    let (inst, g) = install(&e, &v1).await;
+    std::fs::rename(g.join("mods/a-1.jar"), g.join("mods/a-1.jar.disabled")).unwrap();
+
+    update(&e, &inst.id, &v1, &v2).await.unwrap();
+
+    assert!(g.join("mods/a-2.jar.disabled").is_file());
+    assert!(!g.join("mods/a-2.jar").exists());
 }

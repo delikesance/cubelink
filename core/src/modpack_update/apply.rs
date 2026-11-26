@@ -64,6 +64,11 @@ pub(super) async fn download_all(
     Ok((got, missing))
 }
 
+/// Projets des fichiers du nouveau pack introuvables au téléchargement.
+pub(super) fn missing_projects(new_state: &State, missing: &[String]) -> HashSet<Provenance> {
+    new_state.items.values().filter(|it| missing.contains(&it.path)).filter_map(|it| it.provenance.clone()).collect()
+}
+
 /// Les deux packs lus et validés : tout ce qu'il faut pour planifier, sans avoir rien téléchargé ni modifié.
 pub(super) struct Prepared {
     pub(super) old_state: State,
@@ -251,9 +256,12 @@ pub(super) async fn apply_prepared(
     };
 
     // Un fichier introuvable n'est ni ajouté ni remplacé : l'ancien reste en place, le joueur pose le nouveau.
+    // De même, l'ancienne version d'un mod dont la nouvelle est introuvable (autre nom de fichier, même projet) reste :
+    // sinon le joueur n'aurait plus du tout ce mod.
+    let missing_projects = missing_projects(new_state, &missing);
     plan.actions.retain(|a| match a {
         Action::Add { item, .. } | Action::Replace { item, .. } => !missing.contains(&item.path),
-        Action::Remove { .. } => true,
+        Action::Remove { old } => !old.project.as_ref().is_some_and(|p| missing_projects.contains(p)),
     });
     let (added, removed, replaced) = plan.counts();
 
@@ -283,7 +291,11 @@ pub(super) async fn apply_prepared(
             Action::Add { item, dest } | Action::Replace { item, dest, .. } => {
                 mf.added.push(Added {
                     rel: dest.clone(),
-                    digest: item.digest.clone(),
+                    // Sans empreinte de référence (CurseForge), celle de l'objet posé : l'annulation doit le reconnaître.
+                    digest: match objects.get(&item.path) {
+                        Some(o) if item.digest.hex.is_empty() => Digest { alg: Alg::Sha256, hex: o.sha256.to_ascii_lowercase() },
+                        _ => item.digest.clone(),
+                    },
                     sha256: objects.get(&item.path).map(|o| o.sha256.clone()),
                     prov_key: jar_key(dest).filter(|_| item.provenance.is_some()),
                 })

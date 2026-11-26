@@ -37,6 +37,7 @@ pub fn undo(
             player_kept.join(", ")
         );
     }
+    record::restore_from_backup(&game_dir, &bdir)?;
     instances.set_pack(instance_id, mf.from.clone())?;
     let updated = if mf.loader_from != inst.loader {
         instances.set_loader(instance_id, mf.loader_from.clone())?

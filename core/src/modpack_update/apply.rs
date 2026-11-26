@@ -2,6 +2,10 @@
 
 use super::*;
 
+// Point d'entrée de l'import (`mrpack.rs`) : `mod record` est privé, ce glob (`pub use apply::*`) les rend publics.
+pub use super::record::{stamp_origin, RECORD_FILE};
+pub(crate) use super::record::{write_install_record, PlacedFile};
+
 /// Télécharge dans le magasin (sans toucher à l'instance) les fichiers d'index à poser. Clé : chemin du fichier.
 pub(super) async fn download_all(
     pack: &MrpackIndex,
@@ -292,7 +296,7 @@ pub(super) async fn apply_prepared(
         }
         e
     };
-    if let Err(e) = write_manifest(&bdir, &mf) {
+    if let Err(e) = write_manifest(&bdir, &mf).and_then(|()| record::save_to_backup(&game_dir, &bdir)) {
         return Err(fail(e, &mf));
     }
     let run = || -> Result<()> {
@@ -342,7 +346,7 @@ pub(super) async fn apply_prepared(
         if new_loader != inst.loader {
             instances.set_loader(&inst.id, new_loader.clone())?;
         }
-        Ok(())
+        record::write_state(&game_dir, &new_origin, new_state, old_state, &objects, &missing)
     };
     if let Err(e) = run() {
         // Ce qui n'a pas été posé n'existe pas encore : `revert` tolère une opération inachevée.

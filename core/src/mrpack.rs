@@ -577,6 +577,8 @@ async fn run_import(
     let mut done = 0u32;
     // Provenance des jars posés, écrite en une fois après la boucle (l'ordre d'arrivée est aléatoire).
     let mut provenance: Vec<(String, Provenance)> = Vec::new();
+    // Fichiers d'index effectivement posés (pas les manquants), avec leur objet du magasin : relevé de l'installation.
+    let mut placed: Vec<(&MrpackFile, String)> = Vec::new();
     let mut results = stream::iter(files.iter().copied())
         .map(|f| {
             let dl = &dl;
@@ -601,6 +603,7 @@ async fn run_import(
         let src = store_root.join(&obj.rel_path);
         link_into(&game_dir, &f.path, &src).map_err(|e| with_file_ctx(&f.path, e))?;
         index.add_ref(&obj.sha256)?;
+        placed.push((f, obj.sha256.clone()));
         installed.push(obj.sha256);
         if let (Some(name), Some(p)) = (mod_jar_name(&f.path), &f.provenance) {
             provenance.push((name.to_string(), p.clone()));
@@ -618,7 +621,14 @@ async fn run_import(
     // Un override qui remplace un jar du pack en change le contenu : on n'en garde pas la provenance.
     provenance.retain(|(name, _)| !in_overrides.contains(&format!("mods/{name}").to_ascii_lowercase()));
     // Sans cette provenance, les dépendances du catalogue, les mises à jour et `remove_old_versions` ignorent ces mods.
-    mods::record_provenance(&game_dir, &provenance)
+    mods::record_provenance(&game_dir, &provenance)?;
+    // Sans relevé, une mise à jour retélécharge l'ancien pack : ce n'est donc pas fatal pour l'import.
+    let placed: Vec<crate::modpack_update::PlacedFile<'_>> =
+        placed.iter().map(|(file, sha256)| crate::modpack_update::PlacedFile { file, sha256 }).collect();
+    if let Err(e) = crate::modpack_update::write_install_record(&game_dir, &placed, archive, plan) {
+        tracing::warn!("relevé du modpack non écrit : {e}");
+    }
+    Ok(())
 }
 
 // ---------- CurseForge et zip générique ----------

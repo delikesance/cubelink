@@ -478,8 +478,14 @@ impl AppState {
             (None, None) => None,
         };
         let Some(o) = origin else { return inst };
-        match self.instances.set_pack(&inst.id, Some(o)) {
-            Ok(updated) => updated,
+        match self.instances.set_pack(&inst.id, Some(o.clone())) {
+            Ok(updated) => {
+                // Le relevé écrit à l'import n'a pas d'origine : sans elle, la mise à jour retéléchargerait l'ancien pack.
+                if let Err(e) = self.instances.game_dir(&inst.id).and_then(|g| core_lib::modpack_update::stamp_origin(&g, &o)) {
+                    eprintln!("[Cubelink] relevé du modpack non daté pour {} : {e}", inst.id);
+                }
+                updated
+            }
             Err(e) => {
                 eprintln!("[Cubelink] origine du modpack non enregistrée pour {} : {e}", inst.id);
                 inst
@@ -1021,8 +1027,13 @@ mod tests {
         // 3. Origine fournie (Parcourir) : posée telle quelle, sans interroger Modrinth (aucune cible de hash).
         let c = state.instances.create("C", "1.21.1", spec, 2048).unwrap();
         let given = PackOrigin { source: "curseforge".into(), project_id: "50".into(), version_id: "7".into() };
+        // Relevé écrit à l'import, sans origine : l'origine posée le date, il devient utilisable pour la mise à jour.
+        let g = state.instances.game_dir(&c.id).unwrap();
+        std::fs::write(g.join(core_lib::modpack_update::RECORD_FILE), br#"{"format":1,"origin":null,"files":{}}"#).unwrap();
+        assert!(core_lib::modpack_update::needs_old_pack(&state.instances, &c.id).unwrap());
         let c = state.attach_pack_origin(&p, c, Some(given.clone()), None).await;
         assert_eq!(c.pack, Some(given));
+        assert!(!core_lib::modpack_update::needs_old_pack(&state.instances, &c.id).unwrap());
     }
 
     #[test]

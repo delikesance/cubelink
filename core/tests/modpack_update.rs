@@ -137,7 +137,7 @@ async fn catalogue_modpack_is_detected_updated_and_undone_on_a_real_disk() {
     // Mise à jour.
     let (old_file, _) = browse::fetch_modpack(&p, &input("VER100"), &store, &index, &tmp.join("old"), &dl, &progress).await.unwrap();
     let (new_file, new_origin) = browse::fetch_modpack(&p, &input(&up.version_id), &store, &index, &tmp.join("new"), &dl, &progress).await.unwrap();
-    let r = modpack_update::apply(&instances, &inst.id, &old_file, &new_file, new_origin.clone(), &store, &index, &opts, None, Arc::new(AtomicBool::new(false))).await.unwrap();
+    let r = modpack_update::apply(&instances, &inst.id, Some(&old_file), &new_file, new_origin.clone(), &core_lib::providers::curseforge::CfResolver::new(), &store, &index, &opts, None, Arc::new(AtomicBool::new(false))).await.unwrap();
     assert_eq!((r.added, r.removed, r.replaced), (1, 1, 2), "{r:?}"); // c ajouté ; b retiré ; a et pack.toml remplacés
     assert!(r.kept.is_empty());
     assert_eq!(std::fs::read(g.join("mods/a.jar")).unwrap(), A2);

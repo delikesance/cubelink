@@ -398,7 +398,7 @@ impl AppState {
         // Les futurs d'import ne sont pas prouvés `Send` par rustc : on les exécute sur un thread dédié.
         let handle = tokio::runtime::Handle::current();
         tokio::task::spawn_blocking(move || {
-            handle.block_on(modpack_update::apply(&instances, &id, &old_file, &new_file, new_origin, &store_root, &store, &opts, Some(progress), Arc::new(std::sync::atomic::AtomicBool::new(false))))
+            handle.block_on(modpack_update::apply(&instances, &id, Some(&old_file), &new_file, new_origin, &core_lib::providers::curseforge::CfResolver::new(), &store_root, &store, &opts, Some(progress), Arc::new(std::sync::atomic::AtomicBool::new(false))))
         })
         .await
         .map_err(|_| "mise à jour interrompue".to_string())?
@@ -535,7 +535,7 @@ pub async fn modpack_update_check(state: State<'_, Arc<AppState>>, instance_id: 
     state.modpack_update_check(&instance_id).await
 }
 
-/// Met le modpack d'une instance à la version `version_id` (Modrinth, même Minecraft et même loader ; sinon refus). Compare l'ancien `.mrpack` (retéléchargé par `Instance.pack.version_id`), le nouveau et le disque : un fichier du pack n'est remplacé ou retiré que s'il est encore identique à l'ancien ; un fichier modifié par le joueur est gardé (liste `kept`), ceux qu'il a ajoutés, `saves/`, `options.txt`, `servers.dat` et `logs/` ne sont jamais touchés. Tout est téléchargé avant la première modification ; l'ancien état va dans `<instance>/minecraft/.cubelink-pack-backup/<backup_id>/` (3 sauvegardes gardées) et `Instance.pack` (et la version du loader) change en dernier. Refusé si le jeu tourne ou si une autre mise à jour de l'instance est en cours. Progression par `browse://progress`.
+/// Met le modpack d'une instance à la version `version_id` (Modrinth, même Minecraft et même loader ; sinon refus). Compare l'ancien `.mrpack` (retéléchargé par `Instance.pack.version_id`), le nouveau et le disque : un fichier du pack n'est remplacé ou retiré que s'il est encore identique à l'ancien ; un fichier modifié par le joueur est gardé (liste `kept`) ; un fichier « tolérant » du nouveau pack introuvable (mod CurseForge non redistribuable) n'arrête pas la mise à jour : il n'est ni ajouté ni remplacé et figure dans `missing`, à poser par le joueur ; ceux qu'il a ajoutés, `saves/`, `options.txt`, `servers.dat` et `logs/` ne sont jamais touchés. Tout est téléchargé avant la première modification ; l'ancien état va dans `<instance>/minecraft/.cubelink-pack-backup/<backup_id>/` (3 sauvegardes gardées) et `Instance.pack` (et la version du loader) change en dernier. Refusé si le jeu tourne ou si une autre mise à jour de l'instance est en cours. Progression par `browse://progress`.
 #[tauri::command(rename_all = "snake_case")]
 #[specta::specta(rename_all = "snake_case")]
 pub async fn modpack_update_apply(state: State<'_, Arc<AppState>>, instance_id: String, version_id: String) -> Result<ModpackUpdateResult, String> {

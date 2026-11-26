@@ -114,6 +114,8 @@ pub(crate) struct CfPack {
     pub layout: Layout,
     /// Descriptions lisibles des mods non résolus (`projet X / fichier Y`).
     pub missing: Vec<String>,
+    /// Les mêmes, avec leur projet : une mise à jour garde alors l'ancienne version de ces mods.
+    pub unresolved: Vec<(String, Provenance)>,
     pub opts: ImportOptions,
 }
 
@@ -149,6 +151,7 @@ pub(crate) async fn read(
     // Beaucoup de petits fichiers : la latence domine, on parallélise davantage (résolution et téléchargement).
     opts.concurrency = opts.concurrency.max(16);
     let mut missing: Vec<String> = Vec::new();
+    let mut unresolved: Vec<(String, Provenance)> = Vec::new();
     let mut files = Vec::with_capacity(entries.len());
     let mut seen_paths = HashSet::new();
     // Avec une clé de développeur : une seule requête résout tous les mods (URL + SHA-1). Sinon, ou pour
@@ -216,7 +219,15 @@ pub(crate) async fn read(
             Err(Error::Cancelled) => return Err(Error::Cancelled),
             Err(e) => {
                 tracing::warn!("mod CurseForge {p}/{f} non résolu : {e}");
-                missing.push(format!("projet {p} / fichier {f}"));
+                let label = format!("projet {p} / fichier {f}");
+                unresolved.push((
+                    label.clone(),
+                    Provenance {
+                        source: "curseforge".into(),
+                        id: p.to_string(),
+                    },
+                ));
+                missing.push(label);
             }
             Ok((path, downloads, sha1, size)) => {
                 if seen_paths.insert(path.to_ascii_lowercase()) {
@@ -259,6 +270,7 @@ pub(crate) async fn read(
         index: pack,
         layout,
         missing,
+        unresolved,
         opts,
     })
 }

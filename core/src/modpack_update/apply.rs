@@ -78,6 +78,8 @@ pub(super) struct Prepared {
     pub(super) new_over: Vec<OverrideEntry>,
     /// Options propres au format du nouveau pack (CurseForge : CDN autorisés), à la place de celles de l'appelant.
     pub(super) opts: Option<ImportOptions>,
+    /// Mods du nouveau pack que la source n'a pas pu décrire (libellé, projet) : leur ancienne version reste en place.
+    pub(super) unresolved: Vec<(String, Provenance)>,
 }
 
 /// Nouveau pack lu et validé (index, archive, overrides et contenu effectif), sans rien avoir téléchargé.
@@ -122,7 +124,7 @@ pub(super) fn check_compatible(inst: &Instance, new_idx: &MrpackIndex, new_origi
 /// Assemble l'ancien état et le nouveau pack, après les contrôles de compatibilité.
 pub(super) fn assemble(inst: &Instance, old_state: State, new: NewPack, new_origin: &PackOrigin) -> Result<Prepared> {
     check_compatible(inst, &new.idx, new_origin)?;
-    Ok(Prepared { old_state, new_state: new.state, new_idx: new.idx, new_zip: new.zip, new_over: new.over, opts: None })
+    Ok(Prepared { old_state, new_state: new.state, new_idx: new.idx, new_zip: new.zip, new_over: new.over, opts: None, unresolved: Vec::new() })
 }
 
 /// Modrinth : ancien état = `recorded` (relevé de l'instance) s'il est fourni, sinon lu dans `old_pack`.
@@ -175,7 +177,7 @@ pub async fn apply(
     let prepared = match mrpack::detect(new_pack)? {
         mrpack::PackKind::Modrinth => prepare_modrinth(&inst, recorded, old_pack, new_pack, &new_origin, opts)?,
         mrpack::PackKind::CurseForge => {
-            let prepared = curseforge::prepare(&inst, recorded, old_pack, new_pack, &new_origin, cf, opts).await?;
+            let prepared = curseforge::prepare(&inst, recorded, old_pack, new_pack, &new_origin, cf, opts, &cancel).await?;
             curseforge::refuse_duplicates(&prepared, &game_dir)?;
             prepared
         }
@@ -203,6 +205,7 @@ pub(super) async fn apply_prepared(
         mut new_zip,
         new_over,
         opts: own_opts,
+        unresolved,
     } = prepared;
     let opts = own_opts.as_ref().unwrap_or(opts);
     let (old_state, new_state, new_idx, new_zip, new_over) = (
@@ -258,7 +261,8 @@ pub(super) async fn apply_prepared(
     // Un fichier introuvable n'est ni ajouté ni remplacé : l'ancien reste en place, le joueur pose le nouveau.
     // De même, l'ancienne version d'un mod dont la nouvelle est introuvable (autre nom de fichier, même projet) reste :
     // sinon le joueur n'aurait plus du tout ce mod.
-    let missing_projects = missing_projects(new_state, &missing);
+    let mut missing_projects = missing_projects(new_state, &missing);
+    missing_projects.extend(unresolved.iter().map(|(_, p)| p.clone()));
     plan.actions.retain(|a| match a {
         Action::Add { item, .. } | Action::Replace { item, .. } => !missing.contains(&item.path),
         Action::Remove { old } => !old.project.as_ref().is_some_and(|p| missing_projects.contains(p)),
@@ -362,7 +366,7 @@ pub(super) async fn apply_prepared(
         if new_loader != inst.loader {
             instances.set_loader(&inst.id, new_loader.clone())?;
         }
-        record::write_state(&game_dir, &new_origin, new_state, old_state, &objects, &missing)
+        Ok(())
     };
     if let Err(e) = run() {
         // Ce qui n'a pas été posé n'existe pas encore : `revert` tolère une opération inachevée.
@@ -370,7 +374,14 @@ pub(super) async fn apply_prepared(
         let _ = instances.set_loader(&inst.id, inst.loader.clone());
         return Err(fail(e, &mf));
     }
+    // La mise à jour est faite : un relevé non réécrit n'est pas fatal (l'ancien, d'une autre origine, sera ignoré et
+    // la prochaine mise à jour retéléchargera l'ancien pack).
+    if let Err(e) = record::write_state(&game_dir, &new_origin, new_state, old_state, &objects, &missing, &missing_projects) {
+        tracing::warn!("relevé du modpack non réécrit après la mise à jour : {e}");
+    }
     prune_backups(&game_dir);
+    let mut missing = missing;
+    missing.extend(unresolved.into_iter().map(|(label, _)| label));
     Ok(ModpackUpdateResult {
         added,
         removed,

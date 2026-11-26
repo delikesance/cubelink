@@ -2,19 +2,20 @@
 
 use super::*;
 
-/// Nouveau zip CurseForge lu (mods résolus par `cf`, overrides et contenu effectif) avec les options propres à ce
-/// format (CDN CurseForge autorisés).
-async fn read_pack(path: &Path, cf: &CfResolver, opts: &ImportOptions, cancel: &Arc<AtomicBool>) -> Result<(NewPack, ImportOptions)> {
+/// Zip CurseForge lu (mods résolus par `cf`, overrides et contenu effectif), avec les options propres à ce format
+/// (CDN CurseForge autorisés) et les mods que `cf` n'a pas pu décrire (libellé, projet).
+async fn read_pack(path: &Path, cf: &CfResolver, opts: &ImportOptions, cancel: &Arc<AtomicBool>) -> Result<(NewPack, ImportOptions, Vec<(String, Provenance)>)> {
     let mut zip = mrpack::open_zip(path)?;
     let cfpack = crate::cf_pack::read(&mut zip, cf, opts, cancel).await?;
     let over = mrpack::plan_overrides(&mut zip, &cfpack.opts, &cfpack.layout)?;
     let hashes = hash_overrides(&mut zip, &over)?;
     let state = state_of(&cfpack.index, &over, &hashes);
-    Ok((NewPack { idx: cfpack.index, zip, over, state }, cfpack.opts))
+    Ok((NewPack { idx: cfpack.index, zip, over, state }, cfpack.opts, cfpack.unresolved))
 }
 
 /// CurseForge : nouveau pack résolu par `cf`, ancien état = `recorded` s'il est fourni, sinon reconstruit depuis
 /// `old_pack` et les empreintes de l'API.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn prepare(
     inst: &Instance,
     recorded: Option<State>,
@@ -23,22 +24,32 @@ pub(super) async fn prepare(
     new_origin: &PackOrigin,
     cf: &CfResolver,
     opts: &ImportOptions,
+    cancel: &Arc<AtomicBool>,
 ) -> Result<Prepared> {
     if recorded.is_none() && !cf.has_api_key() {
         return Err(invalid(
             "impossible de comparer avec la version installée sans le relevé de ses fichiers : réinstalle le modpack pour pouvoir le mettre à jour",
         ));
     }
-    let cancel = Arc::new(AtomicBool::new(false));
-    let (new, new_opts) = read_pack(new_pack, cf, opts, &cancel).await?;
+    let (new, new_opts, new_unresolved) = read_pack(new_pack, cf, opts, cancel).await?;
     check_compatible(inst, &new.idx, new_origin)?;
     let old_state = match (recorded, old_pack) {
         (Some(state), _) => state,
-        (None, Some(old)) => read_pack(old, cf, opts, &cancel).await?.0.state,
+        (None, Some(old)) => {
+            let (old, _, old_unresolved) = read_pack(old, cf, opts, cancel).await?;
+            // Ancien état incomplet : un mod non décrit resterait à côté de sa nouvelle version.
+            if !old_unresolved.is_empty() {
+                return Err(Error::Network(
+                    "CurseForge n'a pas pu décrire tous les mods de la version installée : réessaie plus tard".into(),
+                ));
+            }
+            old.state
+        }
         (None, None) => return Err(invalid("version installée du modpack nécessaire pour comparer")),
     };
     let mut prepared = assemble(inst, old_state, new, new_origin)?;
     prepared.opts = Some(new_opts);
+    prepared.unresolved = new_unresolved;
     Ok(prepared)
 }
 

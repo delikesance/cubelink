@@ -75,6 +75,7 @@ fn add(files: &mut BTreeMap<String, RecFile>, path: &str, digest: Digest, proven
 pub(crate) fn write_install_record(
     game_dir: &Path,
     placed: &[PlacedFile<'_>],
+    expected_missing: &[&MrpackFile],
     archive: &mut ZipArchive<std::fs::File>,
     overrides: &[OverrideEntry],
 ) -> Result<()> {
@@ -82,6 +83,10 @@ pub(crate) fn write_install_record(
     let mut files = BTreeMap::new();
     for p in placed {
         add(&mut files, &p.file.path, index_digest(p.file, p.sha256), p.file.provenance.clone());
+    }
+    // Non posé (mod non redistribuable) mais d'empreinte connue : le joueur le posera ; ce sera alors le fichier du pack.
+    for f in expected_missing.iter().filter(|f| !f.unverified && !f.sha1.is_empty()) {
+        add(&mut files, &f.path, Digest::of_index(f), f.provenance.clone());
     }
     for (o, hex) in overrides.iter().zip(hashes) {
         add(&mut files, &o.rel, Digest { alg: Alg::Sha512, hex }, None);
@@ -91,7 +96,7 @@ pub(crate) fn write_install_record(
 
 /// Complète l'origine du relevé écrit à l'import. Sans relevé : rien à faire.
 pub fn stamp_origin(game_dir: &Path, origin: &PackOrigin) -> Result<()> {
-    let Ok(raw) = std::fs::read(record_path(game_dir)) else {
+    let Some(raw) = read_raw(&record_path(game_dir))? else {
         return Ok(());
     };
     let mut record: Record =
@@ -101,8 +106,8 @@ pub fn stamp_origin(game_dir: &Path, origin: &PackOrigin) -> Result<()> {
 }
 
 /// Réécrit le relevé après une mise à jour : contenu du NOUVEAU pack (`new_state`) et `origin`.
-/// `objects` : objets du magasin téléchargés (sha256 des fichiers sans empreinte). `missing` : fichiers non posés, dont
-/// l'ancienne version reste sur le disque (on garde alors son entrée de l'ancien état, s'il y en avait une).
+/// `objects` : objets du magasin téléchargés (sha256 des fichiers sans empreinte). `missing` : fichiers du nouveau
+/// pack non posés ; `missing_projects` : leurs projets, plus ceux que la source n'a pas pu décrire.
 pub(super) fn write_state(
     game_dir: &Path,
     origin: &PackOrigin,
@@ -110,35 +115,54 @@ pub(super) fn write_state(
     old_state: &State,
     objects: &BTreeMap<String, StoredObject>,
     missing: &[String],
+    missing_projects: &HashSet<Provenance>,
 ) -> Result<()> {
     let mut files = BTreeMap::new();
     for (key, item) in &new_state.items {
-        let kept_old = missing.contains(&item.path);
-        let Some(src) = (if kept_old { old_state.items.get(key) } else { Some(item) }) else {
-            continue;
-        };
-        let mut digest = src.digest.clone();
-        if digest.hex.is_empty() {
-            match objects.get(&item.path) {
-                Some(o) if !kept_old => digest = Digest { alg: Alg::Sha256, hex: o.sha256.to_ascii_lowercase() },
-                _ => continue,
+        if missing.contains(&item.path) {
+            match old_state.items.get(key) {
+                // Même chemin : l'ancienne version y est restée.
+                Some(old) => add_known(&mut files, old),
+                // Autre chemin : la version attendue, que le joueur posera lui-même (empreinte connue seulement).
+                None => add_known(&mut files, item),
             }
+            continue;
         }
-        add(&mut files, &src.path, digest, src.provenance.clone());
+        let digest = match objects.get(&item.path) {
+            Some(o) if item.digest.hex.is_empty() => Digest { alg: Alg::Sha256, hex: o.sha256.to_ascii_lowercase() },
+            None if item.digest.hex.is_empty() => continue,
+            _ => item.digest.clone(),
+        };
+        add(&mut files, &item.path, digest, item.provenance.clone());
     }
     // Ancienne version d'un mod dont la nouvelle est introuvable : elle reste sur le disque, donc dans le relevé.
-    let missing_projects = missing_projects(new_state, missing);
     for (key, old) in &old_state.items {
         if !new_state.items.contains_key(key) && old.provenance.as_ref().is_some_and(|p| missing_projects.contains(p)) {
-            add(&mut files, &old.path, old.digest.clone(), old.provenance.clone());
+            add_known(&mut files, old);
         }
     }
     save(game_dir, &Record { format: RECORD_FORMAT, origin: Some(origin.clone()), files })
 }
 
+/// Ajoute `item` au relevé si son empreinte est connue (une empreinte vide ne prouverait rien).
+fn add_known(files: &mut BTreeMap<String, RecFile>, item: &Item) {
+    if !item.digest.hex.is_empty() {
+        add(files, &item.path, item.digest.clone(), item.provenance.clone());
+    }
+}
+
+/// Lit le relevé ; `Ok(None)` s'il n'existe pas, erreur pour tout autre échec de lecture.
+fn read_raw(path: &Path) -> Result<Option<Vec<u8>>> {
+    match std::fs::read(path) {
+        Ok(raw) => Ok(Some(raw)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
 /// Copie le relevé actuel dans la sauvegarde (sans relevé : pas de copie).
 pub(super) fn save_to_backup(game_dir: &Path, bdir: &Path) -> Result<()> {
-    let Ok(raw) = std::fs::read(record_path(game_dir)) else {
+    let Some(raw) = read_raw(&record_path(game_dir))? else {
         return Ok(());
     };
     std::fs::create_dir_all(bdir)?;
@@ -147,9 +171,9 @@ pub(super) fn save_to_backup(game_dir: &Path, bdir: &Path) -> Result<()> {
 
 /// Remet le relevé de la sauvegarde ; sans copie (sauvegarde antérieure aux relevés), supprime le relevé.
 pub(super) fn restore_from_backup(game_dir: &Path, bdir: &Path) -> Result<()> {
-    match std::fs::read(bdir.join(BACKUP_COPY)) {
-        Ok(raw) => write_atomic(&record_path(game_dir), &raw),
-        Err(_) => match std::fs::remove_file(record_path(game_dir)) {
+    match read_raw(&bdir.join(BACKUP_COPY))? {
+        Some(raw) => write_atomic(&record_path(game_dir), &raw),
+        None => match std::fs::remove_file(record_path(game_dir)) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
             _ => Ok(()),
         },

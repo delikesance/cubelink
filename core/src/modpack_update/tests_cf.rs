@@ -212,7 +212,7 @@ async fn unknown_fingerprint_jar_on_disk_that_the_new_pack_drops_blocks_the_upda
 
 /// Ce que `apply` fait avant de planifier : préparation CurseForge puis garde anti-doublon.
 async fn guard(e: &Env, inst: &Instance, game_dir: &Path, old: &Path, new: &Path) -> Result<()> {
-    let prepared = curseforge::prepare(inst, None, Some(old), new, &origin("2"), &resolver(e), &opts()).await?;
+    let prepared = curseforge::prepare(inst, None, Some(old), new, &origin("2"), &resolver(e), &opts(), &Arc::new(AtomicBool::new(false))).await?;
     curseforge::refuse_duplicates(&prepared, game_dir)
 }
 
@@ -280,7 +280,7 @@ async fn recorded_state_is_used_without_reading_the_old_pack() {
         )]),
     };
 
-    let p = curseforge::prepare(&inst, Some(recorded), Some(&v1), &v2, &origin("2"), &resolver(&e), &opts()).await.unwrap();
+    let p = curseforge::prepare(&inst, Some(recorded), Some(&v1), &v2, &origin("2"), &resolver(&e), &opts(), &Arc::new(AtomicBool::new(false))).await.unwrap();
 
     assert_eq!(p.old_state.items.len(), 1);
     assert_eq!(batch_calls().await - before, 1, "seul le nouveau pack doit être résolu");
@@ -426,4 +426,69 @@ async fn disabled_curseforge_mod_stays_disabled_in_its_new_version() {
 
     assert!(g.join("mods/a-2.jar.disabled").is_file());
     assert!(!g.join("mods/a-2.jar").exists());
+}
+
+// ---------- Relecture croisée : mods non résolus, mods non redistribuables posés par le joueur, jar désactivé ----------
+
+/// Installe `v1` puis date le relevé, comme le fait l'app : la mise à jour part du relevé.
+async fn install_with_record(e: &Env, v1: &Path) -> (Instance, PathBuf) {
+    let (inst, g) = install(e, v1).await;
+    record::stamp_origin(&g, &origin("1")).unwrap();
+    assert!(!needs_old_pack(&e.instances, &inst.id).unwrap());
+    (inst, g)
+}
+
+#[tokio::test]
+async fn unresolved_new_mod_without_key_keeps_its_old_version_and_is_reported() {
+    let e = env().await;
+    let r1 = CfMod { project: 900, ..cf_mod(7, "r-1.jar", b"r version 1") };
+    let r2 = CfMod { project: 900, has_url: false, ..cf_mod(8, "r-2.jar", b"r version 2") };
+    mount_mods(&e, &[&r1, &r2]).await;
+    let v1 = cf_zip(&e, "v1", "1.21.1", &[&r1], &[]);
+    let v2 = cf_zip(&e, "v2", "1.21.1", &[&r2], &[("overrides/config/x.toml", CFG2)]);
+    let (inst, g) = install_with_record(&e, &v1).await;
+    // Sans clé : r-2 n'est pas redistribuable, la redirection web ne le résout pas.
+    let no_key = CfResolver::with_base_url(e.server.uri());
+
+    let r = update_with(&e, &no_key, &inst.id, None, &v2).await.unwrap();
+
+    assert_eq!(std::fs::read(g.join("mods/r-1.jar")).unwrap(), b"r version 1");
+    assert_eq!(r.removed, 0);
+    assert_eq!(r.missing.len(), 1, "{:?}", r.missing);
+    assert_eq!(std::fs::read(g.join("config/x.toml")).unwrap(), CFG2);
+}
+
+#[tokio::test]
+async fn non_redistributable_mod_placed_by_the_player_is_updated_without_duplicate() {
+    let e = env().await;
+    let r1 = CfMod { project: 900, has_url: false, ..cf_mod(7, "r-1.jar", b"r version 1") };
+    let r2 = CfMod { project: 900, ..cf_mod(8, "r-2.jar", b"r version 2") };
+    mount_mods(&e, &[&r1, &r2]).await;
+    let v1 = cf_zip(&e, "v1", "1.21.1", &[&r1], &[]);
+    let v2 = cf_zip(&e, "v2", "1.21.1", &[&r2], &[]);
+    let (inst, g) = install_with_record(&e, &v1).await;
+    // Le joueur pose lui-même le jar officiel que l'import n'a pas pu télécharger.
+    std::fs::create_dir_all(g.join("mods")).unwrap();
+    std::fs::write(g.join("mods/r-1.jar"), b"r version 1").unwrap();
+
+    update_with(&e, &resolver(&e), &inst.id, None, &v2).await.unwrap();
+
+    assert!(!g.join("mods/r-1.jar").exists(), "deux versions du même mod");
+    assert_eq!(std::fs::read(g.join("mods/r-2.jar")).unwrap(), b"r version 2");
+}
+
+#[tokio::test]
+async fn disabled_unknown_fingerprint_jar_on_disk_blocks_the_update() {
+    let e = env().await;
+    let (a1, a2) = (cf_mod(1, "a-1.jar", A1), cf_mod(2, "a-2.jar", A2));
+    let x = CfMod { has_url: false, has_sha1: false, ..cf_mod(6, "x.jar", X1) };
+    mount_mods(&e, &[&a1, &a2, &x]).await;
+    let v1 = cf_zip(&e, "v1", "1.21.1", &[&a1, &x], &[]);
+    let v2 = cf_zip(&e, "v2", "1.21.1", &[&a2], &[]);
+    let (inst, g) = install(&e, &v1).await;
+    std::fs::write(g.join("mods/x.jar.disabled"), X1).unwrap();
+
+    let msg = err_text(update(&e, &inst.id, &v1, &v2).await);
+
+    assert!(msg.contains("mods/x.jar"), "{msg}");
 }

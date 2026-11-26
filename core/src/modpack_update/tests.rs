@@ -599,3 +599,6 @@ async fn unreachable_tolerant_file_is_reported_missing_and_the_rest_is_applied()
     assert!(!g.join("mods/restreint.jar").exists());
     assert_eq!(e.instances.get(&inst.id).unwrap().pack, Some(origin("v2")));
 }
+
+#[path = "tests_dup.rs"]
+mod dup;

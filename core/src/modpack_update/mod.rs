@@ -52,6 +52,7 @@ mod check;
 mod curseforge;
 mod record;
 mod digest;
+mod duplicates;
 mod plan;
 mod state;
 mod undo;

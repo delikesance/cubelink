@@ -267,6 +267,12 @@ pub(super) async fn apply_prepared(
         Action::Add { item, .. } | Action::Replace { item, .. } => !missing.contains(&item.path),
         Action::Remove { old } => !old.project.as_ref().is_some_and(|p| missing_projects.contains(p)),
     });
+    // Un jar du pack dont le modid est déjà porté par un jar du joueur (même mod pris sur l'autre source) n'est pas posé.
+    let staged_dir = bdir.join("staged");
+    duplicates::drop_player_duplicates(&mut plan, &game_dir, old_state, new_state, |item| match item.source {
+        Source::Index(_) => objects.get(&item.path).map(|o| store_root.join(&o.rel_path)),
+        Source::Over(_) => Some(staged_dir.join(item.path.split('/').collect::<PathBuf>())),
+    });
     let (added, removed, replaced) = plan.counts();
 
     // Phase B : modification de l'instance, manifeste écrit avant le premier déplacement.

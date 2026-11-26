@@ -169,7 +169,11 @@ pub async fn apply(
     let recorded = record::old_state(&game_dir, &inst);
     let prepared = match mrpack::detect(new_pack)? {
         mrpack::PackKind::Modrinth => prepare_modrinth(&inst, recorded, old_pack, new_pack, &new_origin, opts)?,
-        mrpack::PackKind::CurseForge => curseforge::prepare(&inst, recorded, old_pack, new_pack, &new_origin, cf, opts).await?,
+        mrpack::PackKind::CurseForge => {
+            let prepared = curseforge::prepare(&inst, recorded, old_pack, new_pack, &new_origin, cf, opts).await?;
+            curseforge::refuse_duplicates(&prepared, &game_dir)?;
+            prepared
+        }
         mrpack::PackKind::Plain => return Err(invalid("format de modpack inconnu")),
     };
     apply_prepared(instances, &inst, prepared, new_origin, store_root, index, opts, &progress, &cancel).await

@@ -143,6 +143,12 @@ pub struct CfFile {
     /// Empreinte CurseForge (murmur2) du fichier ; 0 si absente.
     #[serde(default)]
     pub file_fingerprint: u64,
+    /// 1 = release, 2 = beta, 3 = alpha.
+    #[serde(default)]
+    pub release_type: u32,
+    /// Fichier de serveur d'un modpack (à ne jamais proposer à un joueur).
+    #[serde(default)]
+    pub is_server_pack: bool,
 }
 
 /// Correspondance exacte d'une empreinte (`POST /v1/fingerprints/432`).

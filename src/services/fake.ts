@@ -1192,7 +1192,9 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
       packUpdateCalls.push({ kind: "apply", args: [id, versionId] });
       need(id);
       packUpdates.set(id, null);
-      return { added: 3, removed: 1, replaced: 12, kept: ["config/sodium-options.json"], missing: [], backup_id: "pack-backup-demo" };
+      // Identifiant numérique = fichier CurseForge : un mod non redistribuable reste à télécharger soi-même.
+      const missing = /^\d+$/.test(versionId) ? ["mods/mod-exclusif.jar"] : [];
+      return { added: 3, removed: 1, replaced: 12, kept: ["config/sodium-options.json"], missing, backup_id: "pack-backup-demo" };
     },
     modpackUpdateUndo: async (id, backupId) => {
       packUpdateCalls.push({ kind: "undo", args: [id, backupId] });

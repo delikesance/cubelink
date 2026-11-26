@@ -34,17 +34,17 @@ export function PackUpdate({ services, inst, locked, onChanged }: { services: Sv
   const alive = useRef(true);
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
 
-  const modrinth = inst.pack?.source === "modrinth";
+  const supported = inst.pack?.source === "modrinth" || inst.pack?.source === "curseforge";
   const versionId = inst.pack?.version_id ?? "";
 
   // Détection : meilleur effort, silencieuse hors ligne (la commande garde son résultat 30 minutes).
   const check = useCallback(() => {
-    if (!modrinth) { setUpdate(null); return; }
+    if (!supported) { setUpdate(null); return; }
     services.modpackUpdateCheck(inst.id).then(
       (u) => { if (alive.current) setUpdate(u); },
       () => { if (alive.current) setUpdate(null); },
     );
-  }, [services, inst.id, modrinth]);
+  }, [services, inst.id, supported]);
   useEffect(() => { check(); }, [check, versionId]);
 
   // Progression des téléchargements pendant la mise à jour.
@@ -131,6 +131,12 @@ export function PackUpdate({ services, inst, locked, onChanged }: { services: Sv
             <p className="ipg-note">
               {plural(done.r.kept.length, "fichier à toi a été conservé", "fichiers à toi ont été conservés")} tel{done.r.kept.length > 1 ? "s" : ""} quel{done.r.kept.length > 1 ? "s" : ""} :{" "}
               {done.r.kept.slice(0, 3).join(", ")}{done.r.kept.length > 3 ? `, … (+${done.r.kept.length - 3})` : ""}.
+            </p>
+          )}
+          {done.r.missing.length > 0 && (
+            <p className="ipg-note">
+              {plural(done.r.missing.length, "mod à télécharger", "mods à télécharger")} toi-même :{" "}
+              {done.r.missing.slice(0, 5).join(", ")}{done.r.missing.length > 5 ? `, … (+${done.r.missing.length - 5})` : ""}.
             </p>
           )}
           <div className="ipg-upd-act">

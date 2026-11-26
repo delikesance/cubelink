@@ -28,7 +28,8 @@ pub struct CfDownload {
 /// Fichier résolu par l'API officielle (résolution groupée).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CfApiFile {
-    pub url: String,
+    /// `None` : l'auteur n'autorise pas la distribution tierce (le SHA-1 et le nom restent connus).
+    pub url: Option<String>,
     pub file_name: String,
     pub sha1: String,
     pub size: u64,
@@ -100,8 +101,8 @@ impl CfResolver {
         self.api_key.is_some()
     }
 
-    /// Résout tous les fichiers en quelques requêtes (500 par lot). Les fichiers inconnus ou sans URL de
-    /// distribution (téléchargement tiers désactivé par l'auteur) sont absents du résultat.
+    /// Résout tous les fichiers en quelques requêtes (500 par lot). Les fichiers inconnus sont absents du résultat ;
+    /// ceux sans URL de distribution (téléchargement tiers désactivé par l'auteur) y figurent avec `url: None`.
     pub async fn resolve_batch(&self, file_ids: &[u64]) -> Result<HashMap<u64, CfApiFile>> {
         let Some(key) = &self.api_key else { return Ok(HashMap::new()) };
         let mut out = HashMap::new();
@@ -121,7 +122,7 @@ impl CfResolver {
             }
             let body: FilesResponse = resp.json().await.map_err(|e| Error::Network(format!("réponse CurseForge invalide : {e}")))?;
             for f in body.data {
-                let Some(url) = f.download_url.filter(|u| !u.is_empty()) else { continue };
+                let url = f.download_url.filter(|u| !u.is_empty());
                 let sha1 = f.hashes.iter().find(|h| h.algo == 1).map(|h| h.value.to_ascii_lowercase()).unwrap_or_default();
                 out.insert(f.id, CfApiFile { url, file_name: f.file_name, sha1, size: f.file_length });
             }
@@ -197,7 +198,7 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[tokio::test]
-    async fn batch_resolves_in_one_request_and_skips_restricted() {
+    async fn batch_resolves_in_one_request_and_keeps_restricted_without_url() {
         let s = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/mods/files"))
@@ -211,9 +212,11 @@ mod tests {
             .await;
         let r = CfResolver::with_base_url("http://127.0.0.1:1").with_api(s.uri(), "k");
         let m = r.resolve_batch(&[1, 2]).await.unwrap();
-        assert_eq!(m.len(), 1);
+        assert_eq!(m.len(), 2);
         assert_eq!(m[&1].sha1, "ab");
         assert_eq!(m[&1].size, 3);
+        assert_eq!(m[&1].url.as_deref(), Some("https://edge.forgecdn.net/files/0/1/a.jar"));
+        assert_eq!((m[&2].url.as_deref(), m[&2].file_name.as_str()), (None, "b.jar"));
     }
 
     #[tokio::test]

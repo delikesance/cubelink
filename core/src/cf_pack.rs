@@ -83,6 +83,13 @@ fn cf_loader(m: &CfMinecraft) -> Result<LoaderSpec> {
     Ok(LoaderSpec { loader, version: version.to_string() })
 }
 
+/// Loader déclaré par le `manifest.json` d'un zip CurseForge (sans rien résoudre ni télécharger).
+pub fn manifest_loader(zip_path: &std::path::Path) -> Result<LoaderSpec> {
+    let mut archive = crate::mrpack::open_zip(zip_path)?;
+    let m = read_cf_manifest(&mut archive).ok_or_else(|| invalid("manifest.json CurseForge invalide"))?;
+    cf_loader(&m.minecraft)
+}
+
 /// Pack CurseForge résolu : index au format commun, emplacement des overrides, mods introuvables et options
 /// d'import adaptées (CDN CurseForge autorisés, plus de parallélisme).
 pub(crate) struct CfPack {
@@ -139,15 +146,31 @@ pub(crate) async fn read(archive: &mut ZipArchive<File>, cf: &CfResolver, opts: 
                 return ((p, f), Err(Error::Cancelled));
             }
             let r = async {
-                let (d, sha1, size) = match batch_ref.get(&f) {
-                    Some(b) => (CfDownload { url: b.url.clone(), file_name: b.file_name.clone() }, b.sha1.clone(), b.size),
-                    None => (cf.resolve(p, f).await?, String::new(), 0),
+                let (downloads, file_name, sha1, size) = match batch_ref.get(&f) {
+                    Some(b) => {
+                        let direct = match &b.url {
+                            Some(url) => Some(CfDownload { url: url.clone(), file_name: b.file_name.clone() }),
+                            // Distribution tierce interdite : la redirection web peut encore répondre, sinon le fichier
+                            // reste dans l'index sans URL (nom et SHA-1 connus) et sera « introuvable » au téléchargement.
+                            None => cf.resolve(p, f).await.ok(),
+                        };
+                        match direct {
+                            Some(d) => (vec![d.url], d.file_name, b.sha1.clone(), b.size),
+                            None => (Vec::new(), b.file_name.clone(), b.sha1.clone(), b.size),
+                        }
+                    }
+                    None => {
+                        let d = cf.resolve(p, f).await?;
+                        (vec![d.url], d.file_name, String::new(), 0)
+                    }
                 };
-                check_url(&d.url, opts_ref)?;
-                let dir = if d.file_name.to_ascii_lowercase().ends_with(".zip") { "resourcepacks" } else { "mods" };
-                let path = format!("{dir}/{}", d.file_name);
+                for url in &downloads {
+                    check_url(url, opts_ref)?;
+                }
+                let dir = if file_name.to_ascii_lowercase().ends_with(".zip") { "resourcepacks" } else { "mods" };
+                let path = format!("{dir}/{file_name}");
                 validate_file_path(&path)?;
-                Ok::<_, Error>((path, d.url, sha1, size))
+                Ok::<_, Error>((path, downloads, sha1, size))
             }
             .await;
             ((p, f), r)
@@ -160,11 +183,11 @@ pub(crate) async fn read(archive: &mut ZipArchive<File>, cf: &CfResolver, opts: 
                 tracing::warn!("mod CurseForge {p}/{f} non résolu : {e}");
                 missing.push(format!("projet {p} / fichier {f}"));
             }
-            Ok((path, url, sha1, size)) => {
+            Ok((path, downloads, sha1, size)) => {
                 if seen_paths.insert(path.to_ascii_lowercase()) {
                     let unverified = sha1.is_empty();
                     let provenance = Some(Provenance { source: "curseforge".into(), id: p.to_string() });
-                    files.push(MrpackFile { path, sha1, sha512: String::new(), downloads: vec![url], file_size: size, env: None, unverified, tolerant: true, provenance });
+                    files.push(MrpackFile { path, sha1, sha512: String::new(), downloads, file_size: size, env: None, unverified, tolerant: true, provenance });
                 }
             }
         }

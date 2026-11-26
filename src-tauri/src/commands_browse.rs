@@ -119,6 +119,26 @@ struct ProgressEvent<'a> {
     label: &'a str,
 }
 
+/// Sources dont la mise à jour de modpack est prise en charge.
+fn is_updatable_source(source: &str) -> bool {
+    matches!(source, "modrinth" | "curseforge")
+}
+
+/// Identifiant de version : `[A-Za-z0-9_-]`, 1 à 64 caractères pour Modrinth ; chiffres seulement pour CurseForge
+/// (identifiant de fichier).
+fn valid_version_id(source: &str, id: &str) -> bool {
+    let ok = |b: u8| if source == "curseforge" { b.is_ascii_digit() } else { b.is_ascii_alphanumeric() || b == b'_' || b == b'-' };
+    (1..=64).contains(&id.len()) && id.bytes().all(ok)
+}
+
+/// Loader déclaré par le pack téléchargé (`.mrpack` ou zip CurseForge).
+fn pack_loader(file: &Path) -> core_lib::types::Result<core_lib::types::LoaderSpec> {
+    match core_lib::mrpack::detect(file)? {
+        core_lib::mrpack::PackKind::CurseForge => core_lib::cf_pack::manifest_loader(file),
+        _ => Ok(core_lib::mrpack::parse_index(file)?.loader),
+    }
+}
+
 impl AppState {
     fn emit_browse_progress(&self, done: u32, total: u32, label: &str) {
         self.emit_event("browse://progress", &ProgressEvent { done, total, label });
@@ -316,11 +336,11 @@ impl AppState {
         mod_fix::undo(&dir, backup_id, &self.store, &inst.minecraft, inst.loader.loader).map_err(|e| user_msg(&e))
     }
 
-    /// Mise à jour disponible pour le modpack installé (Modrinth), `None` si l'instance est à jour ou sans origine connue.
+    /// Mise à jour disponible pour le modpack installé (Modrinth ou CurseForge), `None` si l'instance est à jour ou sans origine connue.
     /// Mise en cache 30 minutes ; une erreur réseau est renvoyée (l'interface l'ignore) et n'est pas mise en cache.
     pub async fn modpack_update_check(&self, instance_id: &str) -> Result<Option<ModpackUpdate>, String> {
         let (inst, _) = self.instance_game_dir(instance_id)?;
-        let Some(pack) = inst.pack.clone().filter(|o| o.source == "modrinth") else { return Ok(None) };
+        let Some(pack) = inst.pack.clone().filter(|o| is_updatable_source(&o.source)) else { return Ok(None) };
         if let Some((v, at, r)) = lock(update_cache()).get(instance_id) {
             if *v == pack.version_id && at.elapsed() < UPDATE_CHECK_TTL {
                 return Ok(r.clone());
@@ -336,10 +356,10 @@ impl AppState {
     pub async fn modpack_update_apply(&self, instance_id: &str, version_id: &str) -> Result<ModpackUpdateResult, String> {
         let (inst, _) = self.instance_game_dir(instance_id)?;
         self.ensure_not_running(instance_id)?;
-        let Some(pack) = inst.pack.clone().filter(|o| o.source == "modrinth") else {
-            return Err("Cette instance n'a pas d'origine Modrinth connue : la mise à jour n'est pas possible.".into());
+        let Some(pack) = inst.pack.clone().filter(|o| is_updatable_source(&o.source)) else {
+            return Err("Cette instance n'a pas d'origine de modpack connue : la mise à jour n'est pas possible.".into());
         };
-        if version_id.is_empty() || !version_id.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        if !valid_version_id(&pack.source, version_id) {
             return Err("identifiant de version invalide".into());
         }
         let _guard = PackUpdateGuard::take(instance_id)?;
@@ -354,28 +374,34 @@ impl AppState {
         let p = providers();
         let dl = DlOptions::default();
         let cb = |d: u32, t: u32, l: &str| self.emit_browse_progress(d, t, l);
+        let source = if pack.source == "curseforge" { BrowseSource::Curseforge } else { BrowseSource::Modrinth };
         let input = |v: &str| BrowseInstallInput {
-            source: BrowseSource::Modrinth,
+            source,
             id: pack.project_id.clone(),
             kind: BrowseKind::Modpack,
             version_id: Some(v.to_string()),
             instance_id: None,
             ram_mb: None,
         };
-        let (old_file, _) = browse::fetch_modpack(&p, &input(&pack.version_id), &self.paths.store, &self.store, &tmp.join("old"), &dl, &cb)
-            .await
-            .map_err(|e| format!("Impossible de récupérer la version installée du modpack pour la comparer ({}). La mise à jour n'a pas été appliquée.", user_msg(&e)))?;
+        // L'ancien pack n'est retéléchargé que si l'instance n'a pas de relevé de ses fichiers.
+        let old_file = if modpack_update::needs_old_pack(&self.instances, &inst.id).map_err(|e| user_msg(&e))? {
+            let (file, _) = browse::fetch_modpack(&p, &input(&pack.version_id), &self.paths.store, &self.store, &tmp.join("old"), &dl, &cb)
+                .await
+                .map_err(|e| format!("Impossible de récupérer la version installée du modpack pour la comparer ({}). La mise à jour n'a pas été appliquée.", user_msg(&e)))?;
+            Some(file)
+        } else {
+            None
+        };
         let (new_file, new_origin) =
             browse::fetch_modpack(&p, &input(version_id), &self.paths.store, &self.store, &tmp.join("new"), &dl, &cb).await.map_err(|e| user_msg(&e))?;
 
         // Le loader change de version (même Minecraft, même loader) : il doit être installable AVANT de toucher à l'instance.
         let new_loader = {
             let f = new_file.clone();
-            tokio::task::spawn_blocking(move || core_lib::mrpack::parse_index(&f))
+            tokio::task::spawn_blocking(move || pack_loader(&f))
                 .await
                 .map_err(|_| "mise à jour interrompue".to_string())?
                 .map_err(|e| user_msg(&e))?
-                .loader
         };
         if new_loader.loader == inst.loader.loader && new_loader != inst.loader {
             let probe = Instance { loader: new_loader, ..inst.clone() };
@@ -391,6 +417,7 @@ impl AppState {
             opts.allowed_hosts.extend(["127.0.0.1".to_string(), "localhost".to_string()]);
             opts.allow_http = true;
         }
+        let cf = cf_resolver();
         let emit = self.emit.clone();
         let progress: core_lib::mrpack::FilesProgress =
             Arc::new(move |d, t| emit("browse://progress", serde_json::json!({ "done": d, "total": t, "label": "Mise à jour du modpack" })));
@@ -398,7 +425,7 @@ impl AppState {
         // Les futurs d'import ne sont pas prouvés `Send` par rustc : on les exécute sur un thread dédié.
         let handle = tokio::runtime::Handle::current();
         tokio::task::spawn_blocking(move || {
-            handle.block_on(modpack_update::apply(&instances, &id, Some(&old_file), &new_file, new_origin, &core_lib::providers::curseforge::CfResolver::new(), &store_root, &store, &opts, Some(progress), Arc::new(std::sync::atomic::AtomicBool::new(false))))
+            handle.block_on(modpack_update::apply(&instances, &id, old_file.as_deref(), &new_file, new_origin, &cf, &store_root, &store, &opts, Some(progress), Arc::new(std::sync::atomic::AtomicBool::new(false))))
         })
         .await
         .map_err(|_| "mise à jour interrompue".to_string())?
@@ -528,14 +555,14 @@ pub async fn mods_fix_undo(state: State<'_, Arc<AppState>>, instance_id: String,
     state.mods_fix_undo(&instance_id, &backup_id).await
 }
 
-/// Mise à jour disponible pour le modpack installé depuis Modrinth (`None` : à jour, instance sans origine Modrinth ou CurseForge). Seules les versions compatibles avec l'instance (même Minecraft, même loader) sont proposées, jamais une plus ancienne, et une pré-version seulement si la version installée en est une. Résultat gardé 30 minutes ; en cas d'erreur réseau la commande échoue et l'interface l'ignore.
+/// Mise à jour disponible pour le modpack installé depuis Modrinth ou CurseForge (`None` : à jour, instance sans origine de modpack, ou CurseForge sans clé d'API). Seules les versions compatibles avec l'instance (même Minecraft, même loader) sont proposées, jamais une plus ancienne, et une pré-version seulement si la version installée en est une. Résultat gardé 30 minutes ; en cas d'erreur réseau la commande échoue et l'interface l'ignore.
 #[tauri::command(rename_all = "snake_case")]
 #[specta::specta(rename_all = "snake_case")]
 pub async fn modpack_update_check(state: State<'_, Arc<AppState>>, instance_id: String) -> Result<Option<ModpackUpdate>, String> {
     state.modpack_update_check(&instance_id).await
 }
 
-/// Met le modpack d'une instance à la version `version_id` (Modrinth, même Minecraft et même loader ; sinon refus). Compare l'ancien `.mrpack` (retéléchargé par `Instance.pack.version_id`), le nouveau et le disque : un fichier du pack n'est remplacé ou retiré que s'il est encore identique à l'ancien ; un fichier modifié par le joueur est gardé (liste `kept`), ceux qu'il a ajoutés, `saves/`, `options.txt`, `servers.dat` et `logs/` ne sont jamais touchés. Tout est téléchargé avant la première modification ; l'ancien état va dans `<instance>/minecraft/.cubelink-pack-backup/<backup_id>/` (3 sauvegardes gardées) et `Instance.pack` (et la version du loader) change en dernier. Refusé si le jeu tourne ou si une autre mise à jour de l'instance est en cours. Progression par `browse://progress`.
+/// Met le modpack d'une instance à la version `version_id` (Modrinth ou CurseForge, même Minecraft et même loader ; sinon refus). Compare l'ancien pack (relevé de l'instance, sinon retéléchargé par `Instance.pack.version_id`), le nouveau et le disque : un fichier du pack n'est remplacé ou retiré que s'il est encore identique à l'ancien ; un fichier modifié par le joueur est gardé (liste `kept`) ; un fichier « tolérant » du nouveau pack introuvable (mod CurseForge non redistribuable) n'arrête pas la mise à jour : il n'est ni ajouté ni remplacé et figure dans `missing`, à poser par le joueur ; ceux qu'il a ajoutés, `saves/`, `options.txt`, `servers.dat` et `logs/` ne sont jamais touchés. Tout est téléchargé avant la première modification ; l'ancien état va dans `<instance>/minecraft/.cubelink-pack-backup/<backup_id>/` (3 sauvegardes gardées) et `Instance.pack` (et la version du loader) change en dernier. Refusé si le jeu tourne ou si une autre mise à jour de l'instance est en cours. Progression par `browse://progress`.
 #[tauri::command(rename_all = "snake_case")]
 #[specta::specta(rename_all = "snake_case")]
 pub async fn modpack_update_apply(state: State<'_, Arc<AppState>>, instance_id: String, version_id: String) -> Result<ModpackUpdateResult, String> {
@@ -671,7 +698,7 @@ mod tests {
         assert!(st.modpack_update_check("../x").await.unwrap_err().contains("invalide"));
         assert!(st.modpack_update_apply("../x", "abc").await.unwrap_err().contains("invalide"));
         assert!(st.modpack_update_undo("../x", "abc").await.unwrap_err().contains("invalide"));
-        // Sans origine Modrinth : rien à proposer, rien à appliquer.
+        // Sans origine de modpack : rien à proposer, rien à appliquer.
         assert_eq!(st.modpack_update_check(&inst.id).await.unwrap(), None);
         assert!(st.modpack_update_apply(&inst.id, "abc").await.unwrap_err().contains("origine"));
         // Identifiant de version et de sauvegarde validés.
@@ -679,10 +706,25 @@ mod tests {
         assert!(st.modpack_update_apply(&inst.id, "../x").await.unwrap_err().contains("invalide"));
         assert!(st.modpack_update_apply(&inst.id, "").await.unwrap_err().contains("invalide"));
         assert!(st.modpack_update_undo(&inst.id, "../x").await.is_err());
+        // CurseForge : l'identifiant de version ne contient que des chiffres.
+        st.instances.set_pack(&inst.id, Some(core_lib::types::PackOrigin { source: "curseforge".into(), project_id: "100".into(), version_id: "1".into() })).unwrap();
+        assert!(st.modpack_update_apply(&inst.id, "abc").await.unwrap_err().contains("invalide"));
+        assert!(st.modpack_update_apply(&inst.id, "12x").await.unwrap_err().contains("invalide"));
         // Jeu en cours : refus.
         *lock(&st.game) = Some(inst.id.clone());
         assert!(st.modpack_update_apply(&inst.id, "abc").await.unwrap_err().contains("jeu"));
         assert!(st.modpack_update_undo(&inst.id, "123").await.unwrap_err().contains("jeu"));
+    }
+
+    #[test]
+    fn version_ids_are_validated_per_source() {
+        assert!(valid_version_id("modrinth", "modpack-7-v2"));
+        assert!(valid_version_id("modrinth", "AANobbMI_x"));
+        assert!(!valid_version_id("modrinth", "../x"));
+        assert!(!valid_version_id("modrinth", ""));
+        assert!(!valid_version_id("modrinth", &"a".repeat(65)));
+        assert!(valid_version_id("curseforge", "5002"));
+        assert!(!valid_version_id("curseforge", "modpack-7-v2"));
     }
 
     #[test]

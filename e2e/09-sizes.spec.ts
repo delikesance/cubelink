@@ -12,6 +12,16 @@ const SIZES: [number, number][] = [[960, 600], [1280, 720]];
 const OUT = path.join(ARTIFACTS, 'sizes');
 const byId = (id: string) => SCREENS.find((s) => s.id === id)!;
 
+/** Profil neuf = cache vide, donc « Vider le cache… » est desactive (volontaire, cf. e2e/20-cache.spec.ts). Pour ouvrir la
+ *  confirmation, `cache_size` annonce 12 Mo ; `cache_clear` reste le vrai. A appeler avant d'ouvrir l'onglet Stockage. */
+async function pretendCacheIsFull(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const internals = (window as any).__TAURI_INTERNALS__;
+    const real = internals.invoke.bind(internals);
+    internals.invoke = (cmd: string, ...rest: unknown[]) => (cmd === 'cache_size' ? Promise.resolve(12 * 1024 * 1024) : real(cmd, ...rest));
+  });
+}
+
 interface Variant { id: string; screen: Screen; setup?: (page: Page) => Promise<void> }
 const VARIANTS: Variant[] = [
   ...SCREENS.map((screen) => ({ id: screen.id, screen })),
@@ -19,7 +29,7 @@ const VARIANTS: Variant[] = [
   { id: 'friends-code-confirm', screen: byId('friends-requests'), setup: async (p) => { await p.getByRole('button', { name: /Générer un nouveau code/ }).click(); } },
   { id: 'settings-network', screen: byId('settings'), setup: async (p) => { await p.getByRole('tab', { name: 'Réseau' }).click(); } },
   { id: 'settings-java', screen: byId('settings'), setup: async (p) => { await p.getByRole('tab', { name: 'Java' }).click(); } },
-  { id: 'settings-storage-confirm', screen: byId('settings'), setup: async (p) => { await p.getByRole('tab', { name: 'Stockage' }).click(); await p.getByRole('button', { name: /Vider le cache/ }).click(); } },
+  { id: 'settings-storage-confirm', screen: byId('settings'), setup: async (p) => { await pretendCacheIsFull(p); await p.getByRole('tab', { name: 'Stockage' }).click(); await p.getByRole('button', { name: /Vider le cache/ }).click(); } },
   { id: 'settings-about', screen: byId('settings'), setup: async (p) => { await p.getByRole('tab', { name: 'À propos' }).click(); } },
   { id: 'error-no-license', screen: { ...byId('error'), hash: '#/error?state=no-license' } },
   { id: 'legal-last-section', screen: byId('legal'), setup: async (p) => { await p.locator('article section, main section').last().scrollIntoViewIfNeeded(); } },

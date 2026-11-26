@@ -198,17 +198,17 @@ export default function InstancePage() {
     goTab(TABS[n].id, true);
   };
 
-  if (instances === null) return <main className="ipg"><p role="status" className="ipg-loading">Chargement du modpack…</p></main>;
+  if (instances === null) return <div className="ipg"><p role="status" className="ipg-loading">Chargement du modpack…</p></div>;
 
   if (!inst) {
     return (
-      <main className="ipg">
+      <div className="ipg">
         <div className="ipg-missing">
           <h1 ref={h1} tabIndex={-1}>Modpack introuvable</h1>
           <p className="ipg-meta">{loadError ?? "Ce modpack n'existe plus ou a été supprimé."}</p>
           <Button onClick={() => navigate("main")}>Retour à l'accueil</Button>
         </div>
-      </main>
+      </div>
     );
   }
 
@@ -233,7 +233,7 @@ export default function InstancePage() {
 
 
   return (
-    <main className="ipg">
+    <div className="ipg">
       <Hero services={services} inst={inst} />
       <header
         className="ipg-head"
@@ -395,6 +395,6 @@ export default function InstancePage() {
           </div>
         </Modal>
       )}
-    </main>
+    </div>
   );
 }

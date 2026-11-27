@@ -202,7 +202,7 @@ jobs:
           shared-key: ci-e2e-linux
           save-if: ${{ github.event_name == 'push' }}
       - name: Dépendances système (Xvfb, openbox, WebDriver)
-        run: bash scripts/ci-apt.sh xvfb webkit2gtk-driver openbox xdotool wmctrl x11-utils dbus-x11
+        run: bash scripts/ci-apt.sh xvfb webkit2gtk-driver openbox xdotool wmctrl x11-utils dbus-x11 python3-gi
       - run: npm ci --ignore-scripts
       - name: Agent LAN (JDK 17 préinstallé sur le runner)
         run: JAVA_HOME="$JAVA_HOME_17_X64" bash core/resources/lan-agent/build.sh

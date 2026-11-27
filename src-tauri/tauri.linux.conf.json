@@ -6,6 +6,12 @@
         "files": {
           "/usr/lib/libgpg-error.so.0": "/usr/lib/x86_64-linux-gnu/libgpg-error.so.0"
         }
+      },
+      "rpm": {
+        "desktopTemplate": "linux/cubelink.desktop"
+      },
+      "deb": {
+        "desktopTemplate": "linux/cubelink.desktop"
       }
     }
   }

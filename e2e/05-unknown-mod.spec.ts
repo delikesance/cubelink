@@ -73,7 +73,14 @@ test('T5 : mod inconnu signale avant telechargement, confiance requise, sha256 i
     expect(sha256File(path.join(host.gameDir, ...f.path.split('/'))), f.path).toBe(f.sha256);
   }
   // Les fichiers exclus de l'hote ne sont pas copies.
-  for (const ex of ['options.txt', 'servers.dat', 'saves']) expect(fs.existsSync(path.join(guestDir, ex)), ex).toBe(false);
+  for (const ex of ['servers.dat', 'saves']) expect(fs.existsSync(path.join(guestDir, ex)), ex).toBe(false);
+  // options.txt n'est jamais copie de l'hote : le lanceur en cree un en rejoignant (onboardAccessibility:false seul), sans les reglages de l'hote.
+  const optionsPath = path.join(guestDir, 'options.txt');
+  if (fs.existsSync(optionsPath)) {
+    const options = fs.readFileSync(optionsPath, 'utf8');
+    expect(options, 'options.txt du lanceur').toContain('onboardAccessibility:false');
+    expect(options, "reglages de l'hote non copies").not.toMatch(/fov:70|lang:fr_fr/);
+  }
 
   // Deuxieme « Rejoindre » : le mod maison deja accepte (meme sha256) n'est plus redemande, tout vient du cache.
   const again = await invoke<Plan & { unknown_trusted: string[] }>(appB.page, 'join_plan', { friend_public_key: keyA });

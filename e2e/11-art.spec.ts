@@ -66,6 +66,8 @@ test('Illustrations : recherche auto, image locale, installation Parcourir, gale
 
   // --- sans correspondance : pas d'erreur, degrade genere, instance jouable ---
   const other = await makeHostInstance(appA, { id: 'zz-unknown', name: 'Zzqx introuvable', minecraft: '1.21.1-test' });
+  // le rechargement garde le hash courant (la fiche Parcourir) : on revient d'abord a l'accueil
+  await page.evaluate(() => { window.location.hash = '#/main'; });
   await page.reload();
   await waitForRoute(page, 'main');
   await page.waitForTimeout(1500);

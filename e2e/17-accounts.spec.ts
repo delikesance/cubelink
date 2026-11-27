@@ -103,7 +103,9 @@ test('2. multi-comptes hors ligne : formulaire libre, ajout, 2 clics barre de ti
   await expect.poll(async () => activeName(await accounts(app.page))).toBe('Alice_1');
   await expect(card.locator('.acc-row[data-active] .acc-nm')).toHaveText('Alice_1');
 
-  // Changer de compte via la barre de titre : 2 clics (ouvrir le menu, choisir).
+  // Changer de compte via le sélecteur de l'Accueil (absent des Réglages) : 2 clics (ouvrir le menu, choisir).
+  await app.page.evaluate(() => { window.location.hash = '#/main'; });
+  await route(app.page, 'main');
   await expect(app.page.locator('.acc-trigger')).toContainText('Alice_1');
   await app.page.locator('.acc-trigger').click();
   await app.page.getByRole('menuitemradio', { name: /Bob_2/ }).click();

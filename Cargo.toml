@@ -67,7 +67,9 @@ opt-level = 3
 opt-level = 3
 
 [profile.release]
-lto = "fat"
-codegen-units = 1
+# LTO léger et compilation parallèle : la release se construit en quelques minutes en CI (fat + 1 unité doublait le temps
+# pour un gain négligeable sur un launcher).
+lto = "thin"
+codegen-units = 16
 strip = true
 opt-level = 3

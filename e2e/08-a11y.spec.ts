@@ -3,9 +3,9 @@
 // Refonte 2 : Parametres / Mentions sont des ecrans (plus des dialogues), Creer = choix puis formulaire.
 // Refonte de l'accueil : Amis = colonne de l'accueil + onglet Amis des Parametres (plus d'ecran ni de tiroir) ; Mods et Logs
 // = onglets de la page du modpack ; les dialogues modaux restants sont des confirmations (<Modal>).
-import type { Page } from '@playwright/test';
 import { test, expect, waitForRoute } from './harness/fixtures';
 import { SCREENS, prepare, gotoScreen, tabThrough, smallTargets, contrastIssues, unnamedControls, type Screen } from './helpers/e2e4-lib';
+import { seedUnusedCacheObject } from './helpers/cache-seed';
 
 const byId = (id: string) => SCREENS.find((s) => s.id === id)!;
 /** Boutons du bandeau de fenetre (46x36, taille native Windows), selecteur de compte du bandeau (36 px de haut comme lui) et lien d'evitement (visible au focus seulement). */
@@ -19,16 +19,6 @@ const isTooSmall = (t: { desc: string; w: number; h: number }) => {
   const compact = COMPACT.find((c) => c.desc.test(t.desc));
   return !(compact && t.w >= compact.min && t.h >= compact.min);
 };
-
-/** Profil neuf = cache vide, donc « Vider le cache… » est desactive (volontaire, cf. e2e/20-cache.spec.ts). Pour exercer la
- *  confirmation, `cache_size` annonce 12 Mo ; `cache_clear` reste le vrai. A appeler avant d'ouvrir l'onglet Stockage. */
-async function pretendCacheIsFull(page: Page): Promise<void> {
-  await page.evaluate(() => {
-    const internals = (window as any).__TAURI_INTERNALS__;
-    const real = internals.invoke.bind(internals);
-    internals.invoke = (cmd: string, ...rest: unknown[]) => (cmd === 'cache_size' ? Promise.resolve(12 * 1024 * 1024) : real(cmd, ...rest));
-  });
-}
 
 test.describe('T8 accessibilite clavier', () => {
   test('parcours Tab de chaque ecran : ordre logique, focus visible #6FD3F0, aucun piege', async ({ appA }) => {
@@ -116,7 +106,7 @@ test.describe('T8 accessibilite clavier', () => {
     const page = appA.page;
     await prepare(appA);
     await gotoScreen(page, byId('settings'));
-    await pretendCacheIsFull(page);
+    seedUnusedCacheObject(appA.dataDir);
     await page.getByRole('tab', { name: 'Stockage' }).click();
     await page.getByRole('button', { name: /Vider le cache/ }).click();
     await expect(page.getByRole('alertdialog')).toBeVisible();
@@ -233,7 +223,7 @@ test.describe('T8 accessibilite clavier', () => {
     await expect(page.locator('[role=alert]').filter({ hasText: /\S/ }).first()).toBeVisible({ timeout: 20_000 });
     await gotoScreen(page, byId('settings'));
     await page.getByRole('tab', { name: 'Réseau' }).click();
-    await page.getByRole('checkbox', { name: /Passer toujours par le relais/ }).check();
+    await page.getByRole('checkbox', { name: /Laisser tous mes amis rejoindre/ }).check();
     await expect(page.locator('[role=status][aria-live=polite]', { hasText: 'Enregistré' })).toBeVisible();
   });
 
@@ -264,7 +254,7 @@ test.describe('T8 accessibilite clavier', () => {
     expect(total).toBeGreaterThan(60);
     // etats secondaires : confirmation du cache, onglet A propos
     await gotoScreen(page, byId('settings'));
-    await pretendCacheIsFull(page);
+    seedUnusedCacheObject(appA.dataDir);
     await page.getByRole('tab', { name: 'Stockage' }).click();
     await page.getByRole('button', { name: /Vider le cache/ }).click();
     expect.soft((await contrastIssues(page)).issues, '[settings/stockage+confirmation]').toEqual([]);

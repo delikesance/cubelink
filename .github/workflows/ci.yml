@@ -145,6 +145,8 @@ jobs:
   # (auth, Mojang, Modrinth) et un faux Java. Le harnais pilote WebView2 par CDP : Windows seulement.
   # Les scénarios réels (E2E_REAL, E2E_MC, E2E_SLOW) s'ignorent d'eux-mêmes sans leur variable.
   e2e-windows:
+    # Non bloquant : seulement sur les PR, pour ne pas occuper un runner pendant une publication.
+    if: github.event_name == 'pull_request'
     runs-on: windows-latest
     timeout-minutes: 60
     steps:
@@ -186,6 +188,8 @@ jobs:
   # `continue-on-error` et absent de `needs` (canary, release). Le promouvoir en bloquant (le remettre dans `needs` des deux
   # jobs) seulement après un run vert, sur confirmation du mainteneur, comme `e2e-windows`.
   e2e-linux:
+    # Non bloquant : seulement sur les PR, pour ne pas occuper un runner pendant une publication.
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-22.04
     timeout-minutes: 40
     continue-on-error: true

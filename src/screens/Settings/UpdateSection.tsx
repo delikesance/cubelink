@@ -1,8 +1,9 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Button, Card, ProgressBar } from "../../ui";
 import { useServices } from "../../app/context";
 import { openExternal } from "../../app/externalLinks";
 import { useUpdateState } from "../../app/useUpdateState";
+import { checkedAgo } from "./checkedAgo";
 
 function messageOf(e: unknown): string {
   if (e instanceof Error && e.message) return e.message;
@@ -15,6 +16,9 @@ export function UpdateSection() {
   const services = useServices();
   const st = useUpdateState(services);
   const [err, setErr] = useState("");
+  // L'âge du dernier contrôle se rafraîchit à la minute près.
+  const [now, setNow] = useState(() => Date.now() / 1000);
+  useEffect(() => { const t = setInterval(() => setNow(Date.now() / 1000), 60_000); return () => clearInterval(t); }, []);
   const phase = st?.phase ?? "idle";
   const busy = phase === "checking" || phase === "downloading";
   const v = st?.version ?? "";
@@ -25,7 +29,8 @@ export function UpdateSection() {
 
   let text = "Aucune vérification effectuée pour l'instant.";
   if (phase === "checking") text = "Recherche en cours…";
-  else if (phase === "up_to_date") text = "Cubelink est à jour.";
+  else if (phase === "up_to_date") text = st?.last_checked ? `Cubelink est à jour. ${checkedAgo(st.last_checked, now)}.` : "Cubelink est à jour.";
+  else if (phase === "managed_by_store") text = "Les mises à jour passent par le Microsoft Store.";
   else if (phase === "available" || phase === "downloading") text = `Version ${v} trouvée, téléchargement…`;
   else if (phase === "ready") text = `Version ${v} prête à installer.`;
   else if (phase === "available_manual") text = `Nouvelle version ${v} disponible. ${st?.message ?? ""}`.trim();
@@ -40,10 +45,10 @@ export function UpdateSection() {
           <span role="status" aria-live="polite" className={phase === "error" || err ? "set-error" : undefined}>{err || text}</span>
           {phase === "downloading" && <ProgressBar value={pct} label="Téléchargement de la mise à jour" showValue />}
         </div>
-        {/* Une version est déjà trouvée (téléchargement ou prête) : chercher à nouveau n'apporterait rien. */}
+        {/* Une version est déjà trouvée (téléchargement ou prête) : chercher à nouveau n'apporterait rien ; sous le Store, il n'y a rien à chercher. */}
         {phase === "available_manual" ? <Button onClick={() => openExternal(st?.url || "https://github.com/delikesance/cubelink/releases/latest")}>Voir la release</Button>
           : phase === "ready" ? <Button onClick={install}>Redémarrer et installer</Button>
-          : phase !== "available" && phase !== "downloading" && <Button variant="secondary" disabled={busy} onClick={check}>Chercher une mise à jour</Button>}
+          : phase !== "available" && phase !== "downloading" && phase !== "managed_by_store" && <Button variant="secondary" disabled={busy} onClick={check}>Chercher une mise à jour</Button>}
       </div>
     </Card>
   );

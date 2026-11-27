@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import type { Services } from "../../services/types";
 import { Button } from "../../ui";
 import { Modal } from "../Main/Modal";
-import { errText, isEulaRequired, parseHeadUnavailable, type HeadUnavailable } from "./format";
+import { errText, isEulaRequired, parseConfirmHost, parseHeadUnavailable, plural, type ConfirmHost, type HeadUnavailable } from "./format";
 
 /**
  * Lance une action Hearth qui peut démarrer un serveur (jouer, reprise après partie mal terminée).
@@ -10,6 +10,9 @@ import { errText, isEulaRequired, parseHeadUnavailable, type HeadUnavailable } f
  * « J'accepte » enregistre le choix puis relance l'action.
  * Si la dernière version n'a de contenu chez personne de joignable (`head_unavailable`), une boîte propose d'attendre son
  * auteur ou de jouer depuis la dernière version complète.
+ * Si héberger demande une confirmation (`confirm_host` : personne d'autre n'est joignable, ou pas la majorité du groupe), une
+ * boîte prévient du risque de deux versions du monde ; « Héberger quand même » confirme puis relance l'action, « Annuler »
+ * n'héberge rien. Le clic sur Jouer ne vaut jamais confirmation (docs/hearth.md § 1).
  */
 export function useHearthRun(services: Services): {
   /** `groupId` : le groupe concerné, pour proposer le repli quand la dernière version n'a de contenu chez personne. */
@@ -23,6 +26,7 @@ export function useHearthRun(services: Services): {
   const [busy, setBusy] = useState(false);
   const [pending, setPending] = useState<{ action: () => Promise<void>; groupId?: string } | null>(null);
   const [missing, setMissing] = useState<{ info: HeadUnavailable; id: string } | null>(null);
+  const [ask, setAsk] = useState<{ info: ConfirmHost; action: () => Promise<void>; id: string } | null>(null);
   const [url, setUrl] = useState("https://aka.ms/MinecraftEULA");
   const alive = useRef(true);
   useEffect(() => () => { alive.current = false; }, []);
@@ -39,6 +43,8 @@ export function useHearthRun(services: Services): {
         setPending({ action, groupId });
       } else if (groupId && parseHeadUnavailable(e)) {
         setMissing({ info: parseHeadUnavailable(e)!, id: groupId });
+      } else if (groupId && parseConfirmHost(e)) {
+        setAsk({ info: parseConfirmHost(e)!, action, id: groupId });
       } else {
         setError(errText(e));
       }
@@ -81,8 +87,47 @@ export function useHearthRun(services: Services): {
   const playFromPrevious = () => {
     const m = missing;
     setMissing(null);
-    if (m) void run(() => services.hearthPlayFromPrevious(m.id));
+    if (m) void run(() => services.hearthPlayFromPrevious(m.id), m.id);
   };
+
+  const hostAnyway = async () => {
+    const a = ask;
+    if (!a) return;
+    setAsk(null);
+    try {
+      await services.hearthConfirmHost(a.id);
+    } catch (e) {
+      setError(errText(e));
+      return;
+    }
+    await run(a.action, a.id);
+  };
+
+  const askDialog = ask ? (
+    <Modal title="Héberger sans les autres ?" onClose={() => setAsk(null)}>
+      <div className="home-modal-text">
+        {ask.info.kind === "alone" ? (
+          <p>
+            Aucun autre membre n'est joignable pour l'instant{ask.info.offline.length > 0 ? ` (${ask.info.offline.join(", ")})` : ""}.
+            Vérifie aussi ta connexion à Internet : si elle est coupée, personne ne pourra rejoindre.
+          </p>
+        ) : (
+          <p>
+            Seulement {plural(ask.info.acks, "membre est joignable", "membres sont joignables")} sur {ask.info.members} (toi compris) :
+            il en faut {ask.info.needed} pour être sûr d'être le seul à héberger.
+          </p>
+        )}
+        <p>
+          Si un autre membre joue de son côté en même temps, il y aura deux versions du monde et le groupe choisira laquelle
+          garder.
+        </p>
+      </div>
+      <div className="home-modal-foot">
+        <Button variant="secondary" data-autofocus onClick={() => setAsk(null)}>Annuler</Button>
+        <Button onClick={() => { void hostAnyway(); }}>Héberger quand même</Button>
+      </div>
+    </Modal>
+  ) : null;
 
   const headDialog = missing ? (
     <Modal title={`La partie de ${missing.info.author} n'a pas fini d'être envoyée`} onClose={() => setMissing(null)}>
@@ -104,5 +149,5 @@ export function useHearthRun(services: Services): {
     </Modal>
   ) : null;
 
-  return { run, error, busy, clearError: () => setError(null), eula: <>{eula}{headDialog}</> };
+  return { run, error, busy, clearError: () => setError(null), eula: <>{eula}{headDialog}{askDialog}</> };
 }

@@ -26,6 +26,7 @@ pub mod invites;
 pub mod hearth;
 pub mod hotkey;
 pub mod p2p_backend;
+pub mod shutdown;
 pub mod stage;
 pub mod stage_log;
 pub mod state;
@@ -54,6 +55,8 @@ macro_rules! commands {
             commands_instances::instances_list,
             commands_instances::instances_create,
             commands_instances::instances_import_mrpack,
+            commands_instances::launcher_import_scan,
+            commands_instances::launcher_import_run,
             commands_instances::instances_launch,
             commands_instances::minecraft_versions,
             commands_game::instances_kill,
@@ -78,6 +81,7 @@ macro_rules! commands {
             commands_friends::friend_refuse,
             commands_friends::friend_refuse_all,
             commands_friends::friend_remove,
+            commands_friends::friend_set_trust,
             commands_join::join_plan,
             commands_join::join_start,
             commands_join::join_pause,
@@ -104,6 +108,9 @@ macro_rules! commands {
             commands_browse::mods_fix_plan,
             commands_browse::mods_fix_apply,
             commands_browse::mods_fix_undo,
+            commands_browse::modpack_update_check,
+            commands_browse::modpack_update_apply,
+            commands_browse::modpack_update_undo,
             commands_browse::mods_toggle,
             commands_browse::mods_remove,
             commands_browse::mods_add,
@@ -124,9 +131,12 @@ macro_rules! commands {
             commands_hearth::hearth_invite_accept,
             commands_hearth::hearth_invite_dismiss,
             commands_hearth::hearth_play,
+            commands_hearth::hearth_confirm_host,
             commands_hearth::hearth_stop,
             commands_hearth::hearth_unclean_choice,
             commands_hearth::hearth_play_from_previous,
+            commands_hearth::hearth_play_from_version,
+            commands_hearth::hearth_export_solo,
             commands_hearth::hearth_set_instance,
             commands_hearth::hearth_add_member,
             commands_hearth::hearth_remove_member,
@@ -295,6 +305,10 @@ pub fn run() {
             app_log::init(&root);
             let handle = app.handle().clone();
             let sink: state::EventSink = Arc::new(move |name, payload| {
+                // L'état du jeu pilote le raccourci global par appel direct, pas par un événement que le webview pourrait forger.
+                if name == "launch://state" {
+                    hotkey::on_launch_state(&handle, &payload);
+                }
                 let _ = handle.emit(name, payload);
             });
             // L'état est créé tout de suite avec un backend « en démarrage » ; Iroh démarre en tâche de fond
@@ -315,6 +329,8 @@ pub fn run() {
                 background::try_setup_tray(app.handle(), st.clone());
             }
             background::apply_autostart(app.handle());
+            // Fin de session de l'OS, SIGTERM : arrêt propre des serveurs de groupe et du jeu (docs/hearth.md § 7.3).
+            shutdown::install(app.handle(), &st);
             // Sans icone de notification, une fenetre masquee serait introuvable : elle reste alors visible.
             if background::started_in_background(std::env::args()) && background::tray_ok() {
                 if let Some(w) = app.get_webview_window("main") {
@@ -397,8 +413,24 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(select_handler(test_mode, specta_builder().invoke_handler(), test_builder().invoke_handler()))
-        .run(context(test_mode))
-        .expect("erreur au lancement de Cubelink");
+        .build(context(test_mode))
+        .expect("erreur au lancement de Cubelink")
+        .run(move |app, event| on_run_event(app, &event, test_mode));
+}
+
+/// Événements de l'application. `ExitRequested` sans code : la dernière fenêtre a été détruite par le système (fin de
+/// session sans passer par `CloseRequested`, qui est intercepté et masque la fenêtre). Les serveurs de groupe et le jeu
+/// sont alors arrêtés avant de sortir, comme pour un arrêt de la machine. Avec un code (`app.exit` de « Quitter », de la
+/// routine d'arrêt ou d'une mise à jour), on laisse sortir : c'est la fin de ces routines, pas une demande à traiter.
+/// Mode test : rien n'est intercepté (les E2E ferment l'application par WM_CLOSE).
+fn on_run_event(app: &tauri::AppHandle, event: &tauri::RunEvent, test_mode: bool) {
+    let tauri::RunEvent::ExitRequested { code: None, api, .. } = event else { return };
+    if test_mode {
+        return;
+    }
+    let Some(st) = app.try_state::<Arc<state::AppState>>() else { return };
+    api.prevent_exit();
+    shutdown::begin_shutdown(app, &st);
 }
 
 /// Contexte Tauri. En mode test, les arguments de `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` (port CDP du harnais E2E) sont

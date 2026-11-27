@@ -117,7 +117,7 @@ export async function startJoinViaUi(page: Page) {
   await joinBtn.click();
   const go = page.getByRole('button', { name: 'Rejoindre et jouer' });
   await expect(go).toBeVisible({ timeout: 30_000 });
-  const trust = page.getByRole('checkbox');
+  const trust = page.getByLabel(/^Je fais confiance à /);
   if (await trust.count()) await trust.check();
   await go.click();
   // Le transfert se deroule sur l'ecran Rejoindre (plus d'ecran Installation separe).

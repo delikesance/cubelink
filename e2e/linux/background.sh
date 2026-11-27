@@ -2,7 +2,7 @@
 # Usage : `bash e2e/linux/background.sh` (autonome). Il demarre lui-meme Xvfb, openbox (un vrai gestionnaire de fenetres :
 # `wmctrl -c` lui demande de fermer la fenetre) et Vite sur 5173 (le binaire debug charge l'interface depuis devUrl),
 # et se relance sous `dbus-run-session` si aucun bus de session n'existe. Prerequis : xvfb, openbox, xdotool, wmctrl,
-# x11-utils (xwininfo), dbus-x11, un binaire `cargo build -p cubelink` et `npm ci`.
+# x11-utils (xwininfo), dbus-x11, python3-gi (zone de notification factice), un binaire `cargo build -p cubelink` et `npm ci`.
 # Variables : CUBELINK_BIN (binaire), CARGO_TARGET_DIR (sinon target/), E2E_DISPLAY (defaut :99), E2E_LOG_DIR (journaux
 # de l'app et de Xvfb/openbox/Vite ; defaut : dossier temporaire /tmp/cl-bg-logs.*, conserve).
 # Verifie : fenetre montree, entree de demarrage avec --background, fermer = masquer (processus vivant), avis unique,
@@ -27,6 +27,9 @@ for _ in $(seq 1 40); do xdotool getdisplaygeometry >/dev/null 2>&1 && break; sl
 xdotool getdisplaygeometry >/dev/null 2>&1 || { echo "FAIL Xvfb ne repond pas ($DISPLAY)"; cat "$LOGS/xvfb.log"; exit 2; }
 openbox >"$LOGS/openbox.log" 2>&1 & EXTRA_PIDS="$EXTRA_PIDS $!"
 sleep 1
+# Zone de notification factice : sans hote StatusNotifier, fermer quitte (voulu), et le scenario en fond n'existe pas.
+python3 "$ROOT/e2e/linux/fake-tray-host.py" >"$LOGS/tray.log" 2>&1 & EXTRA_PIDS="$EXTRA_PIDS $!"
+for _ in $(seq 1 40); do gdbus call --session -d org.freedesktop.DBus -o /org/freedesktop/DBus -m org.freedesktop.DBus.NameHasOwner org.kde.StatusNotifierWatcher 2>/dev/null | grep -q true && break; sleep 0.25; done
 if ! (exec 3<>/dev/tcp/127.0.0.1/5173) 2>/dev/null; then
   (cd "$ROOT" && exec node_modules/.bin/vite --port 5173 --strictPort >"$LOGS/vite.log" 2>&1) & EXTRA_PIDS="$EXTRA_PIDS $!"
   for _ in $(seq 1 120); do (exec 3<>/dev/tcp/127.0.0.1/5173) 2>/dev/null && break; sleep 0.5; done

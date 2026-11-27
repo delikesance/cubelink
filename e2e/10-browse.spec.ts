@@ -81,8 +81,11 @@ test('Parcourir : recherche, installation d\'un mod avec dependance, modpack, no
   // --- CurseForge : mod autorise (mod-0 'Sodium') installe via la cle factice ---
   await page.getByRole('searchbox').fill('Lithium');
   await page.locator('.br-card-btn', { hasText: 'Lithium' }).first().click();
-  await page.getByRole('button', { name: /^Installer/ }).click();
-  await expect.poll(() => fs.readdirSync(mods).some((f) => f.startsWith('mod-1-1.0.0') ), { timeout: 30_000 }).toBeTruthy();
+  // Meme jar que la dependance Modrinth posee plus haut : reconnu comme deja installe, pas de second exemplaire.
+  await expect(page.getByText(/Déjà installé dans .*mod-1-1\.0\.0\.jar/)).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByRole('button', { name: 'Désinstaller' })).toBeVisible();
+  await expect(page.getByRole('button', { name: /^Installer/ })).toHaveCount(0);
+  expect(fs.readdirSync(mods).filter((f) => f.startsWith('mod-1-'))).toEqual(['mod-1-1.0.0.jar']);
   await page.getByRole('button', { name: 'Retour aux résultats' }).click();
 
   // --- modpack Modrinth : nouvelle instance ---

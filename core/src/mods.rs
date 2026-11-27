@@ -35,7 +35,7 @@ pub struct ModEntry {
     pub custom: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Provenance {
     pub source: String,
     pub id: String,

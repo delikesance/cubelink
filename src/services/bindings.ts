@@ -40,6 +40,10 @@ export const commands = {
 	instancesCreate: (name: string, minecraft: string, loader: LoaderSpec, ramMb: number, options?: InvokeOptions) => __TAURI_INVOKE<Instance_Serialize>("instances_create", { name, minecraft, loader, ram_mb: ramMb }, options),
 	/**  Importe un .mrpack, un zip CurseForge ou un zip brut (les champs facultatifs ne servent qu'au zip brut). Avertissements par `import://warning`. La préparation du jeu qui suit l'import est « au mieux » : progression `import://progress` ; si elle échoue, l'instance et ses mods sont conservés et `import://deferred` l'annonce (le jeu sera téléchargé au premier lancement). Seule une erreur d'import elle-même renvoie une erreur. Un `.mrpack` est reconnu auprès de Modrinth par son SHA-1 (meilleur effort, borné à 20 s, silencieux hors ligne) : s'il est connu, `Instance.pack` reçoit son projet et sa version, sinon `pack` reste absent et l'import réussit quand même. */
 	instancesImportMrpack: (path: string, name: string | null, minecraft: string | null, loader: LoaderSpec | null, ramMb: number | null, options?: InvokeOptions) => __TAURI_INVOKE<Instance_Serialize>("instances_import_mrpack", { path, name, minecraft, loader, ram_mb: ramMb }, options),
+	/**  Cherche les instances de Prism / MultiMC, de la Modrinth App et de la CurseForge App (dossiers habituels Windows et Linux, Flatpak compris) ou, avec `path`, dans le dossier choisi (une instance, un dossier d'instances ou la racine d'un lanceur). Lecture seule : rien n'est écrit chez l'autre lanceur. Une instance au loader inconnu de Cubelink est listée avec `unsupported` (raison) et n'est pas importable. */
+	launcherImportScan: (path: string | null, options?: InvokeOptions) => __TAURI_INVOKE<DetectedInstance_Serialize[]>("launcher_import_scan", { path }, options),
+	/**  Importe l'instance du dossier `path` (relue sur le disque, jamais l'objet reçu d'une recherche) : version de Minecraft et loader repris (version du loader recommandée si le lanceur ne la donne pas), `mods/`, `config/`, `saves/`, `resourcepacks/`, `shaderpacks/`, `options.txt` et `servers.dat` placés dans une nouvelle instance. Les jars et zips de packs vont dans le magasin par hash puis sont liés (lien physique, repli copie), le reste est copié ; la source n'est jamais modifiée ni liée, les liens symboliques ne sont pas suivis. Échec : l'instance n'est pas créée. Progression par `browse://progress`, puis recherche silencieuse de l'illustration par nom (20 s au plus). */
+	launcherImportRun: (path: string, launcher: Launcher, name: string | null, ramMb: number | null, options?: InvokeOptions) => __TAURI_INVOKE<Instance_Serialize>("launcher_import_run", { path, launcher, name, ram_mb: ramMb }, options),
 	/**  Lance l'instance. Progression par `launch://state`, sortie du jeu par `launch://log`. */
 	instancesLaunch: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("instances_launch", { id }, options),
 	/**  Versions de Minecraft disponibles. */
@@ -88,6 +92,8 @@ export const commands = {
 	friendRefuseAll: (options?: InvokeOptions) => __TAURI_INVOKE<number>("friend_refuse_all", undefined, options),
 	/**  Retire un ami : accès d'invité en cours révoqué (le tunnel se coupe, la sonde de présence est refusée), invitations, demandes à rejoindre et demande en file de cet ami oubliées. Réussit aussi s'il n'est déjà plus ami ; les groupes Hearth ne sont pas touchés. */
 	friendRemove: (publicKey: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("friend_remove", { public_key: publicKey }, options),
+	/**  Règle la confiance envers un ami : `always` = « Installer ses mods sans me demander » (ses jars inconnus ne demandent plus l'accord ; les scripts KubeJS et les exécutables restent bloqués ou demandés). Idempotent ; ami inconnu refusé. */
+	friendSetTrust: (publicKey: string, trust: TrustLevel, options?: InvokeOptions) => __TAURI_INVOKE<null>("friend_set_trust", { public_key: publicKey, trust }, options),
 	/**  Plan du « Rejoindre » d'un ami : manifeste, fichiers à recevoir, fichiers à accepter et hash du manifeste montré. */
 	joinPlan: (friendPublicKey: string, options?: InvokeOptions) => __TAURI_INVOKE<JoinPlan_Serialize>("join_plan", { friend_public_key: friendPublicKey }, options),
 	/**  Démarre le transfert du plan montré (`manifest_hash`) ; `accept_unknown` exigé s'il y a des fichiers à accepter. Progression par `transfer://progress`. */
@@ -143,6 +149,12 @@ export const commands = {
 	modsFixApply: (instanceId: string, planId: string, actionIds: string[], options?: InvokeOptions) => __TAURI_INVOKE<FixResult_Serialize>("mods_fix_apply", { instance_id: instanceId, plan_id: planId, action_ids: actionIds }, options),
 	/**  Annule une correction à partir de sa sauvegarde. */
 	modsFixUndo: (instanceId: string, backupId: string, options?: InvokeOptions) => __TAURI_INVOKE<ModCheck_Serialize>("mods_fix_undo", { instance_id: instanceId, backup_id: backupId }, options),
+	/**  Mise à jour disponible pour le modpack installé depuis Modrinth ou CurseForge (`None` : à jour, instance sans origine de modpack, ou CurseForge sans clé d'API). Seules les versions compatibles avec l'instance (même Minecraft, même loader) sont proposées, jamais une plus ancienne, ni un pack serveur CurseForge, et une pré-version seulement si la version installée en est une. Résultat gardé 30 minutes ; en cas d'erreur réseau la commande échoue et l'interface l'ignore. */
+	modpackUpdateCheck: (instanceId: string, options?: InvokeOptions) => __TAURI_INVOKE<ModpackUpdate | null>("modpack_update_check", { instance_id: instanceId }, options),
+	/**  Met le modpack d'une instance à la version `version_id` (Modrinth ou CurseForge, même Minecraft et même loader ; sinon refus). Compare l'ancien pack (relevé de l'instance, sinon retéléchargé par `Instance.pack.version_id`), le nouveau et le disque : un fichier du pack n'est remplacé ou retiré que s'il est encore identique à l'ancien ; un fichier modifié par le joueur est gardé (liste `kept`) ; un fichier « tolérant » du nouveau pack introuvable (mod CurseForge non redistribuable) n'arrête pas la mise à jour : il n'est ni ajouté ni remplacé et figure dans `missing`, à poser par le joueur ; ceux qu'il a ajoutés, `saves/`, `options.txt`, `servers.dat` et `logs/` ne sont jamais touchés. Tout est téléchargé avant la première modification ; l'ancien état va dans `<instance>/minecraft/.cubelink-pack-backup/<backup_id>/` (3 sauvegardes gardées) et `Instance.pack` (et la version du loader) change en dernier. Relevé : `<instance>/minecraft/.cubelink-pack-record.json` (empreintes attendues du pack, écrit à l'installation et daté par l'origine, réécrit après une mise à jour, restauré par l'annulation ; ignoré s'il est illisible, contient un chemin invalide ou ne correspond plus à `Instance.pack`). CurseForge sans relevé : ancien pack et empreintes de l'API (refus sans clé) ; refus avant tout téléchargement si un jar de l'ancien pack d'empreinte inconnue est sur le disque et que la nouvelle version le retire ou le change (il resterait en double). Refusé si le jeu tourne ou si une autre mise à jour de l'instance est en cours. Progression par `browse://progress`. */
+	modpackUpdateApply: (instanceId: string, versionId: string, options?: InvokeOptions) => __TAURI_INVOKE<ModpackUpdateResult>("modpack_update_apply", { instance_id: instanceId, version_id: versionId }, options),
+	/**  Annule une mise à jour de modpack à partir de sa sauvegarde : retire les fichiers ajoutés, remet ceux qui avaient été déplacés, l'ancienne origine du pack et l'ancien loader. Un fichier que le joueur a modifié depuis la mise à jour reste tel quel. Refusé si une mise à jour plus récente a eu lieu depuis, si le jeu tourne ou si une autre opération est en cours. */
+	modpackUpdateUndo: (instanceId: string, backupId: string, options?: InvokeOptions) => __TAURI_INVOKE<Instance_Serialize>("modpack_update_undo", { instance_id: instanceId, backup_id: backupId }, options),
 	/**  Active ou désactive un mod (`.disabled`). */
 	modsToggle: (instanceId: string, file: string, enabled: boolean, options?: InvokeOptions) => __TAURI_INVOKE<null>("mods_toggle", { instance_id: instanceId, file, enabled }, options),
 	/**  Supprime un mod de l'instance. */
@@ -183,19 +195,25 @@ export const commands = {
 	hearthInviteDismiss: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_invite_dismiss", { id }, options),
 	/**  Joue sur le serveur du groupe : le rejoint s'il est hébergé, sinon l'héberge sur ce PC. */
 	hearthPlay: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_play", { id }, options),
+	/**  Confirme l'hébergement sans la majorité du groupe, après une erreur `confirm_host|…` de la commande qui démarre le serveur. */
+	hearthConfirmHost: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_confirm_host", { id }, options),
 	/**  Arrête le serveur du groupe hébergé sur ce PC (monde publié, bail relâché). */
 	hearthStop: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_stop", { id }, options),
 	/**  Choix du groupe après une partie mal terminée. */
 	hearthUncleanChoice: (id: string, choice: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_unclean_choice", { id, choice }, options),
 	/**  Jouer depuis la dernière version complète quand le contenu de la dernière version n'est chez personne de joignable. */
 	hearthPlayFromPrevious: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_play_from_previous", { id }, options),
+	/**  Jouer depuis une version complète choisie dans l'historique (branche : fourche à résoudre). */
+	hearthPlayFromVersion: (id: string, versionId: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_play_from_version", { id, version_id: versionId }, options),
+	/**  Exporter une version du monde du groupe en monde solo, dans les mondes de l'instance liée. */
+	hearthExportSolo: (id: string, versionId: string | null, options?: InvokeOptions) => __TAURI_INVOKE<HearthExport>("hearth_export_solo", { id, version_id: versionId }, options),
 	/**  Associe l'instance locale du modpack au groupe. */
 	hearthSetInstance: (id: string, instanceId: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_set_instance", { id, instance_id: instanceId }, options),
 	/**  Propose d'ajouter un ami au groupe. */
 	hearthAddMember: (id: string, publicKey: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_add_member", { id, public_key: publicKey }, options),
 	/**  Propose de retirer un membre du groupe. */
 	hearthRemoveMember: (id: string, publicKey: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_remove_member", { id, public_key: publicKey }, options),
-	/**  Quitte le groupe, après avoir attendu (jusqu'à 5 min) que ma dernière partie soit remise à un membre. Rejette `{ code: "last_member" | "unreachable" | "outbox_pending" | "orphan_pending" | "other", message? }` : rien n'est supprimé dans ces cas. `force: true` saute l'attente de la file d'envoi (la dernière partie est perdue pour le groupe) et la garde d'une fin de partie non publiée (elle est supprimée avec le monde). */
+	/**  Quitte le groupe, après avoir attendu (jusqu'à 5 min) que ma dernière partie soit remise à `min(2, autres membres)` membres (sortie immédiate si trop peu sont en ligne pour y arriver, ou si les amis l'ont refusée : `HearthSettings.outbox_failed`). Rejette `{ code: "last_member" | "unreachable" | "outbox_pending" | "orphan_pending" | "other", message? }` : rien n'est supprimé dans ces cas. `force: true` saute l'attente de la file d'envoi (la dernière partie est perdue pour le groupe) et la garde d'une fin de partie non publiée (elle est supprimée avec le monde). */
 	hearthLeave: (id: string, force: boolean | null, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_leave", { id, force }, options),
 	/**  Supprime le serveur de ce PC seulement, sans prévenir le groupe : arrête mon serveur, libère les blobs et efface le dossier (choix explicite de l'utilisateur quand personne n'est joignable, jamais un repli automatique). */
 	hearthForget: (id: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("hearth_forget", { id }, options),
@@ -250,7 +268,10 @@ export const commands = {
 	updateState: (options?: InvokeOptions) => __TAURI_INVOKE<UpdateState_Serialize>("update_state", undefined, options),
 	/**  Vérifie s'il existe une mise à jour ; si oui, le téléchargement démarre en arrière-plan. */
 	updateCheck: (options?: InvokeOptions) => __TAURI_INVOKE<UpdateState_Serialize>("update_check", undefined, options),
-	/**  Redémarre et installe la mise à jour téléchargée (refusé si une partie est en cours). */
+	/**
+	 *  Redémarre et installe la mise à jour téléchargée. Refusé si une partie, un téléchargement de monde ou un partage est en
+	 *  cours ; arrête proprement les serveurs de groupe actifs avant le redémarrage.
+	 */
 	updateInstall: (options?: InvokeOptions) => __TAURI_INVOKE<null>("update_install", undefined, options),
 };
 
@@ -415,6 +436,43 @@ export type ContentCheck_Serialize = {
 	verdicts: VersionVerdict[],
 	/**  Mods déjà présents qui empêchent toute version testée (noms affichables). */
 	blockers: string[],
+};
+
+/**  Une instance trouvée chez un autre lanceur. */
+export type DetectedInstance = DetectedInstance_Serialize | DetectedInstance_Deserialize;
+
+/**  Une instance trouvée chez un autre lanceur. */
+export type DetectedInstance_Deserialize = {
+	launcher: Launcher,
+	name: string,
+	/**  Dossier de l'instance chez le lanceur d'origine (c'est ce chemin que l'import relit). */
+	path: string,
+	minecraft: string,
+	/**  Loader et sa version ; la version est vide quand le lanceur ne la donne pas (Cubelink choisit la recommandée). */
+	loader: LoaderSpec,
+	/**  Nombre de mods (`.jar`, activés ou non). */
+	mod_count: number,
+	/**  L'instance contient au moins un monde. */
+	has_saves: boolean,
+	/**  Raison pour laquelle l'instance ne peut pas être importée (loader que Cubelink ne gère pas). */
+	unsupported?: string | null,
+};
+
+/**  Une instance trouvée chez un autre lanceur. */
+export type DetectedInstance_Serialize = {
+	launcher: Launcher,
+	name: string,
+	/**  Dossier de l'instance chez le lanceur d'origine (c'est ce chemin que l'import relit). */
+	path: string,
+	minecraft: string,
+	/**  Loader et sa version ; la version est vide quand le lanceur ne la donne pas (Cubelink choisit la recommandée). */
+	loader: LoaderSpec,
+	/**  Nombre de mods (`.jar`, activés ou non). */
+	mod_count: number,
+	/**  L'instance contient au moins un monde. */
+	has_saves: boolean,
+	/**  Raison pour laquelle l'instance ne peut pas être importée (loader que Cubelink ne gère pas). */
+	unsupported: string | null,
 };
 
 export type DeviceCodeInfo = {
@@ -595,6 +653,13 @@ export type HearthCard_Deserialize = {
 	version?: number | null,
 	/**  Fins de partie non publiées, mises de côté sur ce PC (`HearthDetail::orphans`) : l'hôte n'a pas encore choisi. */
 	orphans: number,
+	/**  Le serveur a planté à la fin de la dernière partie (`None` tant qu'un nouveau serveur n'a pas été lancé). */
+	crash?: HearthCrash_Deserialize | null,
+	/**
+	 *  Le modpack de l'instance liée contient Simple Voice Chat : le serveur ne le charge pas (le tunnel ne transporte
+	 *  pas l'UDP), la voix ne fonctionnera pas. Repéré sur les noms de jars de l'instance, sans les ouvrir.
+	 */
+	voice_unsupported?: boolean,
 };
 
 /**  Carte d'un serveur de groupe sur l'accueil (événement `hearth://state`, commande `hearth_list`). */
@@ -628,6 +693,34 @@ export type HearthCard_Serialize = {
 	version: number | null,
 	/**  Fins de partie non publiées, mises de côté sur ce PC (`HearthDetail::orphans`) : l'hôte n'a pas encore choisi. */
 	orphans: number,
+	/**  Le serveur a planté à la fin de la dernière partie (`None` tant qu'un nouveau serveur n'a pas été lancé). */
+	crash: HearthCrash_Serialize | null,
+	/**
+	 *  Le modpack de l'instance liée contient Simple Voice Chat : le serveur ne le charge pas (le tunnel ne transporte
+	 *  pas l'UDP), la voix ne fonctionnera pas. Repéré sur les noms de jars de l'instance, sans les ouvrir.
+	 */
+	voice_unsupported: boolean,
+};
+
+/**  Dernier plantage du serveur d'un groupe : qui l'hébergeait et le mod probablement en cause. */
+export type HearthCrash = HearthCrash_Serialize | HearthCrash_Deserialize;
+
+/**  Dernier plantage du serveur d'un groupe : qui l'hébergeait et le mod probablement en cause. */
+export type HearthCrash_Deserialize = {
+	host: HearthMemberLite,
+	/**  Le serveur qui a planté était le mien (sur ce PC). */
+	mine: boolean,
+	/**  Mod probable d'après la fin de la sortie du serveur ; `None` : cause inconnue. */
+	mod_hint?: string | null,
+};
+
+/**  Dernier plantage du serveur d'un groupe : qui l'hébergeait et le mod probablement en cause. */
+export type HearthCrash_Serialize = {
+	host: HearthMemberLite,
+	/**  Le serveur qui a planté était le mien (sur ce PC). */
+	mine: boolean,
+	/**  Mod probable d'après la fin de la sortie du serveur ; `None` : cause inconnue. */
+	mod_hint: string | null,
 };
 
 /**  Page du serveur (commande `hearth_detail`). */
@@ -663,6 +756,18 @@ export type HearthDetail_Serialize = {
 export type HearthEula = {
 	accepted: boolean,
 	url: string,
+};
+
+/**  Résultat de « Exporter en monde solo » (`hearth_export_solo`, docs/hearth.md § 8). */
+export type HearthExport = {
+	/**  Nom du dossier créé dans `saves/` de l'instance (aussi le nom du monde dans la liste du jeu). */
+	world_name: string,
+	/**  Numéro de la version exportée. */
+	version_number: number,
+	/**  La dernière version n'était pas complète sur ce PC : c'est la dernière version complète qui a été exportée. */
+	fallback: boolean,
+	/**  Ton joueur (position, inventaire) a été remis dans le monde ; sinon tu apparais au point de départ. */
+	has_player: boolean,
 };
 
 /**  Invitation à un groupe reçue d'un ami (événement `hearth://invites`). */
@@ -790,6 +895,11 @@ export type HearthSettings_Deserialize = {
 	disk_bytes: number,
 	/**  Versions en attente d'envoi chez les autres membres. */
 	outbox_pending: number,
+	/**
+	 *  Phrase prête à afficher quand ma dernière partie a été refusée pour de bon par les amis (trop grosse d'un coup,
+	 *  #99) ; elle reste chez moi et sera tirée quand un ami clique sur Jouer. `None` sinon.
+	 */
+	outbox_failed?: string | null,
 	/**  Nom de l'instance locale du modpack. */
 	instance_name?: string | null,
 };
@@ -802,6 +912,11 @@ export type HearthSettings_Serialize = {
 	disk_bytes: number,
 	/**  Versions en attente d'envoi chez les autres membres. */
 	outbox_pending: number,
+	/**
+	 *  Phrase prête à afficher quand ma dernière partie a été refusée pour de bon par les amis (trop grosse d'un coup,
+	 *  #99) ; elle reste chez moi et sera tirée quand un ami clique sur Jouer. `None` sinon.
+	 */
+	outbox_failed: string | null,
 	/**  Nom de l'instance locale du modpack. */
 	instance_name: string | null,
 };
@@ -858,6 +973,11 @@ export type HearthVersion = {
 	is_head: boolean,
 	/**  Branche mise de côté (époque révolue) : restaurable, jamais tête. */
 	side_branch: boolean,
+	/**
+	 *  Le monde de cette version est en entier sur ce PC : « Restaurer » marche sans réseau. `false` : son contenu a été
+	 *  libéré (vieille version) ou n'a jamais été reçu, l'historique ne garde alors que l'en-tête.
+	 */
+	available: boolean,
 };
 
 /**  Monde d'une instance, proposé à la création d'un groupe. */
@@ -1039,6 +1159,12 @@ export type JoinPlan_Deserialize = {
 	 *  pas redemandés.
 	 */
 	unknown_trusted?: string[],
+	/**
+	 *  Jars inconnus ou non vérifiés servis par un ami en qui tu as confiance (« Installer ses mods sans me demander ») :
+	 *  installés sans accord. Les scripts KubeJS n'en font jamais partie, et ces jars ne sont pas mémorisés pour les
+	 *  autres amis.
+	 */
+	unknown_friend_trusted?: string[],
 	/**  Avertissements affichés avant « Rejoindre et jouer » (jamais bloquants : la mesure peut être fausse). */
 	warnings?: JoinWarning[],
 };
@@ -1061,6 +1187,12 @@ export type JoinPlan_Serialize = {
 	 *  pas redemandés.
 	 */
 	unknown_trusted: string[],
+	/**
+	 *  Jars inconnus ou non vérifiés servis par un ami en qui tu as confiance (« Installer ses mods sans me demander ») :
+	 *  installés sans accord. Les scripts KubeJS n'en font jamais partie, et ces jars ne sont pas mémorisés pour les
+	 *  autres amis.
+	 */
+	unknown_friend_trusted: string[],
 	/**  Avertissements affichés avant « Rejoindre et jouer » (jamais bloquants : la mesure peut être fausse). */
 	warnings: JoinWarning[],
 };
@@ -1099,6 +1231,9 @@ export type LaunchStateEvent_Serialize = {
 	state: LaunchPhase,
 	message?: string,
 };
+
+/**  Lanceur d'origine. */
+export type Launcher = "prism" | "curseforge" | "modrinth";
 
 /**
  *  Échec de `hearth_leave`, avec un code stable pour que l'écran choisisse quoi proposer. Seul `Unreachable` autorise le
@@ -1235,6 +1370,31 @@ export type ModIssue_Serialize = {
 	severity: string,
 	message: string,
 	related?: string,
+};
+
+/**  Mise à jour proposée pour un modpack installé. */
+export type ModpackUpdate = {
+	/**  Identifiant de la version à installer (Modrinth : id de version ; CurseForge : id de fichier). */
+	version_id: string,
+	/**  Nom affiché de la version (« Mon pack 1.4.2 »). */
+	name: string,
+	/**  Numéro de version (« 1.4.2 »). */
+	version_number: string,
+	/**  Date de publication ISO 8601. */
+	published: string,
+};
+
+/**  Résultat d'une mise à jour appliquée. */
+export type ModpackUpdateResult = {
+	added: number,
+	removed: number,
+	replaced: number,
+	/**  Chemins (relatifs à l'instance) que le joueur a modifiés ou ajoutés lui-même et que la mise à jour n'a pas touchés. */
+	kept: string[],
+	/**  Fichiers du nouveau pack introuvables (mods CurseForge non redistribuables) : à poser par le joueur. */
+	missing: string[],
+	/**  Sauvegarde à passer à `modpack_update_undo`. */
+	backup_id: string,
 };
 
 /**
@@ -1461,7 +1621,9 @@ export type TrustLevel = "ask" | "always";
 
 export type UpdatePhase = "idle" | "checking" | "up_to_date" | "available" | "downloading" | "ready" | 
 /**  Paquet géré ailleurs (Nix, dossier en lecture seule) : version vérifiée, mais ni téléchargée ni installée. */
-"available_manual" | "error";
+"available_manual" | "error" | 
+/**  Installé via le Microsoft Store : c'est lui qui livre les mises à jour, Cubelink ne vérifie rien lui-même. */
+"managed_by_store";
 
 /**  Contrat avec le front (`UpdateState` dans `src/services/types.ts`). */
 export type UpdateState = UpdateState_Serialize | UpdateState_Deserialize;
@@ -1477,6 +1639,8 @@ export type UpdateState_Deserialize = {
 	message?: string | null,
 	/**  Page de la release (phase `available_manual`). */
 	url?: string | null,
+	/**  Date (secondes Unix, UTC) du dernier contrôle terminé avec un verdict ; `None` tant qu'aucun n'a abouti. */
+	last_checked?: number | null,
 };
 
 /**  Contrat avec le front (`UpdateState` dans `src/services/types.ts`). */
@@ -1490,6 +1654,8 @@ export type UpdateState_Serialize = {
 	message: string | null,
 	/**  Page de la release (phase `available_manual`). */
 	url: string | null,
+	/**  Date (secondes Unix, UTC) du dernier contrôle terminé avec un verdict ; `None` tant qu'aucun n'a abouti. */
+	last_checked: number | null,
 };
 
 /**  Code de vérification : 4 groupes de 4 caractères hexadécimaux majuscules (ex. "3F9A · C21B · 77D0 · 5E14"). */

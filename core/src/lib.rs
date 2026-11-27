@@ -13,7 +13,10 @@ pub mod launch_run;
 pub mod hidden_spawn;
 #[cfg(windows)]
 pub mod win_job;
+pub mod cf_pack;
 pub mod mrpack;
+pub mod import_launcher;
+pub mod modpack_update;
 pub mod manifest;
 pub mod guest;
 pub mod unknown_mods;

@@ -419,6 +419,34 @@ describe("Join", () => {
     expect(screen.getByTestId("already-trusted").textContent).toMatch(/déjà été accepté/);
   });
 
+  it("ami de confiance : pas de case pour ses jars, note friend-trusted et acceptUnknown=false", async () => {
+    const base = createFakeServices({ tickMs: 0 });
+    const noor = (await base.friendList()).find((f) => f.friend.trust === "always")!;
+    const start = vi.fn(base.joinStart);
+    setup({ ...base, joinStart: start }, { friend: noor.friend.public_key });
+    const btn = (await screen.findByRole("button", { name: "Rejoindre et jouer" })) as HTMLButtonElement;
+    expect(btn.disabled).toBe(false);
+    expect(screen.queryByRole("checkbox", { name: /confiance/ })).toBeNull();
+    expect(screen.getByTestId("friend-trusted").textContent).toContain(noor.friend.name);
+    fireEvent.click(btn);
+    await waitFor(() => expect(start).toHaveBeenCalledWith(noor.friend.public_key, FAKE_MANIFEST_HASH, false, 0));
+  });
+
+  it("ami de confiance avec script KubeJS : la case reste exigée pour le script et friend-trusted est affiché", async () => {
+    const base = createFakeServices({ tickMs: 0 });
+    const noor = (await base.friendList()).find((f) => f.friend.trust === "always")!;
+    setup({
+      ...base,
+      joinPlan: async (pk) => ({
+        ...(await base.joinPlan(pk)),
+        unknown_scripts: ["kubejs/server_scripts/x.js"],
+      }),
+    }, { friend: noor.friend.public_key });
+    expect(await screen.findByText("kubejs/server_scripts/x.js")).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Rejoindre et jouer" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByTestId("friend-trusted").textContent).toContain(noor.friend.name);
+  });
+
   it("Annuler et Échap reviennent en arrière (fallback main)", async () => {
     const { goBack } = setup();
     await screen.findByRole("button", { name: "Rejoindre et jouer" });

@@ -15,6 +15,7 @@ import { sessionsFrom } from "../Main/index";
 import { LogsPanel } from "../Main/LogsPanel";
 import { Modal } from "../Main/Modal";
 import { ModsPanel } from "../Main/ModsPanel";
+import { PackUpdate } from "./PackUpdate";
 import { ICONS, Icon } from "../../ui";
 import { SettingsDialog } from "../Main/SettingsDialog";
 import { Viewer } from "../Main/Viewer";
@@ -197,17 +198,17 @@ export default function InstancePage() {
     goTab(TABS[n].id, true);
   };
 
-  if (instances === null) return <main className="ipg"><p role="status" className="ipg-loading">Chargement du modpack…</p></main>;
+  if (instances === null) return <div className="ipg"><p role="status" className="ipg-loading">Chargement du modpack…</p></div>;
 
   if (!inst) {
     return (
-      <main className="ipg">
+      <div className="ipg">
         <div className="ipg-missing">
           <h1 ref={h1} tabIndex={-1}>Modpack introuvable</h1>
           <p className="ipg-meta">{loadError ?? "Ce modpack n'existe plus ou a été supprimé."}</p>
           <Button onClick={() => navigate("main")}>Retour à l'accueil</Button>
         </div>
-      </main>
+      </div>
     );
   }
 
@@ -232,7 +233,7 @@ export default function InstancePage() {
 
 
   return (
-    <main className="ipg">
+    <div className="ipg">
       <Hero services={services} inst={inst} />
       <header
         className="ipg-head"
@@ -291,6 +292,11 @@ export default function InstancePage() {
       {!artBusy && artMsg && (artMsg.kind === "error"
         ? <p className="ipg-note is-error" role="alert">{artMsg.text}</p>
         : <p className="ipg-note" role="status">{artMsg.text}</p>)}
+
+      <PackUpdate
+        services={services} inst={inst} locked={running || preparing}
+        onChanged={() => { void services.instancesList().then((l) => setInstances(l), () => {}); }}
+      />
 
       <section className="ipg-card ipg-friends" aria-label="Amis sur ce pack">
         <div className="ipg-card-h">
@@ -389,6 +395,6 @@ export default function InstancePage() {
           </div>
         </Modal>
       )}
-    </main>
+    </div>
   );
 }

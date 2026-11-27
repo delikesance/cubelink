@@ -1,10 +1,12 @@
 .fl{display:flex;flex-direction:column;gap:12px;color:var(--text);font-family:var(--font-ui);font-size:14px}
 .fl-title{margin:0;font:600 16px var(--font-display)}
 .fl-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px}
-.fl-item{display:flex;align-items:center;gap:12px;padding:8px 20px;border-radius:var(--r-lg);border:1px solid var(--line);background:var(--surface)}
+.fl-item{display:flex;flex-wrap:wrap;align-items:center;gap:12px;padding:8px 20px;border-radius:var(--r-lg);border:1px solid var(--line);background:var(--surface)}
 .fl-who{display:flex;flex-direction:column;min-width:0;margin-right:auto}
 .fl-name{font-weight:600;overflow:hidden;text-overflow:ellipsis}
 .fl-sub,.fl-empty{color:var(--muted)}
+.fl-trust{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:13px;cursor:pointer}
+.fl-trust input{width:18px;height:18px;flex:none;accent-color:var(--accent)}
 .fl-empty{margin:0;line-height:1.5}
 .fl-error{margin:0;color:var(--danger)}
 .fl-live{min-height:20px;color:var(--ok);font-weight:600}

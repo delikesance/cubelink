@@ -17,7 +17,6 @@ import { useContextMenu, type MenuItem } from "../../app/useContextMenu";
 import { useModCheckGate } from "../../app/useModCheck";
 import { Modal } from "./Modal";
 import { HearthSection } from "../Hearth/HearthSection";
-import { HearthMoments } from "../Hearth/Moments";
 import { RemoveFriendDialog } from "../Friends/RemoveFriend";
 
 const LOADERS: Record<string, string> = {
@@ -248,7 +247,7 @@ export default function Main() {
 
   return (
     <div className="home" ref={homeRef}>
-      <main className="home-main">
+      <div className="home-main">
         {failedId && (
           <div className="home-fail enter" role="alert">
             <span className="home-fail-ic" aria-hidden="true"><Icon d={ICONS.alert} size={20} /></span>
@@ -371,7 +370,7 @@ export default function Main() {
             </div>
           )}
         </section>
-      </main>
+      </div>
 
       <aside className="home-side" aria-label="Amis">
         <div className="side-friends">
@@ -444,7 +443,6 @@ export default function Main() {
       </aside>
       {ctx.menu}
       {gate.modal}
-      <HearthMoments services={services} />
       {toRemove && (
         <RemoveFriendDialog
           services={services} friend={toRemove.friend}

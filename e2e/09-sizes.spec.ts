@@ -7,6 +7,7 @@ import path from 'node:path';
 import type { Page } from '@playwright/test';
 import { test, expect, ARTIFACTS, makeHostInstance, waitForRoute } from './harness/fixtures';
 import { SCREENS, prepare, gotoScreen, setWindowSize, type Screen } from './helpers/e2e4-lib';
+import { seedUnusedCacheObject } from './helpers/cache-seed';
 
 const SIZES: [number, number][] = [[960, 600], [1280, 720]];
 const OUT = path.join(ARTIFACTS, 'sizes');
@@ -75,6 +76,7 @@ test.describe('T9 tailles de fenetre', () => {
     const page = appA.page;
     await prepare(appA);
     for (const n of [2, 3, 4, 5, 6]) await makeHostInstance(appA, { id: `monde-${n}`, name: `Monde numero ${n}` }); // rail et grille remplis
+    seedUnusedCacheObject(appA.dataDir); // « Vider le cache… » actif pour la variante settings-storage-confirm
     await page.reload();
     fs.mkdirSync(OUT, { recursive: true });
     for (const f of fs.readdirSync(OUT)) fs.rmSync(path.join(OUT, f), { force: true });

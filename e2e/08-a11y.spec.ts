@@ -5,10 +5,20 @@
 // = onglets de la page du modpack ; les dialogues modaux restants sont des confirmations (<Modal>).
 import { test, expect, waitForRoute } from './harness/fixtures';
 import { SCREENS, prepare, gotoScreen, tabThrough, smallTargets, contrastIssues, unnamedControls, type Screen } from './helpers/e2e4-lib';
+import { seedUnusedCacheObject } from './helpers/cache-seed';
 
 const byId = (id: string) => SCREENS.find((s) => s.id === id)!;
 /** Boutons du bandeau de fenetre (46x36, taille native Windows), selecteur de compte du bandeau (36 px de haut comme lui) et lien d'evitement (visible au focus seulement). */
 const CHROME = /^(button\.tb-btn|button\.acc-trigger|a\.skip-link)/;
+/** Zones denses documentees (docs/ux-guidelines.md, « Compact ») : onglets de la colonne d'amis 32 px, comptes 36 px. */
+const COMPACT: { desc: RegExp; min: number }[] = [
+  { desc: /^button\. "(En partie|En ligne|Tous) · \d+"$/, min: 32 },
+  { desc: /^button\.acc-(remove|addbtn) /, min: 36 },
+];
+const isTooSmall = (t: { desc: string; w: number; h: number }) => {
+  const compact = COMPACT.find((c) => c.desc.test(t.desc));
+  return !(compact && t.w >= compact.min && t.h >= compact.min);
+};
 
 test.describe('T8 accessibilite clavier', () => {
   test('parcours Tab de chaque ecran : ordre logique, focus visible #6FD3F0, aucun piege', async ({ appA }) => {
@@ -72,7 +82,7 @@ test.describe('T8 accessibilite clavier', () => {
     // pas de navigation « Sections des reglages » ici (src/screens/Legal/index.test.tsx le verifie aussi)
     await expect(page.getByRole('navigation', { name: 'Sections des réglages' })).toHaveCount(0);
     expect(await page.locator('article h3').count()).toBeGreaterThan(1);
-    const back = page.getByRole('button', { name: 'Retour' });
+    const back = page.locator('main').getByRole('button', { name: 'Retour' }); // l'autre « Retour » est celui de la barre de titre
     await back.focus();
     await expect(back).toBeFocused();
   });
@@ -96,6 +106,7 @@ test.describe('T8 accessibilite clavier', () => {
     const page = appA.page;
     await prepare(appA);
     await gotoScreen(page, byId('settings'));
+    seedUnusedCacheObject(appA.dataDir);
     await page.getByRole('tab', { name: 'Stockage' }).click();
     await page.getByRole('button', { name: /Vider le cache/ }).click();
     await expect(page.getByRole('alertdialog')).toBeVisible();
@@ -212,7 +223,7 @@ test.describe('T8 accessibilite clavier', () => {
     await expect(page.locator('[role=alert]').filter({ hasText: /\S/ }).first()).toBeVisible({ timeout: 20_000 });
     await gotoScreen(page, byId('settings'));
     await page.getByRole('tab', { name: 'Réseau' }).click();
-    await page.getByRole('checkbox', { name: /Passer toujours par le relais/ }).check();
+    await page.getByRole('checkbox', { name: /Laisser tous mes amis rejoindre/ }).check();
     await expect(page.locator('[role=status][aria-live=polite]', { hasText: 'Enregistré' })).toBeVisible();
   });
 
@@ -221,7 +232,7 @@ test.describe('T8 accessibilite clavier', () => {
     await prepare(appA);
     for (const s of SCREENS) {
       await gotoScreen(page, s);
-      const small = (await smallTargets(page, 44)).filter((t) => !CHROME.test(t.desc));
+      const small = (await smallTargets(page, 44)).filter((t) => !CHROME.test(t.desc) && isTooSmall(t));
       expect.soft(small, `[${s.id}] cibles < 44 px`).toEqual([]);
     }
     // bandeau de fenetre : documente (design natif Windows 46x36), non bloquant
@@ -243,6 +254,7 @@ test.describe('T8 accessibilite clavier', () => {
     expect(total).toBeGreaterThan(60);
     // etats secondaires : confirmation du cache, onglet A propos
     await gotoScreen(page, byId('settings'));
+    seedUnusedCacheObject(appA.dataDir);
     await page.getByRole('tab', { name: 'Stockage' }).click();
     await page.getByRole('button', { name: /Vider le cache/ }).click();
     expect.soft((await contrastIssues(page)).issues, '[settings/stockage+confirmation]').toEqual([]);

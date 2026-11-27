@@ -115,9 +115,9 @@ test('T1 retrait : A retire B, B n\'obtient plus de PONG et A n\'a plus d\'ami',
   const codeA = await readMyCode(appA);
   await sendRequest(appB, codeA);
   await expect(appB.page.getByLabel(/^Code de vérification : /)).toBeVisible({ timeout: 30_000 });
-  await expect.poll(async () => (await invoke<{ items: { public_key: string }[] }>(appA.page, 'friend_requests', { offset: 0, limit: 5, query: null })).items.length, { timeout: 30_000 }).toBe(1);
-  const keyB = (await invoke<{ items: { public_key: string }[] }>(appA.page, 'friend_requests', { offset: 0, limit: 5, query: null })).items[0].public_key;
-  await invoke(appA.page, 'friend_accept', { public_key: keyB });
+  // A accepte par l'interface : la liste « Mes amis » de la page déjà ouverte se recharge (un friend_accept direct ne la rafraîchit pas).
+  await appA.page.getByLabel(`J'ai comparé ce code avec ${NAME_B}`).check({ timeout: 30_000 });
+  await appA.page.getByRole('button', { name: `Accepter ${NAME_B}` }).click({ timeout: 30_000 });
   for (const app of [appA, appB]) {
     await expect.poll(async () => (await invoke<{ presence: string }[]>(app.page, 'friend_list'))[0]?.presence, { timeout: 60_000 }).toBe('online');
   }

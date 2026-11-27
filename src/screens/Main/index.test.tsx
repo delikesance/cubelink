@@ -18,6 +18,12 @@ const grid = () => screen.getByRole("group", { name: "Instances" });
 const side = () => screen.getByRole("complementary", { name: "Amis" });
 
 describe("Main", () => {
+  it("ne déclare pas de <main> : le shell porte déjà l'unique repère main", async () => {
+    setup();
+    await screen.findByRole("group", { name: "Instances" });
+    expect(screen.queryByRole("main")).toBeNull();
+  });
+
   it("affiche les modpacks en tuiles ; un clic ouvre la page du modpack", async () => {
     const { navigate } = setup();
     const tile = await within(await screen.findByRole("group", { name: "Instances" })).findByRole("button", { name: "Create: Aeronautics" });

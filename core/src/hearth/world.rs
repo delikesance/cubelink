@@ -32,11 +32,34 @@ pub fn is_world_dir(dir: &Path) -> bool {
     fs::metadata(dir.join(LEVEL_DAT)).is_ok_and(|m| m.is_file())
 }
 
-/// Vrai pour un fichier qui n'entre jamais dans une copie ni une version du monde : `session.lock` (verrou du jeu)
-/// et les fichiers temporaires `*.tmp`. `rel` est un chemin relatif ou un simple nom.
+/// Vrai pour un fichier qui n'entre jamais dans une copie ni une version du monde : `session.lock` (verrou du jeu),
+/// les fichiers temporaires `*.tmp` et `*.dat_new`, et les temporaires que Minecraft crée avant de les renommer :
+/// `level<chiffres>.dat` et `<uuid>-<chiffres>.dat` (`File.createTempFile`). `level.dat`, `level.dat_old` et
+/// `<uuid>.dat` sont de vraies données et restent inclus. `rel` est un chemin relatif ou un simple nom.
 pub fn is_excluded(rel: &str) -> bool {
-    let name = rel.rsplit(['/', '\\']).next().unwrap_or(rel);
-    name.eq_ignore_ascii_case("session.lock") || name.to_ascii_lowercase().ends_with(".tmp")
+    let name = rel.rsplit(['/', '\\']).next().unwrap_or(rel).to_ascii_lowercase();
+    if name == "session.lock" || name.ends_with(".tmp") || name.ends_with(".dat_new") {
+        return true;
+    }
+    let Some(stem) = name.strip_suffix(".dat") else { return false };
+    let all_digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    if let Some(n) = stem.strip_prefix("level") {
+        return all_digits(n);
+    }
+    // `<uuid>-<chiffres>` : 36 caractères d'UUID (hexadécimal et tirets), puis `-` et le nombre aléatoire du jeu.
+    match stem.split_at_checked(36) {
+        Some((uuid, rest)) => rest.strip_prefix('-').is_some_and(all_digits) && is_uuid(uuid),
+        None => false,
+    }
+}
+
+/// Vrai pour un UUID écrit en 8-4-4-4-12 caractères hexadécimaux.
+fn is_uuid(s: &str) -> bool {
+    s.len() == 36
+        && s.bytes().enumerate().all(|(i, b)| match i {
+            8 | 13 | 18 | 23 => b == b'-',
+            _ => b.is_ascii_hexdigit(),
+        })
 }
 
 /// Nom d'une sauvegarde d'instance : un seul segment de chemin, sans `..` ni séparateur.
@@ -343,6 +366,52 @@ mod tests {
         assert!(is_excluded("data/x.tmp"));
         assert!(!is_excluded("region/r.0.0.mca"));
         assert!(!is_excluded("level.dat_old"));
+    }
+
+    #[test]
+    fn exclusions_des_temporaires_de_minecraft() {
+        const U: &str = "123e4567-e89b-12d3-a456-426614174000";
+        // Exclus : `*.dat_new`, `level<chiffres>.dat`, `<uuid>-<chiffres>.dat`.
+        assert!(is_excluded("region/x.dat_new"));
+        assert!(is_excluded("level.dat_new"));
+        assert!(is_excluded("level1234.dat"));
+        assert!(is_excluded("LEVEL9.DAT"));
+        assert!(is_excluded(&format!("playerdata/{U}-0042.dat")));
+        assert!(is_excluded(&format!("advancements\\{}-7.dat", U.to_uppercase())));
+        // Gardés : les vrais fichiers du monde et les noms voisins.
+        assert!(!is_excluded("level.dat"));
+        assert!(!is_excluded("level.dat_old"));
+        assert!(!is_excluded("levelx.dat"));
+        assert!(!is_excluded("level1a.dat"));
+        assert!(!is_excluded("data/levelx.dat"));
+        assert!(!is_excluded(&format!("playerdata/{U}.dat")));
+        assert!(!is_excluded(&format!("playerdata/{U}.dat_old")));
+        assert!(!is_excluded(&format!("playerdata/{U}-.dat")));
+        assert!(!is_excluded(&format!("playerdata/{U}-12a.dat")));
+        assert!(!is_excluded("playerdata/uuid-123.dat"));
+        assert!(!is_excluded("level.dat_new_x"));
+        assert!(!is_excluded("region/r.0.0.mca"));
+    }
+
+    #[test]
+    fn copy_ecarte_les_temporaires_de_minecraft_et_garde_level_dat() {
+        let t = tempfile::tempdir().unwrap();
+        let src = t.path().join("saves").join("Monde");
+        sample_world(&src);
+        let u = "123e4567-e89b-12d3-a456-426614174000";
+        write(&src, "level42.dat", b"tmp");
+        write(&src, "data/map_1.dat_new", b"tmp");
+        write(&src, &format!("playerdata/{u}-99.dat"), b"tmp");
+        write(&src, &format!("playerdata/{u}.dat"), b"player");
+        write(&src, "level.dat_old", b"old");
+        let dst = t.path().join("hearth").join("world");
+        copy_world(&src, &dst).unwrap();
+        assert!(dst.join("level.dat").is_file());
+        assert!(dst.join("level.dat_old").is_file());
+        assert!(dst.join(format!("playerdata/{u}.dat")).is_file());
+        assert!(!dst.join("level42.dat").exists());
+        assert!(!dst.join("data/map_1.dat_new").exists());
+        assert!(!dst.join(format!("playerdata/{u}-99.dat")).exists());
     }
 
     #[test]

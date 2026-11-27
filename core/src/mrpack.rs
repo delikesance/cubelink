@@ -22,8 +22,7 @@ use zip::ZipArchive;
 
 use crate::instance::InstanceStore;
 use crate::mods::{self, Provenance};
-use crate::providers::curseforge::CfDownload;
-use crate::providers::curseforge::{CfResolver, CDN_HOSTS, MAX_FILE_BYTES};
+use crate::providers::curseforge::{CfResolver, MAX_FILE_BYTES};
 use crate::providers::modrinth_api::{FileHashes, VersionFile};
 use crate::providers::modrinth_dl::{fetch_into_store, fetch_into_store_unverified, DlOptions, StoredObject};
 use crate::store::index::StoreIndex;
@@ -31,7 +30,7 @@ use crate::store::link::link_into;
 use crate::types::{Error, Instance, Loader, LoaderSpec, Result};
 
 const INDEX_NAME: &str = "modrinth.index.json";
-const MAX_INDEX_BYTES: u64 = 8 * 1024 * 1024;
+pub(crate) const MAX_INDEX_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_ENTRIES: usize = 100_000;
 /// Dossiers autorisés pour les fichiers listés dans l'index.
 const FILE_DIRS: &[&str] = &["mods", "config", "resourcepacks", "shaderpacks", "datapacks", "defaultconfigs", "kubejs"];
@@ -80,13 +79,13 @@ fn modrinth_project_from_url(urls: &[String]) -> Option<Provenance> {
 }
 
 /// Nom du jar si `path` est de la forme `mods/<nom>.jar` (un seul niveau).
-fn mod_jar_name(path: &str) -> Option<&str> {
+pub(crate) fn mod_jar_name(path: &str) -> Option<&str> {
     let name = path.strip_prefix("mods/")?;
     (!name.contains('/') && name.to_ascii_lowercase().ends_with(".jar")).then_some(name)
 }
 
 impl MrpackFile {
-    fn client_unsupported(&self) -> bool {
+    pub(crate) fn client_unsupported(&self) -> bool {
         self.env.as_ref().and_then(|e| e.client.as_deref()) == Some("unsupported")
     }
 }
@@ -184,7 +183,7 @@ pub fn has_dangerous_ext(name: &str) -> bool {
 }
 
 /// Valide un chemin relatif du pack (séparateur `/` uniquement). Retourne le premier segment.
-fn validate_rel(path: &str) -> Result<&str> {
+pub(crate) fn validate_rel(path: &str) -> Result<&str> {
     let bad = |why: &str| invalid(format!("chemin du pack refusé ({why}) : {path:?}"));
     if path.is_empty() {
         return Err(bad("vide"));
@@ -215,7 +214,7 @@ fn validate_rel(path: &str) -> Result<&str> {
     Ok(path.split('/').next().unwrap_or(path))
 }
 
-fn validate_file_path(path: &str) -> Result<()> {
+pub(crate) fn validate_file_path(path: &str) -> Result<()> {
     let first = validate_rel(path)?;
     if !path.contains('/') || !FILE_DIRS.contains(&first) {
         return Err(invalid(format!("chemin du pack hors des dossiers autorisés ({}) : {path:?}", FILE_DIRS.join(", "))));
@@ -223,7 +222,7 @@ fn validate_file_path(path: &str) -> Result<()> {
     Ok(())
 }
 
-fn check_url(url: &str, opts: &ImportOptions) -> Result<()> {
+pub(crate) fn check_url(url: &str, opts: &ImportOptions) -> Result<()> {
     let u = url::Url::parse(url).map_err(|e| invalid(format!("URL invalide {url:?} : {e}")))?;
     match u.scheme() {
         "https" => {}
@@ -252,7 +251,7 @@ fn read_index_json(archive: &mut ZipArchive<File>) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
-fn open_zip(zip_path: &Path) -> Result<ZipArchive<File>> {
+pub(crate) fn open_zip(zip_path: &Path) -> Result<ZipArchive<File>> {
     let f = File::open(zip_path)?;
     let a = ZipArchive::new(f).map_err(|e| invalid(format!("archive de modpack invalide : {e}")))?;
     if a.len() > MAX_ENTRIES {
@@ -335,25 +334,25 @@ pub fn parse_index(zip_path: &Path) -> Result<MrpackIndex> {
 // ---------- Overrides ----------
 
 /// Préfixes des dossiers du zip copiés tels quels dans l'instance.
-struct Layout {
-    common: String,
-    client: Option<String>,
+pub(crate) struct Layout {
+    pub(crate) common: String,
+    pub(crate) client: Option<String>,
 }
 
 impl Layout {
-    fn mrpack() -> Self {
+    pub(crate) fn mrpack() -> Self {
         Self { common: "overrides/".into(), client: Some("client-overrides/".into()) }
     }
 }
 
-struct OverrideEntry {
-    index: usize,
-    rel: String,
+pub(crate) struct OverrideEntry {
+    pub(crate) index: usize,
+    pub(crate) rel: String,
 }
 
 /// Valide toutes les entrées d'overrides (zip-slip, extensions, bombe) sans rien écrire.
 /// Retourne les entrées dans l'ordre d'application (`overrides/` puis `client-overrides/`).
-fn plan_overrides(archive: &mut ZipArchive<File>, opts: &ImportOptions, layout: &Layout) -> Result<Vec<OverrideEntry>> {
+pub(crate) fn plan_overrides(archive: &mut ZipArchive<File>, opts: &ImportOptions, layout: &Layout) -> Result<Vec<OverrideEntry>> {
     let mut common = Vec::new();
     let mut client = Vec::new();
     let mut total: u64 = 0;
@@ -404,7 +403,7 @@ fn plan_overrides(archive: &mut ZipArchive<File>, opts: &ImportOptions, layout: 
     Ok(common)
 }
 
-fn extract_overrides(
+pub(crate) fn extract_overrides(
     archive: &mut ZipArchive<File>,
     plan: &[OverrideEntry],
     game_dir: &Path,
@@ -446,7 +445,7 @@ fn extract_overrides(
 
 // ---------- Import ----------
 
-fn sanitize_name(name: &str) -> String {
+pub(crate) fn sanitize_name(name: &str) -> String {
     let cleaned: String = name.chars().map(|c| if c.is_control() || "<>:\"/\\|?*".contains(c) { '-' } else { c }).collect();
     let cleaned: String = cleaned.trim().chars().take(64).collect();
     let cleaned = cleaned.trim().trim_end_matches('.').trim().to_string();
@@ -469,7 +468,7 @@ fn with_file_ctx(path: &str, e: Error) -> Error {
     }
 }
 
-async fn fetch_file(file: &MrpackFile, store_root: &Path, index: &StoreIndex, dl: &DlOptions) -> Result<StoredObject> {
+pub(crate) async fn fetch_file(file: &MrpackFile, store_root: &Path, index: &StoreIndex, dl: &DlOptions) -> Result<StoredObject> {
     if file.unverified {
         let Some(url) = file.downloads.first() else { return Err(with_file_ctx(&file.path, Error::Network("aucune URL".into()))) };
         return fetch_into_store_unverified(url, MAX_FILE_BYTES, store_root, index, dl).await.map_err(|e| with_file_ctx(&file.path, e));
@@ -578,6 +577,10 @@ async fn run_import(
     let mut done = 0u32;
     // Provenance des jars posés, écrite en une fois après la boucle (l'ordre d'arrivée est aléatoire).
     let mut provenance: Vec<(String, Provenance)> = Vec::new();
+    // Fichiers d'index effectivement posés (pas les manquants), avec leur objet du magasin : relevé de l'installation.
+    let mut placed: Vec<(&MrpackFile, String)> = Vec::new();
+    // Fichiers tolérants non récupérés : le relevé garde leur empreinte attendue (le joueur les posera).
+    let mut expected_missing: Vec<&MrpackFile> = Vec::new();
     let mut results = stream::iter(files.iter().copied())
         .map(|f| {
             let dl = &dl;
@@ -589,6 +592,7 @@ async fn run_import(
             Ok(o) => o,
             Err(Error::Cancelled) => return Err(Error::Cancelled),
             Err(e) if f.tolerant => {
+                expected_missing.push(f);
                 tracing::warn!("mod CurseForge non récupéré ({}) : {e}", f.path);
                 missing.push(f.path.rsplit('/').next().unwrap_or(&f.path).to_string());
                 done += 1;
@@ -602,6 +606,7 @@ async fn run_import(
         let src = store_root.join(&obj.rel_path);
         link_into(&game_dir, &f.path, &src).map_err(|e| with_file_ctx(&f.path, e))?;
         index.add_ref(&obj.sha256)?;
+        placed.push((f, obj.sha256.clone()));
         installed.push(obj.sha256);
         if let (Some(name), Some(p)) = (mod_jar_name(&f.path), &f.provenance) {
             provenance.push((name.to_string(), p.clone()));
@@ -619,7 +624,14 @@ async fn run_import(
     // Un override qui remplace un jar du pack en change le contenu : on n'en garde pas la provenance.
     provenance.retain(|(name, _)| !in_overrides.contains(&format!("mods/{name}").to_ascii_lowercase()));
     // Sans cette provenance, les dépendances du catalogue, les mises à jour et `remove_old_versions` ignorent ces mods.
-    mods::record_provenance(&game_dir, &provenance)
+    mods::record_provenance(&game_dir, &provenance)?;
+    // Sans relevé, une mise à jour retélécharge l'ancien pack : ce n'est donc pas fatal pour l'import.
+    let placed: Vec<crate::modpack_update::PlacedFile<'_>> =
+        placed.iter().map(|(file, sha256)| crate::modpack_update::PlacedFile { file, sha256 }).collect();
+    if let Err(e) = crate::modpack_update::write_install_record(&game_dir, &placed, &expected_missing, archive, plan) {
+        tracing::warn!("relevé du modpack non écrit : {e}");
+    }
+    Ok(())
 }
 
 // ---------- CurseForge et zip générique ----------
@@ -640,79 +652,16 @@ pub struct PlainSpec {
     pub loader: LoaderSpec,
 }
 
-#[derive(Deserialize)]
-struct CfManifest {
-    minecraft: CfMinecraft,
-    #[serde(default)]
-    name: String,
-    #[serde(default)]
-    files: Vec<CfEntry>,
-    #[serde(default)]
-    overrides: String,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct CfMinecraft {
-    version: String,
-    #[serde(default)]
-    mod_loaders: Vec<CfLoader>,
-}
-
-#[derive(Deserialize)]
-struct CfLoader {
-    id: String,
-    #[serde(default)]
-    primary: bool,
-}
-
-#[derive(Deserialize)]
-struct CfEntry {
-    #[serde(rename = "projectID")]
-    project_id: u64,
-    #[serde(rename = "fileID")]
-    file_id: u64,
-}
-
-fn read_cf_manifest(archive: &mut ZipArchive<File>) -> Option<CfManifest> {
-    let entry = archive.by_name("manifest.json").ok()?;
-    if entry.size() > MAX_INDEX_BYTES {
-        return None;
-    }
-    let mut buf = Vec::new();
-    entry.take(MAX_INDEX_BYTES).read_to_end(&mut buf).ok()?;
-    let m: CfManifest = serde_json::from_slice(&buf).ok()?;
-    (!m.minecraft.version.trim().is_empty()).then_some(m)
-}
-
 /// Détecte le format de l'archive.
 pub fn detect(zip_path: &Path) -> Result<PackKind> {
     let mut archive = open_zip(zip_path)?;
     if archive.by_name(INDEX_NAME).is_ok() {
         return Ok(PackKind::Modrinth);
     }
-    if read_cf_manifest(&mut archive).is_some() {
+    if crate::cf_pack::read_cf_manifest(&mut archive).is_some() {
         return Ok(PackKind::CurseForge);
     }
     Ok(PackKind::Plain)
-}
-
-fn cf_loader(m: &CfMinecraft) -> Result<LoaderSpec> {
-    let Some(l) = m.mod_loaders.iter().find(|l| l.primary).or(m.mod_loaders.first()) else {
-        return Ok(LoaderSpec { loader: Loader::Vanilla, version: String::new() });
-    };
-    let (name, version) = l.id.split_once('-').ok_or_else(|| invalid(format!("loader CurseForge invalide : {:?}", l.id)))?;
-    let loader = match name.to_ascii_lowercase().as_str() {
-        "forge" => Loader::Forge,
-        "neoforge" => Loader::NeoForge,
-        "fabric" => Loader::Fabric,
-        "quilt" => Loader::Quilt,
-        other => return Err(invalid(format!("loader CurseForge non supporté : {other}"))),
-    };
-    if version.is_empty() {
-        return Err(invalid("version du loader vide"));
-    }
-    Ok(LoaderSpec { loader, version: version.to_string() })
 }
 
 /// Résultat d'un import CurseForge : l'instance et les mods qu'on n'a pas pu récupérer.
@@ -739,86 +688,10 @@ pub async fn import_curseforge(
     cancel: Arc<AtomicBool>,
 ) -> Result<CfImportResult> {
     let mut archive = open_zip(zip_path)?;
-    let m = read_cf_manifest(&mut archive).ok_or_else(|| invalid("manifest.json CurseForge invalide"))?;
-    let loader = cf_loader(&m.minecraft)?;
-    let overrides = if m.overrides.is_empty() { "overrides".to_string() } else { m.overrides.clone() };
-    validate_rel(&overrides)?;
-
-    let mut entries: Vec<(u64, u64)> = Vec::new();
-    let mut seen_ids = HashSet::new();
-    for f in &m.files {
-        if seen_ids.insert((f.project_id, f.file_id)) {
-            entries.push((f.project_id, f.file_id));
-        }
-    }
-
-    let mut opts = opts.clone();
-    opts.allowed_hosts.extend(CDN_HOSTS.iter().map(|h| h.to_string()));
-    // Beaucoup de petits fichiers : la latence domine, on parallélise davantage (résolution et téléchargement).
-    opts.concurrency = opts.concurrency.max(16);
-    let mut missing: Vec<String> = Vec::new();
-    let mut files = Vec::with_capacity(entries.len());
-    let mut seen_paths = HashSet::new();
-    // Avec une clé de développeur : une seule requête résout tous les mods (URL + SHA-1). Sinon, ou pour
-    // les mods sans URL de distribution, on retombe sur la résolution par redirection (sans clé).
-    let batch = if cf.has_api_key() {
-        let ids: Vec<u64> = entries.iter().map(|(_, f)| *f).collect();
-        match cf.resolve_batch(&ids).await {
-            Ok(b) => b,
-            Err(e) => {
-                tracing::warn!("résolution groupée CurseForge indisponible, repli sans clé : {e}");
-                Default::default()
-            }
-        }
-    } else {
-        Default::default()
-    };
-    let batch_ref = &batch;
-    let opts_ref = &opts;
-    let cancel_ref = &cancel;
-    let mut resolved = stream::iter(entries.iter().copied())
-        .map(|(p, f)| async move {
-            if cancel_ref.load(Ordering::SeqCst) {
-                return ((p, f), Err(Error::Cancelled));
-            }
-            let r = async {
-                let (d, sha1, size) = match batch_ref.get(&f) {
-                    Some(b) => (CfDownload { url: b.url.clone(), file_name: b.file_name.clone() }, b.sha1.clone(), b.size),
-                    None => (cf.resolve(p, f).await?, String::new(), 0),
-                };
-                check_url(&d.url, opts_ref)?;
-                let dir = if d.file_name.to_ascii_lowercase().ends_with(".zip") { "resourcepacks" } else { "mods" };
-                let path = format!("{dir}/{}", d.file_name);
-                validate_file_path(&path)?;
-                Ok::<_, Error>((path, d.url, sha1, size))
-            }
-            .await;
-            ((p, f), r)
-        })
-        .buffer_unordered(opts.concurrency.max(1));
-    while let Some(((p, f), r)) = resolved.next().await {
-        match r {
-            Err(Error::Cancelled) => return Err(Error::Cancelled),
-            Err(e) => {
-                tracing::warn!("mod CurseForge {p}/{f} non résolu : {e}");
-                missing.push(format!("projet {p} / fichier {f}"));
-            }
-            Ok((path, url, sha1, size)) => {
-                if seen_paths.insert(path.to_ascii_lowercase()) {
-                    let unverified = sha1.is_empty();
-                    let provenance = Some(Provenance { source: "curseforge".into(), id: p.to_string() });
-                    files.push(MrpackFile { path, sha1, sha512: String::new(), downloads: vec![url], file_size: size, env: None, unverified, tolerant: true, provenance });
-                }
-            }
-        }
-    }
-    drop(resolved);
-    if cancel.load(Ordering::SeqCst) {
-        return Err(Error::Cancelled);
-    }
-    let pack = MrpackIndex { name: m.name, version_id: String::new(), minecraft: m.minecraft.version.trim().to_string(), loader, files };
-    let layout = Layout { common: format!("{overrides}/"), client: None };
-    let (instance, dl_missing) = import_pack(pack, archive, &layout, instances, store_root, index, &opts, progress, cancel).await?;
+    let pack = crate::cf_pack::read(&mut archive, cf, opts, &cancel).await?;
+    let mut missing = pack.missing;
+    let (instance, dl_missing) =
+        import_pack(pack.index, archive, &pack.layout, instances, store_root, index, &pack.opts, progress, cancel).await?;
     missing.extend(dl_missing);
     Ok(CfImportResult { instance, missing })
 }

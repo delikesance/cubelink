@@ -1,11 +1,11 @@
 import { validateOfflineName } from "./accounts";
-import { HEARTH_EULA_REQUIRED, HEARTH_HEAD_UNAVAILABLE, HearthLeaveError } from "./types";
+import { HEARTH_CONFIRM_HOST, HEARTH_EULA_REQUIRED, HEARTH_HEAD_UNAVAILABLE, HearthLeaveError } from "./types";
 import type {
-  AccountInfo, AccountsState, BrowseHit, BrowseInstallResult, BrowseKind, BrowseProgressEvent, BrowseSource, BrowseVersion, FixPlan, FixProgressEvent, FixResult, ModCheck, ModEntry, ModIssue,
-  CreateInstanceInput, DeviceCode, HostState, Invite, JoinAnswer, JoinRequest, ImportWarningEvent, ImportProgressEvent, ImportDeferredEvent, LaunchLogEvent, FriendRequest, FriendWithPresence, Instance, InstanceArt,
+  AccountInfo, AccountsState, BrowseHit, BrowseInstallResult, BrowseKind, BrowseProgressEvent, BrowseSource, BrowseVersion, FixPlan, FixProgressEvent, FixResult, ModCheck, ModEntry, ModIssue, ModpackUpdate,
+  CreateInstanceInput, DetectedInstance, DeviceCode, HostState, Invite, JoinAnswer, JoinRequest, ImportWarningEvent, ImportProgressEvent, ImportDeferredEvent, LaunchLogEvent, FriendRequest, FriendWithPresence, Instance, InstanceArt,
   JoinPlan, JoinWarning, LaunchState, Manifest, PresenceEvent, UnknownModsEvent, Profile, Services, Settings,
   StageFallback, StageState, TransferProgress, TunnelStateEvent, Unsubscribe, UpdateState,
-  HearthCard, HearthDetail, HearthHandover, HearthHostPrompt, HearthInvite, HearthMember, HearthMemberLite,
+  HearthCard, HearthDetail, HearthHandover, HearthHostPrompt, HearthInvite, HearthRamWarning, HearthMember, HearthMemberLite,
 } from "./types";
 
 export interface FakeOptions {
@@ -17,6 +17,10 @@ export interface FakeOptions {
   requestCount?: number;
   /** Valeur renvoyée par pickFiles (configurable aussi via setPickedFiles). */
   pickedFiles?: string[];
+  /** Instances « trouvées » chez les autres lanceurs (défaut : un Prism, un CurseForge, un Modrinth et un loader non géré). `[]` : rien de détecté. */
+  detectedInstances?: DetectedInstance[];
+  /** Instances que `launcherImportScan` ne renvoie qu'avec un chemin choisi à la main. */
+  manualInstances?: DetectedInstance[];
   /** Comptes présents au départ (le premier est actif). Vide par défaut : écran Connexion. */
   accounts?: AccountInfo[];
   /** Réponse de `stageSupported` (zone de jeu intégrée). Faux par défaut : comme dans un navigateur. */
@@ -34,6 +38,8 @@ export interface FakeControls {
   setSavePath(path: string | null): void;
   /** Test : sauvegardes d'identité demandées (`export`/`import` avec leurs arguments) et redémarrages. */
   readonly identityCalls: Array<{ kind: "export" | "import" | "restart"; path?: string; passphrase?: string }>;
+  /** Valeur renvoyée par pickFolder (null : le sélecteur est annulé). */
+  setPickedFolder(path: string | null): void;
   /** Simule un glisser-déposer natif de fichiers sur la fenêtre. */
   dropFiles(paths: string[]): void;
   /** Test : émet un événement host://state. */
@@ -74,10 +80,18 @@ export interface FakeControls {
   emitHearthHandover(e: HearthHandover): void;
   /** Test : émet hearth://host_prompt. */
   emitHearthHostPrompt(e: HearthHostPrompt): void;
+  /** Test : émet hearth://ram_warning. */
+  emitHearthRamWarning(e: HearthRamWarning): void;
   /** Test : le contrat d'utilisation de Minecraft est déjà accepté (ou non). Défaut : non. */
   setHearthEula(accepted: boolean): void;
   /** Test : la dernière version n'a de contenu chez personne : `hearthPlay` rejette avec `head_unavailable` jusqu'à `hearthPlayFromPrevious`. `previous: null` : aucune version complète. */
   setHearthHeadUnavailable(info: { author: string; head: number; previous: number | null } | null): void;
+  /** Test : mise à jour de modpack que `modpackUpdateCheck` renverra pour cette instance (`"offline"` : la détection échoue). */
+  setPackUpdate(instanceId: string, u: ModpackUpdate | null | "offline"): void;
+  /** Test : appels `modpackUpdateApply` / `modpackUpdateUndo`, dans l'ordre. */
+  readonly packUpdateCalls: Array<{ kind: "apply" | "undo"; args: string[] }>;
+  /** Test : héberger sans la majorité du groupe demande une confirmation : `hearthPlay` rejette avec `confirm_host|best_effort|…` (état `idle`) tant que `hearthConfirmHost` n'a pas été appelé. L'état `blocked` demande toujours `confirm_host|alone|…`. */
+  setHearthBestEffort(info: { acks: number; members: number; needed: number } | null): void;
   /** Test : commandes Hearth reçues, dans l'ordre (nom sans préfixe `hearth`, arguments). */
   readonly hearthCalls: Array<{ kind: string; args: unknown[] }>;
   /** Test : fusionne `patch` dans l'état de la zone de jeu et émet stage://state. */
@@ -229,6 +243,18 @@ function makeManifest(): Manifest {
   };
 }
 
+/** Instances « trouvées » par défaut chez les autres lanceurs. */
+const DEFAULT_DETECTED: DetectedInstance[] = [
+  { launcher: "prism", name: "Aventure entre amis", path: "C:\\Users\\Alex\\AppData\\Roaming\\PrismLauncher\\instances\\Aventure", minecraft: "1.21.1",
+    loader: { loader: "fabric", version: "0.16.5" }, mod_count: 42, has_saves: true, unsupported: null },
+  { launcher: "curseforge", name: "All the Mods 10", path: "C:\\Users\\Alex\\curseforge\\minecraft\\Instances\\ATM10", minecraft: "1.21.1",
+    loader: { loader: "neoforge", version: "21.1.77" }, mod_count: 380, has_saves: false, unsupported: null },
+  { launcher: "modrinth", name: "Survie vanilla", path: "C:\\Users\\Alex\\AppData\\Roaming\\ModrinthApp\\profiles\\Survie", minecraft: "1.20.4",
+    loader: { loader: "vanilla", version: "" }, mod_count: 0, has_saves: true, unsupported: null },
+  { launcher: "prism", name: "Vieux pack", path: "C:\\Users\\Alex\\AppData\\Roaming\\PrismLauncher\\instances\\Vieux", minecraft: "1.8.9",
+    loader: { loader: "vanilla", version: "" }, mod_count: 12, has_saves: false, unsupported: "le loader « liteloader » n'est pas géré par Cubelink" },
+];
+
 export function createFakeServices(opts: FakeOptions = {}): Services & FakeControls {
   const tickMs = opts.tickMs ?? 250;
   const loginDelayMs = opts.loginDelayMs ?? 1200;
@@ -318,6 +344,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     hearthInvites: new Set<(l: HearthInvite[]) => void>(),
     hearthHandover: new Set<(e: HearthHandover) => void>(),
     hearthHostPrompt: new Set<(e: HearthHostPrompt) => void>(),
+    hearthRamWarning: new Set<(e: HearthRamWarning) => void>(),
     stage: new Set<(s: StageState) => void>(),
     stageFallback: new Set<(f: StageFallback) => void>(),
     stageFullscreen: new Set<(on: boolean) => void>(),
@@ -325,7 +352,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
   let stageSt: StageState = { attached: false, game: false, panel: false };
   const stageCalls: FakeControls["stageCalls"] = [];
   const setStage = (patch: Partial<StageState>) => { stageSt = { ...stageSt, ...patch }; emit(listeners.stage, { ...stageSt }); };
-  let updateSt: UpdateState = { phase: "idle", current: "0.1.0", version: null, notes: null, downloaded: 0, total: null, message: null, url: null };
+  let updateSt: UpdateState = { phase: "idle", current: "0.1.0", version: null, notes: null, downloaded: 0, total: null, message: null, url: null, last_checked: null };
   let updateCheckPatch: Partial<UpdateState> = { phase: "up_to_date" };
   const setUpdate = (patch: Partial<UpdateState>) => { updateSt = { ...updateSt, ...patch }; emit(listeners.update, { ...updateSt }); };
   function sub<T>(set: Set<(v: T) => void>, cb: (v: T) => void): Unsubscribe {
@@ -348,10 +375,17 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
   let hearthInvs: HearthInvite[] = [];
   let hearthEula = false;
   let hearthHeadMissing: { author: string; head: number; previous: number | null } | null = null;
+  let hearthBestEffort: { acks: number; members: number; needed: number } | null = null;
+  /** Groupes dont la personne a confirmé « Héberger quand même » (consommé par le lancement). */
+  const hearthConfirmed = new Set<string>();
   /** Le faux service part avec Hearth activé (le vrai réglage est coupé par défaut) ; `hearthSetEnabled` le change. */
   let hearthOn = true;
   let hearthN = 0;
   const hearthCalls: Array<{ kind: string; args: unknown[] }> = [];
+  const packUpdates = new Map<string, ModpackUpdate | null | "offline">();
+  const packUpdateCalls: Array<{ kind: "apply" | "undo"; args: string[] }> = [];
+  /** Exports déjà faits par groupe : le deuxième prend le suffixe « 2 », comme le vrai (jamais d'écrasement). */
+  const hearthExports = new Map<string, number>();
   const liteOf = (pk: string): HearthMemberLite => {
     const f = friends.find((x) => x.friend.public_key === pk);
     return { public_key: pk, name: f?.friend.name ?? "Ami", online: f?.presence === "online" };
@@ -376,7 +410,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
   const newVersion = (g: HearthDetail, kind: "session" | "checkpoint" | "restore") => {
     const number = (g.versions[0]?.number ?? 0) + 1;
     g.versions = [
-      { id: `v-${g.card.id}-${number}`, number, kind, author: ME.public_key, author_name: ME.name, created_at: Math.floor(Date.now() / 1000), played_secs: 1800, total_size: 410_000_000, is_head: true, side_branch: false },
+      { id: `v-${g.card.id}-${number}`, number, kind, author: ME.public_key, author_name: ME.name, created_at: Math.floor(Date.now() / 1000), played_secs: 1800, total_size: 410_000_000, is_head: true, side_branch: false, available: true },
       ...g.versions.map((v) => ({ ...v, is_head: false })),
     ];
     g.card.version = number;
@@ -391,13 +425,13 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     ];
     const card: HearthCard = {
       minecraft: "1.21.1", loader: "NeoForge", state: "idle", host: null, players: 0, progress: null, step: null, step_index: null,
-      step_count: 3, unclean: null, members_online: [], members_total: members.length, is_creator: true, can_host: true,
+      step_count: 3, unclean: null, crash: null, voice_unsupported: false, members_online: [], members_total: members.length, is_creator: true, can_host: true,
       instance_id: "inst-aeronautics", version: 1, orphans: d.orphans?.length ?? 0, ...p,
     };
     const g: HearthDetail = {
       card, members, proposals: [], blocker: null, fork: [], orphans: [],
-      versions: [{ id: `v-${p.id}-1`, number: 1, kind: "session", author: ME.public_key, author_name: ME.name, created_at: NOW - 86400, played_secs: 5400, total_size: 380_000_000, is_head: true, side_branch: false }],
-      settings: { keep_background: false, disk_bytes: 380_000_000, outbox_pending: 0, instance_name: "Create: Aeronautics" },
+      versions: [{ id: `v-${p.id}-1`, number: 1, kind: "session", author: ME.public_key, author_name: ME.name, created_at: NOW - 86400, played_secs: 5400, total_size: 380_000_000, is_head: true, side_branch: false, available: true }],
+      settings: { keep_background: false, disk_bytes: 380_000_000, outbox_pending: 0, outbox_failed: null, instance_name: "Create: Aeronautics" },
       ...d,
     };
     g.card = card;
@@ -438,6 +472,8 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
 
   // --- mods en mémoire ---
   let picked = opts.pickedFiles ?? [];
+  let pickedFolder: string | null = null;
+  const detected = opts.detectedInstances ?? DEFAULT_DETECTED;
   const mods = new Map<string, ModEntry[]>();
   mods.set("inst-aeronautics", [
     ...["create", "sodium", "iris", "lithium", "jade", "xaero-minimap", "waystones", "farmers-delight"].map((n, i) => (
@@ -586,6 +622,24 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
       if (/differe|deferred/i.test(path)) emit(listeners.importDeferred, { instance_id: inst.id, message: "réseau indisponible" });
       return { ...inst };
     },
+    launcherImportScan: async (path) => {
+      if (path && path.trim()) return (opts.manualInstances ?? (/rien|empty|vide/i.test(path) ? [] : detected.slice(0, 1))).map((d) => ({ ...d }));
+      return detected.map((d) => ({ ...d }));
+    },
+    launcherImportRun: async (path, _launcher, o) => {
+      const d = [...detected, ...(opts.manualInstances ?? [])].find((x) => x.path === path);
+      if (!d) throw new Error("Ce dossier n'est pas une instance lisible de ce lanceur.");
+      if (d.unsupported) throw new Error(d.unsupported);
+      const total = Math.max(1, d.mod_count + 2);
+      for (const done of [Math.ceil(total / 2), total]) emit(listeners.browse, { done, total, label: "Import de l'instance" });
+      const inst: Instance = {
+        ...noExtras, id: `inst-${instances.length + 1}`, name: o?.name?.trim() || d.name, minecraft: d.minecraft,
+        loader: d.loader.loader !== "vanilla" && !d.loader.version ? { ...d.loader, version: "0.16.5" } : { ...d.loader },
+        ram_mb: o?.ram_mb ?? 4096, mod_count: d.mod_count,
+      };
+      instances.push(inst);
+      return { ...inst };
+    },
     instancesLaunch: async (id) => {
       if (!instances.some((i) => i.id === id)) throw new Error("Instance introuvable.");
       clearLaunch(id);
@@ -712,17 +766,31 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
       const g = hearthCard(id);
       const st = g.card.state;
       if (st === "idle" || st === "unclean" || st === "blocked") {
+        if (st === "blocked" && !hearthConfirmed.has(id)) {
+          const offline = g.members.filter((m) => !m.is_me && !m.online).map((m) => m.name);
+          throw new Error(`${HEARTH_CONFIRM_HOST}|alone|${offline.join(";")}`);
+        }
         if (!hearthEula) throw new Error(HEARTH_EULA_REQUIRED);
         if (hearthHeadMissing) {
           const m = hearthHeadMissing;
           throw new Error(`${HEARTH_HEAD_UNAVAILABLE}|${m.head}|${m.previous ?? ""}|${m.author}`);
         }
+        if (st === "idle" && hearthBestEffort && !hearthConfirmed.has(id)) {
+          const b = hearthBestEffort;
+          throw new Error(`${HEARTH_CONFIRM_HOST}|best_effort|${b.acks}|${b.members}|${b.needed}`);
+        }
+        hearthConfirmed.delete(id);
         hearthLaunch(id, ["Mise à jour du monde", "Démarrage du serveur", "Ouverture de Minecraft"], { state: "hosting", host: { ...ME }, players: 1, unclean: null });
       } else if (st === "hosted") {
         hearthLaunch(id, ["Connexion à l'hôte", "Ouverture de Minecraft"], { state: "hosted", players: g.card.players + 1 });
       } else {
         throw new Error("Ce serveur ne peut pas être lancé pour l'instant.");
       }
+    },
+    hearthConfirmHost: async (id) => {
+      hearthCalls.push({ kind: "ConfirmHost", args: [id] });
+      hearthCard(id);
+      hearthConfirmed.add(id);
     },
     hearthPlayFromPrevious: async (id) => {
       hearthCalls.push({ kind: "PlayFromPrevious", args: [id] });
@@ -731,6 +799,33 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
       if (!hearthEula) throw new Error(HEARTH_EULA_REQUIRED);
       hearthHeadMissing = null;
       hearthLaunch(id, ["Mise à jour du monde", "Démarrage du serveur", "Ouverture de Minecraft"], { state: "hosting", host: { ...ME }, players: 1, unclean: null });
+    },
+    hearthPlayFromVersion: async (id, versionId) => {
+      hearthCalls.push({ kind: "PlayFromVersion", args: [id, versionId] });
+      const g = hearthCard(id);
+      const v = g.versions.find((x) => x.id === versionId);
+      if (!v) throw new Error("cette version n'existe plus");
+      if (!v.available) throw new Error(`Le contenu de la version ${v.number} n'est plus sur ce PC : elle ne peut pas servir de départ.`);
+      if (v.is_head) throw new Error("C'est déjà la version actuelle : clique sur Jouer.");
+      if (!hearthEula) throw new Error(HEARTH_EULA_REQUIRED);
+      hearthLaunch(id, ["Mise à jour du monde", "Démarrage du serveur", "Ouverture de Minecraft"], { state: "hosting", host: { ...ME }, players: 1, unclean: null });
+    },
+    hearthExportSolo: async (id, versionId) => {
+      hearthCalls.push({ kind: "ExportSolo", args: versionId === undefined ? [id] : [id, versionId] });
+      const g = hearthCard(id);
+      if (!g.card.instance_id) throw new Error("Choisis d'abord l'instance de ce groupe : l'export s'écrit dans ses mondes.");
+      let v = versionId === undefined ? g.versions.find((x) => x.is_head) : g.versions.find((x) => x.id === versionId);
+      if (!v) throw new Error("cette version n'existe plus");
+      let fallback = false;
+      if (versionId !== undefined && !v.available) throw new Error(`Le contenu de la version ${v.number} n'est plus sur ce PC : elle ne peut pas être exportée.`);
+      if (versionId === undefined && !v.available) {
+        v = g.versions.find((x) => x.available && !x.is_head);
+        if (!v) throw new Error("aucune version de ce monde n'est complète sur ce PC : il faut d'abord la recevoir");
+        fallback = true;
+      }
+      hearthExports.set(id, (hearthExports.get(id) ?? 0) + 1);
+      const n = hearthExports.get(id)!;
+      return { world_name: `${g.card.name} (export du groupe)${n > 1 ? ` ${n}` : ""}`, version_number: v.number, fallback, has_player: true };
     },
     hearthStop: async (id) => {
       hearthCalls.push({ kind: "Stop", args: [id] });
@@ -855,6 +950,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     onHearthInvites: (cb) => sub(listeners.hearthInvites, cb),
     onHearthHandover: (cb) => sub(listeners.hearthHandover, cb),
     onHearthHostPrompt: (cb) => sub(listeners.hearthHostPrompt, cb),
+    onHearthRamWarning: (cb) => sub(listeners.hearthRamWarning, cb),
     seedHearth: (p, d) => {
       const g = makeHearth(p, d);
       hearthGroups.set(g.card.id, g);
@@ -879,9 +975,13 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     },
     emitHearthHandover: (e) => emit(listeners.hearthHandover, e),
     emitHearthHostPrompt: (e) => emit(listeners.hearthHostPrompt, e),
+    emitHearthRamWarning: (e) => emit(listeners.hearthRamWarning, e),
     setHearthEula: (a) => { hearthEula = a; },
     setHearthHeadUnavailable: (i) => { hearthHeadMissing = i; },
+    setHearthBestEffort: (i) => { hearthBestEffort = i; },
     hearthCalls,
+    packUpdateCalls,
+    setPackUpdate: (id, u) => { packUpdates.set(id, u); },
     friendInvites: async () => invites.map((i) => ({ ...i })),
     friendInviteDismiss: async (id) => {
       invites = invites.filter((i) => i.id !== id);
@@ -943,23 +1043,35 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
       const i = friends.findIndex((f) => f.friend.public_key === pk);
       if (i >= 0) friends.splice(i, 1);
     },
+    friendSetTrust: async (pk, trust) => {
+      const f = friends.find((x) => x.friend.public_key === pk);
+      if (!f) throw new Error("cet ami est inconnu");
+      f.friend.trust = trust;
+    },
 
-    joinPlan: async (): Promise<JoinPlan> => {
+    joinPlan: async (pk): Promise<JoinPlan> => {
       // Comme le backend : disque d'abord (reçu + 1 Gio de marge), puis compte hors ligne actif.
       const warnings: JoinWarning[] = [];
       const need = bytes_total + 1_073_741_824;
       if (opts.freeDiskBytes !== undefined && opts.freeDiskBytes < need) warnings.push({ kind: "disk", need, free: opts.freeDiskBytes });
       if (accounts.find((a) => a.id === active)?.kind === "offline") warnings.push({ kind: "offline_account" });
+      const friendTrusted = friends.find((x) => x.friend.public_key === pk)?.friend.trust === "always";
       return {
         manifest: makeManifest(), manifest_hash: FAKE_MANIFEST_HASH, cached: 91, to_receive: 3, to_receive_bytes: bytes_total,
-        unknown_mods: ["mods/mod-maison.jar"], unknown_unchecked: [], unknown_scripts: [], unknown_trusted: [], warnings,
+        unknown_mods: friendTrusted ? [] : ["mods/mod-maison.jar"],
+        unknown_unchecked: [],
+        unknown_scripts: [],
+        unknown_trusted: [],
+        unknown_friend_trusted: friendTrusted ? ["mods/mod-maison.jar"] : [],
+        warnings,
       };
     },
     joinPlay: async () => {},
     // Comme le backend : refuse un autre manifeste, et des mods inconnus sans la case de confiance.
-    joinStart: async (_pk, manifestHash, acceptUnknown) => {
+    joinStart: async (pk, manifestHash, acceptUnknown) => {
       if (manifestHash !== FAKE_MANIFEST_HASH) throw new Error("La partie de ton ami a changé depuis l'affichage du plan : vérifie le nouveau plan avant de rejoindre.");
-      if (!acceptUnknown) throw new Error("Des mods inconnus ou non vérifiés demandent ton accord : ouvre « Rejoindre » dans Cubelink pour les voir et les accepter.");
+      const friendTrusted = friends.find((x) => x.friend.public_key === pk)?.friend.trust === "always";
+      if (!acceptUnknown && !friendTrusted) throw new Error("Des mods inconnus ou non vérifiés demandent ton accord : ouvre « Rejoindre » dans Cubelink pour les voir et les accepter.");
       step = 0;
       emit(listeners.transfer, progress("preparing"));
       startTimer();
@@ -1070,6 +1182,24 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
       syncCount(id);
       return checkOf(id);
     },
+    modpackUpdateCheck: async (id) => {
+      need(id);
+      const u = packUpdates.get(id) ?? null;
+      if (u === "offline") throw new Error("réseau : hors ligne");
+      return u;
+    },
+    modpackUpdateApply: async (id, versionId) => {
+      packUpdateCalls.push({ kind: "apply", args: [id, versionId] });
+      need(id);
+      packUpdates.set(id, null);
+      // Identifiant numérique = fichier CurseForge : un mod non redistribuable reste à télécharger soi-même.
+      const missing = /^\d+$/.test(versionId) ? ["mods/mod-exclusif.jar"] : [];
+      return { added: 3, removed: 1, replaced: 12, kept: ["config/sodium-options.json"], missing, backup_id: "pack-backup-demo" };
+    },
+    modpackUpdateUndo: async (id, backupId) => {
+      packUpdateCalls.push({ kind: "undo", args: [id, backupId] });
+      return { ...need(id) };
+    },
     modsRemove: async (id, file) => {
       const m = modFile(id, file);
       const list = modsOf(id);
@@ -1109,6 +1239,8 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
       if (!identityStaged) throw new Error("Aucune restauration en attente.");
       identityCalls.push({ kind: "restart" });
     },
+    pickFolder: async () => pickedFolder,
+    setPickedFolder: (path) => { pickedFolder = path; },
     dropFiles: (paths) => emit(listeners.drop, paths),
     emitHostState: (e) => emit(listeners.host, e),
     answerSentRequest: (code, answer, name = "Alex") => {
@@ -1167,7 +1299,7 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     updateCheck: async () => {
       setUpdate({ phase: "checking", message: null });
       await Promise.resolve();
-      setUpdate(updateCheckPatch);
+      setUpdate({ last_checked: Math.floor(Date.now() / 1000), ...updateCheckPatch });
       return { ...updateSt };
     },
     updateInstall: async () => {

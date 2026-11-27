@@ -28,7 +28,42 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Push vers `main` (fusion de `canary`) : si exactement le même arbre de fichiers est déjà passé au vert sur `canary`
+  # (mêmes jobs bloquants), les vérifications ne sont pas refaites et la release part tout de suite.
+  verified:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      skip: ${{ steps.v.outputs.skip }}
+    steps:
+      - id: v
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          tree() { gh api "repos/$REPO/git/commits/$1" -q .tree.sha; }
+          want=$(tree "$SHA")
+          required="front agent-lan-java8 clippy-windows tests-windows clippy-linux tests-linux deny"
+          for row in $(gh api "repos/$REPO/actions/workflows/ci.yml/runs?branch=canary&event=push&per_page=15" -q '.workflow_runs[]|"\(.id),\(.head_sha)"'); do
+            id=${row%,*}; sha=${row#*,}
+            [ "$(tree "$sha")" = "$want" ] || continue
+            ok=$(gh api "repos/$REPO/actions/runs/$id/jobs?per_page=50" -q '[.jobs[]|select(.conclusion=="success")|.name]|join(" ")')
+            missing=0
+            for j in $required; do [[ " $ok " == *" $j "* ]] || missing=1; done
+            if [ $missing = 0 ]; then echo "arbre déjà vérifié sur canary (run $id, $sha)"; echo skip=true >> "$GITHUB_OUTPUT"; exit 0; fi
+          done
+          echo "arbre jamais vérifié en entier sur canary : vérifications complètes"
+          echo skip=false >> "$GITHUB_OUTPUT"
+
   front:
+    needs: verified
+    if: ${{ !cancelled() && needs.verified.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -40,6 +75,8 @@ jobs:
       - run: npm run test:front
 
   agent-lan-java8:
+    needs: verified
+    if: ${{ !cancelled() && needs.verified.outputs.skip != 'true' }}
     # L'agent LAN est compilé --release 8 avec un JDK 17 (build.sh) puis exécuté sur de vrais JVM 8 et 17 (stubs legacy
     # SRG 1.7.10 / 1.12.2 et stubs modernes) : un UnsupportedClassVersionError ou une régression Java 8 casse la CI.
     runs-on: ubuntu-latest
@@ -63,6 +100,8 @@ jobs:
           echo "$out" | grep -q 'Java 8 reel : TESTE'
 
   clippy-windows:
+    needs: verified
+    if: ${{ !cancelled() && needs.verified.outputs.skip != 'true' }}
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
@@ -81,6 +120,8 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
   tests-windows:
+    needs: verified
+    if: ${{ !cancelled() && needs.verified.outputs.skip != 'true' }}
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
@@ -100,6 +141,8 @@ jobs:
   # Linux : clippy et tests complets. Les scénarios X11 de la Scène (host/tests) ouvrent de vraies fenêtres :
   # ils tournent sous un serveur X virtuel (xvfb-run).
   clippy-linux:
+    needs: verified
+    if: ${{ !cancelled() && needs.verified.outputs.skip != 'true' }}
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     steps:
@@ -117,6 +160,8 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
   tests-linux:
+    needs: verified
+    if: ${{ !cancelled() && needs.verified.outputs.skip != 'true' }}
     runs-on: ubuntu-22.04
     timeout-minutes: 40
     steps:
@@ -232,6 +277,8 @@ jobs:
 
   # Licences, sources et crates interdites (deny.toml). Bloquant.
   deny:
+    needs: verified
+    if: ${{ !cancelled() && needs.verified.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -271,8 +318,13 @@ jobs:
   # exceptions : `e2e-windows` et `advisories` ne bloquent pas). release.yml n'a plus de déclencheur `push` propre.
   # Le job appelant doit porter `contents: write` : un workflow appelé ne peut pas élargir les permissions de l'appelant.
   release:
-    needs: [front, agent-lan-java8, clippy-windows, tests-windows, clippy-linux, tests-linux, deny]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [verified, front, agent-lan-java8, clippy-windows, tests-windows, clippy-linux, tests-linux, deny]
+    # Toutes les vérifications vertes, ou toutes sautées parce que le même arbre est déjà vert sur canary.
+    if: >-
+      !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.verified.result == 'success' &&
+      (needs.verified.outputs.skip == 'true' || (needs.front.result == 'success' && needs.agent-lan-java8.result == 'success' &&
+      needs.clippy-windows.result == 'success' && needs.tests-windows.result == 'success' && needs.clippy-linux.result == 'success' &&
+      needs.tests-linux.result == 'success' && needs.deny.result == 'success'))
     permissions:
       contents: write
     uses: ./.github/workflows/release.yml

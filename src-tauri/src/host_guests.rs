@@ -53,7 +53,10 @@ pub fn host_guests(state: State<'_, Arc<AppState>>) -> Result<Vec<HostGuest>, St
 /// Retire l'accès d'un ami à mon monde solo (invitation ou demande acceptée).
 #[tauri::command(rename_all = "snake_case")]
 #[specta::specta(rename_all = "snake_case")]
-pub fn host_guest_revoke(state: State<'_, Arc<AppState>>, public_key: String) -> Result<(), String> {
+pub fn host_guest_revoke(
+    state: State<'_, Arc<AppState>>,
+    public_key: String,
+) -> Result<(), String> {
     state.host_guest_revoke(&public_key)
 }
 
@@ -83,17 +86,31 @@ mod tests {
         fn presence(&self, _k: &str) -> Presence {
             Presence::Online
         }
-        fn send_request(&self, _t: FriendCodePayload, _n: String) -> BoxFuture<'_, Result<VerifyCode, String>> {
+        fn send_request(
+            &self,
+            _t: FriendCodePayload,
+            _n: String,
+        ) -> BoxFuture<'_, Result<VerifyCode, String>> {
             Box::pin(async { Err("x".into()) })
         }
-        fn fetch_manifest(&self, _k: String) -> BoxFuture<'_, Result<crate::p2p_backend::HostManifest, String>> {
+        fn fetch_manifest(
+            &self,
+            _k: String,
+        ) -> BoxFuture<'_, Result<crate::p2p_backend::HostManifest, String>> {
             Box::pin(async { Err("x".into()) })
         }
         fn send_invite(&self, k: String, m: InviteMessage) -> BoxFuture<'_, Result<(), String>> {
             self.0.lock().unwrap().push((k, m.revoke));
             Box::pin(async { Ok(()) })
         }
-        fn receive_files(&self, _k: String, _i: String, _p: Plan, _pr: ProgressFn, _c: Arc<TransferControl>) -> BoxFuture<'_, Result<(), Error>> {
+        fn receive_files(
+            &self,
+            _k: String,
+            _i: String,
+            _p: Plan,
+            _pr: ProgressFn,
+            _c: Arc<TransferControl>,
+        ) -> BoxFuture<'_, Result<(), Error>> {
             Box::pin(async { Ok(()) })
         }
     }
@@ -102,15 +119,39 @@ mod tests {
         hex::encode([n; 32])
     }
 
-    fn hosting(dir: &std::path::Path) -> (Arc<AppState>, crate::state::test_support::Events, Arc<Sent>) {
+    fn hosting(
+        dir: &std::path::Path,
+    ) -> (Arc<AppState>, crate::state::test_support::Events, Arc<Sent>) {
         let (st, events) = test_state(dir);
         let sent = Arc::new(Sent::default());
         st.set_backend(sent.clone());
         for n in [1u8, 2] {
-            st.friends.add_friend(&Friend { public_key: key(n), name: format!("Ami{n}"), trust: TrustLevel::Ask, added_at: 1 }).unwrap();
+            st.friends
+                .add_friend(&Friend {
+                    public_key: key(n),
+                    name: format!("Ami{n}"),
+                    trust: TrustLevel::Ask,
+                    added_at: 1,
+                })
+                .unwrap();
         }
-        let inst = st.instances.create("Monde", "1.21.1", LoaderSpec { loader: Loader::Vanilla, version: String::new() }, 2048).unwrap();
-        *lock(&st.host) = Some(HostState { instance_id: inst.id, sharing: true, world_port: Some(54321) });
+        let inst = st
+            .instances
+            .create(
+                "Monde",
+                "1.21.1",
+                LoaderSpec {
+                    loader: Loader::Vanilla,
+                    version: String::new(),
+                },
+                2048,
+            )
+            .unwrap();
+        *lock(&st.host) = Some(HostState {
+            instance_id: inst.id,
+            sharing: true,
+            world_port: Some(54321),
+        });
         (st, events, sent)
     }
 
@@ -128,8 +169,14 @@ mod tests {
         assert!(e.contains("déjà envoyée"), "{e}");
         let g = st.host_guests();
         assert_eq!(g.len(), 1);
-        assert_eq!((g[0].public_key.as_str(), g[0].origin, g[0].entered), (key(1).as_str(), PassOrigin::Invite, false));
-        assert!(count(&events, "host://guests") >= 1, "la liste des invités est annoncée");
+        assert_eq!(
+            (g[0].public_key.as_str(), g[0].origin, g[0].entered),
+            (key(1).as_str(), PassOrigin::Invite, false)
+        );
+        assert!(
+            count(&events, "host://guests") >= 1,
+            "la liste des invités est annoncée"
+        );
         // Une fois entré, une nouvelle invitation est de nouveau possible (elle ne change rien à son accès).
         st.access.mark_entered(&[1; 32]);
         st.friend_invite(&key(1)).await.unwrap();
@@ -146,20 +193,42 @@ mod tests {
         assert!(!st.access.contains(&[1; 32]));
         assert!(st.host_guests().is_empty());
         for _ in 0..50 {
-            if sent.0.lock().unwrap().iter().any(|(k, r)| *r && *k == key(1)) {
+            if sent
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(k, r)| *r && *k == key(1))
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        assert!(sent.0.lock().unwrap().iter().any(|(k, r)| *r && *k == key(1)), "révocation envoyée à l'ami");
+        assert!(
+            sent.0
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(k, r)| *r && *k == key(1)),
+            "révocation envoyée à l'ami"
+        );
         // « Tous mes amis » ne le réinvite pas ; une invitation explicite, si.
         let before = sent.0.lock().unwrap().len();
-        st.invite_friend(&key(1), PassOrigin::AllFriends).await.unwrap();
+        st.invite_friend(&key(1), PassOrigin::AllFriends)
+            .await
+            .unwrap();
         assert!(!st.access.contains(&[1; 32]));
-        assert_eq!(sent.0.lock().unwrap().len(), before, "aucune invitation envoyée");
+        assert_eq!(
+            sent.0.lock().unwrap().len(),
+            before,
+            "aucune invitation envoyée"
+        );
         st.friend_invite(&key(1)).await.unwrap();
         assert!(st.access.contains(&[1; 32]));
-        assert!(st.host_guest_revoke(&key(9)).unwrap_err().contains("inconnu"));
+        assert!(st
+            .host_guest_revoke(&key(9))
+            .unwrap_err()
+            .contains("inconnu"));
     }
 
     #[tokio::test]
@@ -168,8 +237,18 @@ mod tests {
         let (st, events, _) = hosting(dir.path());
         assert!(st.friend_join_asks().is_empty());
         let _ = st.friend_join_request(&key(2)).await; // le faux backend répond tout de suite
-        assert_eq!(count(&events, "friend://join_asks"), 2, "envoi puis réponse");
-        let last = lock(&events).iter().rev().find(|(n, _)| n == "friend://join_asks").unwrap().1.clone();
+        assert_eq!(
+            count(&events, "friend://join_asks"),
+            2,
+            "envoi puis réponse"
+        );
+        let last = lock(&events)
+            .iter()
+            .rev()
+            .find(|(n, _)| n == "friend://join_asks")
+            .unwrap()
+            .1
+            .clone();
         assert_eq!(last.as_array().map(Vec::len), Some(0));
         assert!(st.friend_join_asks().is_empty());
     }

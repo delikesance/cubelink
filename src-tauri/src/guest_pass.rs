@@ -36,7 +36,11 @@ pub struct GuestPass {
 
 impl GuestPass {
     pub fn new(origin: PassOrigin, now: Instant, ttl: Duration) -> Self {
-        Self { origin, until: now + ttl, entered: false }
+        Self {
+            origin,
+            until: now + ttl,
+            entered: false,
+        }
     }
 
     /// L'accès vaut-il encore à `now` ?
@@ -55,7 +59,10 @@ impl GuestPass {
         if self.entered {
             return self;
         }
-        Self { until: now + ttl, ..self }
+        Self {
+            until: now + ttl,
+            ..self
+        }
     }
 
     /// Invitation envoyée par l'hôte et pas encore utilisée.
@@ -100,9 +107,15 @@ mod tests {
     #[test]
     fn un_acces_utilise_ne_perime_plus() {
         let t0 = Instant::now();
-        let p = GuestPass { entered: true, ..GuestPass::new(PassOrigin::Request, t0, TTL) };
+        let p = GuestPass {
+            entered: true,
+            ..GuestPass::new(PassOrigin::Request, t0, TTL)
+        };
         assert!(p.is_valid(t0 + TTL * 10));
-        assert!(!p.is_pending(t0), "un invité entré n'a plus d'invitation en attente");
+        assert!(
+            !p.is_pending(t0),
+            "un invité entré n'a plus d'invitation en attente"
+        );
         assert_eq!(p.remaining_secs(t0), None);
     }
 
@@ -111,10 +124,20 @@ mod tests {
         let t0 = Instant::now();
         let later = t0 + Duration::from_secs(200);
         let p = GuestPass::new(PassOrigin::Invite, t0, TTL).renewed(later, TTL);
-        assert_eq!((p.origin, p.until), (PassOrigin::Invite, later + TTL), "origine gardée");
+        assert_eq!(
+            (p.origin, p.until),
+            (PassOrigin::Invite, later + TTL),
+            "origine gardée"
+        );
         assert!(p.is_pending_invite(later));
-        assert!(!GuestPass::new(PassOrigin::AllFriends, t0, TTL).is_pending_invite(t0), "seule une invitation grise « Inviter »");
-        let entered = GuestPass { entered: true, ..GuestPass::new(PassOrigin::Request, t0, TTL) };
+        assert!(
+            !GuestPass::new(PassOrigin::AllFriends, t0, TTL).is_pending_invite(t0),
+            "seule une invitation grise « Inviter »"
+        );
+        let entered = GuestPass {
+            entered: true,
+            ..GuestPass::new(PassOrigin::Request, t0, TTL)
+        };
         assert_eq!(entered.renewed(later, TTL), entered);
     }
 }

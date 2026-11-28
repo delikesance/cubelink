@@ -55,7 +55,12 @@ impl Default for SessionAccess {
 impl SessionAccess {
     /// Comme `default`, avec une validité des laissez-passer réglable (tests).
     pub fn with_ttl(ttl: Duration) -> Self {
-        Self { inner: Mutex::default(), ttl, observer: Mutex::new(None), announcing: Mutex::new(()) }
+        Self {
+            inner: Mutex::default(),
+            ttl,
+            observer: Mutex::new(None),
+            announcing: Mutex::new(()),
+        }
     }
 
     /// Branche l'observateur de la liste des invités (un seul ; le dernier l'emporte).
@@ -77,14 +82,18 @@ impl SessionAccess {
         let now = Instant::now();
         let newly = {
             let mut sets = lock(&self.inner);
-            if sets.serving.is_some() || (origin == PassOrigin::AllFriends && sets.removed.contains(key)) {
+            if sets.serving.is_some()
+                || (origin == PassOrigin::AllFriends && sets.removed.contains(key))
+            {
                 return false;
             }
             if origin != PassOrigin::AllFriends {
                 sets.removed.remove(key);
             }
             let prev = sets.guests.get(key).copied().filter(|p| p.is_valid(now));
-            let pass = prev.map_or(GuestPass::new(origin, now, self.ttl), |p| p.renewed(now, self.ttl));
+            let pass = prev.map_or(GuestPass::new(origin, now, self.ttl), |p| {
+                p.renewed(now, self.ttl)
+            });
             sets.guests.insert(*key, pass);
             prev.is_none()
         };
@@ -94,7 +103,10 @@ impl SessionAccess {
 
     /// Une invitation envoyée à cet ami (bouton « Inviter ») attend encore qu'il entre.
     pub fn has_pending_invite(&self, key: &PeerKey) -> bool {
-        lock(&self.inner).guests.get(key).is_some_and(|p| p.is_pending_invite(Instant::now()))
+        lock(&self.inner)
+            .guests
+            .get(key)
+            .is_some_and(|p| p.is_pending_invite(Instant::now()))
     }
 
     /// Retire l'accès de cet ami s'il ne l'a pas encore utilisé (invitation qui n'a pas pu partir).
@@ -229,14 +241,20 @@ impl SessionAccess {
     /// Vrai si ce pair a un accès valide, pour une cible quelconque (sans tenir compte de l'amitié).
     pub fn contains(&self, key: &PeerKey) -> bool {
         let sets = lock(&self.inner);
-        sets.guests.get(key).is_some_and(|p| p.is_valid(Instant::now())) || sets.groups.values().any(|s| s.contains(key))
+        sets.guests
+            .get(key)
+            .is_some_and(|p| p.is_valid(Instant::now()))
+            || sets.groups.values().any(|s| s.contains(key))
     }
 
     /// Ce pair a-t-il accès à la cible `target` ?
     pub fn allows(&self, target: &SessionTarget, key: &PeerKey) -> bool {
         let sets = lock(&self.inner);
         match target {
-            SessionTarget::Solo => sets.guests.get(key).is_some_and(|p| p.is_valid(Instant::now())),
+            SessionTarget::Solo => sets
+                .guests
+                .get(key)
+                .is_some_and(|p| p.is_valid(Instant::now())),
             SessionTarget::Group(g) => sets.groups.get(g).is_some_and(|s| s.contains(key)),
         }
     }
@@ -246,8 +264,16 @@ impl SessionAccess {
     pub fn served_for(&self, key: &PeerKey) -> (SessionTarget, bool) {
         let sets = lock(&self.inner);
         match sets.serving {
-            Some(g) => (SessionTarget::Group(g), sets.groups.get(&g).is_some_and(|s| s.contains(key))),
-            None => (SessionTarget::Solo, sets.guests.get(key).is_some_and(|p| p.is_valid(Instant::now()))),
+            Some(g) => (
+                SessionTarget::Group(g),
+                sets.groups.get(&g).is_some_and(|s| s.contains(key)),
+            ),
+            None => (
+                SessionTarget::Solo,
+                sets.guests
+                    .get(key)
+                    .is_some_and(|p| p.is_valid(Instant::now())),
+            ),
         }
     }
 
@@ -267,11 +293,17 @@ mod tests {
     fn un_acces_inutilise_perime_et_ne_laisse_plus_entrer() {
         let access = SessionAccess::with_ttl(Duration::ZERO);
         assert!(access.allow_friend(&K, PassOrigin::Invite));
-        assert!(!access.allows(&SessionTarget::Solo, &K), "invitation échue : plus d'accès");
+        assert!(
+            !access.allows(&SessionTarget::Solo, &K),
+            "invitation échue : plus d'accès"
+        );
         assert!(!access.contains(&K));
         assert!(access.guests().is_empty());
         access.mark_entered(&K);
-        assert!(!access.allows(&SessionTarget::Solo, &K), "un accès échu ne se rattrape pas en entrant");
+        assert!(
+            !access.allows(&SessionTarget::Solo, &K),
+            "un accès échu ne se rattrape pas en entrant"
+        );
     }
 
     #[test]
@@ -283,10 +315,19 @@ mod tests {
         assert_eq!((g[0].origin, g[0].entered), (PassOrigin::Invite, false));
         assert!(g[0].expires_at.is_some_and(|t| t > now_secs()));
         access.mark_entered(&K);
-        assert!(!access.has_pending_invite(&K), "entré : plus d'invitation en attente");
+        assert!(
+            !access.has_pending_invite(&K),
+            "entré : plus d'invitation en attente"
+        );
         access.revoke_unused_pass(&K);
-        assert!(access.contains(&K), "un invité entré garde son accès si une invitation échoue");
-        assert_eq!((access.guests()[0].entered, access.guests()[0].expires_at), (true, None));
+        assert!(
+            access.contains(&K),
+            "un invité entré garde son accès si une invitation échoue"
+        );
+        assert_eq!(
+            (access.guests()[0].entered, access.guests()[0].expires_at),
+            (true, None)
+        );
         access.clear_guests();
         assert!(!access.contains(&K));
     }
@@ -297,13 +338,22 @@ mod tests {
         access.allow_friend(&K, PassOrigin::AllFriends);
         access.remove_guest(&K);
         assert!(!access.contains(&K));
-        assert!(!access.allow_friend(&K, PassOrigin::AllFriends), "« tous mes amis » ne le réinvite pas");
+        assert!(
+            !access.allow_friend(&K, PassOrigin::AllFriends),
+            "« tous mes amis » ne le réinvite pas"
+        );
         assert!(!access.contains(&K));
-        assert!(access.allow_friend(&K, PassOrigin::Invite), "une invitation explicite le réinvite");
+        assert!(
+            access.allow_friend(&K, PassOrigin::Invite),
+            "une invitation explicite le réinvite"
+        );
         assert!(access.contains(&K));
         access.remove_guest(&K);
         access.clear_guests();
-        assert!(access.allow_friend(&K, PassOrigin::AllFriends), "partie suivante : la liste des retraits est vidée");
+        assert!(
+            access.allow_friend(&K, PassOrigin::AllFriends),
+            "partie suivante : la liste des retraits est vidée"
+        );
     }
 
     #[test]

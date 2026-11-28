@@ -210,6 +210,8 @@ impl JoinRequestHandler {
             return Admission::Now(JoinAnswer::Refused);
         }
         if self.policy.is_allowed(&key) {
+            // Déjà invité : l'accès est renouvelé, pour qu'il ne périme pas juste après ce « accepté ».
+            self.policy.grant(&key);
             return Admission::Now(JoinAnswer::Accepted);
         }
         let mut book = crate::util::lock(&self.book);

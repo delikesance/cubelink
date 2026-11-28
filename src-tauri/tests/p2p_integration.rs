@@ -16,7 +16,7 @@ type Events = Arc<Mutex<Vec<(String, serde_json::Value)>>>;
 /// Règle de jonction : l'hôte ouvre à `guest` l'accès à sa partie en cours (comme une invitation acceptée).
 fn allow(host: &Node, guest: &Node) {
     let key: [u8; 32] = hex::decode(guest.key()).unwrap().try_into().unwrap();
-    host.st.access.allow_friend(&key);
+    host.st.access.allow_friend(&key, cubelink_app::guest_pass::PassOrigin::Invite);
 }
 
 struct Node {

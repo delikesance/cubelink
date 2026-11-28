@@ -105,6 +105,7 @@ impl ProtocolHandler for ManifestHandler {
             if kind[0] != REQUEST {
                 return None;
             }
+            self.inner.authorizer.admitted(&peer);
             send.write_all(&bytes).await.ok()?;
             send.finish().ok()?;
             // Laisse l'invité lire avant de fermer la connexion.

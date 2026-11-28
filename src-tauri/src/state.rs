@@ -428,6 +428,15 @@ impl AppState {
         let identity = Arc::new(identity);
         let friends = Arc::new(friends);
         let access = Arc::new(crate::authz::SessionAccess::default());
+        {
+            // Liste des invités du monde solo, à chaque changement (`host://guests`).
+            let emit = emit.clone();
+            access.observe(Arc::new(move |list| {
+                if let Ok(v) = serde_json::to_value(&list) {
+                    emit("host://guests", v);
+                }
+            }));
+        }
         let hearth = crate::hearth::HearthRuntime::new(&paths.root, identity.clone(), friends.clone(), instances.clone(), access.clone(), emit.clone())?;
         Ok(Self {
             last_seen,

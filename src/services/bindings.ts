@@ -179,6 +179,12 @@ export const commands = {
 	friendJoinRequestAnswer: (publicKey: string, accept: boolean, options?: InvokeOptions) => __TAURI_INVOKE<null>("friend_join_request_answer", { public_key: publicKey, accept }, options),
 	/**  Demande à un ami de rejoindre son monde ; renvoie `accepted`, `refused` ou `expired`. */
 	friendJoinRequest: (publicKey: string, options?: InvokeOptions) => __TAURI_INVOKE<JoinAnswer>("friend_join_request", { public_key: publicKey }, options),
+	/**  Invités de ma partie en cours (monde solo), avec l'origine et l'échéance de leur accès. */
+	hostGuests: (options?: InvokeOptions) => __TAURI_INVOKE<HostGuest_Serialize[]>("host_guests", undefined, options),
+	/**  Retire l'accès d'un ami à mon monde solo (invitation ou demande acceptée). */
+	hostGuestRevoke: (publicKey: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("host_guest_revoke", { public_key: publicKey }, options),
+	/**  Amis à qui j'ai demandé à rejoindre et qui n'ont pas encore répondu. */
+	friendJoinAsks: (options?: InvokeOptions) => __TAURI_INVOKE<string[]>("friend_join_asks", undefined, options),
 	/**  Serveurs de groupe de ce PC (cartes de l'accueil). */
 	hearthList: (options?: InvokeOptions) => __TAURI_INVOKE<HearthCard_Serialize[]>("hearth_list", undefined, options),
 	/**  Page d'un serveur de groupe : membres, versions du monde, votes, réglages. */
@@ -986,6 +992,29 @@ export type HearthWorld = {
 	size_bytes: number,
 };
 
+/**  Un invité vu par l'hôte (`host_guests`, événement `host://guests`). */
+export type HostGuest = HostGuest_Serialize | HostGuest_Deserialize;
+
+/**  Un invité vu par l'hôte (`host_guests`, événement `host://guests`). */
+export type HostGuest_Deserialize = {
+	public_key: string,
+	origin: PassOrigin,
+	/**  Vrai une fois que l'ami a commencé à rejoindre (manifeste, fichiers ou tunnel). */
+	entered: boolean,
+	/**  Échéance (secondes Unix) tant que l'ami n'est pas entré, sinon `null`. */
+	expires_at?: number | null,
+};
+
+/**  Un invité vu par l'hôte (`host_guests`, événement `host://guests`). */
+export type HostGuest_Serialize = {
+	public_key: string,
+	origin: PassOrigin,
+	/**  Vrai une fois que l'ami a commencé à rejoindre (manifeste, fichiers ou tunnel). */
+	entered: boolean,
+	/**  Échéance (secondes Unix) tant que l'ami n'est pas entré, sinon `null`. */
+	expires_at: number | null,
+};
+
 /**  État du partage hôte (événement `host://state`, commande `host_state`). */
 export type HostState = HostState_Serialize | HostState_Deserialize;
 
@@ -1424,6 +1453,15 @@ export type PackOrigin = {
 	/**  Identifiant de version du catalogue (Modrinth : id de version ; CurseForge : id de fichier). */
 	version_id: string,
 };
+
+/**  Origine d'un accès, montrée à l'hôte. */
+export type PassOrigin = 
+/**  Invitation envoyée par l'hôte (« Inviter »). */
+"invite" | 
+/**  Demande à rejoindre acceptée par l'hôte. */
+"request" | 
+/**  Réglage « Laisser tous mes amis rejoindre mes mondes solo sans invitation ». */
+"all_friends";
 
 export type Presence = "online" | "offline";
 

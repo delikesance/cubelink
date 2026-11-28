@@ -227,7 +227,7 @@ impl AppState {
             if sent.get(&key).is_some_and(|t| t.elapsed() < ANNOUNCE_RENEW) {
                 continue;
             }
-            match self.friend_invite(&key).await {
+            match self.invite_friend(&key, crate::guest_pass::PassOrigin::AllFriends).await {
                 Ok(()) => {
                     sent.insert(key, std::time::Instant::now());
                 }
@@ -556,7 +556,7 @@ mod tests {
 
         // Un invité (accès solo) perd l'accès avec le monde, et les demandes à rejoindre en attente sont annulées côté backend.
         open();
-        st.access.allow_friend(&[1; 32]);
+        st.access.allow_friend(&[1; 32], crate::guest_pass::PassOrigin::Invite);
         st.host_world_closed(&inst.id);
         assert!(!st.access.contains(&[1; 32]));
         assert!(rec.0.lock().unwrap().contains(&"cancel_requests".to_string()), "demandes en attente annulées");

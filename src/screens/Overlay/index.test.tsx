@@ -12,6 +12,64 @@ const mount = (svc: ReturnType<typeof createFakeServices>) => {
   render(<ShellContext.Provider value={ctx}><InGamePanel /></ShellContext.Provider>);
 };
 
+describe("Panneau en jeu : invités", () => {
+  const hosted = async () => createFakeServices({ tickMs: 0 });
+  /** Le monde est ouvert : l'événement host://state suit le montage. */
+  const openWorld = async (svc: ReturnType<typeof createFakeServices>) => {
+    await screen.findByRole("list", { name: "Amis" }); // la lecture initiale de host_state est passée
+    act(() => svc.emitHostState({ sharing: true, world_port: 25565 } as never));
+  };
+
+  it("après une invitation : Inviter grisé « Invité · … », ligne « Peuvent rejoindre », Retirer la fait disparaître", async () => {
+    const svc = await hosted();
+    mount(svc);
+    await openWorld(svc);
+    const alex = (await svc.friendList())[0].friend;
+    await act(() => svc.friendInvite(alex.public_key));
+    const btn = await screen.findByRole("button", { name: new RegExp(`^Invitation envoyée à ${alex.name}, expire dans [45] min$`) });
+    expect(btn.textContent).toMatch(/^Invité · [45] min$/);
+    expect(btn.getAttribute("aria-disabled")).toBe("true");
+    expect((btn as HTMLButtonElement).disabled).toBe(false); // reste focalisable
+    const list = await screen.findByRole("list", { name: "Peuvent rejoindre" });
+    expect(within(list).getByText(/^Invité · [45] min$/)).toBeTruthy();
+    fireEvent.click(within(list).getByRole("button", { name: `Retirer l'accès de ${alex.name}` }));
+    await waitFor(() => expect(svc.revokeCalls).toEqual([alex.public_key]));
+    await waitFor(() => expect(screen.queryByRole("list", { name: "Peuvent rejoindre" })).toBeNull());
+    expect((await screen.findByRole("button", { name: `Inviter ${alex.name}` })).getAttribute("aria-disabled")).toBeNull();
+  });
+
+  it("invité entré : « A rejoint », et Inviter reste possible (il a pu quitter la partie)", async () => {
+    const svc = await hosted();
+    const alex = (await svc.friendList())[0].friend;
+    svc.setHostGuests([{ public_key: alex.public_key, origin: "request", entered: true, expires_at: null }]);
+    mount(svc);
+    await openWorld(svc);
+    const list = await screen.findByRole("list", { name: "Peuvent rejoindre" });
+    expect(within(list).getByText("A rejoint")).toBeTruthy();
+    expect(screen.getByRole("button", { name: `Inviter ${alex.name}` }).getAttribute("aria-disabled")).toBeNull();
+  });
+
+  it("réglage open_to_all_friends actif : badge « Monde ouvert à tous tes amis »", async () => {
+    const svc = await hosted();
+    await svc.settingsSet({ ...(await svc.settingsGet()), open_to_all_friends: true });
+    mount(svc);
+    await screen.findByRole("list", { name: "Amis" });
+    expect(screen.queryByText("Monde ouvert à tous tes amis"), "pas de badge sans monde ouvert").toBeNull();
+    await openWorld(svc);
+    expect(await screen.findByText("Monde ouvert à tous tes amis")).toBeTruthy();
+  });
+
+  it("Retirer qui échoue : le message s'affiche", async () => {
+    const svc = await hosted();
+    const alex = (await svc.friendList())[0].friend;
+    svc.setHostGuests([{ public_key: alex.public_key, origin: "all_friends", entered: false, expires_at: Math.floor(Date.now() / 1000) + 200 }]);
+    svc.hostGuestRevoke = async () => { throw new Error("Impossible de retirer l'accès."); };
+    mount(svc);
+    fireEvent.click(await screen.findByRole("button", { name: `Retirer l'accès de ${alex.name}` }));
+    expect(await screen.findByRole("alert")).toBeTruthy();
+  });
+});
+
 describe("Panneau en jeu : modpack en cours", () => {
   it("le modpack lancé a un bouton rouge Fermer qui ferme le jeu après confirmation ; les autres gardent Lancer", async () => {
     const svc = createFakeServices({ tickMs: 0 });

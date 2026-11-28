@@ -89,6 +89,9 @@ export function createTauriServices(): Services {
     friendJoinRequest: (publicKey) => commands.friendJoinRequest(publicKey),
     friendJoinRequestAnswer: (publicKey, accept) => done(commands.friendJoinRequestAnswer(publicKey, accept)),
     friendJoinRequests: () => commands.friendJoinRequests(),
+    friendJoinAsks: () => commands.friendJoinAsks(),
+    hostGuests: () => commands.hostGuests(),
+    hostGuestRevoke: (publicKey) => done(commands.hostGuestRevoke(publicKey)),
     gameSwitch: (instanceId) => done(commands.gameSwitch(instanceId)),
     gameCurrent: () => commands.gameCurrent(),
     gameClose: () => done(commands.gameClose()),
@@ -167,6 +170,8 @@ export function createTauriServices(): Services {
     onFriendCodeChanged: (cb) => on("friend://code_changed", () => cb()),
     onFriendJoinRequest: (cb) => on("friend://join_request", cb),
     onFriendJoinRequests: (cb) => on("friend://join_requests", cb),
+    onFriendJoinAsks: (cb) => on("friend://join_asks", cb),
+    onHostGuests: (cb) => on("host://guests", cb),
     hearthList: () => commands.hearthList(),
     // Champs à valeurs fixes resserrés dans `types.ts` (Rust les envoie en `String`).
     hearthDetail: (id) => commands.hearthDetail(id) as Promise<HearthDetail>,

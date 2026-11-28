@@ -24,7 +24,10 @@ pub mod trusted_mods;
 pub mod install;
 pub mod invites;
 pub mod hearth;
+pub mod guest_pass;
+pub mod host_guests;
 pub mod hotkey;
+pub mod session_access;
 pub mod p2p_backend;
 pub mod shutdown;
 pub mod stage;
@@ -123,6 +126,9 @@ macro_rules! commands {
             invites::friend_join_requests,
             invites::friend_join_request_answer,
             invites::friend_join_request,
+            host_guests::host_guests,
+            host_guests::host_guest_revoke,
+            host_guests::friend_join_asks,
             commands_hearth::hearth_list,
             commands_hearth::hearth_detail,
             commands_hearth::hearth_worlds,

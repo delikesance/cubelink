@@ -25,6 +25,7 @@ pub fn export_builder() -> tauri_specta::Builder<tauri::Wry> {
         .typ::<core_lib::types::FriendRequest>()
         .typ::<core_lib::launch_run::LaunchStateEvent>()
         .typ::<crate::commands_host::HostState>()
+        .typ::<crate::guest_pass::HostGuest>()
         .typ::<crate::stage::StageState>()
 }
 

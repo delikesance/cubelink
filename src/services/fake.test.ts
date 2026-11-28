@@ -4,6 +4,37 @@ import type { TransferProgress } from "./types";
 
 const svc = () => createFakeServices({ tickMs: 0, loginDelayMs: 0 });
 
+describe("faux service : invités et demandes", () => {
+  it("une invitation en attente refuse la seconde ; hostGuestRevoke la retire et émet host://guests", async () => {
+    const s = svc();
+    const alex = (await s.friendList())[0].friend.public_key;
+    const seen: number[] = [];
+    s.onHostGuests((l) => seen.push(l.length));
+    await s.friendInvite(alex);
+    const [g] = await s.hostGuests();
+    expect(g).toMatchObject({ public_key: alex, origin: "invite", entered: false });
+    expect(g.expires_at).toBeGreaterThan(Math.floor(Date.now() / 1000) + 290);
+    await expect(s.friendInvite(alex)).rejects.toThrow("invitation déjà envoyée");
+    await s.hostGuestRevoke(alex);
+    expect(await s.hostGuests()).toEqual([]);
+    expect(seen).toEqual([1, 0]);
+  });
+
+  it("friendJoinRequest met la clé dans friendJoinAsks le temps de l'attente", async () => {
+    const s = svc();
+    const alex = (await s.friendList())[0].friend.public_key;
+    const seen: string[][] = [];
+    s.onFriendJoinAsks((l) => seen.push(l));
+    s.setJoinAnswer("hold");
+    const p = s.friendJoinRequest(alex);
+    expect(await s.friendJoinAsks()).toEqual([alex]);
+    s.resolveJoinRequest(alex, "accepted");
+    await p;
+    expect(await s.friendJoinAsks()).toEqual([]);
+    expect(seen).toEqual([[alex], []]);
+  });
+});
+
 describe("faux service", () => {
   it("instance d'exemple Create: Aeronautics, 94 mods", async () => {
     const [i] = await svc().instancesList();

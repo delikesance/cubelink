@@ -574,8 +574,8 @@ mod tests {
         let (a, b) = (add_friend(&st, 'a'), add_friend(&st, 'b'));
         let bytes = |c: u8| [c; 32];
         st.friends.set_friend_addr(&a, &p2p_lib::friends_db::PeerAddr { relay: None, addrs: vec!["1.2.3.4:5".into()] }).unwrap();
-        st.access.allow_friend(&bytes(0xaa));
-        st.access.allow_friend(&bytes(0xbb));
+        st.access.allow_friend(&bytes(0xaa), crate::guest_pass::PassOrigin::Invite);
+        st.access.allow_friend(&bytes(0xbb), crate::guest_pass::PassOrigin::Invite);
         st.last_seen.touch(&a, 5000);
         st.last_seen.touch(&b, 5000);
         for k in [&a, &b] {
@@ -642,7 +642,7 @@ mod tests {
         let (st, _) = test_state(dir.path());
         let a = add_friend(&st, 'a');
         let g = p2p_lib::hearth::model::GroupId([1; 16]);
-        st.access.allow_friend(&[0xaa; 32]);
+        st.access.allow_friend(&[0xaa; 32], crate::guest_pass::PassOrigin::Invite);
         st.access.allow_members(g, [[0xaa; 32]]);
         st.friend_remove(&a).unwrap();
         assert!(st.access.contains(&[0xaa; 32]), "il reste membre du groupe");

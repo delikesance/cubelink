@@ -26,6 +26,10 @@ pub type PeerId = String;
 pub trait PeerAuthorizer: Send + Sync {
     fn is_allowed(&self, public_key: &str) -> bool;
 
+    /// Appelé quand une ressource est réellement servie à ce pair (manifeste écrit, fichier autorisé) : `is_allowed`
+    /// reste un simple test, sans effet de bord.
+    fn admitted(&self, _public_key: &str) {}
+
     /// Raison du refus quand `is_allowed` est faux (annoncée à l'invité) : par défaut « pas ami ».
     fn denial(&self, _public_key: &str) -> crate::reach::Reach {
         crate::reach::Reach::NotFriend
@@ -174,6 +178,7 @@ impl Host {
                 file.size, self.limits.max_file_bytes
             )));
         }
+        self.authorizer.admitted(peer);
         let mut peers = lock(&self.peers);
         let st = peers.entry(peer.to_string()).or_default();
         if st.active >= self.limits.max_concurrent_per_peer {

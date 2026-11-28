@@ -34,7 +34,7 @@ Nouvelle règle :
 | Serveur de groupe | Tout **membre** du groupe hébergé |
 | Tout autre pair | Personne |
 
-- L'accès est une liste de clés tenue par l'hôte pour la partie en cours (`SessionAccess`, `src-tauri/src/authz.rs`). Elle est vidée par `host_stop_sharing`.
+- L'accès est une liste de clés tenue par l'hôte pour la partie en cours (`SessionAccess`, `src-tauri/src/session_access.rs`). Elle est vidée par `host_stop_sharing`. Monde solo : chaque clé porte un laissez-passer (`guest_pass.rs`) qui périme au bout de 5 min s'il ne sert pas ; il devient valable jusqu'à la fin de la partie dès que l'ami entre (manifeste, fichier ou tunnel). Avant cette échéance, une invitation ancienne laissait l'ami entrer et sa demande à rejoindre était acceptée d'office, sans rien montrer à l'hôte.
 - **L'accès est indexé par cible** : `SessionTarget::{Solo, Group(GroupId)}`. Le premier message de chaque flux du tunnel désigne la cible ; `HostTunnel` tient une table cible vers port local ; l'autorisation porte sur le couple (clé, cible). Un PC qui sert un groupe et un monde solo en même temps ne mélange donc pas les accès.
 - **Révocation immédiate** : à l'application d'un `RemoveMember` ou d'un `Leave` (§ 3.2), `SessionAccess::revoke(clé)` retire la clé et `tunnel.rs` ferme toutes ses connexions actives avec le code de la raison du refus (`TunnelAuthorizer::denial` : `CLOSE_NOT_INVITED` = 5 pour un membre ou un ami qui n'est plus invité, `CLOSE_DENIED` = 1 pour un non-ami) (registre des flux par clé). Le serveur reçoit en plus `kick` puis `whitelist remove` (§ 6.4).
 - `friend_invite` ajoute la clé invitée. L'invitation automatique de tous les amis en ligne n'a lieu que si le réglage `open_to_all_friends` est activé (désactivé par défaut).

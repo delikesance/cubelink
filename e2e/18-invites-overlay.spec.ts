@@ -104,6 +104,9 @@ test('invitation : refusee sans monde ouvert (francais) ; ignorer supprime l\'in
   // L'hote retire l'acces (« Retirer ») : il peut reinviter tout de suite.
   expect(await invokeErr(appA.page, 'host_guest_revoke', { public_key: keyB })).toBeNull();
   expect(await invoke<unknown[]>(appA.page, 'host_guests')).toEqual([]);
+  await until('invitation retiree chez B', async () => (await invitesOf(appB.page)).length === 0);
+  // B accepte au plus un message d'invitation par ami toutes les 10 s (p2p/src/invite.rs), la revocation comprise.
+  await sleep(10_500);
   expect(await invokeErr(appA.page, 'friend_invite', { public_key: keyB })).toBeNull();
   const again = await until('seconde invitation', async () => (await invitesOf(appB.page))[0]);
   await invoke(appB.page, 'friend_invite_dismiss', { id: again.id });

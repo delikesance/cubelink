@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Hook PreToolUse (matcher Bash) : bloque les commandes que CLAUDE.md réserve à l'utilisateur.
-# Entrée : JSON du hook sur stdin (tool_input.command, cwd).
+# Hook PreToolUse (matchers Bash et REPL) : bloque les commandes que CLAUDE.md réserve à l'utilisateur.
+# Entrée : JSON du hook sur stdin (tool_input.command ou tool_input.code, cwd).
 # Sortie : message sur stderr si bloqué. Code 0 = autorisé, 2 = bloqué.
 # Limites : analyse textuelle, pas un shell. La commande est découpée sur ; && || | et les retours
 # à la ligne ; un texte cité qui ressemble à une commande interdite est bloqué par prudence.
@@ -19,7 +19,9 @@ mi() { grep -Eiq -- "$1" <<<"$2"; }  # motif ERE, insensible à la casse
 command -v jq >/dev/null 2>&1 || block "jq introuvable, la commande ne peut pas être analysée."
 input=$(cat)
 jq -e . >/dev/null 2>&1 <<<"$input" || block "entrée du hook illisible (JSON invalide)."
-cmd=$(jq -r '.tool_input.command // ""' <<<"$input")
+# shellcheck source=hook-command.sh
+. "$(dirname "${BASH_SOURCE[0]}")/hook-command.sh"
+cmd=$(hook_command "$input")
 [ -n "$cmd" ] || exit 0
 cwd=$(jq -r '.cwd // ""' <<<"$input")
 [ -n "$cwd" ] || cwd=$PWD

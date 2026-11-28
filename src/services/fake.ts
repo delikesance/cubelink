@@ -2,7 +2,7 @@ import { validateOfflineName } from "./accounts";
 import { HEARTH_CONFIRM_HOST, HEARTH_EULA_REQUIRED, HEARTH_HEAD_UNAVAILABLE, HearthLeaveError } from "./types";
 import type {
   AccountInfo, AccountsState, BrowseHit, BrowseInstallResult, BrowseKind, BrowseProgressEvent, BrowseSource, BrowseVersion, FixPlan, FixProgressEvent, FixResult, ModCheck, ModEntry, ModIssue, ModpackUpdate,
-  CreateInstanceInput, DetectedInstance, DeviceCode, HostState, Invite, JoinAnswer, JoinRequest, ImportWarningEvent, ImportProgressEvent, ImportDeferredEvent, LaunchLogEvent, FriendRequest, FriendWithPresence, Instance, InstanceArt,
+  CreateInstanceInput, DetectedInstance, DeviceCode, HostGuest, HostState, Invite, JoinAnswer, JoinRequest, ImportWarningEvent, ImportProgressEvent, ImportDeferredEvent, LaunchLogEvent, FriendRequest, FriendWithPresence, Instance, InstanceArt,
   JoinPlan, JoinWarning, LaunchState, Manifest, PresenceEvent, UnknownModsEvent, Profile, Services, Settings,
   StageFallback, StageState, TransferProgress, TunnelStateEvent, Unsubscribe, UpdateState,
   HearthCard, HearthDetail, HearthHandover, HearthHostPrompt, HearthInvite, HearthRamWarning, HearthMember, HearthMemberLite,
@@ -58,6 +58,10 @@ export interface FakeControls {
   setJoinAnswer(a: JoinAnswer | "hold"): void;
   /** Test : résout la demande en attente (`"hold"`) envoyée à cet ami. */
   resolveJoinRequest(publicKey: string, a: JoinAnswer): void;
+  /** Test : remplace la liste des invités de mon monde (host://guests). */
+  setHostGuests(guests: HostGuest[]): void;
+  /** Test : appels de `hostGuestRevoke` (clés retirées). */
+  readonly revokeCalls: string[];
   /** Test : demandes envoyées (`ask`) et décisions prises (`answer`). */
   readonly joinRequestCalls: Array<{ kind: "ask" | "answer"; arg: string; accept?: boolean }>;
   /** Test : appels de commandes de jeu enregistrés (switch, join, invite). */
@@ -305,6 +309,9 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
   let inviteN = 0;
   let joinRequests: JoinRequest[] = [];
   let joinAnswer: JoinAnswer | "hold" = "accepted";
+  let hostGuests: HostGuest[] = [];
+  let joinAsks: string[] = [];
+  const revokeCalls: string[] = [];
   const joinHeld = new Map<string, (a: JoinAnswer) => void>();
   const joinRequestCalls: Array<{ kind: "ask" | "answer"; arg: string; accept?: boolean }> = [];
   const gameCalls: Array<{ kind: "switch" | "join" | "invite" | "close"; arg: string; instanceId?: string }> = [];
@@ -338,6 +345,8 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     codeChanged: new Set<(v: void) => void>(),
     joinRequest: new Set<(r: JoinRequest) => void>(),
     joinRequests: new Set<(l: JoinRequest[]) => void>(),
+    joinAsks: new Set<(l: string[]) => void>(),
+    hostGuests: new Set<(l: HostGuest[]) => void>(),
     update: new Set<(s: UpdateState) => void>(),
     tunnel: new Set<(e: TunnelStateEvent) => void>(),
     hearthState: new Set<(l: HearthCard[]) => void>(),
@@ -354,6 +363,8 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
   const setStage = (patch: Partial<StageState>) => { stageSt = { ...stageSt, ...patch }; emit(listeners.stage, { ...stageSt }); };
   let updateSt: UpdateState = { phase: "idle", current: "0.1.0", version: null, notes: null, downloaded: 0, total: null, message: null, url: null, last_checked: null };
   let updateCheckPatch: Partial<UpdateState> = { phase: "up_to_date" };
+  const setGuests = (l: HostGuest[]) => { hostGuests = l; emit(listeners.hostGuests, l.map((g) => ({ ...g }))); };
+  const setAsks = (l: string[]) => { joinAsks = l; emit(listeners.joinAsks, [...l]); };
   const setUpdate = (patch: Partial<UpdateState>) => { updateSt = { ...updateSt, ...patch }; emit(listeners.update, { ...updateSt }); };
   function sub<T>(set: Set<(v: T) => void>, cb: (v: T) => void): Unsubscribe {
     set.add(cb);
@@ -719,7 +730,12 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     friendList: async () => friends.map((f) => ({ friend: { ...f.friend }, presence: f.presence, in_game: f.in_game, last_seen: f.last_seen })),
     friendInvite: async (pk) => {
       if (!friends.some((f) => f.friend.public_key === pk)) throw new Error("Ami introuvable.");
+      const nowSec = Math.floor(Date.now() / 1000);
+      if (hostGuests.some((g) => g.public_key === pk && g.origin === "invite" && !g.entered && (g.expires_at ?? 0) > nowSec)) {
+        throw new Error("invitation déjà envoyée : elle attend que ton ami la rejoigne");
+      }
       gameCalls.push({ kind: "invite", arg: pk });
+      setGuests([...hostGuests.filter((g) => g.public_key !== pk), { public_key: pk, origin: "invite", entered: false, expires_at: nowSec + 300 }]);
     },
     hearthList: async () => hearthCards(),
     hearthDetail: async (id) => structuredClone(hearthCard(id)),
@@ -990,8 +1006,19 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     friendJoinRequest: async (pk) => {
       if (!friends.some((f) => f.friend.public_key === pk)) throw new Error("Ami introuvable.");
       joinRequestCalls.push({ kind: "ask", arg: pk });
-      if (joinAnswer !== "hold") return joinAnswer;
-      return new Promise<JoinAnswer>((resolve) => { joinHeld.set(pk, resolve); });
+      setAsks([...joinAsks.filter((k) => k !== pk), pk]);
+      try {
+        if (joinAnswer !== "hold") return joinAnswer;
+        return await new Promise<JoinAnswer>((resolve) => { joinHeld.set(pk, resolve); });
+      } finally {
+        setAsks(joinAsks.filter((k) => k !== pk));
+      }
+    },
+    friendJoinAsks: async () => [...joinAsks],
+    hostGuests: async () => hostGuests.map((g) => ({ ...g })),
+    hostGuestRevoke: async (pk) => {
+      revokeCalls.push(pk);
+      setGuests(hostGuests.filter((g) => g.public_key !== pk));
     },
     friendJoinRequestAnswer: async (pk, accept) => {
       joinRequestCalls.push({ kind: "answer", arg: pk, accept });
@@ -1284,6 +1311,8 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
       emit(listeners.joinRequests, joinRequests.map((x) => ({ ...x })));
       return { ...r };
     },
+    setHostGuests: (guests) => setGuests(guests.map((g) => ({ ...g }))),
+    revokeCalls,
     setJoinAnswer: (a) => { joinAnswer = a; },
     resolveJoinRequest: (pk, a) => {
       const res = joinHeld.get(pk);
@@ -1330,6 +1359,8 @@ export function createFakeServices(opts: FakeOptions = {}): Services & FakeContr
     onFriendCodeChanged: (cb) => sub(listeners.codeChanged, () => cb()),
     onFriendJoinRequest: (cb) => sub(listeners.joinRequest, cb),
     onFriendJoinRequests: (cb) => sub(listeners.joinRequests, cb),
+    onFriendJoinAsks: (cb) => sub(listeners.joinAsks, cb),
+    onHostGuests: (cb) => sub(listeners.hostGuests, cb),
     onUnknownMods: (cb) => sub(listeners.unknown, cb),
     onTransferErrorDetails: () => () => {},
     onBrowseProgress: (cb) => sub(listeners.browse, cb),

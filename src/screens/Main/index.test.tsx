@@ -196,6 +196,19 @@ describe("Main", () => {
     expect(within(list).queryByRole("button", { name: `Rejoindre ${alex.name}` })).toBeNull();
   });
 
+  it("Demander est grisé tant que la demande est en attente côté backend", async () => {
+    const { services } = setup();
+    const ctl = services as unknown as ReturnType<typeof createFakeServices>;
+    await screen.findByRole("group", { name: "Instances" });
+    const alex = (await services.friendList())[0].friend;
+    const list = within(side()).getByRole("list", { name: "Amis" });
+    ctl.setJoinAnswer("hold");
+    fireEvent.click(await within(list).findByRole("button", { name: `Demander à rejoindre ${alex.name}` }));
+    await waitFor(() => expect(within(list).getByRole("button", { name: `Demander à rejoindre ${alex.name}` }).getAttribute("aria-disabled")).toBe("true"));
+    act(() => ctl.resolveJoinRequest(alex.public_key, "refused"));
+    await waitFor(() => expect(within(list).getByRole("button", { name: `Demander à rejoindre ${alex.name}` }).getAttribute("aria-disabled")).toBeNull());
+  });
+
   it("demande à rejoindre qui échoue : le message d'erreur s'affiche", async () => {
     setup({ friendJoinRequest: async () => { throw new Error("Ton ami n'est pas en ligne. Il doit ouvrir Cubelink."); } });
     await screen.findByRole("group", { name: "Instances" });

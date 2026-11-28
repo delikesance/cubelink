@@ -7,6 +7,8 @@ import { useServices } from "../../app/context";
 import { canInviteFrom, hostingKeys, useHostState, useInvites } from "../../app/useInvites";
 import { ASK_LABEL, useJoinAsk, useJoinRequests } from "../../app/useJoinRequests";
 import { Badge, Button } from "../../ui";
+import { HostGuestsList } from "../../app/HostGuestsList";
+import { invitedLabel, pendingInviteKeys, remainingText, useHostGuests } from "../../app/useHostGuests";
 import { Avatar } from "../Friends/Avatar";
 import { JoinRequestRow } from "../../app/JoinRequestRow";
 import type { FriendWithPresence, Instance, Invite, JoinRequest } from "../../services/types";
@@ -40,6 +42,9 @@ export default function InGamePanel({ open = true }: { open?: boolean }) {
   const invites = useInvites(services);
   const joinRequests = useJoinRequests(services);
   const { states: askStates, ask: askJoin } = useJoinAsk(services);
+  const { guests, nowSec } = useHostGuests(services);
+  const [openToAll, setOpenToAll] = useState(false);
+  const pendingInvites = pendingInviteKeys(guests, nowSec);
   const host = useHostState(services);
   const canInvite = canInviteFrom(host);
   const hosting = hostingKeys(invites);
@@ -57,6 +62,7 @@ export default function InGamePanel({ open = true }: { open?: boolean }) {
     services.friendList().then((l) => { if (alive) setFriends(l); }, () => {});
     services.instancesList().then((l) => { if (alive) setInstances(l); }, () => {});
     services.gameCurrent().then((id) => { if (alive) setCurrent(id); }, () => {});
+    services.settingsGet().then((s) => { if (alive) setOpenToAll(s.open_to_all_friends); }, () => {});
     return () => { alive = false; };
   }, [services, open]);
 
@@ -128,6 +134,8 @@ export default function InGamePanel({ open = true }: { open?: boolean }) {
   const dismiss = (i: Invite) => run(`dismiss-${i.id}`, () => services.friendInviteDismiss(i.id), `Invitation de ${i.name} ignorée.`);
   const invite = (f: FriendWithPresence) =>
     run(`invite-${f.friend.public_key}`, () => services.friendInvite(f.friend.public_key), `Invitation envoyée à ${f.friend.name}.`);
+  const revoke = (key: string, name: string) =>
+    run(`revoke-${key}`, () => services.hostGuestRevoke(key), `${name} ne peut plus rejoindre ta partie.`);
   const ask = (f: FriendWithPresence) => run(`ask-${f.friend.public_key}`, () => askJoin(f.friend.public_key));
   const decide = (r: JoinRequest, accept: boolean) =>
     run(`req-${r.public_key}`, () => services.friendJoinRequestAnswer(r.public_key, accept), accept ? `${r.name} peut rejoindre ta partie.` : `Demande de ${r.name} refusée.`);
@@ -172,6 +180,11 @@ export default function InGamePanel({ open = true }: { open?: boolean }) {
           </section>
         )}
 
+        <HostGuestsList
+          guests={guests} friends={friends} nowSec={nowSec} openToAll={openToAll && canInvite} services={services}
+          busyKey={busy?.startsWith("revoke-") ? busy.slice(7) : null} onRevoke={(k, n) => { void revoke(k, n); }}
+        />
+
         <section className="ov-sec" aria-labelledby="ov-inv">
           <h2 id="ov-inv">Invitations{invites.length > 0 ? ` · ${invites.length}` : ""}</h2>
           {invites.length === 0 ? <p className="ov-empty">Aucune invitation en attente.</p> : (
@@ -201,6 +214,8 @@ export default function InGamePanel({ open = true }: { open?: boolean }) {
                 const on = f.presence === "online";
                 const pk = f.friend.public_key;
                 const asked = askStates[pk];
+                const guest = guests.find((g) => g.public_key === pk);
+                const invitedUntil = pendingInvites.has(pk) ? guest?.expires_at ?? null : null;
                 const canJoin = on && (hosting.has(pk) || asked === "accepted");
                 return (
                   <li key={pk} className="ov-row">
@@ -222,7 +237,15 @@ export default function InGamePanel({ open = true }: { open?: boolean }) {
                         </Button>
                       )}
                       {on && canInvite && (
-                        <Button variant="secondary" aria-label={`Inviter ${f.friend.name}`} loading={busy === `invite-${pk}`} onClick={() => { void invite(f); }}>Inviter</Button>
+                        <Button
+                          variant="secondary"
+                          aria-label={invitedUntil != null ? `Invitation envoyée à ${f.friend.name}, expire dans ${remainingText(invitedUntil, nowSec)}` : `Inviter ${f.friend.name}`}
+                          aria-disabled={invitedUntil != null || undefined}
+                          loading={busy === `invite-${pk}`}
+                          onClick={invitedUntil != null ? undefined : () => { void invite(f); }}
+                        >
+                          {invitedUntil != null ? invitedLabel(invitedUntil, nowSec) : "Inviter"}
+                        </Button>
                       )}
                     </div>
                   </li>

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { JoinRequest, Services } from "../services/types";
 
 /** Hôte : demandes à rejoindre en attente de décision, tenues à jour par friend://join_requests. */
@@ -29,7 +29,8 @@ export const ASK_LABEL: Record<AskState, string> = {
  * se déconnecte (l'accès ne vaut que pour sa partie en cours). `ask` rejette avec le message de l'erreur.
  */
 export function useJoinAsk(services: Services): { states: Record<string, AskState>; ask: (publicKey: string) => Promise<void> } {
-  const [states, setStates] = useState<Record<string, AskState>>({});
+  const [local, setStates] = useState<Record<string, AskState>>({});
+  const [backendAsks, setBackendAsks] = useState<string[]>([]);
   const set = useCallback((key: string, s: AskState | null) => {
     setStates((m) => {
       const next = { ...m };
@@ -37,6 +38,18 @@ export function useJoinAsk(services: Services): { states: Record<string, AskStat
       return next;
     });
   }, []);
+  // L'attente vient aussi du backend : le panneau en jeu et l'accueil voient la même demande.
+  useEffect(() => {
+    let alive = true;
+    services.friendJoinAsks().then((l) => { if (alive) setBackendAsks(l); }, () => {});
+    const off = services.onFriendJoinAsks((l) => { if (alive) setBackendAsks(l); });
+    return () => { alive = false; off(); };
+  }, [services]);
+  const states = useMemo(() => {
+    const merged = { ...local };
+    for (const key of backendAsks) merged[key] = "pending";
+    return merged;
+  }, [local, backendAsks]);
   useEffect(() => services.onFriendPresence((e) => { if (e.presence !== "online") set(e.public_key, null); }), [services, set]);
   const ask = useCallback(async (key: string) => {
     set(key, "pending");

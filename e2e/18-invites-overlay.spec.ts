@@ -40,9 +40,12 @@ test('invitation : A ouvre son monde et invite B ; B la recoit (evenement, file,
   const lists = await recorded<Invite[]>(appB.page, 'friend://invites');
   expect(lists.at(-1)).toHaveLength(1);
 
-  // A n'a rien recu de B ; un second envoi immediat est refuse (limite de debit), message francais
+  // A n'a rien recu de B ; un second envoi est refuse tant que l'invitation attend, message francais
   expect(await invitesOf(appA.page)).toEqual([]);
-  expect(await invokeErr(appA.page, 'friend_invite', { public_key: keyB })).toMatch(/patientez/);
+  expect(await invokeErr(appA.page, 'friend_invite', { public_key: keyB })).toMatch(/déjà envoyée/);
+  // L'hote voit l'invitation en attente (host_guests : origine invite, pas encore entree)
+  const guests = await invoke<{ public_key: string; origin: string; entered: boolean }[]>(appA.page, 'host_guests');
+  expect(guests.map((g) => [g.public_key, g.origin, g.entered])).toEqual([[keyB, 'invite', false]]);
 
   // UI de B : l'Accueil montre la partie en cours (monde + « Rejoindre ») et « Joue à <modpack> » sur l'ami.
   // Le bloc « Invitations » et « Ignorer » n'existent que dans le panneau en jeu (Scene), absent en mode test.
@@ -96,8 +99,14 @@ test('invitation : refusee sans monde ouvert (francais) ; ignorer supprime l\'in
   await expect(party).toHaveCount(0, { timeout: 10_000 });
   expect(await invitesOf(appB.page)).toEqual([]);
 
-  // par la commande
-  await sleep(10_500); // limite de debit : 10 s entre deux invitations au meme ami
+  // Ignorer ne previent pas l'hote : l'invitation attend toujours chez lui (bouton grise), un renvoi est refuse.
+  expect(await invokeErr(appA.page, 'friend_invite', { public_key: keyB })).toMatch(/déjà envoyée/);
+  // L'hote retire l'acces (« Retirer ») : il peut reinviter tout de suite.
+  expect(await invokeErr(appA.page, 'host_guest_revoke', { public_key: keyB })).toBeNull();
+  expect(await invoke<unknown[]>(appA.page, 'host_guests')).toEqual([]);
+  await until('invitation retiree chez B', async () => (await invitesOf(appB.page)).length === 0);
+  // B accepte au plus un message d'invitation par ami toutes les 10 s (p2p/src/invite.rs), la revocation comprise.
+  await sleep(10_500);
   expect(await invokeErr(appA.page, 'friend_invite', { public_key: keyB })).toBeNull();
   const again = await until('seconde invitation', async () => (await invitesOf(appB.page))[0]);
   await invoke(appB.page, 'friend_invite_dismiss', { id: again.id });

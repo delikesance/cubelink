@@ -75,7 +75,7 @@ async fn ami_non_invite_ou_revoque_recoit_pas_invite_et_non_ami_pas_ami() {
     assert_eq!(e, Reach::NotInvited.message(), "tunnel : {e}");
 
     // Invité : le plan passe. Puis l'invitation est retirée : de nouveau « pas invité ».
-    assert!(host.st.access.allow_friend(&gk));
+    assert!(host.st.access.allow_friend(&gk, cubelink_app::guest_pass::PassOrigin::Invite));
     assert!(guest.st.join_plan(&hk).await.is_ok());
     host.st.access.revoke(&gk);
     let e = guest.st.join_plan(&hk).await.unwrap_err();

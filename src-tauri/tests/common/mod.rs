@@ -106,5 +106,5 @@ pub fn world(host: &Node) -> String {
 /// ami n'obtient ni manifeste, ni fichiers, ni tunnel. Vidé par `host_stop_sharing`.
 pub fn allow(host: &Node, guest: &Node) {
     let key: [u8; 32] = hex::decode(guest.key()).unwrap().try_into().unwrap();
-    host.st.access.allow_friend(&key);
+    host.st.access.allow_friend(&key, cubelink_app::guest_pass::PassOrigin::Invite);
 }

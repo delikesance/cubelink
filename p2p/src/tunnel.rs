@@ -40,6 +40,9 @@ pub const TUNNEL_ALPN: &[u8] = b"cubelink/tunnel/1";
 pub trait TunnelAuthorizer: Send + Sync {
     fn is_allowed(&self, public_key: &[u8; 32]) -> bool;
 
+    /// Appelé une fois la connexion acceptée et le monde servi : `is_allowed` reste un simple test, sans effet de bord.
+    fn admitted(&self, _public_key: &[u8; 32]) {}
+
     /// Raison du refus quand `is_allowed` est faux (annoncée à l'invité, y compris à la révocation) : par défaut « pas ami ».
     fn denial(&self, _public_key: &[u8; 32]) -> Reach {
         Reach::NotFriend
@@ -399,6 +402,7 @@ async fn serve_conn(core: Arc<HostCore>, conn: Connection) {
     let mut stop = core.stop.subscribe();
     let world = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
     let peer = *conn.remote_id().as_bytes();
+    core.authorizer.admitted(&peer);
     let mut streams = JoinSet::new();
     let mut recheck = tokio::time::interval(AUTHZ_RECHECK);
     recheck.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);

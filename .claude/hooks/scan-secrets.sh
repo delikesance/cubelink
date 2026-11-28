@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Hook PreToolUse (matcher Bash) : bloque `git commit` si le contenu à committer ressemble à un secret.
-# Entrée : JSON du hook sur stdin (tool_input.command, cwd).
+# Hook PreToolUse (matchers Bash et REPL) : bloque `git commit` si le contenu à committer ressemble à un secret.
+# Entrée : JSON du hook sur stdin (tool_input.command ou tool_input.code, cwd).
 # Sortie : sur stderr, uniquement le chemin du fichier et la catégorie, JAMAIS la valeur.
 # Code 0 = autorisé, 2 = bloqué (aussi si jq est absent ou si le JSON est invalide : échec fermé).
 # Portée : l'index (git diff --cached) ; avec `git commit -a/--all`, l'arbre suivi complet (git diff HEAD).
@@ -16,7 +16,9 @@ block() {
 command -v jq >/dev/null 2>&1 || block "jq introuvable, la commande ne peut pas être analysée."
 input=$(cat)
 jq -e . >/dev/null 2>&1 <<<"$input" || block "entrée du hook illisible (JSON invalide)."
-cmd=$(jq -r '.tool_input.command // ""' <<<"$input")
+# shellcheck source=hook-command.sh
+. "$(dirname "${BASH_SOURCE[0]}")/hook-command.sh"
+cmd=$(hook_command "$input")
 [ -n "$cmd" ] || exit 0
 cwd=$(jq -r '.cwd // ""' <<<"$input")
 [ -n "$cwd" ] || cwd=$PWD

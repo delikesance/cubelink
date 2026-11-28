@@ -28,8 +28,8 @@ async fn invitation_recue_limitee_annulee_et_refusee_si_non_ami() {
     assert_eq!(guest.count("friend://invite"), 1);
     assert!(guest.count("friend://invites") >= 1);
 
-    // Le renvoi immédiat est limité côté émetteur ; la file reste à une seule invitation.
-    assert!(host.st.friend_invite(&guest.key()).await.unwrap_err().contains("patientez"));
+    // Invitation encore en attente : pas de renvoi ; la file reste à une seule invitation.
+    assert!(host.st.friend_invite(&guest.key()).await.unwrap_err().contains("déjà envoyée"));
     assert_eq!(guest.st.friend_invites().len(), 1);
 
     // L'hôte arrête de partager : l'invitation est annulée chez l'ami.

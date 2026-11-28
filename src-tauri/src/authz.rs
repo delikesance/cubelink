@@ -4,136 +4,15 @@
 //! fichiers qu'aux pairs de `SessionAccess` : amis invités pour la partie en cours, amis dont la demande à rejoindre a
 //! été acceptée, et (plus tard) membres du groupe hébergé. Tout autre pair n'obtient rien.
 
-use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use p2p_lib::friends_db::FriendsDb;
-use p2p_lib::hearth::model::GroupId;
 use p2p_lib::presence::{FriendLookup, PeerKey};
 use p2p_lib::reach::Reach;
 use p2p_lib::transfer::send::PeerAuthorizer;
 use p2p_lib::tunnel::TunnelAuthorizer;
 
-use crate::state::lock;
-
-/// Ce que l'hôte sert en ce moment : un monde solo partagé, ou le serveur d'un groupe. L'accès se donne et se lit
-/// toujours pour une cible précise : un ami invité à un monde solo n'a rien sur le serveur d'un groupe, et inversement.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum SessionTarget {
-    Solo,
-    Group(GroupId),
-}
-
-#[derive(Default)]
-struct AccessSets {
-    /// Cible `Solo` : amis invités ou acceptés, l'accès vaut tant qu'ils sont encore amis acceptés.
-    guests: HashSet<PeerKey>,
-    /// Cible `Group` : membres d'un groupe hébergé (Hearth), l'accès ne dépend pas d'une amitié avec l'hôte.
-    groups: HashMap<GroupId, HashSet<PeerKey>>,
-    /// Le groupe que sert le tunnel en ce moment (un seul port local par hôte). Absent : le monde solo, s'il y en a un.
-    serving: Option<GroupId>,
-}
-
-/// Pairs autorisés à rejoindre la partie en cours de l'hôte, par cible. Vidé à `host_stop_sharing` : l'accès ne survit
-/// jamais à la partie pour laquelle il a été donné.
-#[derive(Default)]
-pub struct SessionAccess {
-    inner: Mutex<AccessSets>,
-}
-
-impl SessionAccess {
-    /// Un ami invité ou dont la demande est acceptée, pour le monde solo. Vrai si l'accès est nouveau. Sans effet tant
-    /// que l'hôte sert un groupe : un non-membre n'entre jamais dans un groupe par une demande à rejoindre.
-    pub fn allow_friend(&self, key: &PeerKey) -> bool {
-        let mut sets = lock(&self.inner);
-        if sets.serving.is_some() {
-            return false;
-        }
-        sets.guests.insert(*key)
-    }
-
-    /// Ouvre l'accès au serveur du groupe `group` aux membres donnés (ajoute aux membres déjà autorisés) et en fait la
-    /// cible servie par le tunnel.
-    pub fn allow_members(&self, group: GroupId, keys: impl IntoIterator<Item = PeerKey>) {
-        let mut sets = lock(&self.inner);
-        sets.groups.entry(group).or_default().extend(keys);
-        sets.serving = Some(group);
-    }
-
-    /// Retire l'accès d'un membre au groupe `group` (retrait, départ).
-    pub fn revoke_member(&self, group: &GroupId, key: &PeerKey) {
-        if let Some(set) = lock(&self.inner).groups.get_mut(group) {
-            set.remove(key);
-        }
-    }
-
-    /// Retire l'accès à ce pair, pour toutes les cibles (ami retiré, invitation annulée).
-    pub fn revoke(&self, key: &PeerKey) {
-        let mut sets = lock(&self.inner);
-        sets.guests.remove(key);
-        for set in sets.groups.values_mut() {
-            set.remove(key);
-        }
-    }
-
-    /// Retire l'accès d'invité (monde solo) de ce pair. Les groupes Hearth ne sont pas touchés : l'appartenance à un
-    /// groupe ne dépend pas de l'amitié (voir `docs/hearth.md`).
-    pub fn revoke_guest(&self, key: &PeerKey) {
-        lock(&self.inner).guests.remove(key);
-    }
-
-    /// Fin de la partie d'un groupe : plus aucun accès à ce groupe. Le monde solo partagé en parallèle n'est pas touché.
-    pub fn close_group(&self, group: &GroupId) {
-        let mut sets = lock(&self.inner);
-        sets.groups.remove(group);
-        if sets.serving.as_ref() == Some(group) {
-            sets.serving = None;
-        }
-    }
-
-    /// Fin de partie : plus aucun accès, pour aucune cible.
-    pub fn clear(&self) {
-        let mut sets = lock(&self.inner);
-        sets.guests.clear();
-        sets.groups.clear();
-        sets.serving = None;
-    }
-
-    /// Le monde solo est fermé : plus aucun invité pour lui. L'accès des groupes n'est pas touché.
-    pub fn clear_guests(&self) {
-        lock(&self.inner).guests.clear();
-    }
-
-    /// Vrai si ce pair a une entrée, pour une cible quelconque (sans tenir compte de l'amitié).
-    pub fn contains(&self, key: &PeerKey) -> bool {
-        let sets = lock(&self.inner);
-        sets.guests.contains(key) || sets.groups.values().any(|s| s.contains(key))
-    }
-
-    /// Ce pair a-t-il accès à la cible `target` ?
-    pub fn allows(&self, target: &SessionTarget, key: &PeerKey) -> bool {
-        let sets = lock(&self.inner);
-        match target {
-            SessionTarget::Solo => sets.guests.contains(key),
-            SessionTarget::Group(g) => sets.groups.get(g).is_some_and(|s| s.contains(key)),
-        }
-    }
-
-    /// La cible que sert le tunnel en ce moment, et si ce pair y a accès (un seul verrou : pas de cible qui change entre
-    /// les deux lectures).
-    pub fn served_for(&self, key: &PeerKey) -> (SessionTarget, bool) {
-        let sets = lock(&self.inner);
-        match sets.serving {
-            Some(g) => (SessionTarget::Group(g), sets.groups.get(&g).is_some_and(|s| s.contains(key))),
-            None => (SessionTarget::Solo, sets.guests.contains(key)),
-        }
-    }
-
-    /// Vrai si l'hôte sert le serveur d'un groupe (les demandes à rejoindre ne s'appliquent alors pas).
-    pub fn serving_group(&self) -> bool {
-        lock(&self.inner).serving.is_some()
-    }
-}
+pub use crate::session_access::{SessionAccess, SessionTarget};
 
 fn decode_key(hex_key: &str) -> Option<PeerKey> {
     if hex_key.len() != 64 {
@@ -192,12 +71,20 @@ impl PeerAuthorizer for FriendsAuthz {
     fn is_allowed(&self, public_key: &str) -> bool {
         (self.share_mods)() && decode_key(&public_key.to_lowercase()).is_some_and(|k| self.may_join(&k))
     }
+    fn admitted(&self, public_key: &str) {
+        if let Some(k) = decode_key(&public_key.to_lowercase()) {
+            self.access.mark_entered(&k);
+        }
+    }
 }
 
 /// Tunnel de jeu : pair autorisé pour la partie suffit.
 impl TunnelAuthorizer for FriendsAuthz {
     fn is_allowed(&self, public_key: &[u8; 32]) -> bool {
         self.may_join(public_key)
+    }
+    fn admitted(&self, public_key: &[u8; 32]) {
+        self.access.mark_entered(public_key);
     }
     fn denial(&self, public_key: &[u8; 32]) -> Reach {
         self.join_denial(public_key)
@@ -216,6 +103,7 @@ impl FriendLookup for FriendsAuthz {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use p2p_lib::hearth::model::GroupId;
     use core_lib::types::{Friend, TrustLevel};
 
     fn authz(share: bool) -> (FriendsAuthz, Arc<SessionAccess>, Arc<std::sync::atomic::AtomicBool>, String) {
@@ -235,11 +123,11 @@ mod tests {
         assert!(!PeerAuthorizer::is_allowed(&a, &key));
         assert!(!TunnelAuthorizer::is_allowed(&a, &[0xab; 32]));
         assert!(FriendLookup::is_friend(&a, &[0xab; 32]), "reste ami : présence et invitations marchent");
-        assert!(access.allow_friend(&[0xab; 32]));
+        assert!(access.allow_friend(&[0xab; 32], crate::guest_pass::PassOrigin::Invite));
         assert!(PeerAuthorizer::is_allowed(&a, &key));
         assert!(PeerAuthorizer::is_allowed(&a, &key.to_uppercase()));
         assert!(TunnelAuthorizer::is_allowed(&a, &[0xab; 32]));
-        assert!(!access.allow_friend(&[0xab; 32]), "déjà autorisé");
+        assert!(!access.allow_friend(&[0xab; 32], crate::guest_pass::PassOrigin::Invite), "déjà autorisé");
     }
 
     #[test]
@@ -249,10 +137,10 @@ mod tests {
         assert_eq!(TunnelAuthorizer::denial(&a, &[0xab; 32]), Reach::NotInvited);
         assert_eq!(a.join_denial(&[0xab; 32]), Reach::NotInvited);
         // Non-ami : « pas ami », même s'il figure dans la liste d'accès.
-        access.allow_friend(&[0xcd; 32]);
+        access.allow_friend(&[0xcd; 32], crate::guest_pass::PassOrigin::Invite);
         assert_eq!(TunnelAuthorizer::denial(&a, &[0xcd; 32]), Reach::NotFriend);
         // Invité révoqué (fin de partie, invitation annulée) : redevient « pas invité ».
-        assert!(access.allow_friend(&[0xab; 32]));
+        assert!(access.allow_friend(&[0xab; 32], crate::guest_pass::PassOrigin::Invite));
         access.revoke(&[0xab; 32]);
         assert_eq!(TunnelAuthorizer::denial(&a, &[0xab; 32]), Reach::NotInvited);
         // Groupe servi : un inconnu ne doit rien apprendre (« pas ami »), même retiré du groupe ; un ami retiré est « pas invité ».
@@ -268,7 +156,7 @@ mod tests {
     #[test]
     fn inconnu_refuse_meme_dans_la_liste_d_acces_s_il_n_est_pas_ami() {
         let (a, access, _, key) = authz(true);
-        access.allow_friend(&[0xcd; 32]);
+        access.allow_friend(&[0xcd; 32], crate::guest_pass::PassOrigin::Invite);
         assert!(!PeerAuthorizer::is_allowed(&a, &"cd".repeat(32)));
         assert!(!TunnelAuthorizer::is_allowed(&a, &[0xcd; 32]));
         assert!(!PeerAuthorizer::is_allowed(&a, "pas une clé"));
@@ -278,7 +166,7 @@ mod tests {
     #[test]
     fn share_mods_ne_concerne_que_les_fichiers() {
         let (a, access, flag, key) = authz(true);
-        access.allow_friend(&[0xab; 32]);
+        access.allow_friend(&[0xab; 32], crate::guest_pass::PassOrigin::Invite);
         assert!(PeerAuthorizer::is_allowed(&a, &key));
         flag.store(false, std::sync::atomic::Ordering::SeqCst);
         assert!(!PeerAuthorizer::is_allowed(&a, &key));
@@ -295,7 +183,7 @@ mod tests {
         assert!(!TunnelAuthorizer::is_allowed(&a, &[3; 32]));
         access.revoke(&[2; 32]);
         assert!(!TunnelAuthorizer::is_allowed(&a, &[2; 32]));
-        access.allow_friend(&[0xab; 32]);
+        access.allow_friend(&[0xab; 32], crate::guest_pass::PassOrigin::Invite);
         access.clear();
         assert!(!access.contains(&[1; 32]) && !access.contains(&[0xab; 32]));
         assert!(!TunnelAuthorizer::is_allowed(&a, &[1; 32]));
@@ -307,14 +195,14 @@ mod tests {
         let (a, access, _, _) = authz(true);
         let g = GroupId([7; 16]);
         // Un monde solo partagé : Dave (ami invité) entre. Puis l'hôte sert un groupe dont Dave n'est pas membre.
-        access.allow_friend(&[0xab; 32]);
+        access.allow_friend(&[0xab; 32], crate::guest_pass::PassOrigin::Invite);
         assert!(TunnelAuthorizer::is_allowed(&a, &[0xab; 32]));
         access.allow_members(g, [[1u8; 32]]);
         assert!(!TunnelAuthorizer::is_allowed(&a, &[0xab; 32]), "un invité solo n'atteint pas le serveur du groupe");
         assert!(!PeerAuthorizer::is_allowed(&a, &"ab".repeat(32)), "ni son manifeste");
         assert!(TunnelAuthorizer::is_allowed(&a, &[1; 32]));
         // Une demande à rejoindre acceptée pendant le groupe n'ouvre rien : ni maintenant, ni pour le groupe.
-        assert!(!access.allow_friend(&[0xcd; 32]));
+        assert!(!access.allow_friend(&[0xcd; 32], crate::guest_pass::PassOrigin::Invite));
         assert!(!access.contains(&[0xcd; 32]));
         // Fin de la partie du groupe : le monde solo partagé en parallèle garde ses invités.
         access.close_group(&g);
@@ -336,9 +224,20 @@ mod tests {
     }
 
     #[test]
+    fn tester_l_acces_ne_fait_pas_entrer_seul_le_service_le_fait() {
+        let (a, access, _, key) = authz(true);
+        access.allow_friend(&[0xab; 32], crate::guest_pass::PassOrigin::Invite);
+        assert!(PeerAuthorizer::is_allowed(&a, &key));
+        assert!(TunnelAuthorizer::is_allowed(&a, &[0xab; 32]));
+        assert!(!access.guests()[0].entered, "un simple test ne fige pas l'accès");
+        TunnelAuthorizer::admitted(&a, &[0xab; 32]);
+        assert!(access.guests()[0].entered);
+    }
+
+    #[test]
     fn ami_retire_perd_son_acces_d_invite() {
         let (a, access, _, key) = authz(true);
-        access.allow_friend(&[0xab; 32]);
+        access.allow_friend(&[0xab; 32], crate::guest_pass::PassOrigin::Invite);
         assert!(a.db.remove_friend(&key).is_ok());
         assert!(!TunnelAuthorizer::is_allowed(&a, &[0xab; 32]));
     }

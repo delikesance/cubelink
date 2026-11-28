@@ -354,6 +354,9 @@ impl p2p_lib::transfer::send::PeerAuthorizer for HostAuthz {
     fn is_allowed(&self, public_key: &str) -> bool {
         p2p_lib::transfer::send::PeerAuthorizer::is_allowed(self.authz.as_ref(), public_key)
     }
+    fn admitted(&self, public_key: &str) {
+        p2p_lib::transfer::send::PeerAuthorizer::admitted(self.authz.as_ref(), public_key)
+    }
     fn denial(&self, public_key: &str) -> Reach {
         let key = public_key.to_lowercase();
         let join = hex::decode(&key).ok().and_then(|b| <[u8; 32]>::try_from(b).ok()).map(|k| self.authz.join_denial(&k));
@@ -386,7 +389,7 @@ impl JoinPolicy for HostJoinPolicy {
         self.authz.may_join(key)
     }
     fn grant(&self, key: &PeerKey) {
-        self.authz.access().allow_friend(key);
+        self.authz.access().allow_friend(key, crate::guest_pass::PassOrigin::Request);
     }
 }
 

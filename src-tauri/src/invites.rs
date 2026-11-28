@@ -30,6 +30,7 @@ use tauri::State;
 use base64::Engine;
 
 use crate::error::user_msg;
+use crate::guest_pass::PassOrigin;
 use crate::state::{lock, now_secs, AppState};
 
 /// Durée de vie d'une invitation (reçue ou émise).
@@ -51,7 +52,7 @@ pub struct JoinRequest {
     pub expires_at: i64,
 }
 
-fn key_bytes(hex_key: &str) -> Option<[u8; 32]> {
+pub(crate) fn key_bytes(hex_key: &str) -> Option<[u8; 32]> {
     if hex_key.len() != 64 {
         return None;
     }
@@ -179,8 +180,10 @@ impl AppState {
         if !lock(&self.join_requests_out).insert(public_key.to_string()) {
             return Err("une demande est déjà en attente chez cet ami".into());
         }
+        self.emit_join_asks();
         let res = self.backend().send_join_request(public_key.to_string()).await.map_err(|e| crate::error::sanitize(&e));
         lock(&self.join_requests_out).remove(public_key);
+        self.emit_join_asks();
         res
     }
 
@@ -204,7 +207,9 @@ impl AppState {
         // Le demandeur en attente reçoit un refus plutôt que de patienter jusqu'à l'expiration.
         self.backend().answer_join_request(key, false);
         self.join_request_ended(key);
-        lock(&self.join_requests_out).remove(key);
+        if lock(&self.join_requests_out).remove(key) {
+            self.emit_join_asks();
+        }
         lock(&self.invites_sent).remove(key);
     }
 
@@ -224,12 +229,26 @@ impl AppState {
         self.invite_remove(|i| i.id == id);
     }
 
-    /// Envoie à l'ami `public_key` une invitation à rejoindre notre monde ouvert.
+    /// Envoie à l'ami `public_key` une invitation à rejoindre notre monde ouvert (bouton « Inviter »). Refusé tant
+    /// qu'une invitation précédente attend encore que l'ami entre.
     pub async fn friend_invite(&self, public_key: &str) -> Result<(), String> {
+        self.invite_friend(public_key, PassOrigin::Invite).await
+    }
+
+    /// Invitation avec son origine : `Invite` (bouton) ou `AllFriends` (réglage « tous mes amis », renouvelée tant que
+    /// le monde est ouvert ; sans effet envers un ami dont l'hôte a retiré l'accès pendant cette partie).
+    pub(crate) async fn invite_friend(&self, public_key: &str, origin: PassOrigin) -> Result<(), String> {
         let host = self.host_state().filter(|h| h.world_port.is_some()).ok_or("ouvrez d'abord votre monde au réseau local pour inviter un ami")?;
         self.check_friend(public_key)?;
         if self.access.serving_group() {
             return Err("ce serveur est celui d'un groupe : ajoute cet ami au groupe pour qu'il y joue".into());
+        }
+        let key = key_bytes(public_key).ok_or("cet ami est inconnu")?;
+        if origin == PassOrigin::AllFriends && self.access.was_removed(&key) {
+            return Ok(());
+        }
+        if origin == PassOrigin::Invite && self.access.has_pending_invite(&key) {
+            return Err("invitation déjà envoyée : elle attend que ton ami la rejoigne".into());
         }
         let inst = self.instances.get(&host.instance_id).map_err(|e| user_msg(&e))?;
         {
@@ -255,13 +274,13 @@ impl AppState {
             icon,
         };
         // L'accès précède l'invitation : l'ami qui la reçoit peut rejoindre aussitôt.
-        let key = key_bytes(public_key).ok_or("cet ami est inconnu")?;
-        let newly = self.access.allow_friend(&key);
+        let newly = self.access.allow_friend(&key, origin);
         let res = self.backend().send_invite(public_key.to_string(), msg).await.map_err(|e| crate::error::sanitize(&e));
         if res.is_err() {
             lock(&self.invites_sent).remove(public_key);
             if newly {
-                self.access.revoke(&key);
+                // Seulement l'accès solo pas encore utilisé : jamais un groupe Hearth ni un invité déjà entré.
+                self.access.revoke_unused_pass(&key);
             }
         }
         res
@@ -519,7 +538,8 @@ mod tests {
             assert!(!sent[0].1.revoke);
         }
         // Anti-spam côté émetteur.
-        assert!(st.friend_invite(&key(1)).await.unwrap_err().contains("patientez"));
+        // Invitation encore en attente : refusée avant même l'anti-spam.
+        assert!(st.friend_invite(&key(1)).await.unwrap_err().contains("déjà envoyée"));
         assert_eq!(rec.0.lock().unwrap().len(), 1);
 
         // Arrêt du partage : annulation envoyée à l'ami invité.

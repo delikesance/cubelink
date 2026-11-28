@@ -12,6 +12,7 @@ import { WorldIcon } from "../../ui";
 import { lastSeenText } from "../Friends/lastSeen";
 import { canInviteFrom, useInvites } from "../../app/useInvites";
 import { ASK_LABEL, useJoinAsk } from "../../app/useJoinRequests";
+import { invitedLabel, pendingInviteKeys, remainingText, useHostGuests } from "../../app/useHostGuests";
 import { AccountSwitcher, NameHead } from "../../app/AccountSwitcher";
 import { useContextMenu, type MenuItem } from "../../app/useContextMenu";
 import { useModCheckGate } from "../../app/useModCheck";
@@ -67,6 +68,9 @@ export default function Main() {
   const [query, setQuery] = useState("");
   const invites = useInvites(services);
   const { states: askStates, ask: askJoin } = useJoinAsk(services);
+  const { guests: hostGuests, nowSec: guestNowSec } = useHostGuests(services);
+  const pendingInvites = pendingInviteKeys(hostGuests, guestNowSec);
+  const guestOf = (key: string) => hostGuests.find((g) => g.public_key === key);
   const ctx = useContextMenu();
   /** Modpack dont la suppression attend confirmation (clic droit > Supprimer). */
   const [toDelete, setToDelete] = useState<Instance | null>(null);
@@ -211,7 +215,11 @@ export default function Main() {
     const asked = askStates[key];
     if (on && (g || asked === "accepted")) items.push({ key: "join", label: g ? `Rejoindre ${g.world_name}` : "Rejoindre", icon: <Icon d={ICONS.play} />, onSelect: () => join(key) });
     else if (on && f.in_game) items.push({ key: "ask", label: asked ? ASK_LABEL[asked] : "Demander à rejoindre", icon: <Icon d={ICONS.play} />, disabled: asked === "pending", onSelect: () => ask(key) });
-    if (on && inviteOk && !g) items.push({ key: "invite", label: "Inviter dans ma partie", icon: <Icon d={ICONS.userPlus} />, onSelect: () => invite(key) });
+    const hosted = guestOf(key);
+    if (on && inviteOk && !g) {
+      const until = pendingInvites.has(key) ? hosted?.expires_at ?? null : null;
+      items.push({ key: "invite", label: until != null ? invitedLabel(until, guestNowSec) : "Inviter dans ma partie", icon: <Icon d={ICONS.userPlus} />, disabled: until != null, onSelect: () => invite(key) });
+    }
     items.push({ key: "copy", label: "Copier le pseudo", icon: <Icon d={ICONS.copy} />, separator: items.length > 0, onSelect: () => copy(f.friend.name) });
     items.push({ key: "manage", label: "Gérer mes amis", icon: <Icon d={ICONS.friends} />, onSelect: () => navigate("settings", { tab: "amis" }) });
     items.push({ key: "remove", label: "Retirer des amis", icon: <Icon d={ICONS.trash} />, danger: true, separator: true, onSelect: () => setToRemove(f) });
@@ -410,12 +418,17 @@ export default function Main() {
                     {seen && <span className="s">{seen}</span>}
                     {!g && (asked === "refused" || asked === "expired") && <span className="s">{ASK_LABEL[asked]}</span>}
                   </span>
-                  {on && inviteOk && !g && (
-                    <Button
-                      variant="secondary" aria-label={`Inviter ${f.friend.name}`}
-                      onClick={() => invite(f.friend.public_key)}
-                    >Inviter</Button>
-                  )}
+                  {on && inviteOk && !g && (() => {
+                    const until = pendingInvites.has(f.friend.public_key) ? guestOf(f.friend.public_key)?.expires_at ?? null : null;
+                    return (
+                      <Button
+                        variant="secondary"
+                        aria-label={until != null ? `Invitation envoyée à ${f.friend.name}, expire dans ${remainingText(until, guestNowSec)}` : `Inviter ${f.friend.name}`}
+                        aria-disabled={until != null || undefined}
+                        onClick={until != null ? undefined : () => invite(f.friend.public_key)}
+                      >{until != null ? invitedLabel(until, guestNowSec) : "Inviter"}</Button>
+                    );
+                  })()}
                   {on && (g || asked === "accepted") && (
                     <Button variant={g ? "primary" : "secondary"} aria-label={`Rejoindre ${f.friend.name}`} onClick={() => join(f.friend.public_key)}>Rejoindre</Button>
                   )}

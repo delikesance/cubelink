@@ -81,6 +81,8 @@ export type Sha256Hex = string;
 export interface InstancePatch { name?: string; ram_mb?: number; java_path?: string; jvm_args?: string; wrapper?: string }
 /** Demande à rejoindre reçue d'un ami (hôte), en attente de sa décision. Timestamps en secondes Unix. */
 export type JoinRequest = B.JoinRequest;
+/** Un invité vu par l'hôte (`hostGuests`, événement `host://guests`). */
+export type HostGuest = B.HostGuest_Serialize;
 /** Réponse de l'hôte à ma demande à rejoindre. */
 export type JoinAnswer = B.JoinAnswer;
 
@@ -282,6 +284,12 @@ export interface Services {
   friendJoinRequestAnswer(publicKey: string, accept: boolean): Promise<void>;
   /** Hôte : demandes à rejoindre en attente de décision. */
   friendJoinRequests(): Promise<JoinRequest[]>;
+  /** Invité : amis à qui j'ai demandé à rejoindre et qui n'ont pas encore répondu. */
+  friendJoinAsks(): Promise<string[]>;
+  /** Hôte : amis autorisés à rejoindre mon monde (invités, demandes acceptées, « tous mes amis »). */
+  hostGuests(): Promise<HostGuest[]>;
+  /** Hôte : retire l'accès d'un ami à mon monde. */
+  hostGuestRevoke(publicKey: string): Promise<void>;
   /** Ferme le jeu en cours puis lance l'instance. */
   gameSwitch(instanceId: string): Promise<void>;
   /** Instance du jeu en cours (en préparation ou lancé), `null` sinon. */
@@ -380,6 +388,10 @@ export interface Services {
   onFriendJoinRequest(cb: (r: JoinRequest) => void): Unsubscribe;
   /** Hôte : liste complète des demandes en attente, à chaque changement. */
   onFriendJoinRequests(cb: (l: JoinRequest[]) => void): Unsubscribe;
+  /** Amis à qui j'ai demandé à rejoindre, sans réponse (friend://join_asks). */
+  onFriendJoinAsks(cb: (l: string[]) => void): Unsubscribe;
+  /** Liste des invités de mon monde, à chaque changement (host://guests). Aucun événement à l'échéance. */
+  onHostGuests(cb: (l: HostGuest[]) => void): Unsubscribe;
   // --- serveurs de groupe (Hearth) ---
   hearthList(): Promise<HearthCard[]>;
   hearthDetail(id: string): Promise<HearthDetail>;
